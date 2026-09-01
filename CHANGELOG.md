@@ -2,7 +2,13 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.11`.
+Versions follow the git tags `0.4.0` … `0.4.12`.
+
+## [0.4.12] — 2026-09-01
+
+### Fixed
+
+- `ka setup` writes a working PreToolUse hook command when the package lives in an isolated venv and `key-amnesia-hook` is not on PATH. Resolution prefers the sibling console script next to this install's interpreter, then `shutil.which` (absolute path), then `{sys.executable} -m key_amnesia.hooks.secret_guard` — never bare `python`. Upgrade: re-run `ka setup`, then restart the agent.
 
 ## [0.4.11] — 2026-08-20
 
@@ -135,6 +141,7 @@ Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-th
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.12]: https://github.com/fujitoid/key-amnesia/compare/0.4.11...0.4.12
 [0.4.11]: https://github.com/fujitoid/key-amnesia/compare/0.4.10...0.4.11
 [0.4.10]: https://github.com/fujitoid/key-amnesia/compare/0.4.7...0.4.10
 [0.4.7]: https://github.com/fujitoid/key-amnesia/compare/0.4.6...0.4.7

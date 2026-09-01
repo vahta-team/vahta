@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -320,3 +321,197 @@ def test_cli_setup_flags_parsed(fake_home: Path) -> None:
     rc = main(["setup", "--skills-only"])
     assert rc == 0
     assert not (fake_home / ".claude" / "settings.json").exists()
+
+
+# --- hook command resolution (isolated venv / missing PATH) -------------------
+
+
+def _hook_script_name() -> str:
+    return "key-amnesia-hook.exe" if sys.platform == "win32" else "key-amnesia-hook"
+
+
+def _python_name() -> str:
+    return "python.exe" if sys.platform == "win32" else "python"
+
+
+def _venv_scripts_dir(root: Path) -> Path:
+    return root / "Scripts" if sys.platform == "win32" else root / "bin"
+
+
+def _no_which(*_args, **_kwargs):
+    return None
+
+
+def test_hook_command_uses_sibling_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = _venv_scripts_dir(tmp_path / "venv")
+    scripts.mkdir(parents=True)
+    python = scripts / _python_name()
+    python.write_bytes(b"")
+    hook = scripts / _hook_script_name()
+    hook.write_bytes(b"")
+    monkeypatch.setattr(sc.sys, "executable", str(python))
+    monkeypatch.setattr(sc.shutil, "which", _no_which)
+
+    cmd = sc._hook_command()
+    assert cmd == sc._quote_hook_path(str(hook))
+    assert "python -m" not in cmd
+    assert "-m key_amnesia" not in cmd
+
+
+def test_hook_command_fallback_uses_sys_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = _venv_scripts_dir(tmp_path / "venv")
+    scripts.mkdir(parents=True)
+    python = scripts / _python_name()
+    python.write_bytes(b"")
+    monkeypatch.setattr(sc.sys, "executable", str(python))
+    monkeypatch.setattr(sc.shutil, "which", _no_which)
+
+    cmd = sc._hook_command()
+    quoted = sc._quote_hook_path(str(python))
+    assert cmd.startswith(quoted)
+    assert "-m key_amnesia.hooks.secret_guard" in cmd
+    assert not cmd.startswith("python ")
+    assert not cmd.startswith("python.exe")
+
+
+def test_hook_command_uses_which_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = _venv_scripts_dir(tmp_path / "other-venv")
+    scripts.mkdir(parents=True)
+    python = scripts / _python_name()
+    python.write_bytes(b"")
+    found = tmp_path / "on-path" / _hook_script_name()
+    found.parent.mkdir(parents=True)
+    found.write_bytes(b"")
+
+    def _which(name, mode=None, path=None):
+        if name == "key-amnesia-hook":
+            return str(found)
+        return None
+
+    monkeypatch.setattr(sc.sys, "executable", str(python))
+    monkeypatch.setattr(sc.shutil, "which", _which)
+
+    cmd = sc._hook_command()
+    assert cmd == sc._quote_hook_path(str(found))
+
+
+def test_hook_command_quotes_path_with_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = _venv_scripts_dir(tmp_path / "my venv")
+    scripts.mkdir(parents=True)
+    python = scripts / _python_name()
+    python.write_bytes(b"")
+    hook = scripts / _hook_script_name()
+    hook.write_bytes(b"")
+    monkeypatch.setattr(sc.sys, "executable", str(python))
+    monkeypatch.setattr(sc.shutil, "which", _no_which)
+
+    cmd = sc._hook_command()
+    quoted = sc._quote_hook_path(str(hook))
+    assert cmd == quoted
+    if sys.platform == "win32":
+        assert cmd.startswith('"') and cmd.endswith('"')
+    else:
+        assert cmd.startswith("'") and cmd.endswith("'")
+
+
+def test_setup_replaces_bare_python_module_hook(fake_home: Path) -> None:
+    old = "python -m key_amnesia.hooks.secret_guard"
+    claude = fake_home / ".claude" / "settings.json"
+    claude.parent.mkdir(parents=True)
+    claude.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": old}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cursor = fake_home / ".cursor" / "hooks.json"
+    cursor.parent.mkdir(parents=True)
+    cursor.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "hooks": {"preToolUse": [{"command": old, "matcher": "Shell"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    codex = fake_home / ".codex" / "hooks.json"
+    codex.parent.mkdir(parents=True)
+    codex.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": old}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sc.cmd_setup(_ns(hook_only=True))
+    new_cmd = sc._hook_command()
+    assert new_cmd != old
+    assert not new_cmd.startswith("python ")
+
+    claude_cmds = [
+        h["command"]
+        for entry in json.loads(claude.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        for h in entry["hooks"]
+    ]
+    cursor_cmds = [
+        e["command"]
+        for e in json.loads(cursor.read_text(encoding="utf-8"))["hooks"]["preToolUse"]
+    ]
+    codex_cmds = [
+        h["command"]
+        for entry in json.loads(codex.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+        for h in entry["hooks"]
+    ]
+    assert claude_cmds == [new_cmd]
+    assert cursor_cmds == [new_cmd]
+    assert codex_cmds == [new_cmd]
+
+
+def test_setup_prints_resolved_hook_command(fake_home: Path, capsys) -> None:
+    sc.cmd_setup(_ns(hook_only=True))
+    out = capsys.readouterr().out
+    assert f"hook command: {sc._hook_command()}" in out
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Scripts/ next to venv-root python.exe")
+def test_hook_command_windows_scripts_beside_venv_root_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "venv"
+    root.mkdir()
+    python = root / "python.exe"
+    python.write_bytes(b"")
+    scripts = root / "Scripts"
+    scripts.mkdir()
+    hook = scripts / "key-amnesia-hook.exe"
+    hook.write_bytes(b"")
+    monkeypatch.setattr(sc.sys, "executable", str(python))
+    monkeypatch.setattr(sc.shutil, "which", _no_which)
+    assert sc._hook_command() == sc._quote_hook_path(str(hook))
