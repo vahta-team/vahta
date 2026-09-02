@@ -42,6 +42,15 @@ Flags: `--skills-only`, `--hook-only`, `--permissions-only`,
 `--permissions-remove`, `--yes` (do not prompt before writing permission
 files; never deletes user allows).
 
+After any upgrade, re-run `ka setup` (it rewrites the hook command) and
+restart Claude Code / Cursor / Codex.
+
+An isolated venv (`~/.local/share/key-amnesia/venv/`) does **not** need
+`key-amnesia-hook` on PATH; setup writes the venv console script (or this
+install's `python -m`). The 0.4.11 bug wrote bare `python -m …`, which hit
+system Python and failed with `ModuleNotFoundError: No module named
+'key_amnesia'` on every tool call — upgrade to 0.4.12, `ka setup`, restart.
+
 ## Agent bootstrap prompt
 
 Paste into a coding agent:

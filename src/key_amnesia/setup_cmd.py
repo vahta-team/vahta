@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
 from importlib import resources
@@ -28,7 +29,8 @@ CURSOR_MATCHER = "Shell|Write"
 # Codex: Bash + apply_patch aliases (Write/Edit also match apply_patch edits).
 CODEX_MATCHER = "Bash|Write|Edit|apply_patch"
 HOOK_COMMAND = "key-amnesia-hook"
-HOOK_COMMAND_FALLBACK = "python -m key_amnesia.hooks.secret_guard"
+_HOOK_MODULE = "key_amnesia.hooks.secret_guard"
+_WIN_NEEDS_QUOTE = frozenset(' \t"&|<>^()%,;=')
 
 
 def _skills_root():
@@ -75,8 +77,41 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def _quote_hook_path(path: str) -> str:
+    """Quote a filesystem path for a PreToolUse hook command line."""
+    if sys.platform == "win32":
+        if any(c in _WIN_NEEDS_QUOTE for c in path):
+            return '"' + path.replace('"', '\\"') + '"'
+        return path
+    return shlex.quote(path)
+
+
+def _sibling_hook_script() -> Path | None:
+    """Console script next to this interpreter (venv ``bin/`` / ``Scripts/``)."""
+    parent = Path(os.path.abspath(sys.executable)).parent
+    if sys.platform == "win32":
+        names = (f"{HOOK_COMMAND}.exe", HOOK_COMMAND)
+        candidates = [parent / n for n in names]
+        # ``python.exe`` sometimes lives in the venv root, not ``Scripts/``.
+        if parent.name.lower() != "scripts":
+            candidates.extend(parent / "Scripts" / n for n in names)
+    else:
+        candidates = [parent / HOOK_COMMAND]
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
 def _hook_command() -> str:
-    return HOOK_COMMAND if shutil.which(HOOK_COMMAND) else HOOK_COMMAND_FALLBACK
+    """Resolved hook argv computed at call time (tests monkeypatch ``sys.executable``)."""
+    sibling = _sibling_hook_script()
+    if sibling is not None:
+        return _quote_hook_path(os.path.abspath(str(sibling)))
+    found = shutil.which(HOOK_COMMAND)
+    if found:
+        return _quote_hook_path(os.path.abspath(found))
+    return f"{_quote_hook_path(sys.executable)} -m {_HOOK_MODULE}"
 
 
 def _is_our_hook_command(command: str) -> bool:
@@ -194,6 +229,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         lines.extend(_copy_skills(dest_roots))
 
     if not skills_only and not permissions_only and not permissions_remove:
+        hook_cmd = _hook_command()
         claude_settings = home / ".claude" / "settings.json"
         cursor_hooks = home / ".cursor" / "hooks.json"
         codex_hooks = codex_home / "hooks.json"
@@ -203,6 +239,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         lines.append(f"hook installed: {cursor_hooks} (preToolUse)")
         _merge_codex_hooks(codex_hooks)
         lines.append(f"hook installed: {codex_hooks} (PreToolUse)")
+        lines.append(f"hook command: {hook_cmd}")
 
     for line in lines:
         theme.out(line)
