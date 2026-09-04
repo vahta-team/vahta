@@ -1,4 +1,4 @@
-"""`ka setup`: skills, secret-guard hook, and best-effort harness allow lists.
+"""`ka setup`: terminal choice, skills, secret-guard hook, harness allow lists.
 
 Copies the three bundled agent skills to the Claude Code / Cursor / Codex
 skills directories and merges a `PreToolUse` (Claude, Codex) / `preToolUse`
@@ -17,10 +17,18 @@ import os
 import shlex
 import shutil
 import sys
+import tempfile
+import time
 from importlib import resources
 from pathlib import Path
 
 from key_amnesia import theme
+from key_amnesia.config import ConfigError, load_config, set_config_value
+from key_amnesia.platform import detect_terminals, spawn_isolated_console
+
+# How long to wait for the test terminal to run its one command and report.
+_TERMINAL_TEST_TIMEOUT_S = 6.0
+_TERMINAL_TEST_POLL_S = 0.1
 
 SKILL_NAMES = ["key-amnesia-usage", "key-amnesia-hygiene", "key-amnesia-migrate"]
 
@@ -200,19 +208,167 @@ def _check_path() -> str:
     return _path_guidance()
 
 
+def _terminal_applies() -> bool:
+    """Only Linux has to be told. Windows opens a console, macOS Terminal.app."""
+    return sys.platform.startswith("linux")
+
+
+def _prompt_terminal_choice(
+    detected: list[tuple[str, list[str]]], current: str
+) -> str | None:
+    """Ask which terminal to use. Returns a command string, or None to keep as-is."""
+    theme.info("Which terminal should key-amnesia open when it needs your password?")
+    for i, (name, command) in enumerate(detected, start=1):
+        shown = shlex.join(command[1:]) if len(command) > 1 else ""
+        suffix = f"  ({name} {shown})" if shown else ""
+        theme.out(f"  {i}) {name}{suffix}")
+    auto_n = len(detected) + 1
+    theme.out(f"  {auto_n}) detect one each time (no fixed choice)")
+
+    default_n = 1
+    for i, (name, _) in enumerate(detected, start=1):
+        if current and shlex.split(current)[0].endswith(name):
+            default_n = i
+            break
+
+    try:
+        raw = input(f"Choice [{default_n}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        theme.out("")
+        return None
+    if not raw:
+        raw = str(default_n)
+    try:
+        choice = int(raw)
+    except ValueError:
+        theme.warn(f"Not a number: {raw!r} — leaving the terminal setting alone.")
+        return None
+    if choice == auto_n:
+        return ""
+    if 1 <= choice <= len(detected):
+        name, command = detected[choice - 1]
+        # Store the name plus its flags, not the absolute path: a stored path
+        # goes stale when the terminal moves between /usr/bin and /usr/local.
+        return shlex.join([name, *command[1:]])
+    theme.warn(f"Out of range: {choice} — leaving the terminal setting alone.")
+    return None
+
+
+def _test_terminal() -> tuple[bool, str]:
+    """Open the configured terminal on a command that reports back.
+
+    Configuring a terminal and finding out it does not open is the failure this
+    whole setting exists to prevent, so setup proves the choice rather than
+    trusting it. Returns (ok, detail).
+    """
+    fd, marker = tempfile.mkstemp(prefix="key-amnesia-terminal-test-")
+    os.close(fd)
+    os.unlink(marker)
+    argv = ["sh", "-c", 'printf ok > "$1"', "sh", marker]
+    try:
+        spawn_isolated_console(argv, dict(os.environ))
+    except OSError as e:
+        return False, str(e).splitlines()[0]
+
+    deadline = time.monotonic() + _TERMINAL_TEST_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if os.path.exists(marker):
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
+            return True, "opened and ran the test command"
+        time.sleep(_TERMINAL_TEST_POLL_S)
+    try:
+        os.unlink(marker)
+    except OSError:
+        pass
+    return False, (
+        f"the window did not run the command within {_TERMINAL_TEST_TIMEOUT_S:.0f}s"
+    )
+
+
+def configure_terminal(*, yes: bool = False, force: bool = False) -> int:
+    """Pick, store and prove the terminal used for the password prompt."""
+    if not _terminal_applies():
+        theme.out(f"terminal: not configurable on {sys.platform} (uses the OS console)")
+        return 0
+
+    current = str(load_config().get("terminal") or "")
+    detected = detect_terminals()
+
+    chosen: str | None = None
+    if not detected:
+        # Nothing to offer. If something is already configured it may still
+        # work — it just is not a name this build knows — so keep it and let
+        # the check below have the last word.
+        if not current:
+            theme.warn(
+                "No terminal emulator found on PATH. Without one, any `ka` "
+                "command that needs your password from a non-interactive "
+                "parent cannot ask."
+            )
+            theme.info(
+                'Install one, or name yours: ka config set terminal "myterm --run-in"'
+            )
+            return 0
+        theme.out(f"terminal: {current} (configured; none of the known ones found)")
+    elif current and not force:
+        theme.out(f"terminal: {current} (already configured)")
+    elif len(detected) == 1 and not force:
+        chosen = shlex.join([detected[0][0], *detected[0][1][1:]])
+        theme.out(f"terminal: {chosen} (the only one installed)")
+    elif yes or not sys.stdin.isatty():
+        chosen = shlex.join([detected[0][0], *detected[0][1][1:]])
+        theme.out(f"terminal: {chosen} (first of {len(detected)} found; not asking)")
+    else:
+        chosen = _prompt_terminal_choice(detected, current)
+        if chosen == "":
+            theme.out("terminal: detect one each time")
+
+    if chosen is not None:
+        try:
+            set_config_value("terminal", chosen)
+        except ConfigError as e:
+            theme.error(f"Could not store the terminal: {e}")
+            return 1
+
+    ok, detail = _test_terminal()
+    if ok:
+        theme.success(f"Terminal check: {detail}")
+        return 0
+    theme.warn(f"Terminal check failed: {detail}")
+    theme.info(
+        'Set one explicitly with the flag it needs, e.g. '
+        'ka config set terminal "ghostty -e"'
+    )
+    return 1
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     skills_only = bool(getattr(args, "skills_only", False))
     hook_only = bool(getattr(args, "hook_only", False))
     permissions_only = bool(getattr(args, "permissions_only", False))
     permissions_remove = bool(getattr(args, "permissions_remove", False))
+    terminal_only = bool(getattr(args, "terminal_only", False))
+    reconfigure_terminal = bool(getattr(args, "reconfigure_terminal", False))
     yes = bool(getattr(args, "yes", False))
-    only_flags = [skills_only, hook_only, permissions_only, permissions_remove]
+    only_flags = [
+        skills_only,
+        hook_only,
+        permissions_only,
+        permissions_remove,
+        terminal_only,
+    ]
     if sum(1 for f in only_flags if f) > 1:
         theme.error(
-            "--skills-only, --hook-only, --permissions-only, and "
-            "--permissions-remove are mutually exclusive."
+            "--skills-only, --hook-only, --permissions-only, "
+            "--permissions-remove and --terminal-only are mutually exclusive."
         )
         return 2
+
+    if terminal_only:
+        return configure_terminal(yes=yes, force=True)
 
     home = Path.home()
     codex_home = _codex_home(home)
@@ -270,6 +426,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     if not permissions_only and not permissions_remove:
         theme.out(_check_path())
+
+    if not (skills_only or hook_only or permissions_only or permissions_remove):
+        # Only on a full run: the check opens a real window, and someone who
+        # asked for skills alone did not ask for that. Last, so a fresh install
+        # has already put `ka` where it can be found before we open a terminal
+        # that depends on it.
+        term_rc = configure_terminal(yes=yes, force=reconfigure_terminal)
+        if term_rc and not rc:
+            rc = term_rc
 
     theme.info(
         "Restart Claude Code / Cursor / Codex (or reload the window) to pick "

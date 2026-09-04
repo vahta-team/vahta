@@ -515,3 +515,137 @@ def test_hook_command_windows_scripts_beside_venv_root_python(
     monkeypatch.setattr(sc.sys, "executable", str(python))
     monkeypatch.setattr(sc.shutil, "which", _no_which)
     assert sc._hook_command() == sc._quote_hook_path(str(hook))
+# --- terminal choice --------------------------------------------------------
+#
+# `ka setup` is where the user says which terminal opens for a password
+# prompt. Before this existed the answer was a hardcoded list, and on a
+# desktop whose terminal was not in it there was no answer at all.
+
+
+@pytest.fixture
+def linux_setup(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sc.sys, "platform", "linux")
+    monkeypatch.setattr(sc, "_test_terminal", lambda: (True, "opened and ran"))
+    monkeypatch.setattr(sc.sys.stdin, "isatty", lambda: False)
+    # The CI runner has none of these installed; validation must not depend on
+    # what happens to be on the machine running the suite.
+    monkeypatch.setattr(
+        "key_amnesia.config.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+
+
+def _detected(*names: str):
+    table = {
+        "ghostty": ["/usr/bin/ghostty", "-e"],
+        "kitty": ["/usr/bin/kitty"],
+        "foot": ["/usr/bin/foot"],
+    }
+    return [(n, table[n]) for n in names]
+
+
+def test_single_terminal_is_chosen_without_asking(linux_setup, monkeypatch, capsys):
+    monkeypatch.setattr(sc, "detect_terminals", lambda: _detected("ghostty"))
+    assert sc.configure_terminal() == 0
+    assert sc.load_config()["terminal"] == "ghostty -e"
+    assert "the only one installed" in capsys.readouterr().out
+
+
+def test_several_terminals_non_interactive_takes_the_first(
+    linux_setup, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        sc, "detect_terminals", lambda: _detected("ghostty", "kitty", "foot")
+    )
+    assert sc.configure_terminal(yes=True) == 0
+    assert sc.load_config()["terminal"] == "ghostty -e"
+    assert "not asking" in capsys.readouterr().out
+
+
+def test_interactive_choice_is_stored_by_name_not_path(
+    linux_setup, monkeypatch, capsys
+):
+    """A stored absolute path goes stale when the terminal moves prefix."""
+    monkeypatch.setattr(sc, "detect_terminals", lambda: _detected("ghostty", "kitty"))
+    monkeypatch.setattr(sc.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "2")
+    assert sc.configure_terminal() == 0
+    assert sc.load_config()["terminal"] == "kitty"
+
+
+def test_interactive_can_choose_detection(linux_setup, monkeypatch):
+    monkeypatch.setattr(sc, "detect_terminals", lambda: _detected("ghostty", "kitty"))
+    monkeypatch.setattr(sc.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "3")
+    assert sc.configure_terminal() == 0
+    assert sc.load_config()["terminal"] == ""
+
+
+def test_existing_choice_is_kept_on_rerun(linux_setup, monkeypatch, capsys):
+    """setup is re-run on every update; it must not re-ask what is settled."""
+    monkeypatch.setattr(sc, "detect_terminals", lambda: _detected("ghostty", "kitty"))
+    sc.set_config_value("terminal", "kitty")
+    assert sc.configure_terminal() == 0
+    assert sc.load_config()["terminal"] == "kitty"
+    assert "already configured" in capsys.readouterr().out
+
+
+def test_reconfigure_forces_a_new_choice(linux_setup, monkeypatch):
+    monkeypatch.setattr(sc, "detect_terminals", lambda: _detected("ghostty"))
+    sc.set_config_value("terminal", "kitty")
+    assert sc.configure_terminal(force=True) == 0
+    assert sc.load_config()["terminal"] == "ghostty -e"
+
+
+def test_no_terminal_found_explains_the_manual_route(linux_setup, monkeypatch, capsys):
+    monkeypatch.setattr(sc, "detect_terminals", list)
+    assert sc.configure_terminal() == 0
+    out = capsys.readouterr().out
+    assert "ka config set terminal" in out
+    assert sc.load_config()["terminal"] == ""
+
+
+def test_failed_terminal_test_is_reported(linux_setup, monkeypatch, capsys):
+    monkeypatch.setattr(sc, "detect_terminals", lambda: _detected("ghostty"))
+    monkeypatch.setattr(sc, "_test_terminal", lambda: (False, "no window appeared"))
+    assert sc.configure_terminal() == 1
+    captured = capsys.readouterr()
+    assert "no window appeared" in captured.err  # warn goes to stderr
+    assert "ka config set terminal" in captured.out
+
+
+def test_terminal_step_is_skipped_off_linux(monkeypatch, capsys):
+    monkeypatch.setattr(sc.sys, "platform", "win32")
+    assert sc.configure_terminal() == 0
+    assert "not configurable" in capsys.readouterr().out
+
+
+def test_skills_only_does_not_open_a_terminal(fake_home, monkeypatch):
+    """Someone who asked for skills alone did not ask for a window."""
+    called = {"n": 0}
+
+    def counted(**_kwargs):
+        called["n"] += 1
+        return 0
+
+    monkeypatch.setattr(sc, "configure_terminal", counted)
+    sc.cmd_setup(_ns(skills_only=True))
+    assert called["n"] == 0
+
+
+def test_terminal_only_skips_skills_and_hooks(fake_home, monkeypatch):
+    def fail(*_a, **_k):
+        raise AssertionError("--terminal-only must not touch skills or hooks")
+
+    monkeypatch.setattr(sc, "_copy_skills", fail)
+    monkeypatch.setattr(sc, "_merge_claude_settings", fail)
+    monkeypatch.setattr(sc, "configure_terminal", lambda **_k: 0)
+    assert sc.cmd_setup(_ns(terminal_only=True)) == 0
+
+
+def test_configured_terminal_survives_an_empty_detection(linux_setup, monkeypatch, capsys):
+    """Nothing detected but something configured must not crash the picker."""
+    monkeypatch.setattr(sc, "detect_terminals", list)
+    sc.set_config_value("terminal", "kitty")
+    assert sc.configure_terminal(force=True) == 0
+    assert sc.load_config()["terminal"] == "kitty"
+    assert "none of the known ones found" in capsys.readouterr().out

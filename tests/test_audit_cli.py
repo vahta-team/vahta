@@ -139,3 +139,38 @@ def test_config_set_needs_auth(seeded_vault: Path, password: str, monkeypatch, c
     from key_amnesia.config import load_config
 
     assert load_config()["session-mode"] == "cached"
+
+
+def test_config_set_terminal_needs_no_password(monkeypatch, capsys, tmp_path) -> None:
+    """The bootstrap exemption.
+
+    `terminal` decides where a password can be typed, so gating it behind
+    typing one deadlocks the user it is meant to help: their prompt does not
+    open, and the fix for that is the setting they cannot reach.
+    """
+
+    def must_not_be_called(*_a, **_k):
+        raise AssertionError("config set terminal must not ask for the password")
+
+    monkeypatch.setattr("key_amnesia.cli.require_human_auth", must_not_be_called)
+    monkeypatch.setattr(
+        "key_amnesia.config.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+
+    from key_amnesia.config import load_config
+
+    assert main(["config", "set", "terminal", "ghostty -e"]) == 0
+    assert load_config()["terminal"] == "ghostty -e"
+
+    assert main(["config", "set", "terminal", "auto"]) == 0
+    assert load_config()["terminal"] == ""
+    assert "(auto-detect)" in capsys.readouterr().out
+
+
+def test_config_set_terminal_rejects_a_binary_that_is_not_there(monkeypatch) -> None:
+    monkeypatch.setattr("key_amnesia.config.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "key_amnesia.cli.require_human_auth",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no auth expected")),
+    )
+    assert main(["config", "set", "terminal", "nosuchterm -e"]) == 1

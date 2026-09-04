@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +17,25 @@ DEFAULTS: dict[str, Any] = {
     # Default window for `ka unlock --pre-admit` (no `--pre-admit-seconds`
     # flag exists; this is the only knob) — see guard.run_foreground_guard.
     "pre-admit-seconds": 900,
+    # Which terminal opens the isolated console for a password prompt, as a
+    # command prefix the helper argv is appended to ("ghostty -e", "kitty").
+    # Empty means detect one — see platform._preferred_terminal_command.
+    # Linux only; Windows has CREATE_NEW_CONSOLE and macOS has Terminal.app.
+    "terminal": "",
 }
 
 VALID_SESSION_MODES = frozenset({"per-call", "cached"})
+
+# `config set` normally proves the master password first. `terminal` cannot:
+# it is the setting that decides *where* a password can be typed at all, so
+# requiring the vault to change it would mean a user whose terminal is wrong
+# has to satisfy the very prompt they cannot see. It guards nothing — anyone
+# who can write this file can already replace `ka` on PATH — and the agent
+# deny for `config set` lives in ka_policy, not in the password check.
+AUTH_EXEMPT_KEYS = frozenset({"terminal"})
+
+# Accepted as "go back to detecting one".
+_TERMINAL_AUTO = frozenset({"", "auto", "detect", "default", "none"})
 
 
 class ConfigError(Exception):
@@ -76,11 +94,40 @@ def set_config_value(key: str, value: str, path: Path | None = None) -> dict[str
         if seconds < 1:
             raise ConfigError("pre-admit-seconds must be >= 1")
         cfg[key] = seconds
+    elif key == "terminal":
+        cfg[key] = normalize_terminal(value)
     else:
         raise ConfigError(
             f"Unknown config key {key!r}; "
             "supported: session-mode, session-timeout-minutes, "
-            "prompt-timeout-seconds, pre-admit-seconds"
+            "prompt-timeout-seconds, pre-admit-seconds, terminal"
         )
     save_config(cfg, path)
     return cfg
+
+
+def normalize_terminal(value: str) -> str:
+    """Validate a terminal command prefix and return it in canonical form.
+
+    The value is a command, not a binary name, so it carries whatever flag
+    that terminal needs to run something: "ghostty -e", "wezterm start --",
+    "kitty". That is what lets a terminal nobody has heard of work without a
+    code change. The empty string, and a few words meaning the same thing,
+    clear the setting and put detection back in charge.
+    """
+    text = (value or "").strip()
+    if text.lower() in _TERMINAL_AUTO:
+        return ""
+    try:
+        parts = shlex.split(text)
+    except ValueError as e:
+        raise ConfigError(f"terminal is not a valid command line: {e}") from e
+    if not parts:
+        return ""
+    if not shutil.which(parts[0]):
+        raise ConfigError(
+            f"terminal {parts[0]!r} is not on PATH. Give a command that is, "
+            'including the flag it needs to run something (e.g. "ghostty -e"), '
+            'or "auto" to detect one.'
+        )
+    return shlex.join(parts)

@@ -127,6 +127,29 @@ ka unlock --admit-tree              # choose parent/IDE as root when prompted
 ka unlock --pre-admit               # next client only, no ancestry picker
 ```
 
+## Which terminal opens for the password (Linux)
+
+When `ka` is called from something that has no terminal of its own — an agent,
+a CI shell, a `.desktop` launcher — it opens one of yours to ask for the master
+password, so the password is never typed into the caller's stdin. Windows uses
+`CREATE_NEW_CONSOLE` and macOS uses Terminal.app; on Linux there is no single
+answer, so key-amnesia has to be told.
+
+`ka setup` asks once, offering what is installed, and stores the answer. To
+change it, or to name a terminal the picker did not find:
+
+```bash
+ka config set terminal "ghostty -e"     # the command, with the flag it needs
+ka config set terminal "kitty"          # kitty, foot and others take none
+ka config set terminal auto             # go back to detecting one each time
+ka setup --terminal-only                # pick again from what is installed
+```
+
+The value is a command, not a program name, which is why a terminal nobody has
+heard of works without a code change. `KEY_AMNESIA_TERMINAL` overrides it for a
+single run. `ka status` prints the terminal that would open and where the
+setting came from.
+
 Full command reference, project vaults, manifests, roles/export, and admission details: **[the wiki](https://github.com/fujitoid/key-amnesia/wiki)** (`ka docs`).
 
 ## Security limits — read this part honestly

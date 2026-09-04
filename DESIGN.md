@@ -351,10 +351,10 @@ Needs human auth
       yes → getpass/input inline → KDF decrypt in-process
       no  → spawn isolated console (bare argv, env handoff)
               → Windows: CREATE_NEW_CONSOLE
-              → Linux: KEY_AMNESIA_TERMINAL, else TERMINAL, else first terminal on
-                PATH from the table in platform.py (xdg-terminal-exec first; the
-                running desktop's own terminal moved to the front), invoked with
-                the argument convention that terminal actually takes
+              → Linux: the configured terminal — KEY_AMNESIA_TERMINAL, else the
+                `terminal` config value written by `ka setup`, else TERMINAL —
+                else a scan of the table in platform.py, invoked with the
+                argument convention that terminal actually takes
                 (requires DISPLAY or WAYLAND_DISPLAY)
               → macOS (experimental): Terminal.app via osascript/open + PID-file wrapper
                 (launcher returns immediately; parent polls helper PID file)
@@ -382,7 +382,7 @@ Helper behavior after env handoff:
 - Prints clear UX, collects input, KDF/decrypts in-process.
 - Watches parent PID / IPC disconnect → cancel and exit (no orphan window).
 - Parent receives status-only replies — never password, never raw secrets.
-- **Linux non-interactive spawn:** `KEY_AMNESIA_TERMINAL` (a shell-quoted command prefix, flag included) wins; then `TERMINAL`; then the first terminal on `PATH` from `_LINUX_EMULATORS`, with `XDG_CURRENT_DESKTOP`'s own terminal moved to the front. Each entry carries its invocation style, because there is no shared convention: trailing argv (`xdg-terminal-exec`, `kitty`, `foot` — all of which reject `-e`), a flag (`-e`, `--`, `-x`, `start --`), or one `shlex.join`ed string for the terminals whose `-e` takes a single command. Headless (no `DISPLAY` / `WAYLAND_DISPLAY`), no known terminal, or spawn failure → fail closed, with the message naming `KEY_AMNESIA_TERMINAL` and `ka unlock` as the two ways forward.
+- **Linux non-interactive spawn:** the terminal is *configuration*. `KEY_AMNESIA_TERMINAL` (a shell-quoted command prefix, flag included) wins for one run; then the `terminal` config value, which `ka setup` writes after asking; then `TERMINAL`. Only when none of those resolves does it scan `_LINUX_EMULATORS` on `PATH`, with `XDG_CURRENT_DESKTOP`'s own terminal moved to the front — the table is detection data for the setup picker and a fallback, not the policy. A configured terminal that has been uninstalled degrades to the scan rather than raising: losing a terminal must not mean losing the prompt. `terminal` is the one config key that needs no master password, because it is the key that decides where a password can be typed. Each entry carries its invocation style, because there is no shared convention: trailing argv (`xdg-terminal-exec`, `kitty`, `foot` — all of which reject `-e`), a flag (`-e`, `--`, `-x`, `start --`), or one `shlex.join`ed string for the terminals whose `-e` takes a single command. Headless (no `DISPLAY` / `WAYLAND_DISPLAY`), no known terminal, or spawn failure → fail closed, with the message naming `KEY_AMNESIA_TERMINAL` and `ka unlock` as the two ways forward.
 - **macOS non-interactive spawn (experimental):** `osascript` `tell Terminal to do script` (else `open -a Terminal` on a temp `.command`). Because those launchers exit immediately, a wrapper writes its PID to a temp file then `exec`s the helper; parent returns `PidFileProcess` bound to that PID. Secrets travel in a 0600 temp env JSON (never on argv), unlinked by the wrapper before exec. PID-file timeout / launch failure → fail closed. Visible window unconfirmed by a real Mac user — labelled experimental in README / `--help`.
 
 ### `PromptRequest.detail` vs `mutation` — two fields, two trust levels

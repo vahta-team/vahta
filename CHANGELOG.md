@@ -22,9 +22,13 @@ Versions follow the git tags `0.4.0` … `0.4.12`.
 
 ### Added
 
-- `KEY_AMNESIA_TERMINAL` — an escape hatch for a terminal the table does not know. It is a shell-quoted command prefix that the helper argv is appended to, so it carries the flag too: `KEY_AMNESIA_TERMINAL="myterm --run-in"`. `TERMINAL`, the widely set convention, is honoured after it.
+- **The terminal is now configuration, not a list in the source.** `terminal` joins `ka config set`: a command prefix carrying whatever flag that terminal needs — `"ghostty -e"`, `"kitty"`, `"wezterm start --"` — or `auto` to detect one. A terminal nobody has heard of works without waiting for a release.
+- `ka setup` asks which terminal to use, offering the ones it finds. One installed is chosen silently; several are offered as a numbered list; `--yes` or a non-interactive run takes the first and says so. A choice already stored is reported and kept, so re-running setup after an update does not re-ask. `ka setup --terminal-only` picks again, `--reconfigure-terminal` re-asks during a full setup. The choice is then proved by opening the terminal on a test command rather than assumed.
+- Unlike every other config key, `terminal` does not require the master password. It is the setting that decides where a password can be typed, so gating it behind typing one deadlocks exactly the user it exists to help. It guards nothing — anyone who can write the config file can already replace `ka` on `PATH` — and `config set` stays denied to agents by `ka_policy`, which is where that deny has always lived.
+- `ka status` prints the terminal that would open and where the setting came from (`KEY_AMNESIA_TERMINAL`, config, `TERMINAL`, or detection).
+- `KEY_AMNESIA_TERMINAL` — the same command-prefix shape, overriding the stored setting for one run.
 - The running desktop's own terminal is moved to the front of the candidate list from `XDG_CURRENT_DESKTOP`, so a KDE user gets Konsole on a machine that also has ghostty installed.
-- The fail-closed message now names both ways out: set `KEY_AMNESIA_TERMINAL`, or start a session in your own terminal with `ka unlock` and let the agent's call reuse it.
+- The fail-closed message now names the ways out: `ka config set terminal`, `ka setup`, or starting a session with `ka unlock` in a terminal you already have.
 
 ## [0.4.11] — 2026-08-20
 

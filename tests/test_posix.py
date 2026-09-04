@@ -514,3 +514,95 @@ def test_fail_closed_message_names_the_escape_hatch(monkeypatch) -> None:
     message = str(excinfo.value)
     assert "KEY_AMNESIA_TERMINAL" in message
     assert "ka unlock" in message
+
+
+# --- the configured terminal, not a hardcoded scan ------------------------
+#
+# The scan below these tests is the fallback. The intended path is that
+# `ka setup` stores a terminal and this code just uses it, so that a terminal
+# nobody has heard of works without a release.
+
+
+def _set_config_terminal(monkeypatch, value: str) -> None:
+    monkeypatch.setattr(
+        "key_amnesia.config.load_config", lambda *a, **k: {"terminal": value}
+    )
+
+
+def test_configured_terminal_beats_detection(monkeypatch) -> None:
+    _set_config_terminal(monkeypatch, "myterm --run-in")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"myterm": "/opt/bin/myterm", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd == ["/opt/bin/myterm", "--run-in", *HELPER_ARGV]
+
+
+def test_env_beats_configured_terminal(monkeypatch) -> None:
+    """One run can differ from the stored choice without editing the config."""
+    _set_config_terminal(monkeypatch, "ghostty -e")
+    monkeypatch.setenv("KEY_AMNESIA_TERMINAL", "kitty")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"kitty": "/usr/bin/kitty", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd == ["/usr/bin/kitty", *HELPER_ARGV]
+
+
+def test_uninstalled_configured_terminal_falls_back_to_detection(monkeypatch) -> None:
+    """Losing the configured terminal must degrade to a scan, not to no prompt."""
+    _set_config_terminal(monkeypatch, "removedterm -e")
+    cmd = _spawn_capturing(monkeypatch, {"ghostty": "/usr/bin/ghostty"})
+    assert cmd == ["/usr/bin/ghostty", "-e", *HELPER_ARGV]
+
+
+def test_broken_config_does_not_block_the_prompt(monkeypatch) -> None:
+    def explode(*_a, **_k):
+        raise ValueError("config file is not JSON")
+
+    monkeypatch.setattr("key_amnesia.config.load_config", explode)
+    cmd = _spawn_capturing(monkeypatch, {"ghostty": "/usr/bin/ghostty"})
+    assert cmd[0] == "/usr/bin/ghostty"
+
+
+def test_detect_terminals_reports_installed_with_their_flags(monkeypatch) -> None:
+    from key_amnesia.platform import detect_terminals
+
+    monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"}),
+    )
+    assert detect_terminals() == [
+        ("ghostty", ["/usr/bin/ghostty", "-e"]),
+        ("kitty", ["/usr/bin/kitty"]),
+    ]
+
+
+def test_describe_terminal_names_its_source(monkeypatch) -> None:
+    from key_amnesia.platform import describe_terminal
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"}),
+    )
+
+    _set_config_terminal(monkeypatch, "ghostty -e")
+    assert "from config" in describe_terminal()
+
+    monkeypatch.setenv("KEY_AMNESIA_TERMINAL", "kitty")
+    assert "from KEY_AMNESIA_TERMINAL" in describe_terminal()
+
+    monkeypatch.delenv("KEY_AMNESIA_TERMINAL")
+    _set_config_terminal(monkeypatch, "")
+    assert "none configured" in describe_terminal()
+
+
+def test_describe_terminal_when_nothing_is_installed(monkeypatch) -> None:
+    from key_amnesia.platform import describe_terminal
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("key_amnesia.platform.shutil.which", _fake_which({}))
+    _set_config_terminal(monkeypatch, "")
+    assert "ka setup --terminal-only" in describe_terminal()

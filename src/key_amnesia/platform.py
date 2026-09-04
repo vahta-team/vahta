@@ -18,7 +18,8 @@ from key_amnesia import theme
 
 # Environment override: a command prefix, shell-quoted, that we append the
 # helper argv to. `KEY_AMNESIA_TERMINAL="alacritty -e"` is the escape hatch for
-# any terminal this table does not know.
+# any terminal this table does not know, and it beats the stored setting so a
+# one-off run can differ from the configured choice.
 ENV_TERMINAL = "KEY_AMNESIA_TERMINAL"
 
 # How a terminal takes "now run this argv".
@@ -30,7 +31,13 @@ _TRAILING = "trailing"  # term CMD ARGS…        — the command is just argv
 _FLAG = "flag"  # term FLAG… CMD ARGS…  — a flag, then argv
 _JOINED = "joined"  # term FLAG "CMD ARGS…" — one shell-quoted string
 
-# Linux terminal emulators, tried in order (first on PATH wins).
+# Linux terminal emulators known to this module.
+#
+# This is *detection data for `ka setup`*, not a runtime policy: at run time
+# the terminal comes from the configured `terminal` command, and the entries
+# below only supply the invocation flags for one picked by name and the
+# candidate order used when nothing is configured yet. A terminal absent from
+# this table is fully usable — configure it as a command prefix.
 #
 # Order is deliberate. `xdg-terminal-exec` is the freedesktop reference
 # implementation of "launch the user's chosen terminal" and is right whenever
@@ -232,36 +239,111 @@ def _linux_emulator_argv(emulator: str, argv: list[str]) -> list[str]:
     return [emulator, *flags, *argv]
 
 
-def _env_terminal_command() -> list[str] | None:
-    """Explicit terminal from the environment, as a command prefix.
+def terminal_command_for(name: str) -> list[str]:
+    """Command prefix that runs something in the terminal called *name*.
 
-    KEY_AMNESIA_TERMINAL is the escape hatch and wins: it is a shell-quoted
-    prefix ("alacritty -e", "foot") that the helper argv is appended to, so it
-    covers terminals this module has never heard of. TERMINAL is the widely
-    used convention and is honoured second; it names a binary, so its
-    invocation style is looked up in the table and falls back to trailing
-    arguments, which is what modern terminals take.
+    Flags come from the table when the name is in it, and default to none —
+    the modern convention, which kitty, foot and xdg-terminal-exec all use —
+    when it is not. Returns [] if the binary is not on PATH.
     """
-    explicit = os.environ.get(ENV_TERMINAL, "").strip()
-    if explicit:
-        try:
-            parts = shlex.split(explicit)
-        except ValueError:
-            parts = []
-        if parts:
-            path = shutil.which(parts[0])
-            if path:
-                # Resolve here so the spawn does not depend on a PATH that the
-                # emulator's own environment might not share.
-                return [path, *parts[1:]]
+    path = shutil.which(name)
+    if not path:
+        return []
+    _, flags = _EMULATOR_STYLES.get(os.path.basename(name), (_TRAILING, ()))
+    return [path, *flags]
+
+
+def detect_terminals() -> list[tuple[str, list[str]]]:
+    """Every known terminal installed here, best candidate first.
+
+    `ka setup` shows this list; nothing at run time depends on it once a
+    terminal has been configured.
+    """
+    found: list[tuple[str, list[str]]] = []
+    for name in _emulator_candidates():
+        command = terminal_command_for(name)
+        if command:
+            found.append((name, command))
+    return found
+
+
+def _resolve_command_prefix(text: str) -> list[str] | None:
+    """Turn a stored/env command prefix into an absolute argv prefix."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    path = shutil.which(parts[0])
+    if not path:
+        return None
+    # Resolve here so the spawn does not depend on a PATH that the emulator's
+    # own environment might not share.
+    return [path, *parts[1:]]
+
+
+def describe_terminal() -> str:
+    """One line for `ka status`: the terminal that will open, and why.
+
+    Cheap to print and the only place a user can check the setting without
+    triggering a real prompt — which is the whole difficulty with this code
+    path, since it only ever runs when nobody is watching a TTY.
+    """
+    if not sys.platform.startswith("linux"):
+        return f"handled by the OS on {sys.platform}"
+    command, source = resolve_terminal()
+    if command is None:
+        found = ", ".join(name for name, _ in detect_terminals())
+        if found:
+            return f"none configured; would try {found}"
+        return "none configured and none detected — `ka setup --terminal-only`"
+    shown = shlex.join(command)
+    return f"{shown} (from {source})"
+
+
+def resolve_terminal() -> tuple[list[str] | None, str]:
+    """The terminal command to use and where it came from."""
+    from_env = _resolve_command_prefix(os.environ.get(ENV_TERMINAL, ""))
+    if from_env:
+        return from_env, ENV_TERMINAL
+
+    try:
+        from key_amnesia.config import load_config
+
+        configured = str(load_config().get("terminal") or "")
+    except Exception:  # noqa: BLE001 — a broken config must not block the prompt
+        configured = ""
+    from_config = _resolve_command_prefix(configured)
+    if from_config:
+        return from_config, "config"
 
     named = os.environ.get("TERMINAL", "").strip()
     if named:
-        path = shutil.which(named)
-        if path:
-            _, flags = _EMULATOR_STYLES.get(os.path.basename(named), (_TRAILING, ()))
-            return [path, *flags]
-    return None
+        command = terminal_command_for(named)
+        if command:
+            return command, "TERMINAL"
+    return None, "detection"
+
+
+def _preferred_terminal_command() -> list[str] | None:
+    """The terminal to use, in precedence order, or None to fall back to a scan.
+
+    KEY_AMNESIA_TERMINAL wins: a per-invocation override for CI and for
+    debugging a bad setting. Then the `terminal` config value, which is what
+    `ka setup` writes and what a user edits — this is the intended source, and
+    the reason the table below it is only a fallback. Then TERMINAL, the
+    widely set convention, whose value names a binary rather than a command,
+    so its flags are looked up.
+
+    A configured terminal that has since been uninstalled resolves to None
+    here rather than raising, so detection still gets its turn: losing a
+    terminal should degrade to a scan, not to no password prompt at all.
+    """
+    return resolve_terminal()[0]
 
 
 def _emulator_candidates() -> tuple[str, ...]:
@@ -298,8 +380,11 @@ def _no_emulator_oserror(tried: list[str] | None = None) -> OSError:
     return OSError(
         "No suitable terminal emulator found "
         f"(tried {', '.join(names)}). Fail closed.\n"
-        f"  Set {ENV_TERMINAL} to your terminal, including whatever flag it "
-        'takes to run a command — e.g. KEY_AMNESIA_TERMINAL="alacritty -e".\n'
+        "  Tell key-amnesia which terminal you use — the command, including "
+        'whatever flag it takes to run something:\n'
+        '    ka config set terminal "alacritty -e"\n'
+        "  `ka setup` offers the same choice from what is installed, and "
+        f"{ENV_TERMINAL} overrides both for one run.\n"
         "  Or start a session in your own terminal first with `ka unlock`, "
         "which needs no window here."
     )
@@ -337,7 +422,7 @@ def _try_spawn_linux_emulators(
     tried: list[str] = []
     candidates: list[list[str]] = []
 
-    override = _env_terminal_command()
+    override = _preferred_terminal_command()
     if override is not None:
         candidates.append([*override, *argv])
         tried.append(os.path.basename(override[0]))
@@ -630,9 +715,9 @@ def spawn_isolated_console(
     """Spawn *argv* in an isolated console; sensitive data only in *env*.
 
     Windows: CREATE_NEW_CONSOLE, no stdio kwargs.
-    Linux: KEY_AMNESIA_TERMINAL or TERMINAL if set, else the first terminal
-    from _LINUX_EMULATORS on PATH (the running desktop's own terminal first),
-    when DISPLAY or WAYLAND_DISPLAY is set; otherwise fail closed.
+    Linux: the configured terminal (KEY_AMNESIA_TERMINAL, then the `terminal`
+    config value, then TERMINAL), else the first terminal from _LINUX_EMULATORS
+    on PATH, when DISPLAY or WAYLAND_DISPLAY is set; otherwise fail closed.
     macOS (experimental): Terminal.app via osascript/open + PID-file wrapper
     so parent-death tracks the helper, not the short-lived launcher.
     Other platforms: fail closed.
