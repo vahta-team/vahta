@@ -214,7 +214,7 @@ def test_stdin_tty_stdout_not_routes_spawned(ka_home, monkeypatch) -> None:
 
     captured: dict[str, Any] = {}
 
-    def fake_spawn(cmd, env, *, popen_fn=None):
+    def fake_spawn(cmd, env, *, popen_fn=None, confirm_started=None):
         # Bypass platform DISPLAY/emulator gates — this test is about routing.
         captured["cmd"] = cmd
         proc = MagicMock()
@@ -238,7 +238,7 @@ def test_noninteractive_env_forces_spawn_even_when_tty(ka_home, monkeypatch) -> 
 
     captured: dict[str, Any] = {}
 
-    def fake_spawn(cmd, env, *, popen_fn=None):
+    def fake_spawn(cmd, env, *, popen_fn=None, confirm_started=None):
         captured["env"] = env
         proc = MagicMock()
         proc.poll.return_value = 1
@@ -266,3 +266,47 @@ def test_isatty_requires_both_streams(monkeypatch) -> None:
     assert prompt_route._isatty() is False
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     assert prompt_route._isatty() is True
+
+
+# --- the start marker -------------------------------------------------------
+
+
+def test_helper_env_carries_a_start_marker_and_the_helper_touches_it(monkeypatch, tmp_path):
+    """The parent's only early proof that the window really ran our command."""
+    from key_amnesia import prompt_route as pr
+
+    marker, wait = pr._make_start_marker()
+    assert not marker.exists()
+    assert wait(0.05) is False
+
+    captured = {}
+
+    def fake_spawn(cmd, env, *, popen_fn=None, confirm_started=None):
+        captured["env"] = env
+        captured["confirm"] = confirm_started
+        return object()
+
+    monkeypatch.setattr(pr, "spawn_isolated_console", fake_spawn)
+    pr._spawn_helper(
+        pr.PromptRequest(action="reveal"),
+        "addr",
+        b"k" * 32,
+        90,
+        start_marker=marker,
+        confirm_started=wait,
+    )
+    assert captured["env"][pr.ENV_STARTED] == str(marker)
+    assert captured["confirm"] is wait
+
+    # The helper writes it before anything else, so a parent polling sees it.
+    monkeypatch.setenv(pr.ENV_STARTED, str(marker))
+    env = pr.clear_helper_env()
+    assert env[pr.ENV_STARTED] == str(marker)
+    from pathlib import Path as _Path
+
+    _Path(env[pr.ENV_STARTED]).touch()
+    assert wait(0.05) is True
+
+    pr._cleanup_start_marker(marker)
+    assert not marker.exists()
+    assert not marker.parent.exists()

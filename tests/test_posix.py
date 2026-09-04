@@ -606,3 +606,89 @@ def test_describe_terminal_when_nothing_is_installed(monkeypatch) -> None:
     monkeypatch.setattr("key_amnesia.platform.shutil.which", _fake_which({}))
     _set_config_terminal(monkeypatch, "")
     assert "ka setup --terminal-only" in describe_terminal()
+
+
+# --- moving on from a terminal that opened but never ran the helper --------
+#
+# A live process 150ms after spawn does not mean the command inside it ran.
+# When it did not, the caller used to wait out its whole prompt timeout on a
+# window that would never answer, instead of trying the next terminal.
+
+
+def _spawn_with_confirm(monkeypatch, available, confirm, *, poll_alive=True):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which", _fake_which(available)
+    )
+    spawned: list[str] = []
+    killed: list[str] = []
+
+    def fake_popen(cmd, **kwargs):
+        spawned.append(cmd[0])
+        proc = MagicMock()
+        proc.poll.return_value = None if poll_alive else 1
+        proc.terminate.side_effect = lambda: killed.append(cmd[0])
+        return proc
+
+    result = spawn_isolated_console(
+        HELPER_ARGV,
+        dict(SENSITIVE_ENV),
+        popen_fn=fake_popen,
+        confirm_started=confirm,
+    )
+    return result, spawned, killed
+
+
+def test_unconfirmed_terminal_is_closed_and_the_next_one_tried(monkeypatch) -> None:
+    seen: list[float] = []
+
+    def confirm(timeout_s: float) -> bool:
+        seen.append(timeout_s)
+        return len(seen) > 1  # the first candidate never starts the helper
+
+    _, spawned, killed = _spawn_with_confirm(
+        monkeypatch,
+        {"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"},
+        confirm,
+    )
+    assert spawned == ["/usr/bin/ghostty", "/usr/bin/kitty"]
+    assert killed == ["/usr/bin/ghostty"]  # no orphan window left asking
+    assert seen and all(t > 0 for t in seen)
+
+
+def test_the_last_candidate_is_never_abandoned_on_confirmation(monkeypatch) -> None:
+    """With nothing to fall back to, a slow terminal must still be waited for."""
+    calls = {"n": 0}
+
+    def confirm(_timeout_s: float) -> bool:
+        calls["n"] += 1
+        return False
+
+    result, spawned, killed = _spawn_with_confirm(
+        monkeypatch, {"ghostty": "/usr/bin/ghostty"}, confirm
+    )
+    assert spawned == ["/usr/bin/ghostty"]
+    assert killed == []
+    assert calls["n"] == 0
+    assert result is not None
+
+
+def test_confirmed_first_candidate_stops_the_search(monkeypatch) -> None:
+    _, spawned, killed = _spawn_with_confirm(
+        monkeypatch,
+        {"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"},
+        lambda _t: True,
+    )
+    assert spawned == ["/usr/bin/ghostty"]
+    assert killed == []
+
+
+def test_without_a_confirmer_behaviour_is_unchanged(monkeypatch) -> None:
+    """Windows and macOS pass none; Linux must not require one either."""
+    _, spawned, _ = _spawn_with_confirm(
+        monkeypatch,
+        {"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"},
+        None,
+    )
+    assert spawned == ["/usr/bin/ghostty"]

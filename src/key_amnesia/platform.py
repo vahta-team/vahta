@@ -115,6 +115,11 @@ _PKG_MANAGERS: tuple[tuple[str, str], ...] = (
 # Overridable so tests don't pay this cost.
 _POLL_DELAY_S = 0.15
 
+# How long a candidate terminal gets to actually start the helper before we
+# give up on it and try the next one. Generous, because this is only spent
+# when a fallback exists: the last candidate is waited for indefinitely.
+_HELPER_START_TIMEOUT_S = 8.0
+
 # macOS: open/osascript return immediately — parent polls a PID file written by
 # a wrapper that then execs the helper. Overridable for tests.
 _MACOS_PID_WAIT_S = 8.0
@@ -417,8 +422,19 @@ def _try_spawn_linux_emulators(
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any],
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> tuple[Any | None, list[str]]:
-    """Try each known emulator on PATH. Return (proc_or_None, names_tried)."""
+    """Try each known emulator on PATH. Return (proc_or_None, names_tried).
+
+    `confirm_started`, when given, is asked to wait up to N seconds for proof
+    that the *helper inside the window* actually began running. A live process
+    a moment after spawn is a weak proxy: a terminal that opens and then fails
+    to exec its command looks identical to one that worked, and the caller
+    then waits out its whole prompt timeout on a window that will never
+    answer. The confirmation is only used to decide whether to move on to
+    another candidate, so the last one is never abandoned on it — a slow
+    terminal with nothing to fall back to should still be waited for.
+    """
     tried: list[str] = []
     candidates: list[list[str]] = []
 
@@ -434,7 +450,7 @@ def _try_spawn_linux_emulators(
         tried.append(name)
         candidates.append(_linux_emulator_argv(path, argv))
 
-    for cmd in candidates:
+    for index, cmd in enumerate(candidates):
         try:
             # No stdin/stdout/stderr kwargs — emulator owns stdio.
             proc = popen_fn(cmd, env=env, close_fds=True)
@@ -442,11 +458,21 @@ def _try_spawn_linux_emulators(
             continue
         if _POLL_DELAY_S:
             time.sleep(_POLL_DELAY_S)
-        if _process_alive(proc):
+        if not _process_alive(proc):
+            # Launched but exited immediately (bad invocation, broken alias) —
+            # don't report false success; try the next emulator instead.
+            continue
+        is_last = index == len(candidates) - 1
+        if confirm_started is None or is_last:
             return proc, tried
-        # Launched but exited immediately (bad invocation, broken alias) —
-        # don't report false success; try the next emulator instead.
-        continue
+        if confirm_started(_HELPER_START_TIMEOUT_S):
+            return proc, tried
+        # The window is up but our command never ran in it. Close it rather
+        # than leaving an orphan asking for a password nobody will read.
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001 — best effort on a doomed candidate
+            pass
     return None, tried
 
 
@@ -528,6 +554,7 @@ def _spawn_linux(
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any],
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> Any:
     if not _has_interactive_display():
         raise OSError(
@@ -535,7 +562,9 @@ def _spawn_linux(
             "cannot spawn isolated console. Fail closed."
         )
 
-    proc, tried = _try_spawn_linux_emulators(argv, env, popen_fn=popen_fn)
+    proc, tried = _try_spawn_linux_emulators(
+        argv, env, popen_fn=popen_fn, confirm_started=confirm_started
+    )
     if proc is not None:
         return proc
 
@@ -711,6 +740,7 @@ def spawn_isolated_console(
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any] | None = None,
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> Any:
     """Spawn *argv* in an isolated console; sensitive data only in *env*.
 
@@ -735,7 +765,9 @@ def spawn_isolated_console(
         )
 
     if sys.platform.startswith("linux"):
-        return _spawn_linux(argv, env, popen_fn=popen)
+        return _spawn_linux(
+            argv, env, popen_fn=popen, confirm_started=confirm_started
+        )
 
     if sys.platform == "darwin":
         return _spawn_macos(argv, env, popen_fn=popen)

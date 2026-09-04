@@ -10,11 +10,16 @@ import getpass
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from multiprocessing.connection import Connection
+from pathlib import Path
 from typing import Any, Callable
+
+# How often the parent looks for the helper's start marker.
+_START_POLL_S = 0.1
 
 from key_amnesia import ipc
 from key_amnesia import theme
@@ -28,6 +33,11 @@ ENV_AUTHKEY = "KEY_AMNESIA_PROMPT_AUTHKEY"
 ENV_ADDRESS = "KEY_AMNESIA_PROMPT_ADDRESS"
 ENV_PARENT_PID = "KEY_AMNESIA_PROMPT_PARENT_PID"
 ENV_TIMEOUT = "KEY_AMNESIA_PROMPT_TIMEOUT"
+# Path the helper touches the moment it starts. Not sensitive — an empty file
+# in a 0700 temp dir — and the only early proof that the terminal we opened
+# actually ran our command, since the helper's first IPC contact comes after
+# the human has typed the password.
+ENV_STARTED = "KEY_AMNESIA_PROMPT_STARTED"
 # Force spawned-console even when both streams claim to be a TTY (agent harnesses).
 ENV_NONINTERACTIVE = "KEY_AMNESIA_NONINTERACTIVE"
 
@@ -130,6 +140,38 @@ def _helper_command() -> list[str]:
     return [sys.executable, "-m", "key_amnesia", "_prompt-helper"]
 
 
+def _make_start_marker() -> tuple[Path, Callable[[float], bool]]:
+    """A file the helper touches on start, and a waiter for it.
+
+    Returned rather than polled inline because the spawn layer decides *when*
+    to give up on a candidate terminal and try the next one.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="key-amnesia-start-"))
+    os.chmod(tmp, 0o700)
+    marker = tmp / "started"
+
+    def wait(timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if marker.exists():
+                return True
+            time.sleep(_START_POLL_S)
+        return False
+
+    return marker, wait
+
+
+def _cleanup_start_marker(marker: Path) -> None:
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        marker.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _spawn_helper(
     request: PromptRequest,
     address: str,
@@ -137,6 +179,8 @@ def _spawn_helper(
     timeout_s: int,
     *,
     popen_fn: Callable[..., Any] | None = None,
+    start_marker: Path | None = None,
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> Any:
     """Spawn helper with CREATE_NEW_CONSOLE; sensitive data only in env."""
     env = os.environ.copy()
@@ -145,9 +189,13 @@ def _spawn_helper(
     env[ENV_ADDRESS] = address
     env[ENV_PARENT_PID] = str(os.getpid())
     env[ENV_TIMEOUT] = str(timeout_s)
+    if start_marker is not None:
+        env[ENV_STARTED] = str(start_marker)
 
     cmd = _helper_command()
-    return spawn_isolated_console(cmd, env, popen_fn=popen_fn)
+    return spawn_isolated_console(
+        cmd, env, popen_fn=popen_fn, confirm_started=confirm_started
+    )
 
 
 def require_human_auth(
@@ -214,11 +262,18 @@ def require_human_auth(
     # Non-interactive: spawn helper console (Win / Linux / experimental macOS).
     listener = None
     proc = None
+    start_marker, confirm_started = _make_start_marker()
     try:
         listener, address, authkey = ipc.start_listener()
         try:
             proc = _spawn_helper(
-                request, address, authkey, timeout_s, popen_fn=popen_fn
+                request,
+                address,
+                authkey,
+                timeout_s,
+                popen_fn=popen_fn,
+                start_marker=start_marker,
+                confirm_started=confirm_started,
             )
         except OSError as e:
             audit_event(
@@ -346,6 +401,7 @@ def require_human_auth(
             }
         return outcome
     finally:
+        _cleanup_start_marker(start_marker)
         if listener is not None:
             try:
                 listener.close()
@@ -360,7 +416,14 @@ def require_human_auth(
 
 def clear_helper_env() -> dict[str, str]:
     """Read and clear helper env vars from os.environ. Returns the values."""
-    keys = [ENV_REQUEST, ENV_AUTHKEY, ENV_ADDRESS, ENV_PARENT_PID, ENV_TIMEOUT]
+    keys = [
+        ENV_REQUEST,
+        ENV_AUTHKEY,
+        ENV_ADDRESS,
+        ENV_PARENT_PID,
+        ENV_TIMEOUT,
+        ENV_STARTED,
+    ]
     out: dict[str, str] = {}
     for k in keys:
         if k in os.environ:
@@ -424,6 +487,16 @@ def run_prompt_helper() -> int:
     from key_amnesia.vault import VaultError, load_vault
 
     env = clear_helper_env()
+
+    # First thing, before any output: tell the parent this window really did
+    # start us. Best effort — a prompt must never fail over a missing marker.
+    started_at = env.get(ENV_STARTED)
+    if started_at:
+        try:
+            Path(started_at).touch()
+        except OSError:
+            pass
+
     try:
         request_raw = env[ENV_REQUEST]
         authkey = ipc.authkey_from_hex(env[ENV_AUTHKEY])
