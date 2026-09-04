@@ -10,6 +10,22 @@ Versions follow the git tags `0.4.0` … `0.4.12`.
 
 - `ka setup` writes a working PreToolUse hook command when the package lives in an isolated venv and `key-amnesia-hook` is not on PATH. Resolution prefers the sibling console script next to this install's interpreter, then `shutil.which` (absolute path), then `{sys.executable} -m key_amnesia.hooks.secret_guard` — never bare `python`. Upgrade: re-run `ka setup`, then restart the agent.
 
+## [Unreleased]
+
+### Fixed
+
+- **`ka run` could not prompt on a current Linux desktop.** The isolated-console spawn knew four terminals — `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xterm` — and invoked all but one of them with a blanket `-e`. On a Wayland desktop that ships ghostty, kitty, foot or alacritty and none of those four, any `ka` command that needed the master password from a non-TTY parent (an agent harness, a CI shell, a `.desktop` launcher) failed closed with `No suitable terminal emulator found`, and nothing in the message said how to proceed.
+
+  The table now carries nineteen terminals with the argument convention each one actually takes: trailing argv for `xdg-terminal-exec`, `kitty` and `foot`, which reject `-e`; `-e` for ghostty, alacritty, konsole and the X11 set; `--` for gnome-terminal, kgx and mate-terminal; `-x` for xfce4-terminal and terminator; `start --` for wezterm; and one shell-quoted string, built with `shlex.join`, for tilix, lxterminal and qterminal, whose `-e` is string-shaped and used to silently truncate a path containing a space.
+
+  `xdg-terminal-exec` — the freedesktop reference implementation of "open the user's chosen terminal" — is tried first when present. `x-terminal-emulator` moved down the list: it is an alternatives symlink that may land on gnome-terminal, whose `-e` is deprecated, so hitting the real binary with the right flag is always better.
+
+### Added
+
+- `KEY_AMNESIA_TERMINAL` — an escape hatch for a terminal the table does not know. It is a shell-quoted command prefix that the helper argv is appended to, so it carries the flag too: `KEY_AMNESIA_TERMINAL="myterm --run-in"`. `TERMINAL`, the widely set convention, is honoured after it.
+- The running desktop's own terminal is moved to the front of the candidate list from `XDG_CURRENT_DESKTOP`, so a KDE user gets Konsole on a machine that also has ghostty installed.
+- The fail-closed message now names both ways out: set `KEY_AMNESIA_TERMINAL`, or start a session in your own terminal with `ka unlock` and let the agent's call reuse it.
+
 ## [0.4.11] — 2026-08-20
 
 ### Behavior change
