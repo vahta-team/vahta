@@ -2,9 +2,9 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.12`.
+Versions follow the git tags `0.4.0` … `0.4.13`.
 
-## [Unreleased]
+## [0.4.13] — 2026-09-06
 
 ### Fixed
 
