@@ -16,16 +16,85 @@ from typing import Any, Callable, TextIO
 
 from key_amnesia import theme
 
-# Linux X11/Wayland terminal emulators, tried in order (first on PATH wins).
-_LINUX_EMULATORS: tuple[str, ...] = (
-    "x-terminal-emulator",
+# Environment override: a command prefix, shell-quoted, that we append the
+# helper argv to. `KEY_AMNESIA_TERMINAL="alacritty -e"` is the escape hatch for
+# any terminal this table does not know, and it beats the stored setting so a
+# one-off run can differ from the configured choice.
+ENV_TERMINAL = "KEY_AMNESIA_TERMINAL"
+
+# How a terminal takes "now run this argv".
+#
+# There is no single convention, and getting it wrong is not a soft failure:
+# the emulator either refuses to start or opens an interactive shell with no
+# helper in it, and the prompt never appears.
+_TRAILING = "trailing"  # term CMD ARGS…        — the command is just argv
+_FLAG = "flag"  # term FLAG… CMD ARGS…  — a flag, then argv
+_JOINED = "joined"  # term FLAG "CMD ARGS…" — one shell-quoted string
+
+# Linux terminal emulators known to this module.
+#
+# This is *detection data for `ka setup`*, not a runtime policy: at run time
+# the terminal comes from the configured `terminal` command, and the entries
+# below only supply the invocation flags for one picked by name and the
+# candidate order used when nothing is configured yet. A terminal absent from
+# this table is fully usable — configure it as a command prefix.
+#
+# Order is deliberate. `xdg-terminal-exec` is the freedesktop reference
+# implementation of "launch the user's chosen terminal" and is right whenever
+# it exists. After that come the terminals people on Wayland actually run,
+# then the X11-era ones. `x-terminal-emulator` sits low even though it is a
+# user preference on Debian: it is an alternatives symlink that may land on
+# gnome-terminal, whose `-e` is deprecated and string-shaped, so a direct hit
+# on a named terminal above it is always the better invocation.
+_LINUX_EMULATORS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("xdg-terminal-exec", _TRAILING, ()),
+    ("ghostty", _FLAG, ("-e",)),
+    ("kitty", _TRAILING, ()),
+    ("foot", _TRAILING, ()),
+    ("alacritty", _FLAG, ("-e",)),
+    ("wezterm", _FLAG, ("start", "--")),
+    ("gnome-terminal", _FLAG, ("--",)),
+    ("kgx", _FLAG, ("--",)),
+    ("konsole", _FLAG, ("-e",)),
+    ("xfce4-terminal", _FLAG, ("-x",)),
+    ("mate-terminal", _FLAG, ("--",)),
+    ("terminator", _FLAG, ("-x",)),
+    ("tilix", _JOINED, ("-e",)),
+    ("lxterminal", _JOINED, ("-e",)),
+    ("qterminal", _JOINED, ("-e",)),
+    ("urxvt", _FLAG, ("-e",)),
+    ("st", _FLAG, ("-e",)),
+    ("x-terminal-emulator", _FLAG, ("-e",)),
+    ("xterm", _FLAG, ("-e",)),
+)
+
+_EMULATOR_STYLES: dict[str, tuple[str, tuple[str, ...]]] = {
+    name: (style, flags) for name, style, flags in _LINUX_EMULATORS
+}
+
+# Desktop-environment preference, applied by moving these to the front when
+# XDG_CURRENT_DESKTOP names the environment. A KDE user gets Konsole even on a
+# box that also has ghostty installed.
+_DESKTOP_PREFERENCE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("KDE", ("konsole",)),
+    ("GNOME", ("kgx", "gnome-terminal")),
+    ("XFCE", ("xfce4-terminal",)),
+    ("MATE", ("mate-terminal",)),
+    ("LXQT", ("qterminal",)),
+)
+
+# Offered for installation when nothing is on PATH. Deliberately shorter than
+# the table above: these are packaged under the same name everywhere, and one
+# of them is the right answer on any desktop.
+_INSTALLABLE_EMULATORS: tuple[str, ...] = (
+    "alacritty",
     "gnome-terminal",
     "konsole",
     "xterm",
 )
 
 _LINUX_EMULATOR_DESCRIPTIONS: dict[str, str] = {
-    "x-terminal-emulator": "uses your distro's configured default terminal",
+    "alacritty": "small, fast, works on Wayland and X11",
     "gnome-terminal": "full-featured, best if you're on GNOME",
     "konsole": "full-featured, best if you're on KDE",
     "xterm": "lightest and fastest, no desktop-environment dependencies",
@@ -45,6 +114,11 @@ _PKG_MANAGERS: tuple[tuple[str, str], ...] = (
 # away (e.g. a broken alias, or a build that doesn't accept our -e/-- flag).
 # Overridable so tests don't pay this cost.
 _POLL_DELAY_S = 0.15
+
+# How long a candidate terminal gets to actually start the helper before we
+# give up on it and try the next one. Generous, because this is only spent
+# when a fallback exists: the last candidate is waited for indefinitely.
+_HELPER_START_TIMEOUT_S = 8.0
 
 # macOS: open/osascript return immediately — parent polls a PID file written by
 # a wrapper that then execs the helper. Overridable for tests.
@@ -162,10 +236,132 @@ def _has_interactive_display() -> bool:
 def _linux_emulator_argv(emulator: str, argv: list[str]) -> list[str]:
     """Build emulator + helper argv. Secrets stay in env, never on argv."""
     name = os.path.basename(emulator)
-    if name == "gnome-terminal":
-        # gnome-terminal deprecated -e; -- separates options from the command.
-        return [emulator, "--", *argv]
-    return [emulator, "-e", *argv]
+    style, flags = _EMULATOR_STYLES.get(name, (_TRAILING, ()))
+    if style == _JOINED:
+        # -e here takes one string, not a vector. shlex.join keeps a path with
+        # a space in it from splitting into two arguments.
+        return [emulator, *flags, shlex.join(argv)]
+    return [emulator, *flags, *argv]
+
+
+def terminal_command_for(name: str) -> list[str]:
+    """Command prefix that runs something in the terminal called *name*.
+
+    Flags come from the table when the name is in it, and default to none —
+    the modern convention, which kitty, foot and xdg-terminal-exec all use —
+    when it is not. Returns [] if the binary is not on PATH.
+    """
+    path = shutil.which(name)
+    if not path:
+        return []
+    _, flags = _EMULATOR_STYLES.get(os.path.basename(name), (_TRAILING, ()))
+    return [path, *flags]
+
+
+def detect_terminals() -> list[tuple[str, list[str]]]:
+    """Every known terminal installed here, best candidate first.
+
+    `ka setup` shows this list; nothing at run time depends on it once a
+    terminal has been configured.
+    """
+    found: list[tuple[str, list[str]]] = []
+    for name in _emulator_candidates():
+        command = terminal_command_for(name)
+        if command:
+            found.append((name, command))
+    return found
+
+
+def _resolve_command_prefix(text: str) -> list[str] | None:
+    """Turn a stored/env command prefix into an absolute argv prefix."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    path = shutil.which(parts[0])
+    if not path:
+        return None
+    # Resolve here so the spawn does not depend on a PATH that the emulator's
+    # own environment might not share.
+    return [path, *parts[1:]]
+
+
+def describe_terminal() -> str:
+    """One line for `ka status`: the terminal that will open, and why.
+
+    Cheap to print and the only place a user can check the setting without
+    triggering a real prompt — which is the whole difficulty with this code
+    path, since it only ever runs when nobody is watching a TTY.
+    """
+    if not sys.platform.startswith("linux"):
+        return f"handled by the OS on {sys.platform}"
+    command, source = resolve_terminal()
+    if command is None:
+        found = ", ".join(name for name, _ in detect_terminals())
+        if found:
+            return f"none configured; would try {found}"
+        return "none configured and none detected — `ka setup --terminal-only`"
+    shown = shlex.join(command)
+    return f"{shown} (from {source})"
+
+
+def resolve_terminal() -> tuple[list[str] | None, str]:
+    """The terminal command to use and where it came from."""
+    from_env = _resolve_command_prefix(os.environ.get(ENV_TERMINAL, ""))
+    if from_env:
+        return from_env, ENV_TERMINAL
+
+    try:
+        from key_amnesia.config import load_config
+
+        configured = str(load_config().get("terminal") or "")
+    except Exception:  # noqa: BLE001 — a broken config must not block the prompt
+        configured = ""
+    from_config = _resolve_command_prefix(configured)
+    if from_config:
+        return from_config, "config"
+
+    named = os.environ.get("TERMINAL", "").strip()
+    if named:
+        command = terminal_command_for(named)
+        if command:
+            return command, "TERMINAL"
+    return None, "detection"
+
+
+def _preferred_terminal_command() -> list[str] | None:
+    """The terminal to use, in precedence order, or None to fall back to a scan.
+
+    KEY_AMNESIA_TERMINAL wins: a per-invocation override for CI and for
+    debugging a bad setting. Then the `terminal` config value, which is what
+    `ka setup` writes and what a user edits — this is the intended source, and
+    the reason the table below it is only a fallback. Then TERMINAL, the
+    widely set convention, whose value names a binary rather than a command,
+    so its flags are looked up.
+
+    A configured terminal that has since been uninstalled resolves to None
+    here rather than raising, so detection still gets its turn: losing a
+    terminal should degrade to a scan, not to no password prompt at all.
+    """
+    return resolve_terminal()[0]
+
+
+def _emulator_candidates() -> tuple[str, ...]:
+    """Table order, with the running desktop's own terminal moved to the front."""
+    names = [name for name, _, _ in _LINUX_EMULATORS]
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    if not desktop:
+        return tuple(names)
+    for token, preferred in _DESKTOP_PREFERENCE:
+        if token in desktop:
+            front = [n for n in preferred if n in names]
+            return tuple(front + [n for n in names if n not in front])
+    return tuple(names)
 
 
 def _process_alive(proc: Any) -> bool:
@@ -184,10 +380,18 @@ def _process_alive(proc: Any) -> bool:
         return True
 
 
-def _no_emulator_oserror() -> OSError:
+def _no_emulator_oserror(tried: list[str] | None = None) -> OSError:
+    names = tried if tried else list(_emulator_candidates())
     return OSError(
         "No suitable terminal emulator found "
-        f"(tried {', '.join(_LINUX_EMULATORS)}). Fail closed."
+        f"(tried {', '.join(names)}). Fail closed.\n"
+        "  Tell key-amnesia which terminal you use — the command, including "
+        'whatever flag it takes to run something:\n'
+        '    ka config set terminal "alacritty -e"\n'
+        "  `ka setup` offers the same choice from what is installed, and "
+        f"{ENV_TERMINAL} overrides both for one run.\n"
+        "  Or start a session in your own terminal first with `ka unlock`, "
+        "which needs no window here."
     )
 
 
@@ -218,15 +422,35 @@ def _try_spawn_linux_emulators(
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any],
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> tuple[Any | None, list[str]]:
-    """Try each known emulator on PATH. Return (proc_or_None, names_tried)."""
+    """Try each known emulator on PATH. Return (proc_or_None, names_tried).
+
+    `confirm_started`, when given, is asked to wait up to N seconds for proof
+    that the *helper inside the window* actually began running. A live process
+    a moment after spawn is a weak proxy: a terminal that opens and then fails
+    to exec its command looks identical to one that worked, and the caller
+    then waits out its whole prompt timeout on a window that will never
+    answer. The confirmation is only used to decide whether to move on to
+    another candidate, so the last one is never abandoned on it — a slow
+    terminal with nothing to fall back to should still be waited for.
+    """
     tried: list[str] = []
-    for name in _LINUX_EMULATORS:
+    candidates: list[list[str]] = []
+
+    override = _preferred_terminal_command()
+    if override is not None:
+        candidates.append([*override, *argv])
+        tried.append(os.path.basename(override[0]))
+
+    for name in _emulator_candidates():
         path = shutil.which(name)
         if not path:
             continue
         tried.append(name)
-        cmd = _linux_emulator_argv(path, argv)
+        candidates.append(_linux_emulator_argv(path, argv))
+
+    for index, cmd in enumerate(candidates):
         try:
             # No stdin/stdout/stderr kwargs — emulator owns stdio.
             proc = popen_fn(cmd, env=env, close_fds=True)
@@ -234,11 +458,21 @@ def _try_spawn_linux_emulators(
             continue
         if _POLL_DELAY_S:
             time.sleep(_POLL_DELAY_S)
-        if _process_alive(proc):
+        if not _process_alive(proc):
+            # Launched but exited immediately (bad invocation, broken alias) —
+            # don't report false success; try the next emulator instead.
+            continue
+        is_last = index == len(candidates) - 1
+        if confirm_started is None or is_last:
             return proc, tried
-        # Launched but exited immediately (bad invocation, broken alias) —
-        # don't report false success; try the next emulator instead.
-        continue
+        if confirm_started(_HELPER_START_TIMEOUT_S):
+            return proc, tried
+        # The window is up but our command never ran in it. Close it rather
+        # than leaving an orphan asking for a password nobody will read.
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001 — best effort on a doomed candidate
+            pass
     return None, tried
 
 
@@ -266,10 +500,10 @@ def _offer_linux_emulator_install(
             return None
 
         theme.info("Choose a terminal emulator to install:", file=tty)
-        for i, name in enumerate(_LINUX_EMULATORS, start=1):
+        for i, name in enumerate(_INSTALLABLE_EMULATORS, start=1):
             desc = _LINUX_EMULATOR_DESCRIPTIONS.get(name, "")
             theme.info(f"  {i}) {name} - {desc}", file=tty)
-        skip_n = len(_LINUX_EMULATORS) + 1
+        skip_n = len(_INSTALLABLE_EMULATORS) + 1
         theme.info(f"  {skip_n}) skip, don't install anything", file=tty)
 
         choice_raw = _tty_readline(tty, "Choice: ").strip()
@@ -280,7 +514,7 @@ def _offer_linux_emulator_install(
         if choice == skip_n or choice < 1 or choice > skip_n:
             return None
 
-        package = _LINUX_EMULATORS[choice - 1]
+        package = _INSTALLABLE_EMULATORS[choice - 1]
         cmd = _pkg_install_command(package)
         if cmd is not None:
             theme.info("Run this in another shell (not executed by key-amnesia):", file=tty)
@@ -320,6 +554,7 @@ def _spawn_linux(
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any],
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> Any:
     if not _has_interactive_display():
         raise OSError(
@@ -327,7 +562,9 @@ def _spawn_linux(
             "cannot spawn isolated console. Fail closed."
         )
 
-    proc, tried = _try_spawn_linux_emulators(argv, env, popen_fn=popen_fn)
+    proc, tried = _try_spawn_linux_emulators(
+        argv, env, popen_fn=popen_fn, confirm_started=confirm_started
+    )
     if proc is not None:
         return proc
 
@@ -341,7 +578,7 @@ def _spawn_linux(
     offered = _offer_linux_emulator_install(argv, env, popen_fn=popen_fn)
     if offered is not None:
         return offered
-    raise _no_emulator_oserror()
+    raise _no_emulator_oserror(tried)
 
 
 def _applescript_quote(s: str) -> str:
@@ -503,12 +740,14 @@ def spawn_isolated_console(
     env: dict[str, str],
     *,
     popen_fn: Callable[..., Any] | None = None,
+    confirm_started: Callable[[float], bool] | None = None,
 ) -> Any:
     """Spawn *argv* in an isolated console; sensitive data only in *env*.
 
     Windows: CREATE_NEW_CONSOLE, no stdio kwargs.
-    Linux: first available of x-terminal-emulator / gnome-terminal / konsole /
-    xterm when DISPLAY or WAYLAND_DISPLAY is set; otherwise fail closed.
+    Linux: the configured terminal (KEY_AMNESIA_TERMINAL, then the `terminal`
+    config value, then TERMINAL), else the first terminal from _LINUX_EMULATORS
+    on PATH, when DISPLAY or WAYLAND_DISPLAY is set; otherwise fail closed.
     macOS (experimental): Terminal.app via osascript/open + PID-file wrapper
     so parent-death tracks the helper, not the short-lived launcher.
     Other platforms: fail closed.
@@ -526,7 +765,9 @@ def spawn_isolated_console(
         )
 
     if sys.platform.startswith("linux"):
-        return _spawn_linux(argv, env, popen_fn=popen)
+        return _spawn_linux(
+            argv, env, popen_fn=popen, confirm_started=confirm_started
+        )
 
     if sys.platform == "darwin":
         return _spawn_macos(argv, env, popen_fn=popen)

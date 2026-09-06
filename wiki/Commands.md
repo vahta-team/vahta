@@ -19,7 +19,7 @@ notes live in the repository `DESIGN.md`.
 | `ka reveal NAME` / `ka copy NAME` | Human-only surface of a value; always fresh auth |
 | `ka config show` / `ka config set KEY VALUE` | Settings |
 | `ka status` / `ka connect` | Session status (+ registry of live guards). `connect` is a **CLI alias** for `status` — not a sixth IPC verb |
-| `ka setup [--skills-only] [--hook-only] [--permissions-only] [--permissions-remove] [--yes]` | Install skills, secret-guard hook, and harness allow-lists (Claude / Cursor / Codex) |
+| `ka setup [--skills-only] [--hook-only] [--permissions-only] [--permissions-remove] [--terminal-only] [--reconfigure-terminal] [--yes]` | Install skills, secret-guard hook, and harness allow-lists (Claude / Cursor / Codex); on Linux, also pick the terminal that opens for the password |
 | `ka docs [--print]` | Print wiki URL; open browser unless `--print` |
 | `ka identity create` / `show` | Local X25519 identity for KAM2 |
 | `ka member add` / `list` / `remove` | Members/roles (first add enables KAM2) |
@@ -59,6 +59,31 @@ ka run --cwd DIR --secret API_KEY -- python my_script.py
 - `--admit-tree` — at the first unrecognized-peer prompt, choose a
   kernel-verified ancestor as the admission root (widens trust to its
   descendants); session-only, off by default
+
+### `config set terminal` (Linux)
+
+Which terminal `ka` opens to ask for the master password when the caller has
+none of its own — an agent, a CI shell, a `.desktop` launcher. The value is a
+**command prefix**, carrying whatever flag that terminal needs, so a terminal
+the detector has never heard of works without a release.
+
+```bash
+ka config set terminal "ghostty -e"     # -e for ghostty, alacritty, konsole
+ka config set terminal "kitty"          # kitty and foot reject -e; no flag
+ka config set terminal "wezterm start --"
+ka config set terminal auto             # detect one on each run (default)
+```
+
+`KEY_AMNESIA_TERMINAL` overrides the stored value for one run.
+`ka status` prints the terminal that would open and where the setting came
+from. `ka setup` asks once and keeps the answer; `ka setup --terminal-only`
+picks again.
+
+Unlike every other config key, `terminal` does **not** require the master
+password: it is the setting that decides where a password can be typed, so
+gating it behind typing one would deadlock exactly the user it exists to help.
+It guards nothing — anyone who can write the config file can already replace
+`ka` on `PATH` — and `config set` stays denied to agents by `ka_policy`.
 
 Vault-aware commands also accept `--vault PATH`, `--global`, `--no-global`,
 `--env NAME`. Guard-talking commands accept display-only `--name LABEL`.

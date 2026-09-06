@@ -94,8 +94,13 @@ def block_real_isolated_console(monkeypatch: pytest.MonkeyPatch) -> None:
             "pass popen_fn= to require_human_auth or mock spawn_isolated_console"
         )
 
-    def _guarded(cmd, env, *, popen_fn=None):
-        return real(cmd, env, popen_fn=popen_fn or _blocked_popen)
+    def _guarded(cmd, env, *, popen_fn=None, confirm_started=None):
+        return real(
+            cmd,
+            env,
+            popen_fn=popen_fn or _blocked_popen,
+            confirm_started=confirm_started,
+        )
 
     monkeypatch.setattr(platform_mod, "spawn_isolated_console", _guarded)
     monkeypatch.setattr(prompt_route_mod, "spawn_isolated_console", _guarded)

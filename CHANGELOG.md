@@ -2,7 +2,30 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.12`.
+Versions follow the git tags `0.4.0` … `0.4.13`.
+
+## [0.4.13] — 2026-09-06
+
+### Fixed
+
+- **`ka run` could not prompt on a current Linux desktop.** The isolated-console spawn knew four terminals — `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xterm` — and invoked all but one of them with a blanket `-e`. On a Wayland desktop that ships ghostty, kitty, foot or alacritty and none of those four, any `ka` command that needed the master password from a non-TTY parent (an agent harness, a CI shell, a `.desktop` launcher) failed closed with `No suitable terminal emulator found`, and nothing in the message said how to proceed.
+
+  The table now carries nineteen terminals with the argument convention each one actually takes: trailing argv for `xdg-terminal-exec`, `kitty` and `foot`, which reject `-e`; `-e` for ghostty, alacritty, konsole and the X11 set; `--` for gnome-terminal, kgx and mate-terminal; `-x` for xfce4-terminal and terminator; `start --` for wezterm; and one shell-quoted string, built with `shlex.join`, for tilix, lxterminal and qterminal, whose `-e` is string-shaped and used to silently truncate a path containing a space.
+
+  `xdg-terminal-exec` — the freedesktop reference implementation of "open the user's chosen terminal" — is tried first when present. `x-terminal-emulator` moved down the list: it is an alternatives symlink that may land on gnome-terminal, whose `-e` is deprecated, so hitting the real binary with the right flag is always better.
+
+### Added
+
+- **The terminal is now configuration, not a list in the source.** `terminal` joins `ka config set`: a command prefix carrying whatever flag that terminal needs — `"ghostty -e"`, `"kitty"`, `"wezterm start --"` — or `auto` to detect one. A terminal nobody has heard of works without waiting for a release.
+- `ka setup` asks which terminal to use, offering the ones it finds. One installed is chosen silently; several are offered as a numbered list; `--yes` or a non-interactive run takes the first and says so. A choice already stored is reported and kept, so re-running setup after an update does not re-ask. `ka setup --terminal-only` picks again, `--reconfigure-terminal` re-asks during a full setup. The choice is then proved by opening the terminal on a test command rather than assumed.
+- Unlike every other config key, `terminal` does not require the master password. It is the setting that decides where a password can be typed, so gating it behind typing one deadlocks exactly the user it exists to help. It guards nothing — anyone who can write the config file can already replace `ka` on `PATH` — and `config set` stays denied to agents by `ka_policy`, which is where that deny has always lived.
+- **A terminal that opens but never starts the helper no longer costs the whole prompt timeout.** The helper now touches a marker file as its first act, before it prints anything, and the spawn layer waits up to 8s for it. Proof of *life* — a process still running 150 ms after spawn — could not distinguish a working window from one that opened and failed to exec its command; the caller then sat out its full 90-second wait on a window that would never answer. Proof of *start* can. It is only used to decide whether to try another terminal, so the last candidate is never abandoned on it: a slow terminal with no fallback is still waited for, unchanged. An abandoned candidate is closed rather than left on screen asking for a password nobody will read.
+
+  The marker rather than the IPC connection, because the helper asks for the password *before* it connects — a short deadline on the connection would kill the window while the user was typing in it.
+- `ka status` prints the terminal that would open and where the setting came from (`KEY_AMNESIA_TERMINAL`, config, `TERMINAL`, or detection).
+- `KEY_AMNESIA_TERMINAL` — the same command-prefix shape, overriding the stored setting for one run.
+- The running desktop's own terminal is moved to the front of the candidate list from `XDG_CURRENT_DESKTOP`, so a KDE user gets Konsole on a machine that also has ghostty installed.
+- The fail-closed message now names the ways out: `ka config set terminal`, `ka setup`, or starting a session with `ka unlock` in a terminal you already have.
 
 ## [0.4.12] — 2026-09-01
 

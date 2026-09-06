@@ -10,10 +10,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from key_amnesia.platform import (
+    _INSTALLABLE_EMULATORS,
     _LINUX_EMULATORS,
     _pkg_install_command,
     spawn_isolated_console,
 )
+
+_EMULATOR_NAMES = tuple(name for name, _, _ in _LINUX_EMULATORS)
 
 
 HELPER_ARGV = [sys.executable, "-m", "key_amnesia", "_prompt-helper"]
@@ -68,7 +71,20 @@ def _no_poll_delay(monkeypatch):
     monkeypatch.setattr("key_amnesia.platform._POLL_DELAY_S", 0)
 
 
-def test_linux_prefers_x_terminal_emulator(monkeypatch) -> None:
+@pytest.fixture(autouse=True)
+def _neutral_terminal_env(monkeypatch):
+    """The developer's own terminal must not decide what these tests assert."""
+    monkeypatch.delenv("KEY_AMNESIA_TERMINAL", raising=False)
+    monkeypatch.delenv("TERMINAL", raising=False)
+    monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+
+
+def test_linux_prefers_named_terminal_over_alternatives_symlink(monkeypatch) -> None:
+    """A named terminal beats x-terminal-emulator.
+
+    The symlink may resolve to gnome-terminal, whose -e is deprecated and
+    takes a single string; invoking the real binary with -- is always safer.
+    """
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
@@ -94,8 +110,8 @@ def test_linux_prefers_x_terminal_emulator(monkeypatch) -> None:
     spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
 
     cmd = captured["cmd"]
-    assert cmd[0] == "/usr/bin/x-terminal-emulator"
-    assert cmd[1] == "-e"
+    assert cmd[0] == "/usr/bin/gnome-terminal"
+    assert cmd[1] == "--"
     assert cmd[2:] == HELPER_ARGV
     assert "_prompt-helper" in cmd
     joined = " ".join(cmd)
@@ -179,17 +195,17 @@ def test_linux_emulator_exits_immediately_falls_through(monkeypatch) -> None:
     def fake_popen(cmd, **kwargs):
         captured["cmds"].append(cmd)
         proc = MagicMock()
-        if cmd[0] == "/usr/bin/x-terminal-emulator":
+        if cmd[0] == "/usr/bin/gnome-terminal":
             proc.poll.return_value = 1  # exited immediately (bad flag / broken alias)
         else:
-            proc.poll.return_value = None  # gnome-terminal stays running
+            proc.poll.return_value = None  # the next candidate stays running
         return proc
 
     result = spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
 
     assert [c[0] for c in captured["cmds"]] == [
-        "/usr/bin/x-terminal-emulator",
         "/usr/bin/gnome-terminal",
+        "/usr/bin/x-terminal-emulator",
     ]
     assert result.poll() is None
 
@@ -262,7 +278,7 @@ def test_linux_no_emulator_retry_still_empty_fail_closed(monkeypatch) -> None:
         _fake_which({"apt": "/usr/bin/apt"}),
     )
     # y → pick xterm (4) → Enter after install → y retry; which never finds emulators
-    tty = _FakeTTY(answers=["y", "4", "", "y"])
+    tty = _FakeTTY(answers=["y", str(_INSTALLABLE_EMULATORS.index("xterm") + 1), "", "y"])
     monkeypatch.setattr("key_amnesia.platform._open_controlling_tty", lambda: tty)
 
     with pytest.raises(OSError, match="terminal emulator|Fail closed"):
@@ -287,12 +303,12 @@ def test_linux_no_emulator_retry_success(monkeypatch) -> None:
     def which(name: str) -> str | None:
         # First pass (and pkg-mgr probes during offer): no emulators.
         # After retry confirmation, xterm appears.
-        if name in _LINUX_EMULATORS:
+        if name in _EMULATOR_NAMES:
             calls["n"] += 1
-            # Emulator which is consulted once per name per scan. First scan:
-            # 4 misses. Offer path may re-probe pkg managers. Second scan after
-            # retry: return xterm.
-            if calls["n"] > len(_LINUX_EMULATORS) and name == "xterm":
+            # Emulator which is consulted once per name per scan. First scan
+            # misses every name; the offer path may re-probe pkg managers;
+            # the scan after the retry finds xterm.
+            if calls["n"] > len(_EMULATOR_NAMES) and name == "xterm":
                 return "/usr/bin/xterm"
             return None
         if name == "apt":
@@ -354,3 +370,325 @@ def test_other_platform_fail_closed(monkeypatch) -> None:
 
     with pytest.raises(OSError, match="not implemented|fail closed|Fail closed"):
         spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
+
+
+# --- terminal discovery on a desktop that is not GNOME/KDE/X11 -------------
+#
+# The bug these cover: the table used to be x-terminal-emulator, gnome-terminal,
+# konsole, xterm, invoked with a blanket -e. On a current Wayland desktop none
+# of those four is installed, so `ka run` from a non-TTY parent failed closed
+# with "No suitable terminal emulator found" and no way to proceed.
+
+
+def _spawn_capturing(monkeypatch, available: dict[str, str]) -> list[str]:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which", _fake_which(available)
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=fake_popen)
+    return captured["cmd"]
+
+
+def test_wayland_terminals_are_found_at_all(monkeypatch) -> None:
+    """ghostty/kitty/foot alone on PATH must produce a spawn, not a fail-closed."""
+    for name in ("ghostty", "kitty", "foot", "alacritty", "wezterm"):
+        cmd = _spawn_capturing(monkeypatch, {name: f"/usr/bin/{name}"})
+        assert cmd[0] == f"/usr/bin/{name}"
+        assert cmd[-len(HELPER_ARGV):] == HELPER_ARGV
+
+
+def test_trailing_argv_terminals_get_no_dash_e(monkeypatch) -> None:
+    """kitty and foot take the command as trailing args and reject -e."""
+    for name in ("kitty", "foot", "xdg-terminal-exec"):
+        cmd = _spawn_capturing(monkeypatch, {name: f"/usr/bin/{name}"})
+        assert cmd == [f"/usr/bin/{name}", *HELPER_ARGV]
+
+
+def test_flag_argv_terminals(monkeypatch) -> None:
+    for name, flags in (
+        ("ghostty", ["-e"]),
+        ("alacritty", ["-e"]),
+        ("wezterm", ["start", "--"]),
+        ("xfce4-terminal", ["-x"]),
+        ("kgx", ["--"]),
+    ):
+        cmd = _spawn_capturing(monkeypatch, {name: f"/usr/bin/{name}"})
+        assert cmd == [f"/usr/bin/{name}", *flags, *HELPER_ARGV]
+
+
+def test_joined_argv_terminal_is_shell_quoted(monkeypatch) -> None:
+    """tilix -e takes one string; a path with a space must survive it."""
+    argv = ["/opt/my tools/python3", "-m", "key_amnesia", "_prompt-helper"]
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which", _fake_which({"tilix": "/usr/bin/tilix"})
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    spawn_isolated_console(argv, dict(SENSITIVE_ENV), popen_fn=fake_popen)
+    assert captured["cmd"][:2] == ["/usr/bin/tilix", "-e"]
+    assert len(captured["cmd"]) == 3
+    assert "'/opt/my tools/python3'" in captured["cmd"][2]
+
+
+def test_xdg_terminal_exec_wins_when_present(monkeypatch) -> None:
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {
+            "xdg-terminal-exec": "/usr/bin/xdg-terminal-exec",
+            "ghostty": "/usr/bin/ghostty",
+            "xterm": "/usr/bin/xterm",
+        },
+    )
+    assert cmd[0] == "/usr/bin/xdg-terminal-exec"
+
+
+def test_key_amnesia_terminal_env_overrides_everything(monkeypatch) -> None:
+    """The escape hatch: a command prefix, flag included, for unknown terminals."""
+    monkeypatch.setenv("KEY_AMNESIA_TERMINAL", "myterm --run-in")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"myterm": "/opt/bin/myterm", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd == ["/opt/bin/myterm", "--run-in", *HELPER_ARGV]
+
+
+def test_key_amnesia_terminal_env_ignored_when_not_on_path(monkeypatch) -> None:
+    monkeypatch.setenv("KEY_AMNESIA_TERMINAL", "nosuchterm -e")
+    cmd = _spawn_capturing(monkeypatch, {"ghostty": "/usr/bin/ghostty"})
+    assert cmd[0] == "/usr/bin/ghostty"
+
+
+def test_terminal_env_is_honoured_with_table_flags(monkeypatch) -> None:
+    """$TERMINAL names a binary; its invocation style comes from the table."""
+    monkeypatch.setenv("TERMINAL", "alacritty")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"alacritty": "/usr/bin/alacritty", "xterm": "/usr/bin/xterm"},
+    )
+    assert cmd == ["/usr/bin/alacritty", "-e", *HELPER_ARGV]
+
+
+def test_desktop_preference_moves_its_own_terminal_first(monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"konsole": "/usr/bin/konsole", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd[0] == "/usr/bin/konsole"
+
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "Hyprland")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"konsole": "/usr/bin/konsole", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd[0] == "/usr/bin/ghostty"
+
+
+def test_fail_closed_message_names_the_escape_hatch(monkeypatch) -> None:
+    """A user who hits this must be told how to get out of it without guessing."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr("key_amnesia.platform.shutil.which", _fake_which({}))
+    monkeypatch.setattr("key_amnesia.platform._open_controlling_tty", lambda: None)
+
+    with pytest.raises(OSError) as excinfo:
+        spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
+
+    message = str(excinfo.value)
+    assert "KEY_AMNESIA_TERMINAL" in message
+    assert "ka unlock" in message
+
+
+# --- the configured terminal, not a hardcoded scan ------------------------
+#
+# The scan below these tests is the fallback. The intended path is that
+# `ka setup` stores a terminal and this code just uses it, so that a terminal
+# nobody has heard of works without a release.
+
+
+def _set_config_terminal(monkeypatch, value: str) -> None:
+    monkeypatch.setattr(
+        "key_amnesia.config.load_config", lambda *a, **k: {"terminal": value}
+    )
+
+
+def test_configured_terminal_beats_detection(monkeypatch) -> None:
+    _set_config_terminal(monkeypatch, "myterm --run-in")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"myterm": "/opt/bin/myterm", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd == ["/opt/bin/myterm", "--run-in", *HELPER_ARGV]
+
+
+def test_env_beats_configured_terminal(monkeypatch) -> None:
+    """One run can differ from the stored choice without editing the config."""
+    _set_config_terminal(monkeypatch, "ghostty -e")
+    monkeypatch.setenv("KEY_AMNESIA_TERMINAL", "kitty")
+    cmd = _spawn_capturing(
+        monkeypatch,
+        {"kitty": "/usr/bin/kitty", "ghostty": "/usr/bin/ghostty"},
+    )
+    assert cmd == ["/usr/bin/kitty", *HELPER_ARGV]
+
+
+def test_uninstalled_configured_terminal_falls_back_to_detection(monkeypatch) -> None:
+    """Losing the configured terminal must degrade to a scan, not to no prompt."""
+    _set_config_terminal(monkeypatch, "removedterm -e")
+    cmd = _spawn_capturing(monkeypatch, {"ghostty": "/usr/bin/ghostty"})
+    assert cmd == ["/usr/bin/ghostty", "-e", *HELPER_ARGV]
+
+
+def test_broken_config_does_not_block_the_prompt(monkeypatch) -> None:
+    def explode(*_a, **_k):
+        raise ValueError("config file is not JSON")
+
+    monkeypatch.setattr("key_amnesia.config.load_config", explode)
+    cmd = _spawn_capturing(monkeypatch, {"ghostty": "/usr/bin/ghostty"})
+    assert cmd[0] == "/usr/bin/ghostty"
+
+
+def test_detect_terminals_reports_installed_with_their_flags(monkeypatch) -> None:
+    from key_amnesia.platform import detect_terminals
+
+    monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"}),
+    )
+    assert detect_terminals() == [
+        ("ghostty", ["/usr/bin/ghostty", "-e"]),
+        ("kitty", ["/usr/bin/kitty"]),
+    ]
+
+
+def test_describe_terminal_names_its_source(monkeypatch) -> None:
+    from key_amnesia.platform import describe_terminal
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which",
+        _fake_which({"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"}),
+    )
+
+    _set_config_terminal(monkeypatch, "ghostty -e")
+    assert "from config" in describe_terminal()
+
+    monkeypatch.setenv("KEY_AMNESIA_TERMINAL", "kitty")
+    assert "from KEY_AMNESIA_TERMINAL" in describe_terminal()
+
+    monkeypatch.delenv("KEY_AMNESIA_TERMINAL")
+    _set_config_terminal(monkeypatch, "")
+    assert "none configured" in describe_terminal()
+
+
+def test_describe_terminal_when_nothing_is_installed(monkeypatch) -> None:
+    from key_amnesia.platform import describe_terminal
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("key_amnesia.platform.shutil.which", _fake_which({}))
+    _set_config_terminal(monkeypatch, "")
+    assert "ka setup --terminal-only" in describe_terminal()
+
+
+# --- moving on from a terminal that opened but never ran the helper --------
+#
+# A live process 150ms after spawn does not mean the command inside it ran.
+# When it did not, the caller used to wait out its whole prompt timeout on a
+# window that would never answer, instead of trying the next terminal.
+
+
+def _spawn_with_confirm(monkeypatch, available, confirm, *, poll_alive=True):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+    monkeypatch.setattr(
+        "key_amnesia.platform.shutil.which", _fake_which(available)
+    )
+    spawned: list[str] = []
+    killed: list[str] = []
+
+    def fake_popen(cmd, **kwargs):
+        spawned.append(cmd[0])
+        proc = MagicMock()
+        proc.poll.return_value = None if poll_alive else 1
+        proc.terminate.side_effect = lambda: killed.append(cmd[0])
+        return proc
+
+    result = spawn_isolated_console(
+        HELPER_ARGV,
+        dict(SENSITIVE_ENV),
+        popen_fn=fake_popen,
+        confirm_started=confirm,
+    )
+    return result, spawned, killed
+
+
+def test_unconfirmed_terminal_is_closed_and_the_next_one_tried(monkeypatch) -> None:
+    seen: list[float] = []
+
+    def confirm(timeout_s: float) -> bool:
+        seen.append(timeout_s)
+        return len(seen) > 1  # the first candidate never starts the helper
+
+    _, spawned, killed = _spawn_with_confirm(
+        monkeypatch,
+        {"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"},
+        confirm,
+    )
+    assert spawned == ["/usr/bin/ghostty", "/usr/bin/kitty"]
+    assert killed == ["/usr/bin/ghostty"]  # no orphan window left asking
+    assert seen and all(t > 0 for t in seen)
+
+
+def test_the_last_candidate_is_never_abandoned_on_confirmation(monkeypatch) -> None:
+    """With nothing to fall back to, a slow terminal must still be waited for."""
+    calls = {"n": 0}
+
+    def confirm(_timeout_s: float) -> bool:
+        calls["n"] += 1
+        return False
+
+    result, spawned, killed = _spawn_with_confirm(
+        monkeypatch, {"ghostty": "/usr/bin/ghostty"}, confirm
+    )
+    assert spawned == ["/usr/bin/ghostty"]
+    assert killed == []
+    assert calls["n"] == 0
+    assert result is not None
+
+
+def test_confirmed_first_candidate_stops_the_search(monkeypatch) -> None:
+    _, spawned, killed = _spawn_with_confirm(
+        monkeypatch,
+        {"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"},
+        lambda _t: True,
+    )
+    assert spawned == ["/usr/bin/ghostty"]
+    assert killed == []
+
+
+def test_without_a_confirmer_behaviour_is_unchanged(monkeypatch) -> None:
+    """Windows and macOS pass none; Linux must not require one either."""
+    _, spawned, _ = _spawn_with_confirm(
+        monkeypatch,
+        {"ghostty": "/usr/bin/ghostty", "kitty": "/usr/bin/kitty"},
+        None,
+    )
+    assert spawned == ["/usr/bin/ghostty"]

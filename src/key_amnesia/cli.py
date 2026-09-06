@@ -17,8 +17,14 @@ from key_amnesia import crypto
 from key_amnesia import dotenv_import
 from key_amnesia import manifest as manifest_mod
 from key_amnesia.audit import audit_event
-from key_amnesia.config import ConfigError, load_config, set_config_value
+from key_amnesia.config import (
+    AUTH_EXEMPT_KEYS,
+    ConfigError,
+    load_config,
+    set_config_value,
+)
 from key_amnesia.paths import vault_path
+from key_amnesia.platform import describe_terminal
 from key_amnesia.project import (
     VaultContext,
     ensure_project_scaffold,
@@ -354,9 +360,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "session-timeout-minutes",
             "prompt-timeout-seconds",
             "pre-admit-seconds",
+            "terminal",
         ],
     )
-    p_cfg_set.add_argument("value")
+    p_cfg_set.add_argument(
+        "value",
+        help=(
+            'For terminal: the command that runs something in it, flag '
+            'included — "ghostty -e", "kitty", "wezterm start --" — or "auto" '
+            "to detect one."
+        ),
+    )
 
     # status (connect is a plain alias — same handler, no separate verb)
     p_status = sub.add_parser("status", help="Show guard session status")
@@ -403,6 +417,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--permissions-remove",
         action="store_true",
         help="Remove previously recorded key-amnesia allow/deny rules",
+    )
+    p_setup.add_argument(
+        "--terminal-only",
+        action="store_true",
+        help="Only choose the terminal used for password prompts (Linux)",
+    )
+    p_setup.add_argument(
+        "--reconfigure-terminal",
+        action="store_true",
+        help="Ask again even if a terminal is already configured",
     )
     p_setup.add_argument(
         "--yes",
@@ -1647,6 +1671,19 @@ def cmd_config(args: argparse.Namespace) -> int:
         theme.out(json.dumps(cfg, indent=2))
         return 0
     if args.config_command == "set":
+        if args.key in AUTH_EXEMPT_KEYS:
+            # See config.AUTH_EXEMPT_KEYS: `terminal` decides where a password
+            # can be typed, so it cannot be gated behind typing one. Agents are
+            # still blocked from `config set` by ka_policy, not by this check.
+            try:
+                set_config_value(args.key, args.value)
+            except ConfigError as e:
+                theme.error(f"Error: {e}")
+                return 1
+            stored = load_config().get(args.key)
+            audit_event("config", route="inline", result="allowed", reason=f"set {args.key}")
+            theme.success(f"Set {args.key} = {stored if stored else '(auto-detect)'}")
+            return 0
         request = PromptRequest(
             action="config",
             detail=f"config key: {args.key}",
@@ -1716,6 +1753,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         theme.out(format_no_guard_message(path=ctx.last_guard_state_path))
         cfg = load_config()
         theme.out(f"session-mode: {cfg.get('session-mode')}")
+        theme.out(f"terminal: {describe_terminal()}")
         if ctx.project_root:
             theme.out(f"project: {ctx.project_root}")
             theme.out(f"vault: {ctx.vault_path}")
