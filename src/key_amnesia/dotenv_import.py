@@ -12,8 +12,9 @@ should only ever show secret *names*.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 _LINE_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 
@@ -152,3 +153,94 @@ def delete_or_rename_source(
         path.replace(target)
         return "renamed"
     return "kept"
+
+
+MissingPolicy = Literal["error", "skip"]
+PathOutcome = Literal["deleted", "renamed", "kept", "missing", "empty"]
+
+
+@dataclass
+class ImportCommitResult:
+    """Names and per-path outcomes only — never secret values."""
+
+    imported: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    path_outcomes: dict[str, PathOutcome] = field(default_factory=dict)
+    gitignore_added: bool = False
+    manifest_path: Path | None = None
+
+
+def commit_import(
+    paths: list[Path],
+    existing_secrets: dict[str, str],
+    *,
+    on_collision: Callable[[str], CollisionDecision] | None = None,
+    on_missing: MissingPolicy = "skip",
+    commit_vault: Callable[[], None],
+    confirm_delete: Callable[[Path], bool],
+    confirm_delete_again: Callable[[Path], bool],
+    confirm_rename: Callable[[Path], bool],
+    gitignore_ask: Callable[[], bool],
+    project_root: Path,
+) -> ImportCommitResult:
+    """Merge dotenv files into an in-memory secrets dict, save, then dispose.
+
+    Callers inject every decision (collision, delete/rename, gitignore) and
+    the vault write. ``commit_vault`` runs after all merges and **before**
+    any source delete/rename — so a save failure leaves plaintext files
+    untouched. Never prints, logs, or returns secret values.
+    """
+    if on_missing not in ("error", "skip"):
+        raise ValueError("on_missing must be 'error' or 'skip'")
+
+    result = ImportCommitResult()
+    imported_from: set[str] = set()
+
+    if on_missing == "error":
+        for path in paths:
+            if not path.exists():
+                raise FileNotFoundError(path)
+
+    for path in paths:
+        key = str(path)
+        if not path.exists():
+            result.path_outcomes[key] = "missing"
+            continue
+        try:
+            entries = parse_dotenv(path)
+        except OSError:
+            if on_missing == "error":
+                raise
+            result.path_outcomes[key] = "missing"
+            continue
+        if not entries:
+            result.path_outcomes[key] = "empty"
+            continue
+        imported, skipped = import_entries(
+            entries, existing_secrets, on_collision=on_collision
+        )
+        result.imported.extend(imported)
+        result.skipped.extend(skipped)
+        result.path_outcomes[key] = "kept"
+        if imported:
+            imported_from.add(key)
+
+    if result.imported:
+        commit_vault()
+        for path in paths:
+            key = str(path)
+            if key not in imported_from:
+                continue
+            outcome = delete_or_rename_source(
+                path,
+                confirm_delete=lambda p=path: confirm_delete(p),
+                confirm_delete_again=lambda p=path: confirm_delete_again(p),
+                confirm_rename=lambda p=path: confirm_rename(p),
+            )
+            result.path_outcomes[key] = outcome  # deleted | renamed | kept
+        result.gitignore_added = offer_gitignore(project_root, ask=gitignore_ask)
+        result.manifest_path = generate_or_merge_manifest(
+            result.imported, project_root
+        )
+
+    return result

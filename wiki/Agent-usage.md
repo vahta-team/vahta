@@ -56,7 +56,7 @@ never ask them to paste the result back into chat:
 | `ka unlock --admit-tree` | Human-only: widen admission to a chosen ancestor's descendants |
 | `ka passwd` | TTY-only password change |
 | `ka set NAME` | Stores a value; prefer hidden prompt over inline argv |
-| `ka import FILE` | TTY-only; interactive confirms |
+| `ka import FILE [FILE …]` | TTY-only; interactive confirms |
 | `ka reveal` / `ka copy` | Value for the human only; agent gets a status flag |
 | Admission prompt | Yes/no on the guard's own terminal — human approval |
 

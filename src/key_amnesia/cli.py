@@ -161,9 +161,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # import
     p_import = sub.add_parser(
         "import",
-        help="Import secrets from a dotenv file into the vault (TTY-only)",
+        help="Import secrets from dotenv file(s) into the vault (TTY-only)",
     )
-    p_import.add_argument("file", help="Path to a dotenv-format file, e.g. .env")
+    p_import.add_argument(
+        "file",
+        nargs="+",
+        metavar="FILE",
+        help="Path(s) to dotenv-format file(s), e.g. .env .env.local",
+    )
     _add_vault_scope_args(p_import)
 
     # check (CI: project manifest vs project names sidecar — no decrypt)
@@ -236,8 +241,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "After the report, import all importable dotenv findings into "
-            "the project vault without selection prompts (password still "
-            "required; skips delete/rename/gitignore offers)"
+            "the project vault without selection prompts. Password still "
+            "required from a TTY. Skips collisions, never deletes or "
+            "renames source files, adds '.env*' to .gitignore when missing "
+            "(gitignore is filesystem policy, not cryptographic). Still "
+            "exits 1 while those source files remain"
         ),
     )
     p_scan.add_argument(
@@ -773,12 +781,38 @@ def cmd_remove(args: argparse.Namespace) -> int:
     return 1
 
 
+def _emit_import_commit_result(result: dotenv_import.ImportCommitResult) -> None:
+    """Print names and per-path outcomes only — never secret values."""
+    if result.imported:
+        theme.success(
+            f"Imported {len(result.imported)} secret(s): {', '.join(result.imported)}"
+        )
+    if result.skipped:
+        theme.info(f"Skipped (already in vault): {', '.join(result.skipped)}")
+    if not result.imported and not result.skipped:
+        theme.info("Nothing to import.")
+    for raw_path, outcome in result.path_outcomes.items():
+        src = Path(raw_path)
+        if outcome == "deleted":
+            theme.success(f"Deleted {src}.")
+        elif outcome == "renamed":
+            theme.success(f"Renamed {src} to {src.name}.imported.")
+        elif outcome == "kept" and result.imported:
+            theme.info(f"Left {src} in place.")
+        elif outcome == "missing":
+            theme.info(f"Skipped missing file: {src}")
+    if result.gitignore_added:
+        theme.success("Added '.env*' to .gitignore.")
+    if result.manifest_path is not None:
+        theme.info(f"Manifest updated: {result.manifest_path}")
+
+
 def cmd_import(args: argparse.Namespace) -> int:
-    """`ka import FILE`: parse a dotenv file and merge its entries into the
+    """`ka import FILE [FILE ...]`: parse dotenv files and merge into the
     currently resolved vault.
 
-    TTY-only, like `ka init` / `ka passwd` — this command reads a local
-    plaintext file directly (never an agent-supplied value) and drives
+    TTY-only, like `ka init` / `ka passwd` — this command reads local
+    plaintext files directly (never an agent-supplied value) and drives
     several interactive decisions (collisions, delete/rename, .gitignore)
     that only make sense with a human at the keyboard, so it is never
     routed through the spawned-console agent-safe helper. Never prints a
@@ -791,10 +825,11 @@ def cmd_import(args: argparse.Namespace) -> int:
         )
         return 1
 
-    src = Path(args.file)
-    if not src.exists():
-        theme.error(f"Error: file not found: {src}")
-        return 1
+    files = [Path(item) for item in args.file]
+    for src in files:
+        if not src.exists():
+            theme.error(f"Error: file not found: {src}")
+            return 1
 
     ctx = _ctx_from_args(args)
     vp = ctx.vault_path
@@ -803,9 +838,20 @@ def cmd_import(args: argparse.Namespace) -> int:
         theme.error(f"Vault not initialized. Run '{hint}' first.")
         return 1
 
-    entries = dotenv_import.parse_dotenv(src)
-    if not entries:
-        theme.info(f"No KEY=VALUE entries found in {src}.")
+    any_entries = False
+    for src in files:
+        try:
+            if dotenv_import.parse_dotenv(src):
+                any_entries = True
+                break
+        except OSError as e:
+            theme.error(f"Error reading {src}: {e}")
+            return 1
+    if not any_entries:
+        if len(files) == 1:
+            theme.info(f"No KEY=VALUE entries found in {files[0]}.")
+        else:
+            theme.info("No KEY=VALUE entries found.")
         return 0
 
     password = getpass.getpass("Master password: ")
@@ -820,62 +866,44 @@ def cmd_import(args: argparse.Namespace) -> int:
         overwrite = _confirm(f"'{name}' already exists in the vault. Overwrite?")
         return "overwrite" if overwrite else "skip"
 
-    imported, skipped = dotenv_import.import_entries(
-        entries, payload["secrets"], on_collision=_ask_collision
-    )
+    root = ctx.project_root or Path.cwd()
+    try:
+        result = dotenv_import.commit_import(
+            files,
+            payload["secrets"],
+            on_collision=_ask_collision,
+            on_missing="error",
+            commit_vault=lambda: save_vault(vp, password, payload),
+            confirm_delete=lambda p: _confirm(
+                f"Delete {p} now that its secrets are in the vault?"
+            ),
+            confirm_delete_again=lambda p: _confirm(
+                f"This cannot be undone. Really delete {p}?"
+            ),
+            confirm_rename=lambda p: _confirm(
+                f"Rename {p} to {p.name}.imported instead?", default=True
+            ),
+            gitignore_ask=lambda: _confirm(
+                "Add '.env*' to .gitignore so these files are never committed?"
+            ),
+            project_root=root,
+        )
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        audit_event("import", route="inline", result="denied", reason=str(e))
+        return 1
+    except FileNotFoundError as e:
+        theme.error(f"Error: file not found: {e}")
+        return 1
 
-    if imported:
-        save_vault(vp, password, payload)
     audit_event(
         "import",
-        secret_names=imported,
+        secret_names=result.imported,
         route="inline",
-        result="allowed" if imported else "denied",
-        reason="" if imported else "no new secrets (all skipped)",
+        result="allowed" if result.imported else "denied",
+        reason="" if result.imported else "no new secrets (all skipped)",
     )
-
-    if imported:
-        theme.success(f"Imported {len(imported)} secret(s): {', '.join(imported)}")
-    if skipped:
-        theme.info(f"Skipped (already in vault): {', '.join(skipped)}")
-    if not imported and not skipped:
-        theme.info("Nothing to import.")
-
-    if not imported:
-        return 0
-
-    outcome = dotenv_import.delete_or_rename_source(
-        src,
-        confirm_delete=lambda: _confirm(
-            f"Delete {src} now that its secrets are in the vault?"
-        ),
-        confirm_delete_again=lambda: _confirm(
-            f"This cannot be undone. Really delete {src}?"
-        ),
-        confirm_rename=lambda: _confirm(
-            f"Rename {src} to {src.name}.imported instead?", default=True
-        ),
-    )
-    if outcome == "deleted":
-        theme.success(f"Deleted {src}.")
-    elif outcome == "renamed":
-        theme.success(f"Renamed {src} to {src.name}.imported.")
-    else:
-        theme.info(f"Left {src} in place.")
-
-    root = ctx.project_root or Path.cwd()
-    added_gitignore = dotenv_import.offer_gitignore(
-        root,
-        ask=lambda: _confirm(
-            "Add '.env*' to .gitignore so these files are never committed?"
-        ),
-    )
-    if added_gitignore:
-        theme.success("Added '.env*' to .gitignore.")
-
-    manifest_path = dotenv_import.generate_or_merge_manifest(imported, root)
-    theme.info(f"Manifest updated: {manifest_path}")
-
+    _emit_import_commit_result(result)
     return 0
 
 
@@ -952,19 +980,17 @@ def _scan_select_findings(
     *,
     yes: bool,
 ) -> list[scan_mod.Finding]:
-    """Pick which importable findings to store. ``--yes`` takes all."""
+    """Pick which importable findings to store. ``--yes`` takes all.
+
+    One prompt: numbered findings, then ``Selection [all]:``. Empty or
+    ``all`` imports every listed finding; ``n`` / ``no`` imports none;
+    comma-separated indices pick a subset.
+    """
     if not importable:
         return []
     if yes:
         return list(importable)
     theme.out("")
-    theme.info(
-        f"{len(importable)} importable dotenv finding(s). "
-        "Store selected secrets into the project vault?"
-    )
-    if not _confirm("Offer to import selected findings into the project vault?"):
-        return []
-    theme.out("Select findings to import (comma-separated numbers, or 'all'):")
     for i, f in enumerate(importable, start=1):
         names = ", ".join(f.secret_names)
         theme.out(f"  {i}. {f.path}  ({f.secret_count}: {names})")
@@ -974,6 +1000,8 @@ def _scan_select_findings(
         return []
     if not answer or answer == "all":
         return list(importable)
+    if answer in ("n", "no"):
+        return []
     chosen: list[scan_mod.Finding] = []
     for part in answer.split(","):
         part = part.strip()
@@ -990,15 +1018,17 @@ def _scan_import_into_project(
     project_root: Path,
     *,
     yes: bool,
-) -> int:
+) -> dict[str, str]:
     """Store selected dotenv findings into the project vault via dotenv_import.
 
-    Creates ``.amnesia/`` if needed. Never prints secret values. With
-    ``yes=True``, skips collision/delete/rename/gitignore prompts (safe
-    defaults: skip collisions, keep source files, leave gitignore alone).
+    Creates ``.amnesia/`` if needed. Never prints secret values. Loads the
+    project vault only (a ``use_global: true`` scaffold does not prompt for
+    the global password here). With ``yes=True``, skip collisions, keep
+    source files, and add ``.env*`` to ``.gitignore`` when missing
+    (filesystem policy, not cryptographic).
     """
     if not selected:
-        return 0
+        return {}
 
     vp = ensure_project_scaffold(project_root, use_global=True)
     if not vp.exists():
@@ -1007,16 +1037,16 @@ def _scan_import_into_project(
                 "Error: project vault does not exist and cannot be created "
                 "without an interactive terminal. Run 'ka init --project' first."
             )
-            return 1
+            return {}
         theme.info(f"No project vault yet — creating {vp}")
         password = _prompt_new_master_password()
         if password is None:
-            return 1
+            return {}
         try:
             save_vault(vp, password, empty_payload())
         except VaultError as e:
             theme.error(f"Error: {e}")
-            return 1
+            return {}
         theme.success(f"Vault initialized at {vp}")
     else:
         if not sys.stdin.isatty():
@@ -1024,7 +1054,7 @@ def _scan_import_into_project(
                 "Error: importing scan findings requires an interactive "
                 "terminal (master password)."
             )
-            return 1
+            return {}
         password = getpass.getpass("Master password: ")
 
     try:
@@ -1032,85 +1062,67 @@ def _scan_import_into_project(
     except VaultError as e:
         theme.error(f"Error: {e}")
         audit_event("scan_import", route="inline", result="denied", reason=str(e))
-        return 1
+        return {}
 
-    all_imported: list[str] = []
-    all_skipped: list[str] = []
+    def _ask_collision(name: str) -> str:
+        if yes:
+            return "skip"
+        overwrite = _confirm(f"'{name}' already exists in the vault. Overwrite?")
+        return "overwrite" if overwrite else "skip"
 
-    for finding in selected:
-        src = Path(finding.path)
-        if not src.exists():
-            theme.info(f"Skipped missing file: {src}")
-            continue
-        try:
-            entries = dotenv_import.parse_dotenv(src)
-        except OSError as e:
-            theme.error(f"Error reading {src}: {e}")
-            continue
-        if not entries:
-            continue
+    def _confirm_delete(path: Path) -> bool:
+        if yes:
+            return False
+        return _confirm(f"Delete {path} now that its secrets are in the vault?")
 
-        def _ask_collision(name: str, _yes: bool = yes) -> str:
-            if _yes:
-                return "skip"
-            overwrite = _confirm(f"'{name}' already exists in the vault. Overwrite?")
-            return "overwrite" if overwrite else "skip"
+    def _confirm_delete_again(path: Path) -> bool:
+        if yes:
+            return False
+        return _confirm(f"This cannot be undone. Really delete {path}?")
 
-        imported, skipped = dotenv_import.import_entries(
-            entries, payload["secrets"], on_collision=_ask_collision
+    def _confirm_rename(path: Path) -> bool:
+        if yes:
+            return False
+        return _confirm(
+            f"Rename {path} to {path.name}.imported instead?", default=True
         )
-        all_imported.extend(imported)
-        all_skipped.extend(skipped)
 
-        if imported and not yes:
-            outcome = dotenv_import.delete_or_rename_source(
-                src,
-                confirm_delete=lambda s=src: _confirm(
-                    f"Delete {s} now that its secrets are in the vault?"
-                ),
-                confirm_delete_again=lambda s=src: _confirm(
-                    f"This cannot be undone. Really delete {s}?"
-                ),
-                confirm_rename=lambda s=src: _confirm(
-                    f"Rename {s} to {s.name}.imported instead?", default=True
-                ),
-            )
-            if outcome == "deleted":
-                theme.success(f"Deleted {src}.")
-            elif outcome == "renamed":
-                theme.success(f"Renamed {src} to {src.name}.imported.")
-            else:
-                theme.info(f"Left {src} in place.")
+    paths = [Path(f.path) for f in selected]
+    try:
+        result = dotenv_import.commit_import(
+            paths,
+            payload["secrets"],
+            on_collision=_ask_collision,
+            on_missing="skip",
+            commit_vault=lambda: save_vault(vp, password, payload),
+            confirm_delete=_confirm_delete,
+            confirm_delete_again=_confirm_delete_again,
+            confirm_rename=_confirm_rename,
+            gitignore_ask=(
+                (lambda: True)
+                if yes
+                else (
+                    lambda: _confirm(
+                        "Add '.env*' to .gitignore so these files are never committed?"
+                    )
+                )
+            ),
+            project_root=project_root,
+        )
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        audit_event("scan_import", route="inline", result="denied", reason=str(e))
+        return {}
 
-    if all_imported:
-        save_vault(vp, password, payload)
+    if result.imported:
         audit_event(
             "scan_import",
-            secret_names=all_imported,
+            secret_names=result.imported,
             route="inline",
             result="allowed",
         )
-        theme.success(
-            f"Imported {len(all_imported)} secret(s): {', '.join(all_imported)}"
-        )
-        manifest_path = dotenv_import.generate_or_merge_manifest(
-            all_imported, project_root
-        )
-        theme.info(f"Manifest updated: {manifest_path}")
-        if not yes:
-            added_gitignore = dotenv_import.offer_gitignore(
-                project_root,
-                ask=lambda: _confirm(
-                    "Add '.env*' to .gitignore so these files are never committed?"
-                ),
-            )
-            if added_gitignore:
-                theme.success("Added '.env*' to .gitignore.")
-    if all_skipped:
-        theme.info(f"Skipped (already in vault): {', '.join(all_skipped)}")
-    if not all_imported and not all_skipped:
-        theme.info("Nothing imported.")
-    return 0
+    _emit_import_commit_result(result)
+    return dict(result.path_outcomes)
 
 
 def _scan_progress_printer() -> tuple[Any, Any]:
@@ -1230,7 +1242,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     selected = _scan_select_findings(importable, yes=yes)
     if selected:
-        _scan_import_into_project(selected, project_root, yes=yes)
+        outcomes = _scan_import_into_project(selected, project_root, yes=yes)
+        gone = {
+            path
+            for path, outcome in outcomes.items()
+            if outcome in ("deleted", "renamed")
+        }
+        remaining = [
+            f
+            for f in findings
+            if f.path not in gone and Path(f.path).exists()
+        ]
+        n = scan_mod.leak_count(remaining, strict=strict)
+        exit_code = 1 if n > 0 else 0
 
     return exit_code
 

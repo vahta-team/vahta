@@ -20,6 +20,7 @@ from key_amnesia.scan import (
     DEFAULT_EXCLUDE_DIR_NAMES,
     Finding,
     format_human_report,
+    format_import_next_line,
     headline,
     importable_findings,
     iter_agent_transcript_files,
@@ -28,6 +29,7 @@ from key_amnesia.scan import (
     scan_project,
     transcript_line_hit_count,
 )
+from key_amnesia.paths import audit_log_path
 
 
 SECRET_VALUE = "super-secret-value-NEVER-PRINT-me"
@@ -68,6 +70,7 @@ def test_scan_finds_dotenv_names_not_values(ka_home, project_dir, capsys) -> Non
     assert SECRET_VALUE not in captured.out
     assert SECRET_VALUE_2 not in captured.out
     assert SECRET_VALUE not in captured.err
+    assert "next" not in data
 
     paths = [f["path"] for f in data["findings"]]
     assert any(p.endswith(".env") for p in paths)
@@ -327,12 +330,22 @@ def test_scan_import_yes_into_project_vault(
     assert rc == 1  # still LEAK until sources cleaned; we keep files with --yes
     assert SECRET_VALUE not in captured.out
     assert SECRET_VALUE_2 not in captured.out
+    assert SECRET_VALUE not in captured.err
+    assert SECRET_VALUE_2 not in captured.err
 
     payload = vault_mod.load_vault(vp, password)
     assert payload["secrets"]["SCANNED"] == SECRET_VALUE
     assert payload["secrets"]["OTHER"] == SECRET_VALUE_2
     assert (project_dir / ".env").exists()  # --yes skips delete
+    assert not (project_dir / ".env.imported").exists()
     assert (project_dir / "amnesia.toml").exists()
+    gitignore = (project_dir / ".gitignore").read_text(encoding="utf-8")
+    assert ".env*" in gitignore.splitlines()
+    audit_text = audit_log_path().read_text(encoding="utf-8")
+    assert SECRET_VALUE not in audit_text
+    assert SECRET_VALUE_2 not in audit_text
+    assert "SCANNED" in audit_text
+    assert "scan_import" in audit_text
 
 
 def test_scan_import_partial_selection(
@@ -355,8 +368,8 @@ def test_scan_import_partial_selection(
     )
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
-    # Offer? yes; selection "1"; delete? no; rename? no; gitignore? no.
-    answers = iter(["y", "1", "n", "n", "n"])
+    # Selection "1"; delete? no; rename? no; gitignore? no.
+    answers = iter(["1", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
 
     rc = main(["scan"])
@@ -410,6 +423,266 @@ def test_scan_never_prints_values_human_report(
     assert "TOKEN" in captured.out
     assert SECRET_VALUE not in captured.out
     assert SECRET_VALUE not in captured.err
+    assert "Next: in your own terminal, ka import" in captured.out
+    assert ".env" in captured.out
+    assert "ka import FILE" not in captured.out
+
+
+def _seed_project_vault(project_dir: Path, password: str, secrets: dict | None = None) -> Path:
+    ensure_project_scaffold(project_dir)
+    vp = project_vault_path(project_dir)
+    vault_mod.save_vault(
+        vp,
+        password,
+        {
+            "secrets": dict(secrets or {}),
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    return vp
+
+
+def test_scan_import_save_failure_leaves_sources_and_vault(
+    ka_home, password, project_dir, monkeypatch
+) -> None:
+    """Vault save must run before any delete/rename (0.4.13 scan dataloss)."""
+    vp = _seed_project_vault(project_dir, password)
+    before = vp.read_bytes()
+    env = project_dir / ".env"
+    local = project_dir / ".env.local"
+    env.write_text(f"ONE={SECRET_VALUE}\n", encoding="utf-8")
+    local.write_text(f"TWO={SECRET_VALUE_2}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+
+    def _boom(*_a, **_k):
+        raise vault_mod.VaultError("simulated save failure")
+
+    monkeypatch.setattr("key_amnesia.cli.save_vault", _boom)
+
+    rc = main(["scan", "--yes"])
+    assert rc == 1
+    assert env.exists()
+    assert local.exists()
+    assert not (project_dir / ".env.imported").exists()
+    assert not (project_dir / ".env.local.imported").exists()
+    assert vp.read_bytes() == before
+    # in-memory merge must not have reached disk; names sidecar unchanged too.
+
+
+def test_scan_import_yes_collision_skips_existing(
+    ka_home, password, project_dir, monkeypatch
+) -> None:
+    vp = _seed_project_vault(project_dir, password, {"SCANNED": "keep-me-old"})
+    (project_dir / ".env").write_text(
+        f"SCANNED={SECRET_VALUE}\nOTHER={SECRET_VALUE_2}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+
+    rc = main(["scan", "--yes"])
+    assert rc == 1
+    payload = vault_mod.load_vault(vp, password)
+    assert payload["secrets"]["SCANNED"] == "keep-me-old"
+    assert payload["secrets"]["OTHER"] == SECRET_VALUE_2
+    assert (project_dir / ".env").exists()
+
+
+def test_scan_import_interactive_collision_default_skip(
+    ka_home, password, project_dir, monkeypatch
+) -> None:
+    vp = _seed_project_vault(project_dir, password, {"SCANNED": "keep-me-old"})
+    (project_dir / ".env").write_text(
+        f"SCANNED={SECRET_VALUE}\nOTHER={SECRET_VALUE_2}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+    # Enter=all; collision skip; delete no; rename no; gitignore no.
+    answers = iter(["", "", "n", "n", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["scan"])
+    assert rc == 1
+    payload = vault_mod.load_vault(vp, password)
+    assert payload["secrets"]["SCANNED"] == "keep-me-old"
+    assert payload["secrets"]["OTHER"] == SECRET_VALUE_2
+    assert (project_dir / ".env").exists()
+
+
+def test_scan_import_delete_requires_both_confirms(
+    ka_home, password, project_dir, monkeypatch
+) -> None:
+    vp = _seed_project_vault(project_dir, password)
+    env = project_dir / ".env"
+    env.write_text(f"FRESH={SECRET_VALUE}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+    answers = iter(["", "y", "y", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["scan"])
+    assert rc == 0
+    assert not env.exists()
+    payload = vault_mod.load_vault(vp, password)
+    assert payload["secrets"]["FRESH"] == SECRET_VALUE
+
+
+def test_scan_import_declining_second_delete_keeps_file(
+    ka_home, password, project_dir, monkeypatch
+) -> None:
+    _seed_project_vault(project_dir, password)
+    env = project_dir / ".env"
+    env.write_text(f"FRESH={SECRET_VALUE}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+    answers = iter(["", "y", "n", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["scan"])
+    assert rc == 1
+    assert env.exists()
+
+
+def test_scan_import_rename_clears_exit(
+    ka_home, password, project_dir, monkeypatch
+) -> None:
+    vp = _seed_project_vault(project_dir, password)
+    env = project_dir / ".env"
+    env.write_text(f"FRESH={SECRET_VALUE}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+    answers = iter(["", "n", "y", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["scan"])
+    assert rc == 0
+    assert not env.exists()
+    assert (project_dir / ".env.imported").exists()
+    payload = vault_mod.load_vault(vp, password)
+    assert payload["secrets"]["FRESH"] == SECRET_VALUE
+
+
+def test_scan_non_tty_no_offer_no_getpass(
+    ka_home, project_dir, monkeypatch, capsys
+) -> None:
+    (project_dir / ".env").write_text(f"TOKEN={SECRET_VALUE}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        getpass,
+        "getpass",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("getpass")),
+    )
+
+    rc = main(["scan"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "Selection" not in captured.out
+    assert SECRET_VALUE not in captured.out
+    assert SECRET_VALUE not in captured.err
+    assert "LEAK" in captured.out
+
+
+def test_scan_import_yes_one_password_despite_global_vault(
+    seeded_vault, password, project_dir, monkeypatch
+) -> None:
+    """use_global scaffold must not prompt for the global vault during scan import."""
+    vp = _seed_project_vault(project_dir, password)
+    (project_dir / ".env").write_text(f"PROJ={SECRET_VALUE}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    calls: list[str] = []
+
+    def _gp(prompt: str = "") -> str:
+        calls.append(prompt)
+        return password
+
+    monkeypatch.setattr(getpass, "getpass", _gp)
+
+    rc = main(["scan", "--yes"])
+    assert rc == 1
+    assert len(calls) == 1
+    payload = vault_mod.load_vault(vp, password)
+    assert payload["secrets"]["PROJ"] == SECRET_VALUE
+    global_payload = vault_mod.load_vault(seeded_vault, password)
+    assert "PROJ" not in global_payload["secrets"]
+
+
+def test_scan_import_yes_creating_vault_does_not_prompt_global(
+    seeded_vault, password, project_dir, monkeypatch
+) -> None:
+    (project_dir / ".env").write_text(f"FRESH={SECRET_VALUE}\n", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    calls: list[str] = []
+
+    def _gp(prompt: str = "") -> str:
+        calls.append(prompt)
+        return password
+
+    monkeypatch.setattr(getpass, "getpass", _gp)
+
+    rc = main(["scan", "--yes"])
+    assert rc == 1
+    # New vault: master + confirm. Not a third global-vault prompt.
+    assert len(calls) == 2
+    vp = project_vault_path(project_dir)
+    payload = vault_mod.load_vault(vp, password)
+    assert payload["secrets"]["FRESH"] == SECRET_VALUE
+
+
+def test_format_human_report_import_footer_uses_discovered_paths(
+    tmp_path: Path,
+) -> None:
+    env = tmp_path / ".env"
+    local = tmp_path / ".env.local"
+    planted = SECRET_VALUE
+    findings = [
+        Finding(
+            path=str(env),
+            kind="dotenv",
+            secret_names=["A"],
+            secret_count=1,
+            reason="dotenv file",
+            importable=True,
+            confidence="certain",
+        ),
+        Finding(
+            path=str(local),
+            kind="dotenv",
+            secret_names=["B"],
+            secret_count=1,
+            reason="dotenv file",
+            importable=True,
+            confidence="certain",
+        ),
+    ]
+    text = format_human_report(findings, project_root=tmp_path)
+    assert "Next: in your own terminal, ka import .env .env.local" in text
+    assert planted not in text
+    assert "ka import FILE" not in text
+    line = format_import_next_line(findings, project_root=tmp_path)
+    assert line == "Next: in your own terminal, ka import .env .env.local"
+
+
+def test_format_human_report_no_importable_drops_generic_file_line(
+    tmp_path: Path,
+) -> None:
+    findings = [
+        Finding(
+            path=str(tmp_path / "id_rsa"),
+            kind="ssh_private_key",
+            secret_names=[],
+            secret_count=1,
+            reason="ssh key",
+            importable=False,
+            confidence="certain",
+        )
+    ]
+    text = format_human_report(findings, project_root=tmp_path)
+    assert "ka import" not in text
+    assert "Detection is advisory" in text
+    assert format_import_next_line(findings, project_root=tmp_path) is None
 
 
 # --- Agent session transcript scan (--deep) ---

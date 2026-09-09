@@ -41,7 +41,7 @@ The agent gets amnesia. That's the whole point.
 pip install key-amnesia
 ka setup                          # skills + secret-guard hook for Claude Code / Cursor / Codex
 ka init --project                 # or: ka init  for a global vault
-ka import .env                    # move plaintext into the vault (TTY-only; never prints values)
+ka import .env .env.local         # move plaintext into the vault (TTY-only; never prints values)
 ka scan                           # find remaining LEAKs (names/paths only)
 ka scan --deep                    # also home/shell/MCP + agent session transcripts
 ka scan --strict paranoid         # also exit 1 on identifier/passphrase-shaped hits
@@ -50,7 +50,7 @@ ka scan --wide                    # include default-excluded dirs (alias of --in
 ka run --cwd DIR --secret API_KEY -- python my_script.py
 ```
 
-`ka scan` reports **names, paths, and counts** (plus line numbers for agent session transcripts under `--deep`). It never prints secret values. The headline names the `--strict` gate (default `high`: **certain** vendor prefixes and confirmed filenames + **likely** assignments/UUID) and whether those gated findings are in the project, outside it (`--deep`), or both. Identifier-, passphrase-, low-transition, and unconfirmed-`mcp.json` hits are `possible`: they appear in the always-printed three-count summary (`N certain · N likely · N possible`) and in the three `--strict` gate totals; `--strict paranoid` gates on them (the ≤0.4.9 assignment gate). Detection is **advisory**. `--deep` is not a full home walk — it checks known candidates including Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`, and Copilot CLI `~/.copilot/session-state/*/events.jsonl`. Progress for `--deep` goes to stderr (`--quiet` suppresses it). `--wide` aliases `--include-excluded` and does not imply `--deep`.
+`ka scan` reports **names, paths, and counts** (plus line numbers for agent session transcripts under `--deep`). It never prints secret values. The headline names the `--strict` gate (default `high`: **certain** vendor prefixes and confirmed filenames + **likely** assignments/UUID) and whether those gated findings are in the project, outside it (`--deep`), or both. Identifier-, passphrase-, low-transition, and unconfirmed-`mcp.json` hits are `possible`: they appear in the always-printed three-count summary (`N certain · N likely · N possible`) and in the three `--strict` gate totals; `--strict paranoid` gates on them (the ≤0.4.9 assignment gate). Detection is **advisory**. `--deep` is not a full home walk — it checks known candidates including Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`, and Copilot CLI `~/.copilot/session-state/*/events.jsonl`. Progress for `--deep` goes to stderr (`--quiet` suppresses it). `--wide` aliases `--include-excluded` and does not imply `--deep`. `ka scan --yes` imports all importable dotenv hits (password still required, never deletes, adds `.env*` to `.gitignore` when missing). Gitignore is filesystem policy, not cryptographic; `--yes` still exits 1 while those source files remain.
 
 `ka init` asks for the master password twice; if the entries do not match, nothing is created. **There is no recovery** if you forget that password — Argon2id + SecretBox leave none by design.
 

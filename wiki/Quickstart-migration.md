@@ -5,7 +5,7 @@ Goal: get off plaintext `.env` faster than deciding whether to.
 ```bash
 # Inside a project
 ka init --project          # creates .amnesia/; gitignores it
-ka import .env             # TTY-only; never prints values
+ka import .env .env.local  # TTY-only; never prints values
 ka scan                    # find remaining LEAKs; may offer import
 ka run --cwd DIR --secret NAME --as NAME=ENVVAR -- <command>
 ```
@@ -23,10 +23,12 @@ forms such as `--as API_KEY`, `--as NAME`, or `--as ENVVAR` are rejected.
 - TTY-only — run it in your own console. Collision, delete/rename, and
   gitignore decisions are interactive confirms; there is no agent path.
 - Parses dotenv `NAME=value` pairs into the resolved vault (project vault
-  when `.amnesia/` is found).
+  when `.amnesia/` is found). Multiple files: `ka import .env .env.local`
+  — one password, one gitignore ask, one manifest merge.
 - Collisions default to **skip**; overwrite only on explicit confirm.
-- After import: offers delete (double-confirm) or rename to
-  `.imported`, offers `.env*` gitignore, merges `amnesia.toml`.
+- After a successful vault save: offers delete (double-confirm) or rename
+  to `.imported`, offers `.env*` gitignore, merges `amnesia.toml`.
+  Gitignore is **filesystem policy, not cryptographic**.
 - Never prints a secret value.
 
 ## `ka scan`
@@ -42,9 +44,10 @@ passphrase-, low-transition-shaped, and unconfirmed-`mcp.json` hits are `possibl
 aliases `--include-excluded` and does not imply `--deep`. Values are
 never printed.
 
-After the human report, an interactive TTY may offer to store selected
-importable dotenv hits into the project vault (password still required).
-Use report-only when you do not want that offer:
+After the human report, an interactive TTY may offer one selection prompt
+(`Selection [all]:`) to store importable dotenv hits into the project vault
+(password still required). Empty/`all` takes every listed finding; `n`/`no`
+takes none. Use report-only when you do not want that offer:
 
 ```bash
 ka scan
@@ -54,7 +57,9 @@ ka scan --json        # machine-readable; report-only
 ka scan --strict paranoid   # also exit 1 on identifier/passphrase-shaped hits
 ka scan --wide        # include default-excluded dirs
 ka scan --quiet       # no --deep progress on stderr
-ka scan --yes         # import all importable dotenv hits (password still required)
+ka scan --yes         # import all importable dotenv hits (password still required;
+                      # never deletes; adds .env* gitignore when missing; exits 1
+                      # while source files remain)
 ```
 
 ## Session modes

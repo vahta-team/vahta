@@ -233,3 +233,84 @@ def test_import_wrong_password_denied(
     assert rc == 1
     assert env_file.exists()
     assert "A=1" not in err
+
+
+def test_import_never_writes_secret_value_to_audit(
+    seeded_vault, password, project_dir, monkeypatch
+) -> None:
+    from key_amnesia.paths import audit_log_path
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+    env_file = _write_env(project_dir / ".env", "BRAND_NEW=very-secret-value-here\n")
+    answers = iter(["n", "n", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["import", str(env_file)])
+    assert rc == 0
+    text = audit_log_path().read_text(encoding="utf-8")
+    assert "very-secret-value-here" not in text
+    assert "BRAND_NEW" in text
+
+
+def test_import_multi_file_one_password_one_gitignore(
+    seeded_vault, password, project_dir, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    calls: list[str] = []
+
+    def _gp(prompt: str = "") -> str:
+        calls.append(prompt)
+        return password
+
+    monkeypatch.setattr(getpass, "getpass", _gp)
+    env1 = _write_env(project_dir / ".env", "FIRST=secret-one-aaa\n")
+    env2 = _write_env(project_dir / ".env.local", "SECOND=secret-two-bbb\n")
+    # Per file: delete? no; rename? no; then one gitignore? yes.
+    answers = iter(["n", "n", "n", "n", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["import", str(env1), str(env2)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(calls) == 1
+    assert "secret-one-aaa" not in captured.out
+    assert "secret-two-bbb" not in captured.out
+    assert "secret-one-aaa" not in captured.err
+    assert "secret-two-bbb" not in captured.err
+
+    payload = load_vault(seeded_vault, password)
+    assert payload["secrets"]["FIRST"] == "secret-one-aaa"
+    assert payload["secrets"]["SECOND"] == "secret-two-bbb"
+    assert env1.exists()
+    assert env2.exists()
+    gitignore = (project_dir / ".gitignore").read_text(encoding="utf-8")
+    assert ".env*" in gitignore.splitlines()
+    manifest = (project_dir / "amnesia.toml").read_text(encoding="utf-8")
+    assert 'env = "FIRST"' in manifest
+    assert 'env = "SECOND"' in manifest
+
+
+def test_import_save_failure_leaves_both_sources(
+    seeded_vault, password, project_dir, monkeypatch
+) -> None:
+    from key_amnesia.vault import VaultError
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
+    env1 = _write_env(project_dir / ".env", "FIRST=secret-one-aaa\n")
+    env2 = _write_env(project_dir / ".env.local", "SECOND=secret-two-bbb\n")
+    before = seeded_vault.read_bytes()
+
+    def _boom(*_a, **_k):
+        raise VaultError("simulated save failure")
+
+    monkeypatch.setattr("key_amnesia.cli.save_vault", _boom)
+
+    rc = main(["import", str(env1), str(env2)])
+    assert rc == 1
+    assert env1.exists()
+    assert env2.exists()
+    assert not (project_dir / ".env.imported").exists()
+    assert not (project_dir / ".env.local.imported").exists()
+    assert seeded_vault.read_bytes() == before

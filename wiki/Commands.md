@@ -9,7 +9,7 @@ notes live in the repository `DESIGN.md`.
 | `ka passwd` / `ka change-password` | Change master password (refuses while session active) |
 | `ka set NAME` | Store/update secret (hidden prompt preferred over inline value) |
 | `ka remove NAME` | Delete a secret |
-| `ka import FILE` | Import dotenv into resolved vault (TTY-only) |
+| `ka import FILE [FILE …]` | Import dotenv file(s) into resolved vault (TTY-only) |
 | `ka check [--json]` | Manifest vs project names sidecar (CI; no decrypt) |
 | `ka scan [--deep] [--wide] [--include-excluded] [--json] [--strict] [--yes] [--no-import] [--quiet]` | LEAK report (names/paths/counts only); optional offer-to-import |
 | `ka run --cwd DIR --secret NAME [--as NAME=ENVVAR] -- <cmd>` | Inject + scrub; agent-facing path (`=` form required for `--as`) |
@@ -47,7 +47,10 @@ ka run --cwd DIR --secret API_KEY -- python my_script.py
 - `--json` — machine-readable report (`leak_count` matches the `--strict` gate; always includes `certain_count`, `likely_count`, `possible_count`, `strict_certain` / `strict_high` / `strict_paranoid`, and per-finding `confidence` + `reasons`)
 - `--strict certain|high|paranoid` — default `high`: exit 1 iff certain+likely `leak_count` > 0. `certain` is prefixes and confirmed filenames. `likely` is assignments and UUID-shaped values. `paranoid` also fails on identifier/passphrase/low-transition hits and unconfirmed `mcp.json` (the ≤0.4.9 assignment gate). Invalid value → exit 2. Headline names the gate and the location of gated findings. The three-count summary and the three gate totals print at every strictness. Unconfirmed MCP configs count as one possible per file.
 - `--yes` — import all importable dotenv findings without selection
-  prompts (password still required)
+  prompts (password still required from a TTY). Never deletes or
+  renames. Adds `.env*` to `.gitignore` when missing (filesystem
+  policy, not cryptographic). Still exits 1 while those source files
+  remain — do not treat `ka scan --yes && deploy` as a clean gate.
 - `--no-import` — report only; never offer vault store
 - `--quiet` — suppress `--deep` progress on stderr (stdout unchanged)
 

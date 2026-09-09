@@ -1152,10 +1152,10 @@ def format_human_report(
             + _format_hit_lines(f.hit_lines)
         )
         lines.append("")
-    lines.append(
-        "Values are never shown. Store importable dotenv findings with the "
-        "post-scan offer, or run `ka import FILE`."
-    )
+    lines.append("Values are never shown.")
+    next_line = format_import_next_line(findings, project_root=project_root)
+    if next_line:
+        lines.append(next_line)
     lines.append(
         "Detection is advisory; false positives and false negatives are "
         "expected. Word-shaped passphrases appear under possible, not the "
@@ -1166,3 +1166,29 @@ def format_human_report(
 
 def importable_findings(findings: list[Finding]) -> list[Finding]:
     return [f for f in findings if f.importable and f.secret_count > 0]
+
+
+def format_import_next_line(
+    findings: list[Finding], *, project_root: Path
+) -> str | None:
+    """Compose a ``ka import`` hint from scan-discovered dotenv paths only.
+
+    Uses ``Finding.path`` from this scan — never agent-supplied text.
+    """
+    parts: list[str] = []
+    try:
+        root = project_root.resolve()
+    except OSError:
+        root = project_root
+    for f in importable_findings(findings):
+        p = Path(f.path)
+        if not _is_dotenv_filename(p.name):
+            continue
+        try:
+            display = p.resolve().relative_to(root).as_posix()
+        except (ValueError, OSError):
+            display = p.as_posix()
+        parts.append(display)
+    if not parts:
+        return None
+    return "Next: in your own terminal, ka import " + " ".join(parts)
