@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from key_amnesia.dotenv_import import (
+    commit_import,
     delete_or_rename_source,
     generate_or_merge_manifest,
     import_entries,
@@ -217,3 +220,98 @@ def test_delete_or_rename_keeps_when_both_declined(tmp_path: Path) -> None:
     )
     assert outcome == "kept"
     assert f.exists()
+
+
+def test_commit_import_save_failure_leaves_both_sources(tmp_path: Path) -> None:
+    a = tmp_path / ".env"
+    b = tmp_path / ".env.local"
+    a.write_text("A=one\n", encoding="utf-8")
+    b.write_text("B=two\n", encoding="utf-8")
+    secrets: dict[str, str] = {}
+
+    def boom() -> None:
+        raise RuntimeError("save failed")
+
+    with pytest.raises(RuntimeError, match="save failed"):
+        commit_import(
+            [a, b],
+            secrets,
+            on_collision=None,
+            on_missing="skip",
+            commit_vault=boom,
+            confirm_delete=lambda _p: True,
+            confirm_delete_again=lambda _p: True,
+            confirm_rename=lambda _p: True,
+            gitignore_ask=lambda: True,
+            project_root=tmp_path,
+        )
+    assert a.exists()
+    assert b.exists()
+    assert not (tmp_path / ".env.imported").exists()
+    assert not (tmp_path / ".env.local.imported").exists()
+    assert not (tmp_path / ".gitignore").exists()
+    assert not (tmp_path / "amnesia.toml").exists()
+
+
+def test_commit_import_saves_then_deletes(tmp_path: Path) -> None:
+    a = tmp_path / ".env"
+    a.write_text("A=one\n", encoding="utf-8")
+    secrets: dict[str, str] = {}
+    committed = {"n": 0}
+
+    def commit() -> None:
+        committed["n"] += 1
+        assert a.exists()
+
+    result = commit_import(
+        [a],
+        secrets,
+        on_collision=None,
+        on_missing="error",
+        commit_vault=commit,
+        confirm_delete=lambda _p: True,
+        confirm_delete_again=lambda _p: True,
+        confirm_rename=lambda _p: True,
+        gitignore_ask=lambda: True,
+        project_root=tmp_path,
+    )
+    assert committed["n"] == 1
+    assert result.imported == ["A"]
+    assert result.path_outcomes[str(a)] == "deleted"
+    assert not a.exists()
+    assert result.gitignore_added is True
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == ".env*"
+    assert result.manifest_path == tmp_path / "amnesia.toml"
+
+
+def test_commit_import_missing_error_raises(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.env"
+    with pytest.raises(FileNotFoundError):
+        commit_import(
+            [missing],
+            {},
+            on_missing="error",
+            commit_vault=lambda: (_ for _ in ()).throw(AssertionError("no commit")),
+            confirm_delete=lambda _p: False,
+            confirm_delete_again=lambda _p: False,
+            confirm_rename=lambda _p: False,
+            gitignore_ask=lambda: False,
+            project_root=tmp_path,
+        )
+
+
+def test_commit_import_missing_skip(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.env"
+    result = commit_import(
+        [missing],
+        {},
+        on_missing="skip",
+        commit_vault=lambda: (_ for _ in ()).throw(AssertionError("no commit")),
+        confirm_delete=lambda _p: False,
+        confirm_delete_again=lambda _p: False,
+        confirm_rename=lambda _p: False,
+        gitignore_ask=lambda: False,
+        project_root=tmp_path,
+    )
+    assert result.path_outcomes[str(missing)] == "missing"
+    assert result.imported == []

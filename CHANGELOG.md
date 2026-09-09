@@ -2,7 +2,21 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.13`.
+Versions follow the git tags `0.4.0` … `0.4.14`.
+
+## [0.4.14] — 2026-09-09
+
+### Changed
+
+- **`ka scan` import matches `ka import`.** One numbered selection prompt (`Selection [all]:` — empty/`all` takes every listed finding, `n`/`no` takes none). Enter now means import all; the master-password prompt is the backstop. Scan and `ka import` share one save-then-delete core, so a vault write failure leaves every source file in place (0.4.13 could delete plaintext before a failed save).
+- **`ka scan --yes`** still imports all, skips collisions, never deletes or renames, and still needs a TTY for the master password. It now adds `.env*` to `.gitignore` when missing (`offer_gitignore(..., ask=True)`; no-op if already covered). Gitignore is **filesystem policy, not cryptographic** — it does not stop an agent that can read the tree. `--yes` still **exits 1** while those source files remain (`ka scan --yes && deploy` is not a clean gate).
+- **Exit after a TTY / `--yes` import** is 1 only when gated findings still have a source path on disk. Deleted or renamed-to-`.imported` dotenv files no longer fail the gate. `--json`, `--no-import`, and non-TTY scans keep the snapshot exit. The printed report is still a snapshot; it is not re-walked or reprinted.
+- Human report footer: when importable dotenv findings exist, `Next: in your own terminal, ka import .env …` is composed from scan-discovered paths only. No generic `ka import FILE` line; no JSON `next` field.
+- **`ka import FILE [FILE …]`** — one password, one gitignore ask, one manifest merge. No new flag.
+
+### Fixed
+
+- Scan import no longer disposes source files before the vault is saved.
 
 ## [0.4.13] — 2026-09-06
 
@@ -164,6 +178,8 @@ Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-th
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.14]: https://github.com/fujitoid/key-amnesia/compare/0.4.13...0.4.14
+[0.4.13]: https://github.com/fujitoid/key-amnesia/compare/0.4.12...0.4.13
 [0.4.12]: https://github.com/fujitoid/key-amnesia/compare/0.4.11...0.4.12
 [0.4.11]: https://github.com/fujitoid/key-amnesia/compare/0.4.10...0.4.11
 [0.4.10]: https://github.com/fujitoid/key-amnesia/compare/0.4.7...0.4.10

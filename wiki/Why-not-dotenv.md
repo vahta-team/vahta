@@ -38,4 +38,6 @@ hits are only outside the tree (mixed: both counts). A three-count summary
 totals (`--strict certain` / `high` / `paranoid`). Only the listing and
 exit follow `--strict`. Names, paths, and counts only — never values. After the
 report you can store selected dotenv findings into a project vault (TTY
-import path), or migrate a known file with `ka import`.
+import path), or migrate known files with `ka import .env .env.local`.
+`.gitignore` is filesystem policy, not cryptographic: it does not stop an
+agent that can read the tree.
