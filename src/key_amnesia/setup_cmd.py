@@ -2,7 +2,9 @@
 
 Copies the three bundled agent skills to the Claude Code / Cursor / Codex
 skills directories and merges a `PreToolUse` (Claude, Codex) / `preToolUse`
-(Cursor) hook entry into each host's own config file. Optionally merges
+(Cursor) hook entry into each host's own config file. For OpenCode, copies a
+JS bridge plugin into ``~/.config/opencode/plugins/`` (skills already
+auto-load from ``~/.claude/skills`` / ``~/.agents/skills``). Optionally merges
 harness *allow* rules so unattended ``ka run`` / ``ka list`` can proceed;
 the hook is the load-bearing *deny* for forbidden verbs. Safe to re-run
 (idempotent upsert); never drops unrelated keys or other hooks/matchers
@@ -39,6 +41,7 @@ CODEX_MATCHER = "Bash|Write|Edit|apply_patch"
 HOOK_COMMAND = "key-amnesia-hook"
 _HOOK_MODULE = "key_amnesia.hooks.secret_guard"
 _WIN_NEEDS_QUOTE = frozenset(' \t"&|<>^()%,;=')
+_HOOK_ARGV_SENTINEL = "const HOOK_ARGV = null; // filled by ka setup"
 
 
 def _skills_root():
@@ -120,6 +123,48 @@ def _hook_command() -> str:
     if found:
         return _quote_hook_path(os.path.abspath(found))
     return f"{_quote_hook_path(sys.executable)} -m {_HOOK_MODULE}"
+
+
+def _opencode_plugin_template() -> str:
+    root = resources.files("key_amnesia") / "plugins" / "opencode" / "secret-guard.js"
+    return root.read_text(encoding="utf-8")
+
+
+def _bake_opencode_plugin(source: str) -> str:
+    argv = shlex.split(_hook_command())
+    baked = "const HOOK_ARGV = " + json.dumps(argv) + "; // filled by ka setup"
+    if _HOOK_ARGV_SENTINEL not in source:
+        return source
+    return source.replace(_HOOK_ARGV_SENTINEL, baked, 1)
+
+
+def install_opencode_plugin(home: Path) -> list[str]:
+    """Copy the OpenCode bridge plugin; never parse opencode.json."""
+    from key_amnesia.harness_permissions import (
+        OPENCODE_PLUGIN_MARKER,
+        opencode_config_dir,
+        opencode_config_note,
+        opencode_plugin_dest,
+    )
+
+    lines: list[str] = []
+    note = opencode_config_note(home)
+    if note:
+        lines.append(note)
+    oc = opencode_config_dir(home)
+    if not oc.is_dir():
+        return lines + [f"skip OpenCode hook: {oc} is absent"]
+    dest = opencode_plugin_dest(home)
+    if dest.exists():
+        try:
+            existing = dest.read_text(encoding="utf-8")
+        except OSError as e:
+            return lines + [f"OpenCode plugin: could not read {dest}: {e}"]
+        if OPENCODE_PLUGIN_MARKER not in existing:
+            return lines + [f"left in place (not a key-amnesia managed file): {dest}"]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(_bake_opencode_plugin(_opencode_plugin_template()), encoding="utf-8")
+    return lines + [f"hook installed: {dest} (OpenCode plugin)"]
 
 
 def _is_our_hook_command(command: str) -> bool:
@@ -383,6 +428,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
             codex_home / "skills",
         ]
         lines.extend(_copy_skills(dest_roots))
+        lines.append(
+            "OpenCode: skills auto-load from ~/.claude/skills and ~/.agents/skills "
+            "(nothing extra to install)"
+        )
 
     if not skills_only and not permissions_only and not permissions_remove:
         hook_cmd = _hook_command()
@@ -395,6 +444,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         lines.append(f"hook installed: {cursor_hooks} (preToolUse)")
         _merge_codex_hooks(codex_hooks)
         lines.append(f"hook installed: {codex_hooks} (PreToolUse)")
+        lines.extend(install_opencode_plugin(home))
         lines.append(f"hook command: {hook_cmd}")
 
     for line in lines:
@@ -414,6 +464,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 _merge_cursor_hooks(home / ".cursor" / "hooks.json")
             elif name == "codex":
                 _merge_codex_hooks(_codex_home(home) / "hooks.json")
+            elif name == "opencode":
+                for line in install_opencode_plugin(home):
+                    theme.out(line)
 
         perm_rc = run_permissions(
             home,
@@ -437,7 +490,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             rc = term_rc
 
     theme.info(
-        "Restart Claude Code / Cursor / Codex (or reload the window) to pick "
+        "Restart Claude Code / Cursor / Codex / OpenCode (or reload the window) to pick "
         "up the new skills and hook."
     )
     theme.info(

@@ -29,6 +29,10 @@ EXPECTED_HOOK_MEMBERS = [
     "key_amnesia/hooks/__init__.py",
 ]
 
+EXPECTED_PLUGIN_MEMBERS = [
+    "key_amnesia/plugins/opencode/secret-guard.js",
+]
+
 
 @pytest.fixture(scope="module")
 def built_wheel_members(tmp_path_factory: pytest.TempPathFactory) -> list[str]:
@@ -57,4 +61,9 @@ def test_wheel_contains_all_three_skill_md(built_wheel_members: list[str]) -> No
 
 def test_wheel_contains_hook_module(built_wheel_members: list[str]) -> None:
     for member in EXPECTED_HOOK_MEMBERS:
+        assert member in built_wheel_members, f"missing {member} in wheel"
+
+
+def test_wheel_contains_opencode_plugin(built_wheel_members: list[str]) -> None:
+    for member in EXPECTED_PLUGIN_MEMBERS:
         assert member in built_wheel_members, f"missing {member} in wheel"

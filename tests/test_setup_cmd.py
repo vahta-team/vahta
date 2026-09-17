@@ -88,6 +88,7 @@ def test_setup_hook_only_skips_skills(fake_home: Path) -> None:
     assert (fake_home / ".claude" / "settings.json").exists()
     assert (fake_home / ".cursor" / "hooks.json").exists()
     assert (fake_home / ".codex" / "hooks.json").exists()
+    assert not (fake_home / ".config" / "opencode").exists()
 
 
 def test_setup_rejects_both_only_flags(fake_home: Path, capsys) -> None:
@@ -649,3 +650,65 @@ def test_configured_terminal_survives_an_empty_detection(linux_setup, monkeypatc
     assert sc.configure_terminal(force=True) == 0
     assert sc.load_config()["terminal"] == "kitty"
     assert "none of the known ones found" in capsys.readouterr().out
+
+
+# --- OpenCode plugin copy ----------------------------------------------------
+
+
+def test_opencode_hook_only_installs_plugin_without_opencode_json(
+    fake_home: Path,
+) -> None:
+    oc = fake_home / ".config" / "opencode"
+    oc.mkdir(parents=True)
+    rc = sc.cmd_setup(_ns(hook_only=True))
+    assert rc == 0
+    dest = oc / "plugins" / "key-amnesia-secret-guard.js"
+    text = dest.read_text(encoding="utf-8")
+    assert "KEY_AMNESIA_PLUGIN_ID=secret-guard" in text
+    assert "const HOOK_ARGV = null" not in text
+    assert "const HOOK_ARGV = [" in text
+    assert not (oc / "opencode.json").exists()
+
+
+def test_opencode_hook_skipped_when_config_dir_absent(
+    fake_home: Path, capsys
+) -> None:
+    rc = sc.cmd_setup(_ns(hook_only=True))
+    assert rc == 0
+    assert not (fake_home / ".config" / "opencode").exists()
+    assert "skip OpenCode hook" in capsys.readouterr().out
+
+
+def test_opencode_unmanaged_plugin_not_overwritten(fake_home: Path, capsys) -> None:
+    dest = (
+        fake_home / ".config" / "opencode" / "plugins" / "key-amnesia-secret-guard.js"
+    )
+    dest.parent.mkdir(parents=True)
+    dest.write_text("// user-owned plugin\nexport default async () => ({});\n", encoding="utf-8")
+    rc = sc.cmd_setup(_ns(hook_only=True))
+    assert rc == 0
+    assert dest.read_text(encoding="utf-8").startswith("// user-owned plugin")
+    assert "left in place" in capsys.readouterr().out
+
+
+def test_opencode_managed_plugin_updated_on_rerun(fake_home: Path) -> None:
+    oc = fake_home / ".config" / "opencode"
+    oc.mkdir(parents=True)
+    sc.cmd_setup(_ns(hook_only=True))
+    dest = oc / "plugins" / "key-amnesia-secret-guard.js"
+    dest.write_text(
+        dest.read_text(encoding="utf-8").replace(
+            "KEY_AMNESIA_PLUGIN_VERSION=0.4.15",
+            "KEY_AMNESIA_PLUGIN_VERSION=0.0.0",
+        ),
+        encoding="utf-8",
+    )
+    sc.cmd_setup(_ns(hook_only=True))
+    assert "KEY_AMNESIA_PLUGIN_VERSION=0.4.15" in dest.read_text(encoding="utf-8")
+
+
+def test_setup_mentions_opencode_skill_autoload(fake_home: Path, capsys) -> None:
+    sc.cmd_setup(_ns(skills_only=True))
+    out = capsys.readouterr().out
+    assert "OpenCode" in out
+    assert "auto-load" in out
