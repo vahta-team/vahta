@@ -25,13 +25,19 @@ ka setup
 Copies bundled skills (`key-amnesia-usage`, `key-amnesia-hygiene`,
 `key-amnesia-migrate`) into `~/.claude/skills/`, `~/.cursor/skills/`,
 `~/.agents/skills/` (current Codex user path), and `~/.codex/skills/`
-(legacy / `$CODEX_HOME`), merges a PreToolUse / preToolUse hook that
-**denies forbidden `ka` verbs** (and inline credential-shaped tokens), and
-best-effort **allow** rules so the harness will let unattended `ka run` /
-`ka list` through. Files try to let the agent run `ka`; the hook is the
-load-bearing deny (`ka set`, `ka reveal`, `ka scan --yes`, and other
-mutating verbs). Restart or reload the host afterward. On Codex, review
-and trust the new hook via `/hooks` before it will run.
+(legacy / `$CODEX_HOME`). OpenCode auto-loads those skills from
+`~/.claude/skills` and `~/.agents/skills` with nothing extra to copy.
+Setup merges a PreToolUse / preToolUse hook that **denies forbidden `ka`
+verbs** (and inline credential-shaped tokens), and best-effort **allow**
+rules so the harness will let unattended `ka run` / `ka list` through. On
+OpenCode the guard is a plugin under `~/.config/opencode/plugins/` — or
+`$XDG_CONFIG_HOME/opencode/plugins/` when that variable is set, since that is
+where OpenCode reads its config — plus
+`permission.bash` globs — the plugin is the enforcement. Files try to let
+the agent run `ka`; the hook is the load-bearing deny (`ka set`,
+`ka reveal`, `ka scan --yes`, and other mutating verbs). Restart or reload
+the host afterward. On Codex, review and trust the new hook via `/hooks`
+before it will run.
 
 Codex also reads project `AGENTS.md` for instructions; that is separate from
 skills installed by `ka setup`. Cursor: `ka setup` never creates
@@ -43,7 +49,7 @@ Flags: `--skills-only`, `--hook-only`, `--permissions-only`,
 files; never deletes user allows).
 
 After any upgrade, re-run `ka setup` (it rewrites the hook command) and
-restart Claude Code / Cursor / Codex.
+restart Claude Code / Cursor / Codex / OpenCode.
 
 An isolated venv (`~/.local/share/key-amnesia/venv/`) does **not** need
 `key-amnesia-hook` on PATH; setup writes the venv console script (or this

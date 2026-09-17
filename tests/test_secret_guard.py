@@ -403,6 +403,83 @@ def test_ordinary_ka_run_no_trailing_finding(monkeypatch, capsys) -> None:
     assert reply is None
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "shell"])
+def test_opencode_bridge_contract_verb_deny(tool_name: str, monkeypatch, capsys) -> None:
+    """Pin the deny JSON the OpenCode JS plugin parses. Always exit 0."""
+    payload = {"tool_name": tool_name, "tool_input": {"command": "ka reveal FOO"}}
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    hso = reply["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "deny"
+    assert hso["permissionDecisionReason"]
+    assert "reveal" in hso["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("tool_name", ["bash", "shell"])
+def test_opencode_bridge_contract_clean_allow(tool_name: str, monkeypatch, capsys) -> None:
+    payload = {"tool_name": tool_name, "tool_input": {"command": "echo hi"}}
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_opencode_write_content_key_denied(monkeypatch, capsys) -> None:
+    payload = {
+        "tool_name": "write",
+        "tool_input": {"filePath": "/tmp/x.env", "content": "AKIA" + "0" * 16},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_opencode_edit_newString_denied_via_collect_strings(monkeypatch, capsys) -> None:
+    """OpenCode edit args use camelCase newString, which matches no key in
+    `_command_text`. Coverage is the collect_strings fallback — this test is
+    what fails if that fallback is ever removed.
+    """
+    payload = {
+        "tool_name": "edit",
+        "tool_input": {
+            "filePath": "/tmp/x.env",
+            "oldString": "placeholder",
+            "newString": "AKIA" + "0" * 16,
+        },
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_opencode_cd_led_export_denied(monkeypatch, capsys) -> None:
+    """permission.bash globs cannot see this chain; the plugin must."""
+    payload = {
+        "tool_name": "bash",
+        "tool_input": {"command": "cd /tmp && ka export"},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "export" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_opencode_js_guarded_superset_of_allowed() -> None:
+    import re
+    from importlib import resources
+
+    js = (
+        resources.files("key_amnesia") / "plugins" / "opencode" / "secret-guard.js"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"const GUARDED = new Set\(\[([\s\S]*?)\]\)", js)
+    assert match is not None, "GUARDED set not found in secret-guard.js"
+    names = set(re.findall(r'"([^"]+)"', match.group(1)))
+    assert sg._ALLOWED_TOOL_NAMES <= names
+
+
 def test_ka_scan_without_yes_allowed(monkeypatch, capsys) -> None:
     rc, reply = _run_main(_claude_payload("ka scan --deep --no-import"), monkeypatch, capsys)
     assert rc == 0

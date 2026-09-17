@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "key-amnesia"
-version = "0.4.14"
+version = "0.4.15"
 description = "Encrypted secret vault so AI agents can use API keys without seeing them — a drop-in .env replacement"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 authors = [{ name = "key-amnesia contributors" }]
-keywords = ["secrets", "credentials", "vault", "ai-agents", "claude", "cursor", "codex", "security"]
+keywords = ["secrets", "credentials", "vault", "ai-agents", "claude", "cursor", "codex", "opencode", "security"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -55,7 +55,7 @@ where = ["src"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-key_amnesia = ["skills/*/SKILL.md", "hooks/*.py"]
+key_amnesia = ["skills/*/SKILL.md", "hooks/*.py", "plugins/opencode/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

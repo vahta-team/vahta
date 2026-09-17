@@ -3,7 +3,7 @@
 Encrypted secret vault for AI coding agents. The agent can **use** secrets
 through `ka run` without ever **seeing** the values.
 
-> **Docs as of 0.4.14.** Pages in this tree describe the shipped CLI at that
+> **Docs as of 0.4.15.** Pages in this tree describe the shipped CLI at that
 > version. The live GitHub Wiki may lag until maintainers publish from
 > in-repo `wiki/` (see that directory’s `README.md` — publish instructions
 > only; not a wiki page).

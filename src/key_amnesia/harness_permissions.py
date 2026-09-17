@@ -24,6 +24,11 @@ _HOOK_MARKERS = ("key-amnesia-hook", "key_amnesia.hooks.secret_guard")
 FILE_ALLOW_COMMANDS: tuple[str, ...] = tuple(sorted(COVERAGE_ALLOW))
 FILE_DENY_COMMANDS: tuple[str, ...] = tuple(sorted(FILE_DENY_VERBS))
 
+OPENCODE_PLUGIN_REL = "./plugins/key-amnesia-secret-guard.js"
+OPENCODE_PLUGIN_FILENAME = "key-amnesia-secret-guard.js"
+OPENCODE_PLUGIN_MARKER = "KEY_AMNESIA_PLUGIN_ID=secret-guard"
+OPENCODE_BROAD_PATTERNS = ("*", "ka *", "key-amnesia *")
+
 
 def _is_our_hook_command(command: str) -> bool:
     return any(m in command for m in _HOOK_MARKERS)
@@ -63,6 +68,88 @@ def cursor_allow_prefixes() -> list[str]:
         for command in FILE_ALLOW_COMMANDS:
             out.append(f"{binary} {command}")
     return out
+
+
+def _xdg_opencode_dir(home: Path) -> Path | None:
+    """``$XDG_CONFIG_HOME/opencode`` when that variable points inside ``home``.
+
+    OpenCode reads ``$XDG_CONFIG_HOME/opencode`` whenever the variable is set,
+    so a hardcoded ``~/.config/opencode`` can install the guard where OpenCode
+    never looks. The containment check keeps a redirected ``home`` (tests, and
+    any caller installing into another tree) from escaping into the running
+    user's own config directory.
+    """
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    if not raw:
+        return None
+    base = Path(raw)
+    if not base.is_absolute():
+        return None
+    try:
+        base.relative_to(home)
+    except ValueError:
+        return None
+    return base / "opencode"
+
+
+def opencode_config_dir(home: Path) -> Path:
+    xdg = _xdg_opencode_dir(home)
+    if xdg is not None:
+        return xdg
+    return home / ".config" / "opencode"
+
+
+def opencode_config_note(home: Path) -> str | None:
+    """Warn when ``$XDG_CONFIG_HOME`` sends OpenCode where we do not write.
+
+    Staying silent here is the worst failure available to this module: `ka
+    setup` would report the guard installed while OpenCode reads elsewhere.
+    """
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    if not raw or _xdg_opencode_dir(home) is not None:
+        return None
+    try:
+        if home != Path.home():
+            # Installing into some other tree; this process's XDG says nothing
+            # about what OpenCode will read there.
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return (
+        f"OpenCode: XDG_CONFIG_HOME={raw} points outside {home} — writing to "
+        f"{home / '.config' / 'opencode'} instead. If OpenCode reads the other "
+        "path, the guard is not installed there."
+    )
+
+
+def opencode_plugin_dest(home: Path) -> Path:
+    return opencode_config_dir(home) / "plugins" / OPENCODE_PLUGIN_FILENAME
+
+
+def opencode_plugin_managed(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return OPENCODE_PLUGIN_MARKER in path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def opencode_bash_globs(labels: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    for binary in ("ka", "key-amnesia"):
+        for label in sorted(labels):
+            out.append(f"{binary} {label}")
+            out.append(f"{binary} {label} *")
+    return out
+
+
+def opencode_deny_globs() -> list[str]:
+    return opencode_bash_globs(FILE_DENY_COMMANDS)
+
+
+def opencode_allow_globs() -> list[str]:
+    return opencode_bash_globs(FILE_ALLOW_COMMANDS)
 
 
 def _matcher_core(entry: str) -> str:
@@ -212,6 +299,7 @@ class HarnessOutcome:
     conflicts: list[tuple[Path, str]] = field(default_factory=list)
     hook_missing: bool = False
     hook_path: Path | None = None
+    extra_manifest: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _ensure_string_list(obj: dict[str, Any], key: str) -> tuple[list[str] | None, str | None]:
@@ -339,15 +427,11 @@ def prepare_claude(
             manifest_rules=[],
         )
     )
-    setattr(
-        out,
-        "_claude_manifest",
-        {
-            "claude.permissions.allow": allow_ours,
-            "claude.permissions.deny": deny_ours,
-            "claude.autoMode.allow": auto_manifest_rules,
-        },
-    )
+    out.extra_manifest = {
+        "claude.permissions.allow": allow_ours,
+        "claude.permissions.deny": deny_ours,
+        "claude.autoMode.allow": auto_manifest_rules,
+    }
     return out
 
 
@@ -523,6 +607,15 @@ def _pasteable_cursor(prefixes: list[str]) -> list[str]:
     return lines
 
 
+def _pasteable_opencode() -> list[str]:
+    lines = ["Paste-able OpenCode permission.bash:"]
+    for g in opencode_deny_globs()[:4]:
+        lines.append(f'  "{g}": "deny"')
+    lines.append("  …")
+    lines.append(f'  plugin: ["{OPENCODE_PLUGIN_REL}"]')
+    return lines
+
+
 def prepare_codex(home: Path) -> HarnessOutcome:
     out = HarnessOutcome(name="codex")
     out.lines.append(
@@ -534,6 +627,154 @@ def prepare_codex(home: Path) -> HarnessOutcome:
     )
     if not (home / ".codex").is_dir() and not os.environ.get("CODEX_HOME"):
         out.lines.append("skip Codex files: ~/.codex is absent (print-only anyway)")
+    return out
+
+
+def prepare_opencode(
+    home: Path,
+    manifest: dict[str, Any],
+) -> HarnessOutcome:
+    out = HarnessOutcome(name="opencode")
+    oc_home = opencode_config_dir(home)
+    note = opencode_config_note(home)
+    if note:
+        out.lines.append(note)
+    if not oc_home.is_dir():
+        out.lines.append(f"skip OpenCode permissions: {oc_home} is absent")
+        return out
+
+    path = oc_home / "opencode.json"
+    data, err = load_json_object_strict(path)
+    if err:
+        out.ok = False
+        out.lines.append(f"OpenCode: {err} (fail closed; no write)")
+        out.lines.extend(_pasteable_opencode())
+        return out
+    assert data is not None
+
+    plugin_path = opencode_plugin_dest(home)
+    if not opencode_plugin_managed(plugin_path):
+        out.hook_missing = True
+        out.hook_path = plugin_path
+
+    deny_ours = opencode_deny_globs()
+    allow_ours = opencode_allow_globs()
+    for verb in VALUE_EMIT_VERBS:
+        leaked = any(g == f"ka {verb}" or g.startswith(f"ka {verb} ") for g in allow_ours)
+        leaked = leaked or any(
+            g == f"key-amnesia {verb}" or g.startswith(f"key-amnesia {verb} ")
+            for g in allow_ours
+        )
+        if leaked:
+            raise RuntimeError(
+                f"value-emit verb {verb} leaked into file allow list"
+            )
+
+    perms = data.get("permission")
+    if perms is None:
+        perms = {}
+        data["permission"] = perms
+    if not isinstance(perms, dict):
+        out.ok = False
+        out.lines.append(f"OpenCode: {path} permission is not an object (fail closed)")
+        out.lines.extend(_pasteable_opencode())
+        return out
+
+    bash = perms.get("bash")
+    if bash is None:
+        bash_map: dict[str, Any] = {}
+    elif isinstance(bash, str):
+        bash_map = {"*": bash}
+    elif isinstance(bash, dict):
+        if not all(isinstance(k, str) for k in bash.keys()):
+            out.ok = False
+            out.lines.append(
+                f"OpenCode: {path} permission.bash has a non-string key (fail closed)"
+            )
+            out.lines.extend(_pasteable_opencode())
+            return out
+        if not all(isinstance(v, str) for v in bash.values()):
+            out.ok = False
+            out.lines.append(
+                f"OpenCode: {path} permission.bash has a non-string value (fail closed)"
+            )
+            out.lines.extend(_pasteable_opencode())
+            return out
+        bash_map = dict(bash)
+    else:
+        out.ok = False
+        out.lines.append(
+            f"OpenCode: {path} permission.bash is not a string or object (fail closed)"
+        )
+        out.lines.extend(_pasteable_opencode())
+        return out
+
+    ours = deny_ours + [g for g in allow_ours if g not in set(deny_ours)]
+    stale = set(_manifest_list(manifest, "opencode.permission.bash")) - set(ours)
+    merged: dict[str, Any] = {}
+    for k, v in bash_map.items():
+        if k in stale:
+            continue
+        merged[k] = v
+    for g in deny_ours:
+        if g not in merged:
+            merged[g] = "deny"
+    for g in allow_ours:
+        if g not in merged:
+            merged[g] = "allow"
+    perms["bash"] = merged
+
+    deny_set = set(deny_ours)
+    seen_conflicts: set[str] = set()
+    for k, v in merged.items():
+        if not isinstance(v, str) or v == "deny":
+            continue
+        if k in deny_set or k in OPENCODE_BROAD_PATTERNS:
+            if k not in seen_conflicts:
+                out.conflicts.append((path, k))
+                seen_conflicts.add(k)
+
+    extra: dict[str, list[str]] = {"opencode.permission.bash": list(ours)}
+
+    plugin_val = data.get("plugin")
+    plugin_ours = [OPENCODE_PLUGIN_REL]
+    if plugin_val is None:
+        data["plugin"] = list(plugin_ours)
+        extra["opencode.plugin"] = plugin_ours
+    elif not isinstance(plugin_val, list):
+        out.lines.append(
+            f"OpenCode: {path} plugin is not a list — skipping plugin array "
+            "entry (directory scan still loads the guard)"
+        )
+    elif not all(isinstance(x, str) for x in plugin_val):
+        out.lines.append(
+            f"OpenCode: {path} plugin contains a non-string entry — skipping "
+            "plugin array entry (directory scan still loads the guard)"
+        )
+    else:
+        new_plugin, err = merge_string_list(
+            plugin_val, plugin_ours, _manifest_list(manifest, "opencode.plugin")
+        )
+        if err:
+            out.lines.append(
+                f"OpenCode: {path} plugin {err} — skipping plugin array "
+                "entry (directory scan still loads the guard)"
+            )
+        else:
+            assert new_plugin is not None
+            data["plugin"] = new_plugin
+            extra["opencode.plugin"] = plugin_ours
+
+    out.extra_manifest = extra
+    out.changes.append(
+        FileChange(
+            path=path,
+            new_text=dump_json(data),
+            summary=f"OpenCode permission.bash (+ plugin array if writable): {path}",
+            manifest_key="opencode.settings",
+            manifest_rules=[],
+        )
+    )
     return out
 
 
@@ -638,8 +879,12 @@ def apply_permission_plan(
                 f"Install the key-amnesia hook for {outcome.name} now?", False
             ):
                 install_hook_fn(outcome.name)
-                installed = True
-                outcome.hook_missing = False
+                if outcome.name == "opencode" and outcome.hook_path is not None:
+                    installed = opencode_plugin_managed(outcome.hook_path)
+                else:
+                    installed = True
+                if installed:
+                    outcome.hook_missing = False
         if installed:
             continue
         ack = False
@@ -694,17 +939,21 @@ def apply_permission_plan(
             theme.out(f"wrote {change.path}")
             if change.manifest_key and change.manifest_rules:
                 new_rules[change.manifest_key] = list(change.manifest_rules)
-        extra = getattr(outcome, "_claude_manifest", None)
-        if isinstance(extra, dict):
-            new_rules.update(extra)
+        if outcome.extra_manifest:
+            new_rules.update(outcome.extra_manifest)
 
     save_manifest(new_rules)
     return rc
 
 
 def _drop_exact_string(obj: Any, exact: str) -> None:
+    """Remove ``exact`` from string lists *and* as a dict key (OpenCode maps)."""
     if isinstance(obj, dict):
-        for k, v in obj.items():
+        for k in list(obj.keys()):
+            if k == exact:
+                del obj[k]
+                continue
+            v = obj[k]
             if isinstance(v, list):
                 obj[k] = [x for x in v if x != exact]
             else:
@@ -718,9 +967,8 @@ def _save_rules_from_outcomes(
     new_rules: dict[str, list[str]], outcomes: list[HarnessOutcome]
 ) -> None:
     for outcome in outcomes:
-        extra = getattr(outcome, "_claude_manifest", None)
-        if isinstance(extra, dict):
-            new_rules.update(extra)
+        if outcome.extra_manifest:
+            new_rules.update(outcome.extra_manifest)
         for change in outcome.changes:
             if change.manifest_key and change.manifest_rules:
                 new_rules[change.manifest_key] = list(change.manifest_rules)
@@ -730,9 +978,12 @@ def remove_manifested_rules(home: Path) -> int:
     """Delete only strings recorded in the permissions manifest."""
     manifest = load_manifest()
     rules = manifest.get("rules") or {}
+    rc = 0
     if not isinstance(rules, dict) or not rules:
-        theme.info("No permissions manifest entries to remove.")
-        return 0
+        rc = _remove_opencode_plugin_file(home)
+        if rc == 0:
+            theme.info("No permissions manifest entries to remove.")
+        return rc
 
     rc = 0
     mapping: list[tuple[str, Path, tuple[str, ...]]] = [
@@ -761,6 +1012,16 @@ def remove_manifested_rules(home: Path) -> int:
             home / ".cursor" / "cli-config.json",
             ("permissions", "allow"),
         ),
+        (
+            "opencode.permission.bash",
+            opencode_config_dir(home) / "opencode.json",
+            ("permission", "bash"),
+        ),
+        (
+            "opencode.plugin",
+            opencode_config_dir(home) / "opencode.json",
+            ("plugin",),
+        ),
     ]
     for key, path, trail in mapping:
         recorded = rules.get(key)
@@ -785,16 +1046,52 @@ def remove_manifested_rules(home: Path) -> int:
             continue
         last = trail[-1]
         lst = target.get(last) if isinstance(target, dict) else None
-        if not isinstance(lst, list):
-            continue
         drop = set(recorded)
-        target[last] = [x for x in lst if x not in drop]
+        if isinstance(lst, list):
+            target[last] = [x for x in lst if x not in drop]
+        elif isinstance(lst, dict):
+            for k in list(lst.keys()):
+                if k in drop:
+                    del lst[k]
+        else:
+            continue
+        _drop_empty_opencode_containers(data)
         path.write_text(dump_json(data), encoding="utf-8")
         theme.out(f"removed manifested rules from {path} ({key})")
+
+    rc2 = _remove_opencode_plugin_file(home)
+    if rc2:
+        rc = rc2
 
     save_manifest({})
     theme.info("Cleared permissions manifest.")
     return rc
+
+
+def _remove_opencode_plugin_file(home: Path) -> int:
+    js_path = opencode_plugin_dest(home)
+    if not opencode_plugin_managed(js_path):
+        return 0
+    try:
+        js_path.unlink()
+        theme.out(f"removed {js_path}")
+    except OSError as e:
+        theme.error(f"skip remove at {js_path}: {e}")
+        return 1
+    return 0
+
+
+def _drop_empty_opencode_containers(data: dict[str, Any]) -> None:
+    perms = data.get("permission")
+    if isinstance(perms, dict):
+        bash = perms.get("bash")
+        if isinstance(bash, dict) and not bash:
+            del perms["bash"]
+        if not perms:
+            del data["permission"]
+    plugin = data.get("plugin")
+    if isinstance(plugin, list) and not plugin:
+        del data["plugin"]
 
 
 def run_permissions(
@@ -811,6 +1108,7 @@ def run_permissions(
         prepare_claude(home, manifest),
         prepare_cursor(home, manifest),
         prepare_codex(home),
+        prepare_opencode(home, manifest),
     ]
     return apply_permission_plan(
         outcomes,

@@ -2,7 +2,13 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.14`.
+Versions follow the git tags `0.4.0` … `0.4.15`.
+
+## [0.4.15] — 2026-09-17
+
+### Added
+
+- **OpenCode support.** `ka setup` installs a JS bridge plugin at `~/.config/opencode/plugins/key-amnesia-secret-guard.js` (or under `$XDG_CONFIG_HOME/opencode`, which is where OpenCode itself looks when that variable is set) that spawns the existing `secret_guard` module on `tool.execute.before` and throws on a Claude-shaped deny. Skills already auto-load from `~/.claude/skills` and `~/.agents/skills` — nothing extra is copied for OpenCode. Best-effort `permission.bash` deny/allow globs are merged into `opencode.json`; the plugin is the enforcement (it sees `cd`-led chains; the globs do not).
 
 ## [0.4.14] — 2026-09-09
 

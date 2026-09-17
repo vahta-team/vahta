@@ -1,2 +1,3 @@
 recursive-include src/key_amnesia/skills *.md
 recursive-include src/key_amnesia/hooks *.py
+recursive-include src/key_amnesia/plugins *.js

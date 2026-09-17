@@ -39,7 +39,7 @@ The agent gets amnesia. That's the whole point.
 
 ```bash
 pip install key-amnesia
-ka setup                          # skills + secret-guard hook for Claude Code / Cursor / Codex
+ka setup                          # skills + secret-guard hook for Claude Code / Cursor / Codex / OpenCode
 ka init --project                 # or: ka init  for a global vault
 ka import .env .env.local         # move plaintext into the vault (TTY-only; never prints values)
 ka scan                           # find remaining LEAKs (names/paths only)
@@ -84,14 +84,18 @@ this project:
 
 `ka setup` copies the bundled skills to `~/.claude/skills/`, `~/.cursor/skills/`,
 `~/.agents/skills/` (Codex), and `~/.codex/skills/` (legacy Codex /
-`$CODEX_HOME`), merges a PreToolUse / preToolUse hook that **denies forbidden
-`ka` verbs** (and inline credential-shaped tokens), and best-effort **allow**
-rules so the harness will let unattended `ka run` / `ka list` through. Files
-try to let the agent run `ka`; the hook stops `ka set`, `ka reveal`,
-`ka scan --yes`, and other mutating verbs. Codex also needs you to review and
-trust the new hook via `/hooks` before it will run. If Claude `autoMode.allow`
-entries vanish after a restart, re-run `ka setup`. Cursor: `ka setup` never
-creates `~/.cursor/permissions.json` (that file replaces the in-app terminal
+`$CODEX_HOME`). OpenCode auto-loads those skills from `~/.claude/skills` and
+`~/.agents/skills` with nothing extra to copy. Setup merges a PreToolUse /
+preToolUse hook that **denies forbidden `ka` verbs** (and inline
+credential-shaped tokens), and best-effort **allow** rules so the harness will
+let unattended `ka run` / `ka list` through. On OpenCode the guard is a plugin
+under `~/.config/opencode/plugins/` plus `permission.bash` globs — the plugin
+is the enforcement (it sees `cd`-led chains; the globs do not). Files try to
+let the agent run `ka`; the hook stops `ka set`, `ka reveal`, `ka scan --yes`,
+and other mutating verbs. Codex also needs you to review and trust the new hook
+via `/hooks` before it will run. If Claude `autoMode.allow` entries vanish after
+a restart, re-run `ka setup`. Cursor: `ka setup` never creates
+`~/.cursor/permissions.json` (that file replaces the in-app terminal
 allowlist).
 
 Agent-facing `ka run` should be a **bare** command with `--cwd` rather than
@@ -169,7 +173,7 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 11. **`--admit-tree` is a separate opt-in trust-widening (also never the default, no config/env).** At the first unrecognized-peer prompt it lets you pick a kernel-verified *ancestor* as the admission root, so every real OS descendant of that root (including later sibling CLI invocations under the same parent) is silently in-tree for the rest of the session. That is wider than admitting the short-lived connecting `ka` process alone — use it only when you intend lineage trust, and read the loud `via=interactive-tree` announce + audit line for the root you actually chose. It does **not** change `--pre-admit` (arrival-time grant vs lineage root).
 12. **A live guard session reloads on change, not on a fixed schedule.** The guard checks a cheap content fingerprint of the vault file on every `run`/`list`/`status`; when another terminal changes it, the guard re-opens with the SecretBox key it already derived at unlock — no new password prompt. The tradeoff: the guard keeps that **derived key** in memory for the session. Detail: [DESIGN.md](DESIGN.md) and the [threat-model wiki page](https://github.com/fujitoid/key-amnesia/wiki/Threat-model).
 13. **Runner role is not a cryptographic ACL against you.** If your local identity is enrolled as `runner`, `ka` refuses `reveal`/`copy` — effective against an agent. Anyone who knows the master password can still decrypt the vault offline. Per-member `ka export` ciphertext *is* cryptographic (only that member's key opens it).
-14. **Harness file allow-lists are best-effort; the PreToolUse hook is the deny.** Claude `permissions.allow` / `autoMode.allow` and Cursor prefixes try to let the agent run `ka run` / `ka list`. They do not authorize `cd && … | tail` compound chains (each subcommand is classified separately). Codex has no command rules in `config.toml`. Without a trusted hook, auto-mode deny is inert. An agent that can write harness config can remove or disable the hook; hook self-protection is not in this release.
+14. **Harness file allow-lists are best-effort; the hook/plugin is the deny.** Claude `permissions.allow` / `autoMode.allow`, Cursor prefixes, and OpenCode `permission.bash` globs try to let the agent run `ka run` / `ka list`. They do not authorize `cd && … | tail` compound chains (each subcommand is classified separately). Codex has no command rules in `config.toml`. Without a trusted hook (or, on OpenCode, the JS plugin), auto-mode deny is inert. An agent that can write harness config can remove or disable the hook; hook self-protection is not in this release.
 15. **Hook verb-deny is not a complete `ka` sandbox.** Shell aliases, functions, and renamed copies of the binary are not recognized. A trailing command that *constructs* a `ka` invocation at runtime (`python -c "os.system('ka set …')"`) is not verb-denied. `KEY_AMNESIA_HOOK_DISABLE` on the inner command does not disable the hook process; a **user login** env var can inherit into the harness and is the operator bypass.
 16. **Write/Edit tools are not verb-denied** so docs can mention `ka set`. Secret scanning on those tools is unchanged.
 

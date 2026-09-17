@@ -20,6 +20,10 @@ Host contracts from the same detection logic:
 - Cursor ``preToolUse``: stdin JSON with ``tool_name`` / ``tool_input`` (plus
   Cursor-only fields like ``cursor_version`` / ``conversation_id``); deny
   reply uses the flatter ``{"permission": "deny", ...}`` shape.
+- OpenCode has no stdin-JSON hook protocol. ``ka setup`` installs a JS
+  plugin that feeds this module the Claude-shaped payload and throws on a
+  deny reply. There is no ``opencode`` host branch; the Claude deny shape
+  is consumed as-is.
 
 Fails **open** on JSON/IO errors or unexpected shapes — a broken hook must
 never brick the agent. Set ``KEY_AMNESIA_HOOK_DISABLE=1`` to skip all checks

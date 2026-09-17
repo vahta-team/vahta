@@ -48,7 +48,7 @@ There is no MCP “get secret” API. That is intentional.
 
 ## Related
 
-Agent-oriented short form: the `key-amnesia-usage` skill (`src/key_amnesia/skills/key-amnesia-usage/SKILL.md`), installed for Claude Code / Cursor / Codex via `ka setup`.
+Agent-oriented short form: the `key-amnesia-usage` skill (`src/key_amnesia/skills/key-amnesia-usage/SKILL.md`), installed for Claude Code / Cursor / Codex / OpenCode via `ka setup` (OpenCode auto-loads from `~/.claude/skills` and `~/.agents/skills`).
 
 Human docs: [GitHub wiki — Agent usage](https://github.com/fujitoid/key-amnesia/wiki/Agent-usage)
 (`ka docs`).
