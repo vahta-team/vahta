@@ -20,15 +20,18 @@ import pytest
 from key_amnesia.cli import main
 from key_amnesia.detect import (
     ASSIGN,
+    FLAG_FORM_FIRE_TIERS,
     NAMED_WEAKENING_FUNCTION_CALL,
     NAMED_WEAKENING_IDENTIFIER,
     NAMED_WEAKENING_LOW_TRANSITION,
     NAMED_WEAKENING_TYPE_ANNOTATION,
     NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
     NAMED_WEAKENINGS,
+    REASON_FLAG_FORM,
     REASON_UNCONFIRMED_MCP,
     REASON_UUID,
     _iter_assignments,
+    _iter_flag_values,
     classify_value,
     find_prefix_kind,
     find_secret_kind,
@@ -60,6 +63,12 @@ _GEN_HEX32 = "a1b2c3d4e5f6789012345678abcdef01"
 _GEN_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 _GEN_URLSAFE = "A7xQ2mK9pL4vN8wZ1bC3dE5fG6hJ0kL"
 _GEN_VALUES = (_GEN_MIXED, _GEN_MIXED_B, _GEN_HEX32, _GEN_JWT, _GEN_URLSAFE)
+
+# Space-separated flag form. `_GEN_WEAK_PW` is the shape that decides the tier:
+# a human password whose transition rate (0.25) sits far below
+# LIKELY_TRANSITION_FLOOR, so it is `possible`, not `likely`.
+_GEN_WEAK_PW = "hunter7-correct-horse"
+_GEN_UUID = "4f8a1c9e-2b7d-4e63-9a15-0c8bd3f7e214"
 
 DEMOTED_TO_WEAKENING = {
     "passphrase_correct_horse_battery.py": NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
@@ -794,3 +803,122 @@ def test_assign_blowup_alnum_prefix_under_one_second() -> None:
     elapsed = time.perf_counter() - t0
     assert elapsed < 1.0
 
+
+# --- space-separated flag form (`--api-key <value>`) -----------------------
+# Measured against installed 0.4.15: `NAME=<value>`, `--api-key=<value>` and
+# `Bearer <v>` were caught; `--api-key <value>` / `--token <value>` /
+# `--password <value>` were caught nowhere. A credential on argv is the exact
+# leak this product exists to prevent.
+
+
+FLAG_FORM_MUST_FIRE = [
+    f"mysql --password {_GEN_MIXED_B} -u root app_db",
+    f"./cli --api-key {_GEN_MIXED} sync",
+    f"curl --token {_GEN_HEX32} https://api.example.com",
+    f"curl --api-key {_GEN_UUID} https://api.example.com",
+    f"ansible-playbook site.yml --vault-password {_GEN_MIXED_B}",
+    f"java -jar app.jar --private-key {_GEN_URLSAFE}",
+    f"pgcli --password {_GEN_WEAK_PW} -h db.example.com",
+    f'docker login -u me --password "{_GEN_WEAK_PW}"',
+]
+
+# Recommended usage and env/file indirection. Denying any of these would make
+# the product unusable, so they are the hard constraint on the matcher.
+FLAG_FORM_MUST_NOT_FIRE = [
+    "ka run --secret GOOGLE_API_KEY -- ./deploy.sh",
+    "ka run --secret OPENAI_API_KEY --as OPENAI_API_KEY=OPENAI_API_KEY -- python train.py",
+    'gh release create v1.2.3 --token "$GITHUB_TOKEN"',
+    'psql --password "$PGPASSWORD" -h db.example.com -U app',
+    "python app.py --api-key $OPENAI_API_KEY",
+    "aws secretsmanager get-secret-value --secret-name prod/db/password",
+    "docker login registry.example.com -u ci --password-stdin",
+    "vault login --token-file ./token.txt",
+    "gh auth login --with-token < token.txt",
+    "mysql --password --host=db.internal.example.com",
+    "docker buildx build --secret id=app,src=./secrets/app.env .",
+    "curl --api-key ./keys/Prod2Key.pem https://api.example.com",
+    "curl --api-key /run/secrets/api_key https://api.example.com",
+    'git commit -m "rotate the api key and token in CI"',
+    "mysql --password changeme -u root",
+    "curl --api-key <YOUR_KEY_HERE> https://api.example.com",
+]
+
+
+@pytest.mark.parametrize("command", FLAG_FORM_MUST_FIRE)
+def test_flag_form_space_separated_fires(command: str) -> None:
+    kind = find_secret_kind(command)
+    assert kind is not None, command
+    # Never leak the value through the reported kind.
+    for value in (*_GEN_VALUES, _GEN_WEAK_PW, _GEN_UUID):
+        assert value not in kind
+
+
+@pytest.mark.parametrize("command", FLAG_FORM_MUST_NOT_FIRE)
+def test_flag_form_env_indirection_stays_quiet(command: str) -> None:
+    assert find_secret_kind(command) is None, command
+    assert list(_iter_flag_values(command)) == [] or not scan_text_hits(
+        command
+    ).flag_names
+
+
+def test_flag_form_reason_and_kind_name_the_flag() -> None:
+    hits = scan_text_hits(f"mysql --password {_GEN_MIXED_B} -u root")
+    assert [n.upper() for n in hits.likely_names] == ["PASSWORD"]
+    assert hits.flag_names == ["PASSWORD"]
+    assert REASON_FLAG_FORM in hits.likely_reasons
+    assert find_secret_kind(f"mysql --password {_GEN_MIXED_B}") == "--password flag value"
+    # Assignment hits keep the old phrasing.
+    assert find_secret_kind(f"PASSWORD={_GEN_MIXED_B}") == "PASSWORD assignment"
+
+
+def test_flag_form_tier_is_one_flippable_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FLAG_FORM_FIRE_TIERS is the whole tier decision — nothing else changes."""
+    from key_amnesia import detect as detect_mod
+
+    strong = f"mysql --password {_GEN_MIXED_B} -u root"
+    weak = f"pgcli --password {_GEN_WEAK_PW} -h db.example.com"
+    assert classify_value(_GEN_MIXED_B)[0] == "likely"
+    assert classify_value(_GEN_WEAK_PW) == ("possible", NAMED_WEAKENING_LOW_TRANSITION)
+
+    monkeypatch.setattr(detect_mod, "FLAG_FORM_FIRE_TIERS", ("likely",))
+    assert find_secret_kind(strong) is not None
+    assert find_secret_kind(weak) is None
+
+    monkeypatch.setattr(detect_mod, "FLAG_FORM_FIRE_TIERS", ("likely", "possible"))
+    assert find_secret_kind(strong) is not None
+    assert find_secret_kind(weak) is not None
+
+
+def test_flag_form_shipped_tier_is_likely_plus_possible() -> None:
+    """Measured recommendation: 0 false positives, 7 misses -> 1 over 39 cases."""
+    assert FLAG_FORM_FIRE_TIERS == ("likely", "possible")
+
+
+def test_flag_form_is_outside_iter_assignments() -> None:
+    """Structural invariant behind test_assign_differential_corpus.
+
+    The flag form must never be produced by ``_iter_assignments``, or the
+    legacy ``ASSIGN`` equivalence breaks by construction.
+    """
+    for command in FLAG_FORM_MUST_FIRE + FLAG_FORM_MUST_NOT_FIRE:
+        assert _assign_name_and_len(command) == _legacy_assign_name_and_len(command)
+    assert _assign_name_and_len(f"mysql --password {_GEN_MIXED_B}") == []
+    # And the assignment form still wins its own shape.
+    assert _assign_name_and_len(f"--api-key={_GEN_MIXED}") == [("api-key", len(_GEN_MIXED))]
+
+
+def test_flag_form_hook_denies_argv_credential() -> None:
+    assert sg.find_finding(f"mysql --password {_GEN_MIXED_B} -u root") is not None
+    assert sg.find_finding(f"pgcli --password {_GEN_WEAK_PW} -h db") is not None
+    # ka-routed usage is still allowed end to end.
+    assert sg.find_finding("ka run --secret GOOGLE_API_KEY -- ./deploy.sh") is None
+
+
+def test_flag_form_blowup_under_one_second() -> None:
+    """Flat name class: a nested one backtracks catastrophically here."""
+    unit = "-" + ("a" * 4000) + "_token"
+    n = max(1, (256 * 1024) // len(unit))
+    text = unit * n
+    t0 = time.perf_counter()
+    list(_iter_flag_values(text))
+    assert time.perf_counter() - t0 < 1.0
