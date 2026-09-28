@@ -12,6 +12,17 @@ Both consumers import this module. The hook denies on possible|likely|prefix.
 ``ka scan`` ``leak_count`` / default exit count likely + prefix + filename
 hits only.
 
+Two match shapes, both merged at ``scan_text_hits``:
+
+    assignment  ``NAME=<value>`` / ``"api_key": "<value>"``  (``_iter_assignments``)
+    flag        ``--api-key <value>`` / ``--token <value>``   (``_iter_flag_values``)
+
+The flag form is a *separate* matcher on purpose. ``_iter_assignments`` must
+stay finding-identical to the legacy ``ASSIGN`` regex (differential test), and
+``ASSIGN`` itself is quadratic and must never run on scan/hook paths. See
+``FLAG_FORM_FIRE_TIERS`` for the one constant that decides how loud the flag
+form is.
+
 Never returns or logs secret *values*.
 
 Measured evidence (reconstructed shapes, not harvested content)
@@ -166,6 +177,48 @@ _ASSIGN_TAIL = re.compile(
     r"""(?P<nq2>['"]?)\s*[:=]\s*(?P<q>['"]?)(?P<value>[^\s'"]{8,})(?P<q2>['"]?)"""
 )
 
+# --- space-separated flag form: `--api-key <value>` ------------------------
+# ``_ASSIGN_TAIL`` requires ``\s*[:=]\s*``, so through 0.4.15 the detector was
+# assignment-shaped: ``--api-key=<value>`` was caught and ``--api-key <value>``
+# was caught nowhere. A credential on argv is the exact leak this product
+# exists to prevent, so the flag form gets its own anchored matcher, merged at
+# the ``scan_text_hits`` level. It is deliberately NOT folded into
+# ``_iter_assignments``, which must remain finding-identical to ``ASSIGN``.
+REASON_FLAG_FORM = "flag-form"
+
+# THE ONE LINE TO FLIP. ("likely",) fires only on strong value signals
+# (transition floor / hex / UUID). ("likely", "possible") additionally fires on
+# word-shaped and low-transition values — which is where most real
+# `--password <value>` leaks land, e.g. a passphrase-style DB password whose
+# transition rate sits at 0.25, far below LIKELY_TRANSITION_FLOOR.
+FLAG_FORM_FIRE_TIERS: tuple[Confidence, ...] = ("likely", "possible")
+
+# Flat name class on purpose: a nested `(?:[-_][A-Za-z0-9]+)*` backtracks
+# catastrophically on long underscore runs. The name vocabulary is enforced
+# afterwards by ``_SECRET_NAME``, exactly as the assignment form does.
+#
+# The value class is what keeps the recommended usage quiet. It excludes:
+#   $ ` ( )   -> `--token "$GITHUB_TOKEN"`, `--api-key $(pass show x)`
+#   < > | & ; -> `gh auth login --with-token < token.txt`, `--api-key <KEY>`
+#   = , quote -> `--secret id=app,src=./f` (the assignment form's job)
+#   leading - -> `mysql --password --host=db` (the next flag, not a value)
+_FLAG_FORM = re.compile(
+    r"""(?x)
+    (?<![\w./=-])
+    --?(?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    [ \t]+
+    (?P<q>['"]?)
+    (?P<value>[^\s'"`;|&<>()$=\\-][^\s'"`;|&<>()$=\\]{7,})
+    (?P=q)
+    """
+)
+
+# `ka run --secret GOOGLE_API_KEY` / `--password PGPASSWORD` name an env var.
+# That is indirection, not a value — the whole point of the product.
+_ENV_NAME_VALUE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+# `--token ./token.txt` / `--api-key /run/secrets/db` point at a file.
+_PATH_VALUE = re.compile(r"^(?:\.{1,2}/|/|~/|[A-Za-z]:[\\/])")
+
 # One-pass gate: any vendor prefix. Kind is still chosen by PREFIX_PATTERNS
 # order (not leftmost match) so reported secret_names stay stable.
 _ANY_PREFIX = re.compile("|".join(p.pattern for _kind, p in PREFIX_PATTERNS))
@@ -220,6 +273,10 @@ class HitSet:
     possible_reasons: list[str] = field(default_factory=list)
     likely_reason_counts: dict[str, int] = field(default_factory=dict)
     possible_reason_counts: dict[str, int] = field(default_factory=dict)
+    # Upper-cased names that were matched as `--flag <value>` rather than
+    # `name=<value>`. Phrasing only — the hit itself lives in the name dicts
+    # so scan/hook reporting needs no change.
+    flag_names: list[str] = field(default_factory=list)
     # upper(name) -> (original_name, reasons). Source of truth for merge.
     _likely_by_name: dict[str, tuple[str, list[str]]] = field(default_factory=dict)
     _possible_by_name: dict[str, tuple[str, list[str]]] = field(default_factory=dict)
@@ -282,6 +339,9 @@ class HitSet:
             self.bearer_likely = True
         if extra.bearer_possible:
             self.bearer_possible = True
+        for key in extra.flag_names:
+            if key not in self.flag_names:
+                self.flag_names.append(key)
         self._rebuild()
 
 
@@ -434,6 +494,13 @@ def classify_bearer_capture(text: str) -> Confidence:
     return classify_value(match.group(1))[0]
 
 
+def _name_kind(name: str, hits: HitSet) -> str:
+    """Phrase a name hit. Flag-form hits say so, so the deny message is actionable."""
+    if name.upper() in hits.flag_names:
+        return f"--{name} flag value"
+    return f"{name.upper()} assignment"
+
+
 def find_secret_kind(text: str) -> str | None:
     """Human-readable kind if possible|likely|prefix, else None. No values.
 
@@ -445,11 +512,11 @@ def find_secret_kind(text: str) -> str | None:
     if hits.bearer_likely:
         return "Bearer token"
     if hits.likely_names:
-        return f"{hits.likely_names[0].upper()} assignment"
+        return _name_kind(hits.likely_names[0], hits)
     if hits.bearer_possible:
         return "Bearer token"
     if hits.possible_names:
-        return f"{hits.possible_names[0].upper()} assignment"
+        return _name_kind(hits.possible_names[0], hits)
     return None
 
 
@@ -489,6 +556,24 @@ def _iter_assignments(text: str) -> Iterator[tuple[str, str]]:
         yield text[i : kw.end()], tail.group("value")
 
 
+def _iter_flag_values(text: str) -> Iterator[tuple[str, str]]:
+    """Yield (flag_name, value) for space-separated `--api-key <value>` forms.
+
+    Separate from ``_iter_assignments`` by design (see module docstring).
+    Never logs or returns values to callers outside ``scan_text_hits``.
+    """
+    if not text or "-" not in text:
+        return
+    for match in _FLAG_FORM.finditer(text):
+        name = match.group("name")
+        if not _SECRET_NAME.fullmatch(name):
+            continue
+        value = match.group("value")
+        if _ENV_NAME_VALUE.fullmatch(value) or _PATH_VALUE.match(value):
+            continue
+        yield name, value
+
+
 def collect_strings(obj: Any) -> Iterable[str]:
     if isinstance(obj, str):
         yield obj
@@ -512,11 +597,32 @@ def iter_secret_keyed_strings(obj: Any) -> Iterator[tuple[str, str]]:
             yield from iter_secret_keyed_strings(item)
 
 
-def scan_text_hits(text: str) -> HitSet:
-    """Assignment names (likely, possible), vendor prefix, Bearer flags.
+def _merge_chosen(
+    chosen: dict[str, tuple[str, str, list[str]]],
+    name: str,
+    tier: str,
+    reasons: list[str],
+) -> None:
+    """Highest tier wins per name; reasons accumulate within a tier. No values."""
+    key = name.upper()
+    prev = chosen.get(key)
+    if prev is None:
+        chosen[key] = (tier, name, list(reasons))
+        return
+    prev_tier, _prev_name, prev_reasons = prev
+    if prev_tier == "possible" and tier == "likely":
+        chosen[key] = (tier, name, list(reasons))
+    elif prev_tier == tier:
+        for reason in reasons:
+            if reason and reason not in prev_reasons:
+                prev_reasons.append(reason)
 
-    Highest tier wins per name: classify every assignment, keep likely over
-    possible. Vendor prefix is ``certain``. Bearer whose value is likely is
+
+def scan_text_hits(text: str) -> HitSet:
+    """Assignment + flag-form names (likely, possible), vendor prefix, Bearer.
+
+    Highest tier wins per name: classify every assignment and every
+    space-separated `--flag <value>`, keep likely over possible. Vendor prefix is ``certain``. Bearer whose value is likely is
     ``bearer_likely`` (scan ``likely``). Bearer of an identifier sets
     ``bearer_possible``. Never returns values.
     """
@@ -535,19 +641,24 @@ def scan_text_hits(text: str) -> HitSet:
     # key -> (tier, original_name, reasons)
     chosen: dict[str, tuple[str, str, list[str]]] = {}
     for name, value in _iter_assignments(text):
-        key = name.upper()
         tier, reason = classify_value(value)
         if tier not in ("likely", "possible"):
             continue
-        prev = chosen.get(key)
-        if prev is None:
-            chosen[key] = (tier, name, [reason] if reason else [])
+        _merge_chosen(chosen, name, tier, [reason] if reason else [])
+
+    # Space-separated flag form, merged here rather than inside
+    # _iter_assignments so the ASSIGN differential stays intact.
+    for name, value in _iter_flag_values(text):
+        tier, reason = classify_value(value)
+        if tier not in FLAG_FORM_FIRE_TIERS:
             continue
-        prev_tier, _prev_name, prev_reasons = prev
-        if prev_tier == "possible" and tier == "likely":
-            chosen[key] = (tier, name, [reason] if reason else [])
-        elif prev_tier == tier and reason and reason not in prev_reasons:
-            prev_reasons.append(reason)
+        key = name.upper()
+        if key not in hits.flag_names:
+            hits.flag_names.append(key)
+        reasons = [REASON_FLAG_FORM]
+        if reason:
+            reasons.append(reason)
+        _merge_chosen(chosen, name, tier, reasons)
 
     for tier, name, reasons in chosen.values():
         hits.record_assignment(name, tier, reasons)
