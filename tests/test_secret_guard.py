@@ -632,3 +632,103 @@ def test_passphrase_still_hook_denied() -> None:
     assert sg.find_finding("export PASSWORD=CorrectHorseBattery") is not None
     assert sg.find_finding("secret = CorrectHorseBattery") is not None
 
+
+
+# --- union: flag-form credential (branch A) inside MCP arguments (branch B) --
+#
+# Neither half covers this. Before 0.4.16 the space-separated flag form was
+# detected nowhere, and MCP calls never reached the detector at all. The value
+# below is an authored fake with no vendor prefix, so no known-prefix rule can
+# rescue the case: the deny depends on the flag anchor *and* on MCP arguments
+# being scanned.
+
+UNION_FAKE_VALUE = "Xq4vP9mL2kR7nB3wZ6tY"
+
+
+def test_union_fake_value_has_no_vendor_prefix() -> None:
+    """Guards the premise: the fixture must not be catchable by prefix alone."""
+    assert sg.find_finding(UNION_FAKE_VALUE) is None
+    assert sg.find_finding(f"note: {UNION_FAKE_VALUE}") is None
+
+
+def test_union_mcp_flag_form_non_vendor_value_denied(monkeypatch, capsys) -> None:
+    payload = _mcp_payload(
+        {
+            "title": "deploy runbook",
+            "body": f"deploy with --api-key {UNION_FAKE_VALUE}",
+        },
+        tool="mcp__github__create_issue",
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    hso = reply["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "deny"
+    assert "--api-key flag value" in hso["permissionDecisionReason"]
+    assert UNION_FAKE_VALUE not in hso["permissionDecisionReason"]
+
+
+def test_union_mcp_flag_form_in_sibling_argument_denied(monkeypatch, capsys) -> None:
+    """A server arg named `command` must not shadow a flag-form sibling."""
+    payload = _mcp_payload(
+        {
+            "command": "echo hi",
+            "notes": f"then run --password {UNION_FAKE_VALUE}",
+        },
+        tool="mcp__docker__exec",
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert "--password flag value" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_union_cursor_shaped_mcp_flag_form_keeps_flat_deny(monkeypatch, capsys) -> None:
+    """Same union payload on Cursor's contract: flat shape, no hookSpecificOutput."""
+    payload = _mcp_payload(
+        {"body": f"deploy with --api-key {UNION_FAKE_VALUE}"},
+        tool="mcp__github__create_issue",
+    )
+    payload["hook_event_name"] = "preToolUse"
+    payload["cursor_version"] = "1.7.2"
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert "hookSpecificOutput" not in reply
+    assert reply["permission"] == "deny"
+    assert "--api-key flag value" in reply["agent_message"]
+    assert "--api-key flag value" in reply["user_message"]
+    assert UNION_FAKE_VALUE not in json.dumps(reply)
+
+
+def test_union_clean_mcp_payload_stays_silent(monkeypatch, capsys) -> None:
+    """Flag-shaped but non-qualifying args: end-anchored vocabulary + indirection."""
+    payload = _mcp_payload(
+        {
+            "title": "ci notes",
+            "body": (
+                "use --token-file ./t.txt, --password-stdin, "
+                '--secret-name prod/db/password and --token "$GITHUB_TOKEN"'
+            ),
+        },
+        tool="mcp__github__create_issue",
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_union_ka_run_recommended_path_not_denied(monkeypatch, capsys) -> None:
+    """The path key-amnesia tells agents to use must stay usable."""
+    rc, reply = _run_main(
+        _claude_payload("ka run --secret SOME_NAME -- cmd"), monkeypatch, capsys
+    )
+    assert rc == 0
+    assert reply is None
+    rc, reply = _run_main(
+        _claude_payload("ka run --secret SOME_NAME --as SOME_NAME=API_KEY -- ./deploy.sh"),
+        monkeypatch,
+        capsys,
+    )
+    assert rc == 0
+    assert reply is None
