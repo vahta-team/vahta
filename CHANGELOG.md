@@ -2,7 +2,75 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.15`.
+Versions follow the git tags `0.4.0` … `0.4.16`.
+
+## [0.4.16] — 2026-09-29
+
+> **Upgrade: re-run `ka setup`.** The tool-name matcher that decides which calls
+> reach the guard lives in *your* `~/.claude/settings.json` (and Codex
+> `hooks.json`) on disk, written at setup time. Upgrading the package does not
+> rewrite it, so MCP calls keep bypassing the guard **silently** until setup runs
+> again — and nothing warns you: `claude_hook_registered` reports "registered"
+> regardless of which matcher is stored. A matcher-aware check is deliberately
+> deferred, so for this release the re-run is the whole mechanism.
+
+### Fixed
+
+- **A credential passed as a space-separated flag was detected nowhere.**
+  `--api-key <value>`, `--token <value>` and `--password <value>` walked through
+  both the hook and `ka scan`; only `NAME=value`, `--api-key=value` and
+  `Bearer <val>` were caught. The detector was assignment-shaped — it required
+  `[:=]` between name and value — so the leak this product exists to prevent, a
+  credential sitting on argv where it lands in `ps`, shell history and CI logs,
+  was the one shape that passed. Flag-form hits report as `--password flag value`
+  rather than `PASSWORD assignment`, so a finding says which form it came from.
+
+  The name vocabulary is **end-anchored**: `--secret-name`, `--password-stdin`
+  and `--token-file` do not qualify. Values that are env indirection (`"$VAR"`),
+  command substitutions, paths, or shaped like an env-var name are excluded, so
+  `ka run --secret GOOGLE_API_KEY` and `--token "$GITHUB_TOKEN"` stay quiet.
+  Shipped tier is `likely+possible`, set by one constant in `detect.py`
+  (`FLAG_FORM_FIRE_TIERS`) — `likely` alone misses the common case, since a
+  human-authored password classifies as `possible`. Measured at **0 false
+  positives** over 39 authored command lines and the whole repo corpus, cutting
+  misses **7 → 1**.
+
+### Added
+
+- **MCP tool calls are scanned.** On Claude Code and Codex, MCP calls arrive at
+  the same `PreToolUse` event as Bash/Write/Edit, under names shaped
+  `mcp__<server>__<tool>`. key-amnesia dropped them twice: the installed matcher
+  was `Bash|Write|Edit`, which never matches such a name, and the hook's own
+  allow-list early-returned even when a matcher did fire. So an agent could hand
+  a credential to any MCP server with the guard installed and nothing objected.
+
+  MCP arguments are scanned across **all** their strings rather than through the
+  known-key shortcut, because argument names belong to the MCP server: one naming
+  an argument `command` would otherwise shadow a credential sitting in a sibling
+  argument. Verb denial stays shell-only — an MCP call is not a shell command, so
+  `ka reveal` in its arguments is scanned, not verb-denied. Deny reply shapes are
+  unchanged.
+
+  Together with the flag-form fix above, a call such as
+  `mcp__github__create_issue` carrying `deploy with --api-key <value>` is now
+  denied; neither change denies it alone.
+
+### Not covered
+
+Stated plainly, because a guard's gaps are part of its contract:
+
+- **OpenCode MCP calls.** The bundled plugin filters on its own tool-name set,
+  and OpenCode's MCP tool-id shape is undocumented in the plugin SDK types.
+  Unverified, so not guessed at.
+- **Cursor MCP and file reads.** Cursor routes MCP to `beforeMCPExecution` and
+  reads to `beforeReadFile`; `ka setup` registers neither.
+- **MCP *results*.** `PreToolUse` sees only the request, so a server that returns
+  a secret is still invisible.
+- **Positional credentials with no flag to anchor on** — `mysql -u root <secret>`.
+  Firing on bare argv words would need a per-tool argument table.
+- **Single-character-class values** such as `--password postgres-dev-local`, which
+  fail the inherited mixed-class gate in `classify_value`. The tier is not what
+  stops these.
 
 ## [0.4.15] — 2026-09-17
 
