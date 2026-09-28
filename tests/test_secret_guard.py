@@ -480,6 +480,123 @@ def test_opencode_js_guarded_superset_of_allowed() -> None:
     assert sg._ALLOWED_TOOL_NAMES <= names
 
 
+# --- MCP tool calls (same PreToolUse event, `mcp__<server>__<tool>`) --------
+
+
+MCP_NAME_SAMPLES = [
+    "mcp__github__create_issue",
+    "mcp__slack__post_message",
+    "mcp__claude_ai_Gmail__send_message",
+    "MCP__Github__Create_Issue",
+    "mcp__some-server__do__it",
+]
+
+
+@pytest.mark.parametrize("name", MCP_NAME_SAMPLES)
+def test_is_mcp_tool_name_accepts(name: str) -> None:
+    assert sg.is_mcp_tool_name(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Bash", "Write", "apply_patch", "mcp", "mcp__", "mcpfoo__bar", "", "Read"],
+)
+def test_is_mcp_tool_name_rejects(name: str) -> None:
+    assert not sg.is_mcp_tool_name(name)
+
+
+def _mcp_payload(tool_input: object, tool: str = "mcp__github__create_issue") -> dict:
+    return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+
+
+def test_mcp_inline_credential_denied(monkeypatch, capsys) -> None:
+    """The gap this closes: today such a call passes the guard entirely."""
+    payload = _mcp_payload(
+        {"title": "deploy notes", "body": "run with --api-key " + "sk-ant-" + "a" * 25}
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    hso = reply["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "deny"
+    assert "Anthropic" in hso["permissionDecisionReason"]
+
+
+def test_mcp_credential_nested_in_arguments_denied(monkeypatch, capsys) -> None:
+    """MCP argument shapes are server-defined; collect_strings must reach them."""
+    payload = _mcp_payload(
+        {
+            "channel": "#ops",
+            "blocks": [{"text": {"type": "mrkdwn", "value": "AKIA" + "0" * 16}}],
+        },
+        tool="mcp__slack__post_message",
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_mcp_known_key_does_not_shadow_sibling_argument(monkeypatch, capsys) -> None:
+    """A server arg literally named `command` must not hide a sibling secret."""
+    payload = _mcp_payload(
+        {"command": "echo hi", "env_note": "ghp_" + "a" * 25},
+        tool="mcp__docker__exec",
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert "GitHub" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_mcp_clean_arguments_allowed(monkeypatch, capsys) -> None:
+    payload = _mcp_payload({"title": "docs", "body": "describe the setup flow"})
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_mcp_verb_deny_stays_shell_only(monkeypatch, capsys) -> None:
+    """An MCP call is not a shell command: `ka reveal` in its args is not denied."""
+    payload = _mcp_payload(
+        {"path": "notes.md", "contents": "run `ka reveal FOO` yourself"},
+        tool="mcp__filesystem__write_file",
+    )
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_mcp_non_dict_arguments_fail_open(monkeypatch, capsys) -> None:
+    for tool_input in (12345, None, ["a", "b"]):
+        rc, reply = _run_main(_mcp_payload(tool_input), monkeypatch, capsys)
+        assert rc == 0
+        assert reply is None
+
+
+def test_mcp_cursor_shaped_payload_uses_cursor_deny(monkeypatch, capsys) -> None:
+    """Cursor routes MCP to beforeMCPExecution today; if one ever arrives on
+    preToolUse the deny shape must still be Cursor's flat one.
+    """
+    payload = {
+        "hook_event_name": "preToolUse",
+        "cursor_version": "1.7.2",
+        "tool_name": "mcp__stripe__create_charge",
+        "tool_input": {"note": "key " + "sk_live_" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["permission"] == "deny"
+    assert "hookSpecificOutput" not in reply
+
+
+def test_mcp_not_added_to_allowed_tool_names() -> None:
+    """MCP is matched by shape, not by an entry in the fixed allow set."""
+    assert not any(n.startswith("mcp") for n in sg._ALLOWED_TOOL_NAMES)
+
+
 def test_ka_scan_without_yes_allowed(monkeypatch, capsys) -> None:
     rc, reply = _run_main(_claude_payload("ka scan --deep --no-import"), monkeypatch, capsys)
     assert rc == 0

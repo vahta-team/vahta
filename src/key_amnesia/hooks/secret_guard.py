@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """PreToolUse / preToolUse secret guard: blocking hook for Claude Code, Cursor, Codex.
 
-Inspects a pending tool call (Bash/Shell command, Write/Edit file content, or
-Codex ``apply_patch``) and **denies** it when:
+Inspects a pending tool call (Bash/Shell command, Write/Edit file content,
+Codex ``apply_patch``, or an MCP tool call named ``mcp__<server>__<tool>``)
+and **denies** it when:
 
 - the Bash/Shell command is a forbidden ``ka`` verb (``set``, ``reveal``,
   ``scan --yes``, nested ``ka run -- ka set``, …), or
@@ -11,6 +12,9 @@ Codex ``apply_patch``) and **denies** it when:
 Allowed agent path is ``ka run`` / ``ka list`` / ``ka status``. Forbidden
 verbs must be run in the user's own terminal. Write/Edit contents that
 *mention* ``ka set`` are not verb-denied (docs); secret scanning still runs.
+Verb deny is **shell-only**: an MCP tool call is not a shell command, so only
+the secret scan applies to it — its arguments are scanned whole, since MCP
+argument names are server-defined and a credential can sit under any of them.
 
 Host contracts from the same detection logic:
 
@@ -63,9 +67,17 @@ _SUGGESTION = (
 )
 
 
-def _command_text(tool_input: Any) -> str:
-    """Extract the text to scan from Bash/Shell `command` or Write/Edit content."""
+def _command_text(tool_input: Any, *, all_strings: bool = False) -> str:
+    """Extract the text to scan from Bash/Shell `command` or Write/Edit content.
+
+    ``all_strings`` skips the known-key shortcut and joins every string in the
+    payload. Used for MCP calls, whose argument names belong to the MCP server:
+    a key that happens to be called ``command`` or ``content`` must not shadow
+    a credential sitting in a sibling argument.
+    """
     if isinstance(tool_input, dict):
+        if all_strings:
+            return "\n".join(collect_strings(tool_input))
         for key in (
             "command",
             "cmd",
@@ -151,6 +163,17 @@ def _emit_deny(host: str, kind: str, *, reason: str | None = None) -> dict[str, 
 
 _ALLOWED_TOOL_NAMES = {"bash", "shell", "powershell", "write", "edit", "multiedit", "apply_patch"}
 
+# Claude Code delivers MCP tool calls to the same PreToolUse event, named
+# `mcp__<server>__<tool>` (confirmed in Claude Code 2.1.283). Server and tool
+# names are arbitrary, so the prefix is all we can key on — and we key on the
+# prefix alone rather than the full triple, to over-cover rather than miss.
+_MCP_TOOL_RE = re.compile(r"^mcp__.+", re.IGNORECASE)
+
+
+def is_mcp_tool_name(tool_name: str) -> bool:
+    """True for a `mcp__<server>__<tool>`-shaped PreToolUse tool name."""
+    return bool(_MCP_TOOL_RE.match(tool_name.strip()))
+
 
 def main() -> int:
     if os.environ.get(DISABLE_ENV):
@@ -171,12 +194,14 @@ def main() -> int:
 
         tool_name = str(payload.get("tool_name") or "")
         tool_l = tool_name.lower()
-        if tool_name and tool_l not in _ALLOWED_TOOL_NAMES:
+        is_mcp = is_mcp_tool_name(tool_l)
+        if tool_name and not is_mcp and tool_l not in _ALLOWED_TOOL_NAMES:
             return 0
 
-        text = _command_text(payload.get("tool_input"))
+        text = _command_text(payload.get("tool_input"), all_strings=is_mcp)
         host = detect_host(payload)
-        is_shell = tool_l in _SHELL_TOOL_NAMES
+        # MCP calls are never shell: verb deny and ka-chain splitting stay off.
+        is_shell = not is_mcp and tool_l in _SHELL_TOOL_NAMES
 
         # Verb deny before find_finding / _KA_SAFE (Bash/Shell only).
         if is_shell:
