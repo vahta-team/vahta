@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -271,6 +272,70 @@ def test_codex_hooks_matcher_includes_apply_patch(fake_home: Path) -> None:
     path = fake_home / ".codex" / "hooks.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["hooks"]["PreToolUse"][0]["matcher"] == sc.CODEX_MATCHER
+
+
+# --- MCP tool names must reach the hook -------------------------------------
+
+
+MCP_TOOL_NAMES = [
+    "mcp__github__create_issue",
+    "mcp__slack__post_message",
+    "mcp__claude_ai_Gmail__send_message",
+]
+
+# `TodoWrite` is deliberately absent: it substring-matches `Write` already,
+# which is pre-existing matcher behaviour and not what this commit changes.
+NON_MCP_TOOL_NAMES = ["Read", "Grep", "WebFetch", "NotebookRead"]
+
+
+@pytest.mark.parametrize("matcher", [sc.CLAUDE_MATCHER, sc.CODEX_MATCHER])
+@pytest.mark.parametrize("tool", MCP_TOOL_NAMES)
+def test_matchers_match_mcp_tool_names(matcher: str, tool: str) -> None:
+    assert re.fullmatch(matcher, tool) or re.search(matcher, tool)
+
+
+@pytest.mark.parametrize("matcher", [sc.CLAUDE_MATCHER, sc.CODEX_MATCHER])
+@pytest.mark.parametrize("tool", ["Bash", "Write", "Edit"])
+def test_matchers_still_match_the_old_tools(matcher: str, tool: str) -> None:
+    assert re.fullmatch(matcher, tool)
+
+
+@pytest.mark.parametrize("matcher", [sc.CLAUDE_MATCHER, sc.CODEX_MATCHER])
+@pytest.mark.parametrize("tool", NON_MCP_TOOL_NAMES)
+def test_matchers_do_not_widen_to_other_tools(matcher: str, tool: str) -> None:
+    assert not re.search(matcher, tool)
+
+
+def test_codex_matcher_keeps_apply_patch() -> None:
+    assert "apply_patch" in sc.CODEX_MATCHER
+
+
+def test_cursor_matcher_unchanged_no_mcp() -> None:
+    """Cursor MCP calls go to beforeMCPExecution, which ka setup does not register."""
+    assert sc.CURSOR_MATCHER == "Shell|Write"
+    assert "mcp" not in sc.CURSOR_MATCHER
+
+
+def test_installed_claude_matcher_carries_mcp(fake_home: Path) -> None:
+    sc.cmd_setup(_ns(hook_only=True))
+    data = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    matcher = data["hooks"]["PreToolUse"][0]["matcher"]
+    assert sc.MCP_MATCHER_ALTERNATIVE in matcher
+    assert re.search(matcher, "mcp__github__create_issue")
+
+
+def test_installed_codex_matcher_carries_mcp(fake_home: Path) -> None:
+    sc.cmd_setup(_ns(hook_only=True))
+    data = json.loads((fake_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    matcher = data["hooks"]["PreToolUse"][0]["matcher"]
+    assert sc.MCP_MATCHER_ALTERNATIVE in matcher
+    assert re.search(matcher, "mcp__slack__post_message")
+
+
+def test_installed_cursor_matcher_has_no_mcp(fake_home: Path) -> None:
+    sc.cmd_setup(_ns(hook_only=True))
+    data = json.loads((fake_home / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+    assert data["hooks"]["preToolUse"][0]["matcher"] == "Shell|Write"
 
 
 def test_codex_home_env_redirects_skills_and_hooks(
