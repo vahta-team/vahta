@@ -84,7 +84,10 @@ Versions follow the git tags `0.4.0` … `0.4.16`.
   of its native verbs as `mcp__opencode__<tool>` before forwarding. That is not a
   guess at OpenCode's MCP naming; it removes the need to know it, by telling the
   guard what is actually known — an opaque tool, scan every argument, no shell
-  semantics. Native names still go over verbatim, so `bash` keeps verb denial and
+  semantics. Measured afterwards against a live OpenCode session: it names an MCP
+  tool `<server>_<tool>` (`kademo_echo_note`), so it is not `mcp__`-shaped and a
+  prefix guess would have missed every MCP tool. The relabelling covers it
+  unchanged. Native names still go over verbatim, so `bash` keeps verb denial and
   chain splitting. This also closed a silent hole: `patch` was in the plugin's old
   guarded set but absent from the guard's own allowed names, so it was being
   forwarded and discarded unread. Cost, measured: a guarded call spawns the guard,
@@ -95,7 +98,7 @@ Versions follow the git tags `0.4.0` … `0.4.16`.
 Stated plainly, because a guard's gaps are part of its contract:
 
 - **Whatever the OpenCode skip set skips.** A credential typed as a grep pattern
-  or into a todo item is unseen by construction. The set is six verbs wide and
+  or into a todo item is unseen by construction. The set is four verbs wide and
   exists so that read and search loops do not pay the guard's start-up cost.
 - **Cursor MCP and file reads.** Cursor routes MCP to `beforeMCPExecution` and
   reads to `beforeReadFile`; `ka setup` registers neither.

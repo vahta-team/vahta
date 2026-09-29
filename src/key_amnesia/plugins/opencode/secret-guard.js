@@ -46,6 +46,14 @@ const SKIP = new Set([
 const NATIVE = new Set(["bash", "shell", "powershell", "write", "edit",
                         "multiedit", "apply_patch"]);
 
+// Measured on 2026-09-29, live: OpenCode names an MCP tool
+// `<server>_<tool>` — a call to the `echo_note` tool of a server registered as
+// `kademo` arrives here as `kademo_echo_note`. So it is NOT `mcp__`-shaped, and
+// a prefix guess would have missed every MCP tool there is. The relabelling
+// below is what makes that irrelevant: a server name is arbitrary and may even
+// collide with a native verb, so the filter stays "guard everything outside
+// SKIP" rather than trying to recognise MCP names.
+//
 // Everything else is forwarded under an `mcp__`-shaped name. This is NOT a
 // guess at what OpenCode calls an MCP tool — it is the opposite. The Python
 // guard drops any tool name that is neither in `_ALLOWED_TOOL_NAMES` nor
