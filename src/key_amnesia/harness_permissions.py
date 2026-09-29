@@ -24,6 +24,20 @@ _HOOK_MARKERS = ("key-amnesia-hook", "key_amnesia.hooks.secret_guard")
 FILE_ALLOW_COMMANDS: tuple[str, ...] = tuple(sorted(COVERAGE_ALLOW))
 FILE_DENY_COMMANDS: tuple[str, ...] = tuple(sorted(FILE_DENY_VERBS))
 
+# Cursor's autoRun.allow_instructions is documented as string[]: free-form
+# sentences that steer the auto-run classifier. Cursor calls them steering,
+# not enforcement, so this text claims nothing beyond "usually fine".
+CURSOR_ALLOW_INSTRUCTION = (
+    "key-amnesia: the read-only verbs ka run, ka list, ka status, ka connect, "
+    "ka check, ka scan, ka lock, ka config show, ka identity show, "
+    "ka member list, ka docs, ka --version and ka --help do not print secret "
+    "values and are usually fine to run unattended. This is steering only: "
+    "Cursor still applies its own safety check, and the key-amnesia PreToolUse "
+    "hook is what denies ka set, ka reveal, ka export and ka copy."
+)
+
+_ABSENT = object()
+
 OPENCODE_PLUGIN_REL = "./plugins/key-amnesia-secret-guard.js"
 OPENCODE_PLUGIN_FILENAME = "key-amnesia-secret-guard.js"
 OPENCODE_PLUGIN_MARKER = "KEY_AMNESIA_PLUGIN_ID=secret-guard"
@@ -68,6 +82,60 @@ def cursor_allow_prefixes() -> list[str]:
         for command in FILE_ALLOW_COMMANDS:
             out.append(f"{binary} {command}")
     return out
+
+
+def cursor_allow_instructions() -> list[str]:
+    """Our managed ``autoRun.allow_instructions`` entries.
+
+    Cursor documents this field as ``string[]``: free-form sentences that
+    steer its auto-run classifier. They are steering, not enforcement — a
+    matching call still goes through Cursor's own safety check — so the text
+    must not read as if it grants anything.
+    """
+    return [CURSOR_ALLOW_INSTRUCTION]
+
+
+def _json_shape(val: Any) -> str:
+    """Name the JSON shape of ``val`` for a diagnosis without a debugger."""
+    if val is _ABSENT:
+        return "absent"
+    if val is None:
+        return "null"
+    if isinstance(val, bool):
+        return "boolean"
+    if isinstance(val, str):
+        return "string"
+    if isinstance(val, list):
+        return "list"
+    if isinstance(val, dict):
+        return "object"
+    if isinstance(val, (int, float)):
+        return "number"
+    return type(val).__name__
+
+
+def merge_instruction_string(
+    existing: str,
+    ours: list[str],
+    stale_manifest: list[str],
+) -> str:
+    """Merge into a single-string field in place, without reshaping it.
+
+    Cursor documents ``string[]``, but a user who wrote one string keeps one
+    string: we treat its newlines as entries, drop only our own stale lines,
+    and append what is missing. The user's own lines are never rewritten or
+    reordered.
+    """
+    if not existing.strip():
+        return "\n".join(ours)
+    stale = set(stale_manifest) - set(ours)
+    kept = [ln for ln in existing.rstrip().split("\n") if ln not in stale]
+    have = set(kept)
+    for rule in ours:
+        if rule not in have:
+            kept.append(rule)
+            have.add(rule)
+    return "\n".join(kept)
 
 
 def _xdg_opencode_dir(home: Path) -> Path | None:
@@ -517,33 +585,50 @@ def prepare_cursor(
                 return out
             if "block_instructions" in auto:
                 pass  # never write or modify block_instructions
-            text = (
-                "Allow unattended key-amnesia: ka run / ka list / ka status / "
-                "ka connect / ka check / ka scan / ka lock / ka config show / "
-                "ka identity show / ka member list / ka docs / ka --version / "
-                "ka --help. The PreToolUse hook denies ka set, reveal, export, "
-                "copy, and other mutating verbs."
-            )
-            existing = auto.get("allow_instructions")
-            if existing is None:
-                auto["allow_instructions"] = text
+            ours = cursor_allow_instructions()
+            stale = _manifest_list(manifest, "cursor.allow_instructions")
+            existing = auto.get("allow_instructions", _ABSENT)
+            shape = _json_shape(existing)
+            if existing is _ABSENT or existing is None:
+                # Cursor documents string[]; that is what we create.
+                auto["allow_instructions"] = list(ours)
+            elif isinstance(existing, list):
+                merged_i, err = merge_string_list(existing, ours, stale)
+                if err is not None:
+                    out.ok = False
+                    out.lines.append(
+                        f"Cursor: {perm_path} autoRun.allow_instructions is a "
+                        f"list but {err} (fail closed; no write)"
+                    )
+                    return out
+                assert merged_i is not None
+                auto["allow_instructions"] = merged_i
             elif isinstance(existing, str):
-                if "ka run" not in existing:
-                    auto["allow_instructions"] = existing.rstrip() + "\n" + text
+                # Keep the user's shape: one string stays one string.
+                auto["allow_instructions"] = merge_instruction_string(
+                    existing, ours, stale
+                )
             else:
                 out.ok = False
                 out.lines.append(
-                    f"Cursor: {perm_path} autoRun.allow_instructions is not a string "
-                    "(fail closed)"
+                    f"Cursor: {perm_path} autoRun.allow_instructions is a "
+                    f"{shape}; Cursor documents it as a list of strings "
+                    "(fail closed; no write)"
                 )
                 return out
+            out.lines.append(
+                f"Cursor: {perm_path} autoRun.allow_instructions shape: "
+                f"{shape} — merging {len(ours)} key-amnesia instruction in "
+                "that shape (steering for Cursor's auto-run check, not a "
+                "grant; the hook is what denies)"
+            )
             out.changes.append(
                 FileChange(
                     path=perm_path,
                     new_text=dump_json(data),
                     summary=f"Cursor autoRun.allow_instructions: {perm_path}",
                     manifest_key="cursor.allow_instructions",
-                    manifest_rules=[text],
+                    manifest_rules=list(ours),
                 )
             )
 
@@ -1006,6 +1091,11 @@ def remove_manifested_rules(home: Path) -> int:
             "cursor.terminalAllowlist",
             home / ".cursor" / "permissions.json",
             ("terminalAllowlist",),
+        ),
+        (
+            "cursor.allow_instructions",
+            home / ".cursor" / "permissions.json",
+            ("autoRun", "allow_instructions"),
         ),
         (
             "cursor.cli.allow",

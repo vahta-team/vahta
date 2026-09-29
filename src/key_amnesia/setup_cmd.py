@@ -34,10 +34,14 @@ _TERMINAL_TEST_POLL_S = 0.1
 
 SKILL_NAMES = ["key-amnesia-usage", "key-amnesia-hygiene", "key-amnesia-migrate"]
 
-CLAUDE_MATCHER = "Bash|Write|Edit"
+# MCP tool calls reach the same PreToolUse event under `mcp__<server>__<tool>`;
+# without the alternative below the hook is never invoked for them at all.
+MCP_MATCHER_ALTERNATIVE = "mcp__.*"
+CLAUDE_MATCHER = f"Bash|Write|Edit|{MCP_MATCHER_ALTERNATIVE}"
+# Cursor routes MCP calls to its own beforeMCPExecution event, not preToolUse.
 CURSOR_MATCHER = "Shell|Write"
 # Codex: Bash + apply_patch aliases (Write/Edit also match apply_patch edits).
-CODEX_MATCHER = "Bash|Write|Edit|apply_patch"
+CODEX_MATCHER = f"Bash|Write|Edit|apply_patch|{MCP_MATCHER_ALTERNATIVE}"
 HOOK_COMMAND = "key-amnesia-hook"
 _HOOK_MODULE = "key_amnesia.hooks.secret_guard"
 _WIN_NEEDS_QUOTE = frozenset(' \t"&|<>^()%,;=')

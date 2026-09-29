@@ -2,7 +2,113 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.15`.
+Versions follow the git tags `0.4.0` … `0.4.16`.
+
+## [0.4.16] — 2026-09-29
+
+> **Upgrade: re-run `ka setup`.** The tool-name matcher that decides which calls
+> reach the guard lives in *your* `~/.claude/settings.json` (and Codex
+> `hooks.json`) on disk, written at setup time. Upgrading the package does not
+> rewrite it, so MCP calls keep bypassing the guard **silently** until setup runs
+> again — and nothing warns you: `claude_hook_registered` reports "registered"
+> regardless of which matcher is stored. A matcher-aware check is deliberately
+> deferred, so for this release the re-run is the whole mechanism.
+>
+> The same re-run is what replaces the OpenCode bridge plugin (its content marker
+> moves to 0.4.16) and what writes the Cursor instruction in the shape Cursor
+> actually documents. Three files on disk, one command.
+
+### Fixed
+
+- **A credential passed as a space-separated flag was detected nowhere.**
+  `--api-key <value>`, `--token <value>` and `--password <value>` walked through
+  both the hook and `ka scan`; only `NAME=value`, `--api-key=value` and
+  `Bearer <val>` were caught. The detector was assignment-shaped — it required
+  `[:=]` between name and value — so the leak this product exists to prevent, a
+  credential sitting on argv where it lands in `ps`, shell history and CI logs,
+  was the one shape that passed. Flag-form hits report as `--password flag value`
+  rather than `PASSWORD assignment`, so a finding says which form it came from.
+
+  The name vocabulary is **end-anchored**: `--secret-name`, `--password-stdin`
+  and `--token-file` do not qualify. Values that are env indirection (`"$VAR"`),
+  command substitutions, paths, or shaped like an env-var name are excluded, so
+  `ka run --secret GOOGLE_API_KEY` and `--token "$GITHUB_TOKEN"` stay quiet.
+  Shipped tier is `likely+possible`, set by one constant in `detect.py`
+  (`FLAG_FORM_FIRE_TIERS`) — `likely` alone misses the common case, since a
+  human-authored password classifies as `possible`. Measured at **0 false
+  positives** over 39 authored command lines and the whole repo corpus, cutting
+  misses **7 → 1**.
+
+- **Cursor's `autoRun.allow_instructions` was read as a string.** Cursor
+  documents the field as `string[]`, so on a correctly configured machine
+  `ka setup` printed `is not a string (fail closed; no write)` and contributed no
+  Cursor allow-list at all. Both shapes are now read and **merged in place** — a
+  list stays a list, a string stays a string, user entries keep their order and
+  wording, and a genuinely unknown shape still fails closed, now naming the shape
+  it found. The merged sentence was reworded to match what the field actually is:
+  Cursor's own documentation calls these instructions steering for its auto-run
+  check, not enforcement, so the text no longer opens with "Allow unattended" and
+  says outright that the PreToolUse hook is what denies. A test fails the build if
+  that wording drifts back toward sounding like a grant. `--remove` can now take
+  the entry back out; it was manifested but missing from the removal map, so it
+  never could before.
+
+### Added
+
+- **MCP tool calls are scanned.** On Claude Code and Codex, MCP calls arrive at
+  the same `PreToolUse` event as Bash/Write/Edit, under names shaped
+  `mcp__<server>__<tool>`. key-amnesia dropped them twice: the installed matcher
+  was `Bash|Write|Edit`, which never matches such a name, and the hook's own
+  allow-list early-returned even when a matcher did fire. So an agent could hand
+  a credential to any MCP server with the guard installed and nothing objected.
+
+  MCP arguments are scanned across **all** their strings rather than through the
+  known-key shortcut, because argument names belong to the MCP server: one naming
+  an argument `command` would otherwise shadow a credential sitting in a sibling
+  argument. Verb denial stays shell-only — an MCP call is not a shell command, so
+  `ka reveal` in its arguments is scanned, not verb-denied. Deny reply shapes are
+  unchanged.
+
+  Together with the flag-form fix above, a call such as
+  `mcp__github__create_issue` carrying `deploy with --api-key <value>` is now
+  denied; neither change denies it alone.
+
+- **OpenCode covers MCP too, without guessing a name.** The bridge plugin used
+  to forward only the tool names in its own `GUARDED` set, so an MCP call never
+  reached the guard. The filter is inverted: everything is forwarded except a
+  skip set of `read`, `glob`, `grep`, `list`, `todoread` and `todowrite`, whose
+  arguments are paths, patterns and task text. `webfetch` is deliberately not
+  skipped — a token fits in a query string — and a test asserts it never joins the
+  skip set. Inverting alone would have been a no-op: the Python guard ignores tool
+  names it does not recognise, so the plugin now relabels anything that is not one
+  of its native verbs as `mcp__opencode__<tool>` before forwarding. That is not a
+  guess at OpenCode's MCP naming; it removes the need to know it, by telling the
+  guard what is actually known — an opaque tool, scan every argument, no shell
+  semantics. Measured afterwards against a live OpenCode session: it names an MCP
+  tool `<server>_<tool>` (`kademo_echo_note`), so it is not `mcp__`-shaped and a
+  prefix guess would have missed every MCP tool. The relabelling covers it
+  unchanged. Native names still go over verbatim, so `bash` keeps verb denial and
+  chain splitting. This also closed a silent hole: `patch` was in the plugin's old
+  guarded set but absent from the guard's own allowed names, so it was being
+  forwarded and discarded unread. Cost, measured: a guarded call spawns the guard,
+  85–185 ms depending on load; skipped verbs spawn nothing.
+
+### Not covered
+
+Stated plainly, because a guard's gaps are part of its contract:
+
+- **Whatever the OpenCode skip set skips.** A credential typed as a grep pattern
+  or into a todo item is unseen by construction. The set is four verbs wide and
+  exists so that read and search loops do not pay the guard's start-up cost.
+- **Cursor MCP and file reads.** Cursor routes MCP to `beforeMCPExecution` and
+  reads to `beforeReadFile`; `ka setup` registers neither.
+- **MCP *results*.** `PreToolUse` sees only the request, so a server that returns
+  a secret is still invisible.
+- **Positional credentials with no flag to anchor on** — `mysql -u root <secret>`.
+  Firing on bare argv words would need a per-tool argument table.
+- **Single-character-class values** such as `--password postgres-dev-local`, which
+  fail the inherited mixed-class gate in `classify_value`. The tier is not what
+  stops these.
 
 ## [0.4.15] — 2026-09-17
 
