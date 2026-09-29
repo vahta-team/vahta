@@ -763,13 +763,13 @@ def test_opencode_managed_plugin_updated_on_rerun(fake_home: Path) -> None:
     dest = oc / "plugins" / "key-amnesia-secret-guard.js"
     dest.write_text(
         dest.read_text(encoding="utf-8").replace(
-            "KEY_AMNESIA_PLUGIN_VERSION=0.4.15",
+            "KEY_AMNESIA_PLUGIN_VERSION=0.4.16",
             "KEY_AMNESIA_PLUGIN_VERSION=0.0.0",
         ),
         encoding="utf-8",
     )
     sc.cmd_setup(_ns(hook_only=True))
-    assert "KEY_AMNESIA_PLUGIN_VERSION=0.4.15" in dest.read_text(encoding="utf-8")
+    assert "KEY_AMNESIA_PLUGIN_VERSION=0.4.16" in dest.read_text(encoding="utf-8")
 
 
 def test_setup_mentions_opencode_skill_autoload(fake_home: Path, capsys) -> None:

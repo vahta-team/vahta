@@ -467,17 +467,35 @@ def test_opencode_cd_led_export_denied(monkeypatch, capsys) -> None:
     assert "export" in reply["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def test_opencode_js_guarded_superset_of_allowed() -> None:
+def test_opencode_js_skips_nothing_the_python_guard_allows() -> None:
+    """The JS bridge guards everything but SKIP, so SKIP must stay disjoint.
+
+    Until 0.4.16 the plugin held a GUARDED allow-list and this test asserted it
+    was a superset of ``_ALLOWED_TOOL_NAMES``. That premise died when the filter
+    was inverted to cover MCP tools, whose OpenCode tool ids we cannot name. The
+    invariant survives in its complementary form: no tool the Python guard
+    inspects may appear in the JS skip set.
+    """
     import re
     from importlib import resources
 
     js = (
         resources.files("key_amnesia") / "plugins" / "opencode" / "secret-guard.js"
     ).read_text(encoding="utf-8")
-    match = re.search(r"const GUARDED = new Set\(\[([\s\S]*?)\]\)", js)
-    assert match is not None, "GUARDED set not found in secret-guard.js"
-    names = set(re.findall(r'"([^"]+)"', match.group(1)))
-    assert sg._ALLOWED_TOOL_NAMES <= names
+    assert "const GUARDED" not in js, "filter is inverted; GUARDED must be gone"
+    match = re.search(r"const SKIP = new Set\(\[([\s\S]*?)\]\)", js)
+    assert match is not None, "SKIP set not found in secret-guard.js"
+    skipped = set(re.findall(r'"([^"]+)"', match.group(1)))
+    assert sg._ALLOWED_TOOL_NAMES.isdisjoint(skipped)
+    # `webfetch` carries a URL, and a URL can carry a token in a query param.
+    assert "webfetch" not in skipped
+
+    # Anything forwarded under its own spelling must be a name this module
+    # actually inspects; otherwise the bridge would forward it to a guard that
+    # early-returns, which is the no-op 0.4.16 exists to remove.
+    native = re.search(r"const NATIVE = new Set\(\[([\s\S]*?)\]\)", js)
+    assert native is not None, "NATIVE set not found in secret-guard.js"
+    assert set(re.findall(r'"([^"]+)"', native.group(1))) <= sg._ALLOWED_TOOL_NAMES
 
 
 # --- MCP tool calls (same PreToolUse event, `mcp__<server>__<tool>`) --------
