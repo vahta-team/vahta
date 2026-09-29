@@ -13,6 +13,10 @@ Versions follow the git tags `0.4.0` … `0.4.16`.
 > again — and nothing warns you: `claude_hook_registered` reports "registered"
 > regardless of which matcher is stored. A matcher-aware check is deliberately
 > deferred, so for this release the re-run is the whole mechanism.
+>
+> The same re-run is what replaces the OpenCode bridge plugin (its content marker
+> moves to 0.4.16) and what writes the Cursor instruction in the shape Cursor
+> actually documents. Three files on disk, one command.
 
 ### Fixed
 
@@ -35,6 +39,20 @@ Versions follow the git tags `0.4.0` … `0.4.16`.
   positives** over 39 authored command lines and the whole repo corpus, cutting
   misses **7 → 1**.
 
+- **Cursor's `autoRun.allow_instructions` was read as a string.** Cursor
+  documents the field as `string[]`, so on a correctly configured machine
+  `ka setup` printed `is not a string (fail closed; no write)` and contributed no
+  Cursor allow-list at all. Both shapes are now read and **merged in place** — a
+  list stays a list, a string stays a string, user entries keep their order and
+  wording, and a genuinely unknown shape still fails closed, now naming the shape
+  it found. The merged sentence was reworded to match what the field actually is:
+  Cursor's own documentation calls these instructions steering for its auto-run
+  check, not enforcement, so the text no longer opens with "Allow unattended" and
+  says outright that the PreToolUse hook is what denies. A test fails the build if
+  that wording drifts back toward sounding like a grant. `--remove` can now take
+  the entry back out; it was manifested but missing from the removal map, so it
+  never could before.
+
 ### Added
 
 - **MCP tool calls are scanned.** On Claude Code and Codex, MCP calls arrive at
@@ -55,13 +73,30 @@ Versions follow the git tags `0.4.0` … `0.4.16`.
   `mcp__github__create_issue` carrying `deploy with --api-key <value>` is now
   denied; neither change denies it alone.
 
+- **OpenCode covers MCP too, without guessing a name.** The bridge plugin used
+  to forward only the tool names in its own `GUARDED` set, so an MCP call never
+  reached the guard. The filter is inverted: everything is forwarded except a
+  skip set of `read`, `glob`, `grep`, `list`, `todoread` and `todowrite`, whose
+  arguments are paths, patterns and task text. `webfetch` is deliberately not
+  skipped — a token fits in a query string — and a test asserts it never joins the
+  skip set. Inverting alone would have been a no-op: the Python guard ignores tool
+  names it does not recognise, so the plugin now relabels anything that is not one
+  of its native verbs as `mcp__opencode__<tool>` before forwarding. That is not a
+  guess at OpenCode's MCP naming; it removes the need to know it, by telling the
+  guard what is actually known — an opaque tool, scan every argument, no shell
+  semantics. Native names still go over verbatim, so `bash` keeps verb denial and
+  chain splitting. This also closed a silent hole: `patch` was in the plugin's old
+  guarded set but absent from the guard's own allowed names, so it was being
+  forwarded and discarded unread. Cost, measured: a guarded call spawns the guard,
+  85–185 ms depending on load; skipped verbs spawn nothing.
+
 ### Not covered
 
 Stated plainly, because a guard's gaps are part of its contract:
 
-- **OpenCode MCP calls.** The bundled plugin filters on its own tool-name set,
-  and OpenCode's MCP tool-id shape is undocumented in the plugin SDK types.
-  Unverified, so not guessed at.
+- **Whatever the OpenCode skip set skips.** A credential typed as a grep pattern
+  or into a todo item is unseen by construction. The set is six verbs wide and
+  exists so that read and search loops do not pay the guard's start-up cost.
 - **Cursor MCP and file reads.** Cursor routes MCP to `beforeMCPExecution` and
   reads to `beforeReadFile`; `ka setup` registers neither.
 - **MCP *results*.** `PreToolUse` sees only the request, so a server that returns
