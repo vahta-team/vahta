@@ -134,7 +134,7 @@ def test_opencode_plugin_filter_guards_all_but_skip_set(tmp_path: Path) -> None:
     reached = ["bash", "write", "edit", "webfetch", "task", "patch",
                "mcp__github__create_issue", "github.create_issue",
                "some_future_opencode_tool"]
-    skipped = ["read", "glob", "grep", "list", "todoread", "todowrite",
+    skipped = ["read", "glob", "grep", "todowrite",
                "Read", "GREP"]
     runner = tmp_path / "run.mjs"
     runner.write_text(

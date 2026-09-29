@@ -25,12 +25,17 @@ const HOOK_ARGV = null; // filled by ka setup
 //
 // `webfetch` is deliberately NOT skipped: a URL can carry a token in a query
 // parameter.
+//
+// The names are OpenCode's own, read from a headless server on 2026-09-29
+// (`GET /experimental/tool/ids`), not guessed. Its builtin ids at that version:
+// invalid, question, bash, read, glob, grep, edit, write, task, webfetch,
+// todowrite, websearch, skill, apply_patch. Everything outside SKIP is guarded,
+// so `task` (carries a subagent prompt), `websearch` (a query), `question`,
+// `skill` and every MCP tool are scanned.
 const SKIP = new Set([
   "read", // args are a file path plus offset/limit
   "glob", // args are a filename pattern plus a directory
   "grep", // args are a search pattern plus a directory
-  "list", // args are a directory path
-  "todoread", // takes no credential-bearing argument
   "todowrite", // args are the agent's own task list
 ]);
 
