@@ -11,8 +11,11 @@ from key_amnesia.harness_permissions import (
     VALUE_EMIT_VERBS,
     claude_allow_matchers,
     claude_deny_matchers,
+    CURSOR_ALLOW_INSTRUCTION,
+    cursor_allow_instructions,
     cursor_allow_prefixes,
     deny_in_allow_conflicts,
+    merge_instruction_string,
     dump_json,
     load_json_object_strict,
     merge_string_list,
@@ -233,19 +236,135 @@ def test_cursor_appends_existing_allowlist(tmp_path: Path) -> None:
     assert "ka run" in data["terminalAllowlist"]
 
 
-def test_cursor_no_add_allowlist_key_uses_instructions(tmp_path: Path) -> None:
-    (tmp_path / ".cursor").mkdir()
+def _cursor_perm(tmp_path: Path, doc: dict) -> Path:
+    (tmp_path / ".cursor").mkdir(exist_ok=True)
     _merge_cursor_hooks(tmp_path / ".cursor" / "hooks.json")
     perm = tmp_path / ".cursor" / "permissions.json"
-    perm.write_text(dump_json({"other": True}), encoding="utf-8")
-    rc = run_permissions(
+    perm.write_text(dump_json(doc), encoding="utf-8")
+    return perm
+
+
+def _run_cursor(tmp_path: Path) -> int:
+    return run_permissions(
         tmp_path, yes=True, may_install_hook=False, install_hook_fn=None, tty=False
     )
-    assert rc == 0
+
+
+def test_cursor_no_add_allowlist_key_uses_instructions(tmp_path: Path) -> None:
+    perm = _cursor_perm(tmp_path, {"other": True})
+    assert _run_cursor(tmp_path) == 0
     data = json.loads(perm.read_text(encoding="utf-8"))
     assert "terminalAllowlist" not in data
     assert "block_instructions" not in data.get("autoRun", {})
-    assert "ka run" in data["autoRun"]["allow_instructions"]
+    # Cursor documents string[]; an absent field is created in that shape.
+    assert data["autoRun"]["allow_instructions"] == cursor_allow_instructions()
+
+
+def test_cursor_allow_instructions_empty_list(tmp_path: Path) -> None:
+    perm = _cursor_perm(tmp_path, {"autoRun": {"allow_instructions": []}})
+    assert _run_cursor(tmp_path) == 0
+    data = json.loads(perm.read_text(encoding="utf-8"))
+    assert data["autoRun"]["allow_instructions"] == cursor_allow_instructions()
+
+
+def test_cursor_allow_instructions_list_keeps_user_entries(
+    tmp_path: Path, capsys
+) -> None:
+    user = [
+        "Allow reading files under the repo.",
+        "Ask before any network call.",
+    ]
+    perm = _cursor_perm(
+        tmp_path,
+        {
+            "autoRun": {
+                "allow_instructions": list(user),
+                "block_instructions": ["Never run rm -rf."],
+            }
+        },
+    )
+    assert _run_cursor(tmp_path) == 0
+    data = json.loads(perm.read_text(encoding="utf-8"))
+    got = data["autoRun"]["allow_instructions"]
+    # User entries kept verbatim, in order, ours appended.
+    assert got[: len(user)] == user
+    assert got == user + cursor_allow_instructions()
+    # block_instructions is never touched.
+    assert data["autoRun"]["block_instructions"] == ["Never run rm -rf."]
+    assert "shape: list" in capsys.readouterr().out
+
+
+def test_cursor_allow_instructions_list_is_idempotent(tmp_path: Path) -> None:
+    perm = _cursor_perm(
+        tmp_path, {"autoRun": {"allow_instructions": ["Keep this."]}}
+    )
+    assert _run_cursor(tmp_path) == 0
+    first = perm.read_text(encoding="utf-8")
+    assert _run_cursor(tmp_path) == 0
+    assert perm.read_text(encoding="utf-8") == first
+    got = json.loads(first)["autoRun"]["allow_instructions"]
+    assert got.count(CURSOR_ALLOW_INSTRUCTION) == 1
+
+
+def test_cursor_allow_instructions_string_stays_a_string(tmp_path: Path) -> None:
+    perm = _cursor_perm(
+        tmp_path, {"autoRun": {"allow_instructions": "Trust the repo scripts."}}
+    )
+    assert _run_cursor(tmp_path) == 0
+    got = json.loads(perm.read_text(encoding="utf-8"))["autoRun"][
+        "allow_instructions"
+    ]
+    assert isinstance(got, str)
+    assert got.startswith("Trust the repo scripts.")
+    assert CURSOR_ALLOW_INSTRUCTION in got
+    # Second run must not append a duplicate.
+    assert _run_cursor(tmp_path) == 0
+    again = json.loads(perm.read_text(encoding="utf-8"))["autoRun"][
+        "allow_instructions"
+    ]
+    assert again == got
+
+
+@pytest.mark.parametrize(
+    "bad, shape",
+    [
+        ({"a": 1}, "object"),
+        (7, "number"),
+        (True, "boolean"),
+        (["ok", 5], "list"),
+    ],
+)
+def test_cursor_allow_instructions_bad_shape_fails_closed(
+    tmp_path: Path, bad, shape: str
+) -> None:
+    perm = _cursor_perm(tmp_path, {"autoRun": {"allow_instructions": bad}})
+    before = perm.read_text(encoding="utf-8")
+    out = prepare_cursor(tmp_path, {"rules": {}})
+    assert not out.ok
+    assert not any(c.path == perm for c in out.changes)
+    assert any(shape in ln for ln in out.lines)
+    assert _run_cursor(tmp_path) != 0
+    assert perm.read_text(encoding="utf-8") == before
+
+
+def test_cursor_allow_instruction_text_does_not_claim_enforcement() -> None:
+    text = CURSOR_ALLOW_INSTRUCTION.lower()
+    assert "steering only" in text
+    assert "hook is what denies" in text
+    # Must not read as a grant.
+    assert not text.startswith("allow ")
+    assert "always run" not in text
+    assert "without confirmation" not in text
+
+
+def test_merge_instruction_string_drops_only_stale_ours() -> None:
+    stale = "old key-amnesia line"
+    merged = merge_instruction_string(
+        "user line\n" + stale, ["new line"], [stale]
+    )
+    assert merged == "user line\nnew line"
+    # Empty / whitespace string does not gain a leading blank line.
+    assert merge_instruction_string("  ", ["a"], []) == "a"
 
 
 def test_cursor_cli_config_merge_only_if_schema_matches(tmp_path: Path) -> None:
