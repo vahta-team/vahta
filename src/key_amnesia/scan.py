@@ -35,6 +35,7 @@ from key_amnesia.detect import (
     iter_secret_keyed_strings,
     looks_like_json_container,
     scan_text_hits,
+    scan_texts,
 )
 from key_amnesia.dotenv_import import parse_dotenv
 
@@ -321,6 +322,10 @@ def _scan_transcript_payload(obj: Any) -> HitSet:
     nested_objs: list[Any] = []
 
     def _ingest_strings(node: Any) -> None:
+        # Collected first, scanned once. A transcript holds thousands of tiny
+        # strings, and calling the detector per string spends more on the
+        # implementation boundary than the detection itself costs.
+        batch: list[str] = []
         for s in collect_strings(node):
             if looks_like_json_container(s):
                 try:
@@ -330,16 +335,19 @@ def _scan_transcript_payload(obj: Any) -> HitSet:
                 if isinstance(nested, (dict, list)):
                     nested_objs.append(nested)
                     continue
-            acc.merge(scan_text_hits(s))
+            batch.append(s)
+        if batch:
+            acc.merge(scan_texts(batch))
 
     _ingest_strings(obj)
     # One-level unwrap: inner strings of parsed JSON containers, not the
     # container text itself (already skipped above).
     for nested in list(nested_objs):
-        for s in collect_strings(nested):
-            if looks_like_json_container(s):
-                continue
-            acc.merge(scan_text_hits(s))
+        batch = [
+            s for s in collect_strings(nested) if not looks_like_json_container(s)
+        ]
+        if batch:
+            acc.merge(scan_texts(batch))
 
     _apply_secret_keys(acc, obj)
     for nested in nested_objs:

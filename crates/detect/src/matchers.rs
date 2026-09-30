@@ -351,6 +351,19 @@ fn find_assign_keywords(chars: &[char]) -> Vec<(usize, usize)> {
     let mut i = 0usize;
 
     'outer: while i < chars.len() {
+        // Every keyword begins with one of these, so one comparison skips the
+        // overwhelming majority of positions. Python gets the same effect for
+        // free from a compiled alternation, which is a DFA; without this the
+        // port tries six literals at every character and loses its advantage
+        // on keyword-dense text such as source files.
+        if !matches!(
+            chars[i].to_ascii_lowercase(),
+            'a' | 't' | 's' | 'p'
+        ) {
+            i += 1;
+            continue;
+        }
+
         // `api[_-]?key` and `private[_-]?key`
         for (head, tail) in [("api", "key"), ("private", "key")] {
             if let Some(end) = match_optional_sep_pair(chars, i, head, tail) {

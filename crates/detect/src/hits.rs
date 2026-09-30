@@ -34,6 +34,10 @@ pub struct HitSet {
     /// reasons still attached to the name they came from.
     pub likely_reasons_by_name: Vec<Vec<String>>,
     pub possible_reasons_by_name: Vec<Vec<String>>,
+    /// Upper-cased keys, parallel to the name lists. Needed by [`HitSet::merge`],
+    /// which is keyed by name rather than positional.
+    pub likely_keys: Vec<String>,
+    pub possible_keys: Vec<String>,
 }
 
 /// `upper(name) -> (original name, reasons)`, in insertion order.
@@ -55,6 +59,8 @@ impl HitSet {
             likely.iter().map(|(_, (_, r))| r.clone()).collect();
         self.possible_reasons_by_name =
             possible.iter().map(|(_, (_, r))| r.clone()).collect();
+        self.likely_keys = likely.iter().map(|(k, _)| k.clone()).collect();
+        self.possible_keys = possible.iter().map(|(k, _)| k.clone()).collect();
 
         let (names, counts) = flatten_reasons(likely);
         self.likely_reasons = names;
@@ -261,4 +267,77 @@ mod tests {
         assert!(looks_like_json_container("[1]"));
         assert!(!looks_like_json_container("a = 1"));
     }
+}
+
+impl HitSet {
+    fn to_stores(&self) -> (ByName, ByName) {
+        let likely = self
+            .likely_keys
+            .iter()
+            .zip(self.likely_names.iter())
+            .zip(self.likely_reasons_by_name.iter())
+            .map(|((k, n), r)| (k.clone(), (n.clone(), r.clone())))
+            .collect();
+        let possible = self
+            .possible_keys
+            .iter()
+            .zip(self.possible_names.iter())
+            .zip(self.possible_reasons_by_name.iter())
+            .map(|((k, n), r)| (k.clone(), (n.clone(), r.clone())))
+            .collect();
+        (likely, possible)
+    }
+
+    /// Fold `extra` in, with the same rule the Python dataclass uses: a likely
+    /// hit displaces a possible one for the same name, an existing likely hit
+    /// is never replaced, the first vendor prefix wins, and the Bearer flags
+    /// and flag names accumulate.
+    pub fn merge(&mut self, extra: &HitSet) {
+        let (mut likely, mut possible) = self.to_stores();
+        let (extra_likely, extra_possible) = extra.to_stores();
+
+        for (key, pair) in extra_likely {
+            if lookup(&likely, &key).is_some() {
+                continue;
+            }
+            remove(&mut possible, &key);
+            likely.push((key, pair));
+        }
+        for (key, pair) in extra_possible {
+            if lookup(&likely, &key).is_some() || lookup(&possible, &key).is_some() {
+                continue;
+            }
+            possible.push((key, pair));
+        }
+        if self.prefix.is_none() {
+            if let Some(p) = extra.prefix {
+                self.prefix = Some(p);
+            }
+        }
+        self.bearer_likely |= extra.bearer_likely;
+        self.bearer_possible |= extra.bearer_possible;
+        for key in &extra.flag_names {
+            if !self.flag_names.iter().any(|n| n == key) {
+                self.flag_names.push(key.clone());
+            }
+        }
+        self.rebuild(&likely, &possible);
+    }
+}
+
+/// Scan many texts and fold the results into one [`HitSet`].
+///
+/// The reason this exists is measured rather than aesthetic. Scanning agent
+/// transcripts means calling the detector on thousands of *tiny* strings, and
+/// crossing the Python boundary once per string costs more than the detection
+/// saves: on a synthetic 879 KiB transcript tree the Rust path was 768 ms
+/// against Python's 750 ms, i.e. slightly slower. Crossing once per file
+/// instead moves the boundary to where the work is.
+pub fn scan_texts(texts: &[String]) -> HitSet {
+    let mut acc = HitSet::default();
+    for text in texts {
+        let hits = scan_text_hits(text);
+        acc.merge(&hits);
+    }
+    acc
 }

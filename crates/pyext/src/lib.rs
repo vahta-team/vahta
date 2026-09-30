@@ -115,11 +115,19 @@ fn iter_flag_values<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyL
 /// rebuild logic runs. Never carries values.
 #[pyfunction]
 fn scan_text_hits<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
+    let computed = vahta_detect::scan_text_hits(text);
+    build_hitset(py, &computed)
+}
+
+/// Fill the **Python** `HitSet` from a computed one, so its own
+/// `record_assignment` runs and the merge and rebuild logic stays Python's.
+fn build_hitset<'py>(
+    py: Python<'py>,
+    computed: &vahta_detect::HitSet,
+) -> PyResult<Bound<'py, PyAny>> {
     let detect_py = py.import("key_amnesia.detect_py")?;
     let hit_set_cls = detect_py.getattr("HitSet")?;
     let hits = hit_set_cls.call0()?;
-
-    let computed = vahta_detect::scan_text_hits(text);
 
     if let Some(prefix) = computed.prefix {
         hits.setattr("prefix", prefix)?;
@@ -153,6 +161,16 @@ fn scan_text_hits<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny
     Ok(hits)
 }
 
+/// Scan many texts, fold them in Rust, and build **one** Python `HitSet`.
+///
+/// The batched entry point is why this exists: crossing the boundary once per
+/// string made the compiled path slower than Python on transcript trees.
+#[pyfunction]
+fn scan_texts<'py>(py: Python<'py>, texts: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+    let computed = vahta_detect::hits::scan_texts(&texts);
+    build_hitset(py, &computed)
+}
+
 #[pymodule]
 fn _detect_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(entropy, m)?)?;
@@ -168,5 +186,6 @@ fn _detect_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(iter_assignments, m)?)?;
     m.add_function(wrap_pyfunction!(iter_flag_values, m)?)?;
     m.add_function(wrap_pyfunction!(scan_text_hits, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_texts, m)?)?;
     Ok(())
 }
