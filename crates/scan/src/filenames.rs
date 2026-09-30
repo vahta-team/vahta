@@ -1,6 +1,6 @@
 //! Classifying a file by its name alone, before anything is read.
 //!
-//! Ported from `key_amnesia.scan`. Paths are handled as `/`-separated strings
+//! Ported from `key_amnesia.scan_py`. Paths are handled as `/`-separated strings
 //! rather than platform paths, because the Python side compares
 //! `path.as_posix()` and matching that exactly matters more than looking
 //! idiomatic.
@@ -101,7 +101,10 @@ const CONTENT_SCAN_NAMES: [&str; 3] = ["Dockerfile", "Makefile", "Jenkinsfile"];
 
 /// Is this file worth reading for inline assignments?
 pub fn is_content_scannable(name: &str) -> bool {
-    let s = suffix(name).to_ascii_lowercase();
+    // `path.suffix.lower()` is Unicode: a suffix spelled with the Kelvin
+    // sign, `.\u{212a}t`, lowers to `.kt` and is scanned. `to_lowercase`
+    // agrees with Python on it; `to_ascii_lowercase` did not.
+    let s = suffix(name).to_lowercase();
     CONTENT_SCAN_SUFFIXES.contains(&s.as_str()) || CONTENT_SCAN_NAMES.contains(&name)
 }
 
