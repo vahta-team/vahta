@@ -135,3 +135,10 @@ dependencies = [
  "pyo3",
  "vahta-detect",
 ]
+
+[[package]]
+name = "vahta-scan"
+version = "0.0.0"
+dependencies = [
+ "vahta-detect",
+]

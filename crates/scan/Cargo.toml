@@ -1,0 +1,15 @@
+[package]
+name = "vahta-scan"
+version = "0.0.0"
+description = "Finds plaintext credentials an agent can read: files, names and counts, never values"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vahta-detect = { path = "../detect" }
