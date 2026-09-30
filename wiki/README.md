@@ -1,7 +1,7 @@
 # Wiki drafts (GitHub Wiki publish)
 
 These markdown files are **first drafts** for the live GitHub wiki at
-[https://github.com/fujitoid/key-amnesia/wiki](https://github.com/fujitoid/key-amnesia/wiki).
+[https://github.com/vahta-team/vahta/wiki](https://github.com/vahta-team/vahta/wiki).
 
 **Docs as of 0.4.15** — in-repo wording targets that release. Live wiki last
 published for 0.4.5 (0.4.6–0.4.9 had no wiki republish; bump when republishing).
@@ -16,7 +16,7 @@ wiki URL — not these paths.
 Option A — copy pages into the wiki remote:
 
 ```bash
-git clone https://github.com/fujitoid/key-amnesia.wiki.git
+git clone https://github.com/vahta-team/vahta.wiki.git
 # copy *.md from this directory (except this README.md) into the clone
 # commit + push on the wiki repo
 ```

@@ -11,7 +11,7 @@ from key_amnesia.cli import DOCS_URL, cmd_docs, main
 
 
 def test_docs_url_is_standard_wiki() -> None:
-    assert DOCS_URL == "https://github.com/fujitoid/key-amnesia/wiki"
+    assert DOCS_URL == "https://github.com/vahta-team/vahta/wiki"
 
 
 def test_docs_print_only_skips_browser(capsys: pytest.CaptureFixture[str]) -> None:

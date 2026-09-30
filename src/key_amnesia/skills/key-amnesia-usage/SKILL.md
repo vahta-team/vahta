@@ -75,5 +75,5 @@ These require a human at a real keyboard. When one of these is needed, **give th
 
 ## Human reference
 
-Longer prose for operators: [docs/agent-usage.md](https://github.com/fujitoid/key-amnesia/blob/master/docs/agent-usage.md)
-and the wiki ([`ka docs`](https://github.com/fujitoid/key-amnesia/wiki)).
+Longer prose for operators: [docs/agent-usage.md](https://github.com/vahta-team/vahta/blob/master/docs/agent-usage.md)
+and the wiki ([`ka docs`](https://github.com/vahta-team/vahta/wiki)).

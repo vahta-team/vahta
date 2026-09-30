@@ -34,10 +34,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/fujitoid/key-amnesia"
-Documentation = "https://github.com/fujitoid/key-amnesia/wiki"
-Repository = "https://github.com/fujitoid/key-amnesia"
-Issues = "https://github.com/fujitoid/key-amnesia/issues"
+Homepage = "https://github.com/vahta-team/vahta"
+Documentation = "https://github.com/vahta-team/vahta/wiki"
+Repository = "https://github.com/vahta-team/vahta"
+Issues = "https://github.com/vahta-team/vahta/issues"
 Funding = "https://www.buymeacoffee.com/fujitoid"
 
 [project.optional-dependencies]

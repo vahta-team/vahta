@@ -4,7 +4,7 @@
 pip install key-amnesia
 ```
 
-Or from source: `pip install git+https://github.com/fujitoid/key-amnesia`,
+Or from source: `pip install git+https://github.com/vahta-team/vahta`,
 or from a local clone: `pip install .`. You get both `key-amnesia` and the
 `ka` alias.
 
