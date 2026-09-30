@@ -53,6 +53,8 @@ impl Confidence {
 }
 
 pub const REASON_UUID: &str = "uuid";
+/// An `mcp.json` whose top level has neither `mcpServers` nor `servers`.
+pub const REASON_UNCONFIRMED_MCP: &str = "unconfirmed-mcp-shape";
 pub const NAMED_WEAKENING_FUNCTION_CALL: &str = "function-call";
 pub const NAMED_WEAKENING_TYPE_ANNOTATION: &str = "type-annotation";
 pub const NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE: &str = "word-shaped-passphrase";

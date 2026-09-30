@@ -6,6 +6,8 @@
 //! where Python and Rust do not agree by default are called out where they
 //! occur rather than discovered later.
 
+use crate::pyunicode;
+
 /// Character class used by [`transition_rate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharClass {
@@ -15,26 +17,82 @@ pub enum CharClass {
     Other,
 }
 
-/// Classify one character.
+/// Python's `str.isspace()`, which is also exactly what `re`'s `\s` matches
+/// on `str` — checked over every code point, not assumed.
 ///
-/// # Divergence risk
+/// Rust's `char::is_whitespace` is the Unicode `White_Space` property. Python
+/// additionally counts U+001C..U+001F, the ASCII file, group, record and unit
+/// separators, and nothing goes the other way. The difference is not
+/// cosmetic: `API_KEY\x1c=\x1c"<value>"` is a likely finding to Python and was
+/// nothing at all to the port, which makes it a way to walk a credential past
+/// the hook.
+#[inline]
+pub fn is_python_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
+}
+
+/// Python's `\w` on `str`: `str.isalnum()` or `_`.
 ///
-/// Python's `str.isupper` / `islower` / `isdigit` are Unicode-aware, and so
-/// are Rust's `char::is_uppercase` / `is_lowercase` / `is_numeric` — but not
-/// by identical definitions. `is_numeric` admits `Nl` and `No` (`'½'`), while
-/// Python's `isdigit` admits only Decimal and Digit numeric types, so `'½'`
-/// is `Other` to Python and would be `Digit` to a naive port.
+/// Not `char::is_alphanumeric`, which also admits `Other_Alphabetic`
+/// combining marks, circled letters, and code points a newer Unicode version
+/// assigned — about six thousand characters Python does not treat as word
+/// characters, each of which moves a `\b`. The non-ASCII set is a table
+/// generated from the interpreter; see `tools/gen_unicode_tables.py`.
+#[inline]
+pub fn is_word_python(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric() || c == '_';
+    }
+    pyunicode::contains(&pyunicode::WORD, c)
+}
+
+/// One character as Python's `re` sees it under `(?i)`, when the pattern side
+/// is ASCII.
 ///
-/// `is_numeric_python` below reproduces Python's rule. The differential test
-/// against the Python implementation is what proves it, not this comment —
-/// this module has no authority to declare the two equal.
+/// `re.IGNORECASE` on `str` folds by Unicode rules, so four non-ASCII
+/// characters match ASCII letters: `İ` (U+0130) and `ı` (U+0131) match `i`,
+/// `ſ` (U+017F) matches `s`, and the Kelvin sign `K` (U+212A) matches `k`.
+/// Enumerated over every code point against every ASCII letter, digit, `_`
+/// and `-`; these four are the complete list. Everything else non-ASCII is
+/// returned unchanged, so it can never equal an ASCII literal.
+///
+/// A port comparing with `to_ascii_lowercase` misses `paſſword = "<value>"`
+/// entirely where Python reports it, which is again a way past the hook.
+#[inline]
+pub fn fold_ci(c: char) -> char {
+    match c {
+        '\u{130}' | '\u{131}' => 'i',
+        '\u{17f}' => 's',
+        '\u{212a}' => 'k',
+        _ => c.to_ascii_lowercase(),
+    }
+}
+
+/// Classify one character, as Python's `str.isupper` / `islower` /
+/// `isdigit` would.
+///
+/// Rust's `char::is_uppercase` / `is_lowercase` / `is_numeric` are
+/// Unicode-aware too, but not by identical definitions or the same Unicode
+/// version, so non-ASCII answers come from tables generated out of the
+/// interpreter (`tools/gen_unicode_tables.py`). Checked over every code point.
 #[inline]
 pub fn char_class(c: char) -> CharClass {
-    if c.is_uppercase() {
+    if c.is_ascii() {
+        return if c.is_ascii_uppercase() {
+            CharClass::Upper
+        } else if c.is_ascii_lowercase() {
+            CharClass::Lower
+        } else if c.is_ascii_digit() {
+            CharClass::Digit
+        } else {
+            CharClass::Other
+        };
+    }
+    if pyunicode::contains(&pyunicode::UPPER, c) {
         CharClass::Upper
-    } else if c.is_lowercase() {
+    } else if pyunicode::contains(&pyunicode::LOWER, c) {
         CharClass::Lower
-    } else if is_digit_python(c) {
+    } else if pyunicode::contains(&pyunicode::DIGIT, c) {
         CharClass::Digit
     } else {
         CharClass::Other
@@ -43,42 +101,16 @@ pub fn char_class(c: char) -> CharClass {
 
 /// `str.isdigit()` for a single character: Numeric_Type of Decimal or Digit.
 ///
-/// Rust's `char::is_numeric` is the wider `N*` general category, which also
-/// contains `Nl` (Roman numerals) and `No` (vulgar fractions). Excluding the
-/// characters that are numeric but not digits is what keeps `'½'` in the same
-/// class as Python puts it.
+/// Neither `char::is_numeric` (all of `N*`, so `'½'` too) nor `to_digit(10)`
+/// (ASCII only) is this. An earlier hand-written list of five scripts was
+/// wrong on 806 code points — NKo, Mongolian, Tai Tham and the rest — which
+/// only an exhaustive comparison showed; a sampled one had passed.
 #[inline]
 pub fn is_digit_python(c: char) -> bool {
-    if c.is_ascii_digit() {
-        return true;
+    if c.is_ascii() {
+        return c.is_ascii_digit();
     }
-    if !c.is_numeric() {
-        return false;
-    }
-    // Numeric but not a digit: fractions, Roman numerals, circled and
-    // enclosed forms. `to_digit` answers for the decimal/digit types that
-    // Python accepts and rejects the rest.
-    c.to_digit(10).is_some() || is_non_ascii_decimal(c)
-}
-
-/// Decimal digits outside ASCII (Arabic-Indic, Devanagari, fullwidth, …).
-///
-/// `char::to_digit` is ASCII-only, so the general categories have to be asked
-/// directly. `Nd` is exactly Python's decimal case; superscripts such as `'²'`
-/// are `No` with Numeric_Type=Digit, which Python also accepts, and are listed
-/// explicitly because they are few and fixed.
-#[inline]
-fn is_non_ascii_decimal(c: char) -> bool {
-    matches!(c,
-        '\u{00B2}' | '\u{00B3}' | '\u{00B9}'            // ² ³ ¹
-        | '\u{0660}'..='\u{0669}'                        // Arabic-Indic
-        | '\u{06F0}'..='\u{06F9}'                        // Extended Arabic-Indic
-        | '\u{0966}'..='\u{096F}'                        // Devanagari
-        | '\u{0E50}'..='\u{0E59}'                        // Thai
-        | '\u{FF10}'..='\u{FF19}'                        // Fullwidth
-        | '\u{2080}'..='\u{2089}'                        // Subscript
-        | '\u{2460}'..='\u{2468}'                        // Circled 1-9
-    )
+    pyunicode::contains(&pyunicode::DIGIT, c)
 }
 
 /// Compensated summation, matching what CPython's `sum()` does to floats.

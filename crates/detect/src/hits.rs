@@ -127,7 +127,7 @@ pub fn scan_text_hits(text: &str) -> HitSet {
                     *prev_reasons = reasons;
                 } else if *prev_tier == tier {
                     for reason in reasons {
-                        if !reason.is_empty() && !prev_reasons.iter().any(|r| *r == reason) {
+                        if !reason.is_empty() && !prev_reasons.contains(&reason) {
                             prev_reasons.push(reason);
                         }
                     }
@@ -151,7 +151,7 @@ pub fn scan_text_hits(text: &str) -> HitSet {
             continue;
         }
         let key = name.to_uppercase();
-        if !hits.flag_names.iter().any(|n| *n == key) {
+        if !hits.flag_names.contains(&key) {
             hits.flag_names.push(key);
         }
         let mut reasons = vec![REASON_FLAG_FORM.to_string()];
@@ -217,7 +217,7 @@ pub fn find_secret_kind(text: &str) -> Option<String> {
 
 /// `s.lstrip().startswith("{") or startswith("[")`
 pub fn looks_like_json_container(s: &str) -> bool {
-    let t = s.trim_start();
+    let t = s.trim_start_matches(crate::primitives::is_python_space);
     t.starts_with('{') || t.starts_with('[')
 }
 

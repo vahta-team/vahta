@@ -23,13 +23,14 @@ use crate::classify::{classify_value, Confidence};
 /// Python's `\w`: alphanumeric or underscore, Unicode-aware.
 #[inline]
 fn is_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    crate::primitives::is_word_python(c)
 }
 
-/// Python's `\s`, Unicode-aware.
+/// Python's `\s` on `str`. See `primitives::is_python_space` for why this
+/// is not `char::is_whitespace`.
 #[inline]
 fn is_space(c: char) -> bool {
-    c.is_whitespace()
+    crate::primitives::is_python_space(c)
 }
 
 /// `\b` at byte offset `at`: exactly one side is a word character.
@@ -247,7 +248,7 @@ fn find_bearer_value(chars: &[char]) -> Option<String> {
         let matched = chars[start..start + WORD.len()]
             .iter()
             .zip(WORD)
-            .all(|(c, w)| c.to_ascii_lowercase() == w);
+            .all(|(c, w)| crate::primitives::fold_ci(*c) == w);
         if !matched || !at_word_boundary(chars, start) {
             start += 1;
             continue;
@@ -286,9 +287,12 @@ pub fn classify_bearer_capture(text: &str) -> Confidence {
 
 /// `(?i)^(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password|passwd|private[_-]?key)$`
 pub fn is_secret_name(name: &str) -> bool {
-    let trimmed = name.trim().trim_matches(|c| c == '\'' || c == '"');
-    let lower = trimmed.to_ascii_lowercase();
-    let chars: Vec<char> = lower.chars().collect();
+    // `name.strip().strip("'\"")`, with Python's whitespace; then `(?i)`
+    // folding, which is one character to one character, so positions hold.
+    let trimmed = name
+        .trim_matches(crate::primitives::is_python_space)
+        .trim_matches(|c| c == '\'' || c == '"');
+    let chars: Vec<char> = trimmed.chars().map(crate::primitives::fold_ci).collect();
 
     // Try every suffix that a `(?:[a-z0-9]+[_-])*` prefix could leave behind.
     let mut starts = vec![0usize];
@@ -356,10 +360,7 @@ fn find_assign_keywords(chars: &[char]) -> Vec<(usize, usize)> {
         // free from a compiled alternation, which is a DFA; without this the
         // port tries six literals at every character and loses its advantage
         // on keyword-dense text such as source files.
-        if !matches!(
-            chars[i].to_ascii_lowercase(),
-            'a' | 't' | 's' | 'p'
-        ) {
+        if !matches!(crate::primitives::fold_ci(chars[i]), 'a' | 't' | 's' | 'p') {
             i += 1;
             continue;
         }
@@ -398,8 +399,8 @@ fn match_literal_ci(chars: &[char], at: usize, literal: &str) -> Option<usize> {
         return None;
     }
     for (offset, &want) in lit.iter().enumerate() {
-        let c = chars[at + offset];
-        if !c.is_ascii() || c.to_ascii_lowercase() as u8 != want {
+        let c = crate::primitives::fold_ci(chars[at + offset]);
+        if !c.is_ascii() || c as u8 != want {
             return None;
         }
     }
