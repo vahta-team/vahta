@@ -1,27 +1,34 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/fujitoid/key-amnesia/master/media/assets/approved/logo-512.png" alt="key-amnesia" width="200">
+  <img src="https://raw.githubusercontent.com/vahta-team/vahta/master/media/assets/approved/logo-512.png" alt="key-amnesia" width="200">
 </p>
 
 # key-amnesia
 
-<!-- Badge links are absolute for the same reason as the images below: PyPI renders
-     this README outside the repository and cannot resolve relative paths. -->
-[![release](https://img.shields.io/github/v/release/fujitoid/key-amnesia)](https://github.com/fujitoid/key-amnesia/releases/latest)
-[![PyPI](https://img.shields.io/pypi/v/key-amnesia.svg)](https://pypi.org/project/key-amnesia/)
-[![downloads](https://img.shields.io/pypi/dm/key-amnesia)](https://pypistats.org/packages/key-amnesia)
-[![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
-[![stars](https://img.shields.io/github/stars/fujitoid/key-amnesia?logo=github)](https://github.com/fujitoid/key-amnesia/stargazers)
-[![license](https://img.shields.io/github/license/fujitoid/key-amnesia)](https://github.com/fujitoid/key-amnesia/blob/master/LICENSE)
-[![changelog](https://img.shields.io/badge/changelog-Keep%20a%20Changelog-E05735)](https://github.com/fujitoid/key-amnesia/blob/master/CHANGELOG.md)
-[![Docs](https://img.shields.io/badge/docs-wiki-blue)](https://github.com/fujitoid/key-amnesia/wiki)
-[![Discord](https://img.shields.io/discord/1531406398334832690?label=discord&logo=discord)](https://discord.gg/4WnQfk49xX)
+> ### key-amnesia is now **Vahta**
+>
+> **Vahta lets your AI agent *use* your passwords and API keys — without ever
+> letting it *see* them.**
+>
+> The product and the concept are tested. What comes next is not an iteration
+> but a hard reboot: a deep refactor onto a new core, which is why the project
+> has been renamed and moved here.
+>
+> Faster, and more reliable, on more platforms — with enterprise-grade quality
+> and the features small and medium teams actually need. Individual developers
+> stay a first-class priority rather than an afterthought, because the mission
+> is **safe autonomous long-running agents for everyone**, and security is a
+> baseline, not a luxury.
+>
+> Everything below still describes the software as it ships today.
+> `key-amnesia` remains installable from PyPI and will get one final release.
+> It will never be yanked, so pinned installs keep working.
 
 **Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
 
 <!-- Absolute URL, not a repo-relative path: PyPI renders this README outside the
      repository and cannot resolve relative image paths, so a relative link shows
      as a broken image on the project page. -->
-![key-amnesia — the vault hands the agent a sealed envelope it cannot open](https://raw.githubusercontent.com/fujitoid/key-amnesia/master/media/assets/approved/readme-hero.png)
+![key-amnesia — the vault hands the agent a sealed envelope it cannot open](https://raw.githubusercontent.com/vahta-team/vahta/master/media/assets/approved/readme-hero.png)
 
 ## The problem is `.env`
 
@@ -33,7 +40,7 @@ Your choices used to be ugly: paste the key, leave it in plaintext where the age
 
 The agent gets amnesia. That's the whole point.
 
-**Docs:** [github.com/fujitoid/key-amnesia/wiki](https://github.com/fujitoid/key-amnesia/wiki) — or run `ka docs` (prints the URL; opens a browser unless you pass `--print`).
+**Docs:** [github.com/vahta-team/vahta/wiki](https://github.com/vahta-team/vahta/wiki) — or run `ka docs` (prints the URL; opens a browser unless you pass `--print`).
 
 ## How it works, in 30 seconds
 
@@ -62,9 +69,9 @@ When the agent triggers `ka run` and your approval is needed, a new console wind
 pip install key-amnesia
 ```
 
-Or from source: `pip install git+https://github.com/fujitoid/key-amnesia`, or from a local clone: `pip install .` — every path gets you both the full `key-amnesia` command and the short `ka` alias.
+Or from source: `pip install git+https://github.com/vahta-team/vahta`, or from a local clone: `pip install .` — every path gets you both the full `key-amnesia` command and the short `ka` alias.
 
-> Windows and Linux supported. macOS isolated-console spawn is **experimental** (PID-file wrapper around Terminal.app / osascript) until a real Mac user confirms the visible window path — see [wiki — macOS](https://github.com/fujitoid/key-amnesia/wiki/macOS).
+> Windows and Linux supported. macOS isolated-console spawn is **experimental** (PID-file wrapper around Terminal.app / osascript) until a real Mac user confirms the visible window path — see [wiki — macOS](https://github.com/vahta-team/vahta/wiki/macOS).
 
 ### Agent bootstrap
 
@@ -154,7 +161,7 @@ heard of works without a code change. `KEY_AMNESIA_TERMINAL` overrides it for a
 single run. `ka status` prints the terminal that would open and where the
 setting came from.
 
-Full command reference, project vaults, manifests, roles/export, and admission details: **[the wiki](https://github.com/fujitoid/key-amnesia/wiki)** (`ka docs`).
+Full command reference, project vaults, manifests, roles/export, and admission details: **[the wiki](https://github.com/vahta-team/vahta/wiki)** (`ka docs`).
 
 ## Security limits — read this part honestly
 
@@ -171,17 +178,17 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 9. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
 10. **`--pre-admit` is an explicit, opt-in trust-widening you ask for.** It auto-admits whichever process happens to connect first within the window — not necessarily the one you meant — so only use it right before the command you're expecting, for a short window, and treat the loud confirmation line + audit log entry as the evidence of what it actually admitted.
 11. **`--admit-tree` is a separate opt-in trust-widening (also never the default, no config/env).** At the first unrecognized-peer prompt it lets you pick a kernel-verified *ancestor* as the admission root, so every real OS descendant of that root (including later sibling CLI invocations under the same parent) is silently in-tree for the rest of the session. That is wider than admitting the short-lived connecting `ka` process alone — use it only when you intend lineage trust, and read the loud `via=interactive-tree` announce + audit line for the root you actually chose. It does **not** change `--pre-admit` (arrival-time grant vs lineage root).
-12. **A live guard session reloads on change, not on a fixed schedule.** The guard checks a cheap content fingerprint of the vault file on every `run`/`list`/`status`; when another terminal changes it, the guard re-opens with the SecretBox key it already derived at unlock — no new password prompt. The tradeoff: the guard keeps that **derived key** in memory for the session. Detail: [DESIGN.md](DESIGN.md) and the [threat-model wiki page](https://github.com/fujitoid/key-amnesia/wiki/Threat-model).
+12. **A live guard session reloads on change, not on a fixed schedule.** The guard checks a cheap content fingerprint of the vault file on every `run`/`list`/`status`; when another terminal changes it, the guard re-opens with the SecretBox key it already derived at unlock — no new password prompt. The tradeoff: the guard keeps that **derived key** in memory for the session. Detail: [DESIGN.md](DESIGN.md) and the [threat-model wiki page](https://github.com/vahta-team/vahta/wiki/Threat-model).
 13. **Runner role is not a cryptographic ACL against you.** If your local identity is enrolled as `runner`, `ka` refuses `reveal`/`copy` — effective against an agent. Anyone who knows the master password can still decrypt the vault offline. Per-member `ka export` ciphertext *is* cryptographic (only that member's key opens it).
 14. **Harness file allow-lists are best-effort; the hook/plugin is the deny.** Claude `permissions.allow` / `autoMode.allow`, Cursor prefixes, and OpenCode `permission.bash` globs try to let the agent run `ka run` / `ka list`. They do not authorize `cd && … | tail` compound chains (each subcommand is classified separately). Codex has no command rules in `config.toml`. Without a trusted hook (or, on OpenCode, the JS plugin), auto-mode deny is inert. An agent that can write harness config can remove or disable the hook; hook self-protection is not in this release.
 15. **Hook verb-deny is not a complete `ka` sandbox.** Shell aliases, functions, and renamed copies of the binary are not recognized. A trailing command that *constructs* a `ka` invocation at runtime (`python -c "os.system('ka set …')"`) is not verb-denied. `KEY_AMNESIA_HOOK_DISABLE` on the inner command does not disable the hook process; a **user login** env var can inherit into the harness and is the operator bypass.
 16. **Write/Edit tools are not verb-denied** so docs can mention `ka set`. Secret scanning on those tools is unchanged.
 
-Longer honesty notes and policy-vs-crypto labels: [wiki — Threat model](https://github.com/fujitoid/key-amnesia/wiki/Threat-model) (draft; maintainer judgement flagged).
+Longer honesty notes and policy-vs-crypto labels: [wiki — Threat model](https://github.com/vahta-team/vahta/wiki/Threat-model) (draft; maintainer judgement flagged).
 
 ## Community
 
-Questions, bugs, and ideas: [Discord](https://discord.gg/4WnQfk49xX), [GitHub Discussions](https://github.com/fujitoid/key-amnesia/discussions), or [GitHub issues](https://github.com/fujitoid/key-amnesia/issues).
+Questions, bugs, and ideas: [Discord](https://discord.gg/4WnQfk49xX), [GitHub Discussions](https://github.com/vahta-team/vahta/discussions), or [GitHub issues](https://github.com/vahta-team/vahta/issues).
 
 ## Support
 
