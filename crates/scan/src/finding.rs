@@ -68,7 +68,9 @@ pub struct Finding {
     pub kind: String,
     /// Names only. The value they held is never recorded, anywhere.
     pub secret_names: Vec<String>,
-    pub secret_count: usize,
+    /// Signed, because Python's `max(f.secret_count, 0)` implies it can be
+    /// negative and the guard is load-bearing.
+    pub secret_count: i64,
     pub reason: String,
     pub importable: bool,
     pub scope: Scope,
@@ -117,16 +119,19 @@ pub fn gated_confidences(strict: &str) -> Vec<Confidence> {
     }
 }
 
-/// Findings at or above the gate. The number a caller exits non-zero on.
+/// Secrets at or above the gate. The number a caller exits non-zero on.
+///
+/// A **sum of `secret_count`**, not a count of findings: one `.env` holding
+/// four names is four LEAKs, and the headline says so. Python writes
+/// `max(f.secret_count, 0)`, which is why the field is read as a signed value
+/// here rather than trusted to be non-negative.
 pub fn leak_count(findings: &[Finding], strict: &str) -> usize {
     let gate = gated_confidences(strict);
     findings
         .iter()
-        .filter(|f| {
-            f.confidence_tier()
-                .is_some_and(|c| gate.contains(&c))
-        })
-        .count()
+        .filter(|f| f.confidence_tier().is_some_and(|c| gate.contains(&c)))
+        .map(|f| f.secret_count.max(0) as usize)
+        .sum()
 }
 
 #[cfg(test)]
@@ -134,29 +139,41 @@ mod tests {
     use super::*;
     use crate::{STRICT_CERTAIN, STRICT_HIGH, STRICT_PARANOID};
 
-    fn at(conf: &str) -> Finding {
+    /// Distinct `secret_count`s on purpose: equal ones would let a count of
+    /// findings pass for a sum of secrets, which is the bug this replaced.
+    fn at(conf: &str, secret_count: i64) -> Finding {
         let mut f = Finding::new("p", "dotenv", Scope::Project);
         f.confidence = conf.to_string();
+        f.secret_count = secret_count;
         f
     }
 
     #[test]
     fn strict_levels_gate_as_documented() {
-        let all = [at("certain"), at("likely"), at("possible")];
-        assert_eq!(leak_count(&all, STRICT_CERTAIN), 1);
-        assert_eq!(leak_count(&all, STRICT_HIGH), 2);
-        assert_eq!(leak_count(&all, STRICT_PARANOID), 3);
+        let all = [at("certain", 3), at("likely", 5), at("possible", 7)];
+        assert_eq!(leak_count(&all, STRICT_CERTAIN), 3);
+        assert_eq!(leak_count(&all, STRICT_HIGH), 8);
+        assert_eq!(leak_count(&all, STRICT_PARANOID), 15);
     }
 
     #[test]
     fn an_unknown_strict_level_behaves_like_high() {
-        let all = [at("certain"), at("likely"), at("possible")];
-        assert_eq!(leak_count(&all, "nonsense"), 2);
+        let all = [at("certain", 3), at("likely", 5), at("possible", 7)];
+        assert_eq!(leak_count(&all, "nonsense"), 8);
+    }
+
+    /// Python writes `max(f.secret_count, 0)`; a negative count contributes
+    /// nothing rather than wrapping.
+    #[test]
+    fn a_negative_secret_count_contributes_nothing() {
+        let all = [at("certain", -4), at("certain", 2)];
+        assert_eq!(leak_count(&all, STRICT_CERTAIN), 2);
     }
 
     #[test]
     fn a_finding_without_a_confidence_is_never_counted() {
-        let all = [Finding::new("p", "dotenv", Scope::Project)];
-        assert_eq!(leak_count(&all, STRICT_PARANOID), 0);
+        let mut f = Finding::new("p", "dotenv", Scope::Project);
+        f.secret_count = 9;
+        assert_eq!(leak_count(&[f], STRICT_PARANOID), 0);
     }
 }

@@ -13,8 +13,11 @@
 //! 395 of `scan.py`'s 1194 lines, is a moving target tied to other vendors'
 //! file layouts, and stays in Python for now.
 
+pub mod content;
 pub mod filenames;
 pub mod finding;
+pub mod report;
+pub mod walk;
 
 pub use finding::{Confidence, Finding};
 
