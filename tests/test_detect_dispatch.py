@@ -13,8 +13,11 @@ product's own hook does not refuse this file — which it would be right to do.
 
 from __future__ import annotations
 
+from types import ModuleType
+
 import pytest
 
+from key_amnesia import _dispatch
 from key_amnesia import detect as detect_mod
 from key_amnesia import detect_py
 
@@ -93,13 +96,27 @@ def test_unknown_attribute_names_the_active_implementation() -> None:
 def test_a_missing_extension_falls_back_rather_than_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The released wheel ships no extension; asking for it must be a no-op."""
-    monkeypatch.setenv(detect_mod.IMPL_ENV_VAR, detect_mod.IMPL_RUST)
-    impl, name = detect_mod._load_impl()
-    if name == detect_mod.IMPL_RUST:
-        pytest.skip("extension is installed in this environment")
-    assert impl is detect_py
-    assert name == detect_mod.IMPL_PYTHON
+    """The released wheel ships no extension; asking for it must be a no-op.
+
+    Installed onto a throwaway module against an extension name that cannot
+    exist, so this exercises the fallback itself rather than skipping wherever
+    the real extension happens to be built.
+    """
+    monkeypatch.setenv("KEY_AMNESIA_TEST_IMPL", _dispatch.IMPL_RUST)
+    scratch = ModuleType("key_amnesia._dispatch_probe")
+    result = _dispatch.install(
+        scratch,
+        env_var="KEY_AMNESIA_TEST_IMPL",
+        python_module="key_amnesia.detect_py",
+        rust_module="key_amnesia._no_such_extension",
+    )
+    assert result.active == _dispatch.IMPL_PYTHON
+    assert result.impl is detect_py
+    assert scratch.active_impl == _dispatch.IMPL_PYTHON
+    # And the forwarding still works, so the fallback is usable and not merely
+    # selected.
+    assert scratch.scan_text_hits(_PROBE).likely_names == ["API_KEY"]
+    assert result.implemented_natively() == frozenset()
 
 
 def test_own_names_are_not_forwarded_onto_the_implementation() -> None:
