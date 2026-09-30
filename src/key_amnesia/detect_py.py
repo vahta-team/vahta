@@ -444,8 +444,13 @@ def classify_value(value: str) -> tuple[Confidence, str | None]:
     if _TYPE_ANN.fullmatch(v):
         return "none", NAMED_WEAKENING_TYPE_ANNOTATION
 
-    # UUID-shaped / stripped-hex-32: likely even when hyphens make
-    # transition_rate sit below LIKELY_TRANSITION_FLOOR (~0.43).
+    # UUID-shaped / stripped-hex-32: likely even when transition_rate sits
+    # below LIKELY_TRANSITION_FLOOR. Measured: hex-32
+    # a1b2c3d4e5f6789012345678abcdef01 rates 0.42, because a hex alphabet does
+    # not alternate character classes the way base62 does, so without this
+    # promotion it would demote to possible/low-transition. Hyphens are *not*
+    # the reason — they are class "other" and raise the rate (0.42 -> 0.57);
+    # an earlier version of this comment had that backwards.
     if _uuid_or_stripped_hex(v):
         return "likely", REASON_UUID
 

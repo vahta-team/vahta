@@ -18,6 +18,12 @@ therefore behaves exactly as it did before this indirection existed, and
 ``KEY_AMNESIA_DETECT_IMPL=rust`` on a machine without the extension is a no-op
 rather than a crash.
 
+The port is **incremental**, so lookups chain: a name the extension defines
+comes from the extension, and everything else — the legacy ``ASSIGN`` pattern
+object, ``collect_strings`` over arbitrary containers, the constants — still
+comes from Python. :func:`implemented_natively` reports which is which, which
+is more useful than claiming the whole module was replaced.
+
 Why this is a module *subclass* and not a PEP 562 ``__getattr__``
 -----------------------------------------------------------------
 Forwarding reads alone is not enough, and getting that wrong is silent rather
@@ -29,13 +35,11 @@ global — so the test compares the new matcher against itself, passes, and
 verifies nothing. Measured, not reasoned: patching this module left the hit
 list unchanged while patching ``detect_py`` emptied it.
 
-So writes are forwarded too. Assigning any non-dunder name on this module
-assigns it on the active implementation, where the code that reads it lives,
-and ``monkeypatch`` keeps working exactly as it did when the constant and its
-reader shared one module. Nothing is cached, because a cached read would go
-stale the moment someone patched the implementation directly.
+So writes are forwarded too, to whichever module owns the name. Nothing is
+cached, because a cached read would go stale the moment someone patched an
+implementation directly.
 
-Never returns or logs secret *values*, exactly as the implementation it wraps.
+Never returns or logs secret *values*, exactly as the implementations it wraps.
 """
 
 from __future__ import annotations
@@ -61,7 +65,7 @@ def _requested_impl() -> str:
 
 
 def _load_impl() -> tuple[ModuleType, str]:
-    """Return the implementation module and the name it resolved to.
+    """Return the primary implementation module and the name it resolved to.
 
     Falls back to Python rather than raising: an unset or unknown value, and a
     missing or unimportable extension, all mean the same thing to a caller —
@@ -75,9 +79,18 @@ def _load_impl() -> tuple[ModuleType, str]:
     return importlib.import_module(_PYTHON_MODULE), IMPL_PYTHON
 
 
+_fallback = importlib.import_module(_PYTHON_MODULE)
 _impl, active_impl = _load_impl()
 
-#: Names this module owns. Everything else is the implementation's.
+
+def implemented_natively() -> frozenset[str]:
+    """Names the active implementation actually serves itself."""
+    if _impl is _fallback:
+        return frozenset()
+    return frozenset(n for n in dir(_impl) if not n.startswith("__"))
+
+
+#: Names this module owns. Everything else belongs to an implementation.
 _OWN_NAMES = frozenset(
     {
         "IMPL_ENV_VAR",
@@ -88,7 +101,9 @@ _OWN_NAMES = frozenset(
         "_requested_impl",
         "_load_impl",
         "_impl",
+        "_fallback",
         "active_impl",
+        "implemented_natively",
         "_OWN_NAMES",
         "_Dispatcher",
         "importlib",
@@ -101,12 +116,16 @@ _OWN_NAMES = frozenset(
 
 
 class _Dispatcher(ModuleType):
-    """Forwards reads *and writes* to the active implementation module."""
+    """Forwards reads *and writes* to whichever implementation owns the name."""
 
     def __getattr__(self, name: str):
         # Reached only for names absent from this module's own __dict__.
         try:
             return getattr(_impl, name)
+        except AttributeError:
+            pass
+        try:
+            return getattr(_fallback, name)
         except AttributeError:
             raise AttributeError(
                 f"module {__name__!r} has no attribute {name!r} "
@@ -116,17 +135,22 @@ class _Dispatcher(ModuleType):
     def __setattr__(self, name: str, value) -> None:
         if name.startswith("__") or name in _OWN_NAMES:
             ModuleType.__setattr__(self, name, value)
-        else:
-            setattr(_impl, name, value)
+            return
+        # Write where the name is read, so monkeypatching still works. A
+        # compiled extension cannot accept a patched constant, which is why a
+        # test that swaps one is a test of the Python implementation.
+        target = _impl if hasattr(_impl, name) else _fallback
+        setattr(target, name, value)
 
     def __delattr__(self, name: str) -> None:
         if name.startswith("__") or name in _OWN_NAMES:
             ModuleType.__delattr__(self, name)
-        else:
-            delattr(_impl, name)
+            return
+        target = _impl if hasattr(_impl, name) else _fallback
+        delattr(target, name)
 
     def __dir__(self) -> list[str]:
-        return sorted(set(dir(_impl)) | set(self.__dict__))
+        return sorted(set(dir(_impl)) | set(dir(_fallback)) | set(self.__dict__))
 
 
 sys.modules[__name__].__class__ = _Dispatcher

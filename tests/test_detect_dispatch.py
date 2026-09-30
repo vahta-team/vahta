@@ -22,22 +22,46 @@ from key_amnesia import detect_py
 _PROBE = "=".join(("API_KEY", "aB3xQ9mK2pL7vN4wZ8"))
 
 
+PYTHON_ONLY = pytest.mark.skipif(
+    detect_mod.active_impl != detect_mod.IMPL_PYTHON,
+    reason="asserts identity with the Python implementation",
+)
+
+
+def test_every_name_resolves_under_either_implementation() -> None:
+    """The dispatcher chains: the extension first, then Python for the rest."""
+    for name in ("scan_text_hits", "classify_value", "find_secret_kind", "entropy"):
+        assert callable(getattr(detect_mod, name))
+    # Never ported, always served by Python.
+    assert detect_mod.ASSIGN is detect_py.ASSIGN
+    assert detect_mod.FLAG_FORM_FIRE_TIERS == detect_py.FLAG_FORM_FIRE_TIERS
+
+
+@PYTHON_ONLY
 def test_reads_forward_to_the_implementation() -> None:
     assert detect_mod.scan_text_hits is detect_py.scan_text_hits
     assert detect_mod.classify_value is detect_py.classify_value
-    assert detect_mod.FLAG_FORM_FIRE_TIERS == detect_py.FLAG_FORM_FIRE_TIERS
 
 
 def test_private_helpers_forward_too() -> None:
     """Tests import these by name; they must not stop at the dispatcher."""
-    assert detect_mod._iter_assignments is detect_py._iter_assignments
-    assert detect_mod._iter_flag_values is detect_py._iter_flag_values
+    assert callable(detect_mod._iter_assignments)
+    assert callable(detect_mod._iter_flag_values)
+    if detect_mod.active_impl == detect_mod.IMPL_PYTHON:
+        assert detect_mod._iter_assignments is detect_py._iter_assignments
+        assert detect_mod._iter_flag_values is detect_py._iter_flag_values
 
 
+@PYTHON_ONLY
 def test_a_write_through_the_dispatcher_reaches_the_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guard against a silently tautological differential test."""
+    """The guard against a silently tautological differential test.
+
+    Python-only by nature: a compiled implementation reads its own constants
+    and cannot be handed a patched one, so this asserts a property of the
+    Python path rather than of the detector.
+    """
     baseline = detect_mod.scan_text_hits(_PROBE)
     assert baseline.likely_names == ["API_KEY"], "probe stopped being a hit"
 
@@ -50,6 +74,7 @@ def test_a_write_through_the_dispatcher_reaches_the_reader(
     )
 
 
+@PYTHON_ONLY
 def test_monkeypatch_undo_restores_the_implementation() -> None:
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(detect_mod, "_iter_assignments", lambda _text: iter(()))

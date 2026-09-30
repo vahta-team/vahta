@@ -872,8 +872,20 @@ def test_flag_form_reason_and_kind_name_the_flag() -> None:
 
 
 def test_flag_form_tier_is_one_flippable_constant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """FLAG_FORM_FIRE_TIERS is the whole tier decision — nothing else changes."""
+    """FLAG_FORM_FIRE_TIERS is the whole tier decision — nothing else changes.
+
+    Python-only, and structurally so: this swaps a module constant and expects
+    the code that reads it to notice. A compiled implementation reads its own
+    copy and cannot be handed a patched one, so under ``KEY_AMNESIA_DETECT_IMPL
+    =rust`` the assertion would be testing nothing rather than testing the
+    detector. The *shipped* value is asserted separately, by
+    ``test_flag_form_shipped_tier_is_likely_plus_possible``, which is
+    implementation-independent.
+    """
     from key_amnesia import detect as detect_mod
+
+    if detect_mod.active_impl != detect_mod.IMPL_PYTHON:
+        pytest.skip("swaps a module constant; only the Python path can observe it")
 
     strong = f"mysql --password {_GEN_MIXED_B} -u root"
     weak = f"pgcli --password {_GEN_WEAK_PW} -h db.example.com"
