@@ -50,7 +50,7 @@ from key_amnesia.vault import (
 
 # Canonical human docs (GitHub wiki). Per-command --docs deferred until wiki IA
 # is stable — one entry point avoids a rotting cmd→URL map.
-DOCS_URL = "https://github.com/fujitoid/key-amnesia/wiki"
+DOCS_URL = "https://github.com/vahta-team/vahta/wiki"
 
 
 def _write_command_output(stream: Any, text: str) -> None:

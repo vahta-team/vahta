@@ -27,4 +27,4 @@ body:
   - type: markdown
     attributes:
       value: |
-        Security-sensitive ideas that describe a vulnerability should go through [SECURITY.md](https://github.com/fujitoid/key-amnesia/blob/master/SECURITY.md), not a public feature request.
+        Security-sensitive ideas that describe a vulnerability should go through [SECURITY.md](https://github.com/vahta-team/vahta/blob/master/SECURITY.md), not a public feature request.

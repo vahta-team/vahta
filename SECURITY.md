@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please use [GitHub private vulnerability reporting](https://github.com/fujitoid/key-amnesia/security/advisories/new) for this repository.
+Please use [GitHub private vulnerability reporting](https://github.com/vahta-team/vahta/security/advisories/new) for this repository.
 
 Do **not** open a public issue, discussion, or Discord message that includes exploit details or secret values.
 
