@@ -164,6 +164,23 @@ jobs:
           cargo build --release -p vahta-detect --example dump_unicode
           "${{ steps.py.outputs.python }}" benchmarks/diff_unicode.py
 
+      # The checkable promise: the open build cannot make a network request,
+      # because nothing in its dependency tree is an HTTP or TLS client.
+      # Dependencies are welcome; network-capable ones are not.
+      - name: No network client in the dependency tree
+        if: matrix.impl == 'rust'
+        run: |
+          set -euo pipefail
+          found=$(cargo tree --workspace --edges normal,build --prefix none \
+            | sed 's/ .*//' | sort -u \
+            | grep -Ex 'reqwest|hyper|hyper-util|ureq|curl|curl-sys|isahc|surf|attohttpc|h2|rustls|native-tls|openssl|openssl-sys' || true)
+          if [ -n "$found" ]; then
+            echo "network-capable crates in the tree:" >&2
+            echo "$found" >&2
+            exit 1
+          fi
+          echo "no network client in the dependency tree"
+
       - name: Test
         run: |
           set -euo pipefail
