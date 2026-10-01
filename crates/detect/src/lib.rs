@@ -27,7 +27,9 @@ pub use classify::{
     NAMED_WEAKENING_TYPE_ANNOTATION, NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE, REASON_UNCONFIRMED_MCP, REASON_UUID,
     SHANNON_POSSIBLE_FLOOR, STRIPPED_UUID_LEN,
 };
-pub use hits::{find_secret_kind, looks_like_json_container, scan_text_hits, HitSet};
+pub use hits::{
+    find_secret_kind, looks_like_json_container, scan_text_hits, scan_texts, HitSet,
+};
 pub use matchers::{
     classify_bearer_capture, find_prefix_kind, is_secret_name, iter_assignments,
     iter_flag_values, FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM,

@@ -121,9 +121,14 @@ pub fn scan_text_hits(text: &str) -> HitSet {
         let key = name.to_uppercase();
         match chosen.iter_mut().find(|(k, _, _, _)| *k == key) {
             None => chosen.push((key, tier, name.to_string(), reasons)),
-            Some((_, prev_tier, _, prev_reasons)) => {
+            Some((_, prev_tier, prev_name, prev_reasons)) => {
                 if *prev_tier == Confidence::Possible && tier == Confidence::Likely {
+                    // Python replaces the whole entry, so the *later* spelling
+                    // of the name wins when a possible hit is upgraded: a
+                    // lower-case name then an upper-case one reports the
+                    // upper-case one.
                     *prev_tier = tier;
+                    *prev_name = name.to_string();
                     *prev_reasons = reasons;
                 } else if *prev_tier == tier {
                     for reason in reasons {
@@ -237,6 +242,18 @@ mod tests {
     }
 
     #[test]
+    fn an_upgraded_hit_takes_the_later_spelling_of_the_name() {
+        // Python: `chosen[key] = (tier, name, ...)` replaces the whole entry
+        // when a possible hit is upgraded to likely.
+        let name = ["tok", "en"].concat();
+        let first = assignment(&name, "Frombuild");
+        let second = format!("\"{}\": \"{}\"", name.to_uppercase(), "aB3xQ9mK2pL7vN4wZ8");
+        let hits = scan_text_hits(&format!("{first}\n{second}"));
+        assert_eq!(hits.likely_names, vec![name.to_uppercase()]);
+        assert!(hits.possible_names.is_empty());
+    }
+
+    #[test]
     fn a_flag_form_hit_says_it_is_a_flag() {
         let text = format!("mysql --password {} -u root", "Zk9pL2xQ7mN4vB8w");
         let hits = scan_text_hits(&text);
@@ -288,6 +305,31 @@ impl HitSet {
         (likely, possible)
     }
 
+    /// `HitSet.record_assignment`: highest tier wins per name, and a name
+    /// already held at the same or a higher tier is left alone. Any tier other
+    /// than `Likely` / `Possible` records nothing. Does not record values.
+    pub fn record_assignment(&mut self, name: &str, tier: Confidence, reasons: &[String]) {
+        let key = name.to_uppercase();
+        let (mut likely, mut possible) = self.to_stores();
+        match tier {
+            Confidence::Likely => {
+                if lookup(&likely, &key).is_some() {
+                    return;
+                }
+                remove(&mut possible, &key);
+                likely.push((key, (name.to_string(), reasons.to_vec())));
+            }
+            Confidence::Possible => {
+                if lookup(&likely, &key).is_some() || lookup(&possible, &key).is_some() {
+                    return;
+                }
+                possible.push((key, (name.to_string(), reasons.to_vec())));
+            }
+            _ => return,
+        }
+        self.rebuild(&likely, &possible);
+    }
+
     /// Fold `extra` in, with the same rule the Python dataclass uses: a likely
     /// hit displaces a possible one for the same name, an existing likely hit
     /// is never replaced, the first vendor prefix wins, and the Bearer flags
@@ -333,10 +375,10 @@ impl HitSet {
 /// saves: on a synthetic 879 KiB transcript tree the Rust path was 768 ms
 /// against Python's 750 ms, i.e. slightly slower. Crossing once per file
 /// instead moves the boundary to where the work is.
-pub fn scan_texts(texts: &[String]) -> HitSet {
+pub fn scan_texts<S: AsRef<str>>(texts: &[S]) -> HitSet {
     let mut acc = HitSet::default();
     for text in texts {
-        let hits = scan_text_hits(text);
+        let hits = scan_text_hits(text.as_ref());
         acc.merge(&hits);
     }
     acc
