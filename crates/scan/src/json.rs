@@ -94,6 +94,22 @@ pub enum ParseError {
     /// Nesting passed the limit given to [`parse_bounded`]. Says nothing about
     /// whether the text is valid JSON: the parse stopped at the limit.
     TooDeep,
+    /// More values than [`Limits::nodes`] allows. Like [`ParseError::TooDeep`],
+    /// says nothing about validity.
+    TooMany,
+}
+
+/// What a bounded parse may build. Depth bounds the open frames; nodes bound
+/// the finished tree, which a wide line (`[1,1,1,...]`) grows by tens of bytes
+/// per two bytes of text however shallow it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub depth: usize,
+    pub nodes: usize,
+}
+
+impl Limits {
+    pub const NONE: Limits = Limits { depth: usize::MAX, nodes: usize::MAX };
 }
 
 impl Value {
@@ -431,11 +447,24 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
 /// `max_depth` open frames before the parse stops with
 /// [`ParseError::TooDeep`] — the memory a caller is bounding.
 pub fn parse_bounded(text: &str, max_depth: usize) -> Result<Value, ParseError> {
+    parse_limited(text, Limits { depth: max_depth, nodes: usize::MAX })
+}
+
+/// [`parse`] within `limits`: [`ParseError::TooDeep`] past the depth,
+/// [`ParseError::TooMany`] past the node count. Every value counts as a node,
+/// containers included.
+pub fn parse_limited(text: &str, limits: Limits) -> Result<Value, ParseError> {
+    let max_depth = limits.depth;
+    let mut nodes = 0usize;
     let mut p = Parser { text, b: text.as_bytes(), i: 0 };
     let mut stack: Vec<Frame> = Vec::new();
     p.skip_ws();
 
     'value: loop {
+        nodes += 1;
+        if nodes > limits.nodes {
+            return Err(ParseError::TooMany);
+        }
         // A value is expected at `p.i`.
         let mut value = match p.peek().ok_or(ParseError::Invalid)? {
             b'"' => {
@@ -540,6 +569,64 @@ pub fn parse_bounded(text: &str, max_depth: usize) -> Result<Value, ParseError> 
                 }
             }
         }
+    }
+}
+
+/// Every string in `text` in value position, decoded, in reading order, each
+/// with the member key just before it when it is an object member's value
+/// (`f(Some(key), value)`); keys themselves are not reported as strings.
+///
+/// A token walk with no tree, for text that is too big to parse: memory is the
+/// largest single string. It never fails. It does not check structure, so it
+/// reads invalid JSON too: a string with a malformed escape or no closing quote
+/// is passed raw. Duplicate keys are not resolved, so it may report a member
+/// `dict` semantics would have overwritten — more, never less.
+pub fn for_each_string(text: &str, f: &mut dyn FnMut(Option<&str>, &str)) {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    let mut key: Option<String> = None;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let (s, next) = string_token(text, i);
+                i = next;
+                let mut j = i;
+                while j < b.len() && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b':') {
+                    key = Some(s);
+                    i = j + 1;
+                } else {
+                    f(key.take().as_deref(), &s);
+                }
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            _ => {
+                // Any other token ends a pending member: its value is not a
+                // string.
+                key = None;
+                i += 1;
+            }
+        }
+    }
+}
+
+/// The string token opening at `start` (a `"`), decoded, and the index just
+/// past it. Undecodable or unterminated: the raw body, up to the closing quote
+/// or the end.
+fn string_token(text: &str, start: usize) -> (String, usize) {
+    let b = text.as_bytes();
+    let mut end = start + 1;
+    while end < b.len() && b[end] != b'"' {
+        end += if b[end] == b'\\' { 2 } else { 1 };
+    }
+    let end = end.min(b.len());
+    let mut p = Parser { text, b, i: start + 1 };
+    match p.string() {
+        Ok(s) if p.i == end + 1 => (s, end + 1),
+        // `end` is a quote or the end of the text, both char boundaries.
+        _ => (text[start + 1..end].to_string(), (end + 1).min(b.len())),
     }
 }
 
@@ -796,5 +883,42 @@ mod tests {
     #[test]
     fn multibyte_text_passes_through() {
         assert_eq!(string_of(&ok("\"h\u{e9}llo \u{1F600} \u{4e16}\"")), "h\u{e9}llo \u{1F600} \u{4e16}");
+    }
+    #[test]
+    fn the_node_limit_counts_every_value() {
+        let lim = |nodes| Limits { depth: usize::MAX, nodes };
+        // `[1,2]` is three values: the array and two numbers.
+        assert!(parse_limited("[1,2]", lim(3)).is_ok());
+        assert_eq!(parse_limited("[1,2]", lim(2)).err(), Some(ParseError::TooMany));
+        assert_eq!(parse_limited("{\"a\":{}}", lim(1)).err(), Some(ParseError::TooMany));
+        let wide = format!("[{}1]", "1,".repeat(100_000));
+        assert_eq!(parse_limited(&wide, lim(1000)).err(), Some(ParseError::TooMany));
+        assert!(parse_limited(&wide, Limits::NONE).is_ok());
+    }
+
+    fn strings_of(text: &str) -> Vec<(Option<String>, String)> {
+        let mut out = Vec::new();
+        for_each_string(text, &mut |k, v| out.push((k.map(str::to_string), v.to_string())));
+        out
+    }
+
+    #[test]
+    fn the_token_walk_reports_values_with_their_keys() {
+        let got = strings_of(r#"{"a": "x", "b": [ "y", {"c" : "z"} ], "d": 1, "e": "w"}"#);
+        let want = [(Some("a"), "x"), (None, "y"), (Some("c"), "z"), (Some("e"), "w")];
+        let want: Vec<_> = want.iter().map(|(k, v)| (k.map(str::to_string), v.to_string())).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn the_token_walk_decodes_escapes_and_keeps_malformed_strings_raw() {
+        assert_eq!(strings_of(r#"{"API\u005fKEY": "a\"b"}"#), vec![(Some("API_KEY".into()), "a\"b".into())]);
+        // A malformed escape and an unterminated string come through raw.
+        assert_eq!(strings_of(r#"["bad \q esc", "open"#), vec![(None, "bad \\q esc".into()), (None, "open".into())]);
+        // A key whose value is not a string does not leak onto the next string.
+        assert_eq!(strings_of(r#"{"k": [1], "x"]"#), vec![(None, "x".into())]);
+        // Not JSON at all, and multibyte text after a backslash: no panic.
+        assert_eq!(strings_of("garbage \"\\\u{e9}\" ]]"), vec![(None, "\\\u{e9}".into())]);
+        assert!(strings_of("[[[[").is_empty());
     }
 }

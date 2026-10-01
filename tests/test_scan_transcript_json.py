@@ -254,20 +254,22 @@ def test_rust_json_in_a_string_over_the_depth_cap_falls_back_to_text(tmp_path) -
 
 
 @RUST_ONLY
-def test_rust_depth_cap_is_inclusive_and_overridable_per_call(tmp_path) -> None:
-    """The cap is a parameter for tests; the product path never passes it. An
-    escaped key name (``API\\u005fKEY``) is read only from a parsed tree, never
-    from raw text, so it tells the two paths apart."""
+def test_rust_lines_past_either_limit_still_read_escaped_keys(tmp_path) -> None:
+    """The limits are parameters for tests; the product path never passes them.
+    An escaped key name (``API\\u005fKEY``) spells no assignment in raw text,
+    so finding it proves the strings were decoded: by the parse within the
+    limits, by the token walk past them."""
     from key_amnesia import _scan_rs
 
     obj = '{"API\\u005fKEY": "%s"}' % _VALUE
     p = tmp_path / "t.jsonl"
-    p.write_text("[" * 49 + obj + "]" * 49 + "\n" + "[" * 50 + obj + "]" * 50 + "\n", encoding="utf-8")
-    capped = _scan_rs._findings_for_transcript(p, scope="deep", max_json_depth=50)
-    assert _hit_lines(capped) == [1]  # depth 50 parsed; depth 51 is text, which spells no assignment
-    roomy = _scan_rs._findings_for_transcript(p, scope="deep", max_json_depth=51)
-    assert _hit_lines(roomy) == [1, 2]
-    assert _hit_lines(_scan_rs._findings_for_transcript(p, scope="deep")) == [1, 2]
+    deep = "[" * 49 + obj + "]" * 49 + "\n" + "[" * 50 + obj + "]" * 50 + "\n"
+    wide = "[" + "1," * 5000 + obj + "]\n"
+    p.write_text(deep + wide, encoding="utf-8")
+    for kwargs in ({"max_json_depth": 50}, {"max_json_nodes": 1000}, {}):
+        found = _scan_rs._findings_for_transcript(p, scope="deep", **kwargs)
+        assert _hit_lines(found) == [1, 2, 3], kwargs
+        assert _VALUE not in repr(found)
 
 
 def test_scalars_and_garbage_lines_are_skipped(tmp_path) -> None:

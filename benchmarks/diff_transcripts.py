@@ -732,10 +732,11 @@ def layer_transcripts(rng: random.Random, scale: int) -> tuple[int, list[str]]:
             continue
         path.unlink()
 
-    # The depth cap: a line at the cap is parsed, one past it is scanned as
-    # text, and in both a planted key is reported on its own line, between
-    # neighbours that are unaffected. A secret-named key spelled with an escape
-    # is read only from a parsed tree, which tells the two paths apart.
+    # The limits: a line at the depth cap is parsed, one past it (or past the
+    # node limit) is read without a tree, and in all of them a planted key is
+    # reported on its own line, between neighbours that are unaffected. A
+    # secret-named key spelled with an escape spells no assignment in raw text,
+    # so finding it proves the fallback decodes strings as the parse does.
     secret = "prefix " + "s" + "k" + "-" + "ant" + "-" + "abcdefghijklmnopqrstuvwxyz0123" + " suffix"
     escaped_key = '{"API\\u005fKEY": "aB3xQ9mK2pL7vN4wZ8"}'
     for over in (False, True):
@@ -748,10 +749,28 @@ def layer_transcripts(rng: random.Random, scale: int) -> tuple[int, list[str]]:
         found = {f["confidence"]: f["hit_lines"] for f in (asdict(x) for x in run_transcript(path, _scan_rs))}
         checked += 1
         tally(f"depth-cap lines {'over' if over else 'at'} the cap")
-        # Over the cap the escaped key is text, which spells no assignment.
-        want = {"certain": [2]} if over else {"certain": [2], "likely": [3]}
+        want = {"certain": [2], "likely": [3]}
         if found != want:
             failures.append(f"depth cap ({'over' if over else 'at'}): want {want}, rust {found}")
+
+    wide_nodes = 1000
+    for over in (False, True):
+        # At: array + filler + key object + its value is exactly the limit.
+        filler = "1," * (wide_nodes if over else wide_nodes - 3)
+        planted = "[" + filler + json.dumps(secret) + "]"
+        keyed = "[" + filler + escaped_key + "]"
+        body = f'{{"t": "ok"}}\n{planted}\n{keyed}\n{{"t": "ok"}}\n'
+        path = tmp / f"nodes-{'over' if over else 'at'}.jsonl"
+        path.write_text(body, encoding="utf-8")
+        found = {
+            f["confidence"]: f["hit_lines"]
+            for f in (asdict(x) for x in _scan_rs._findings_for_transcript(path, scope="deep", max_json_nodes=wide_nodes))
+        }
+        checked += 1
+        tally(f"node-limit lines {'over' if over else 'at'} the limit")
+        want = {"certain": [2], "likely": [3]}
+        if found != want:
+            failures.append(f"node limit ({'over' if over else 'at'}): want {want}, rust {found}")
 
     # Cadence: a long file, blank lines included, and a callback that raises.
     n = scan_py._PROGRESS_LINE_EVERY * 3 + 17

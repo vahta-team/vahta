@@ -27,8 +27,9 @@
 //! like any other: the parser, the walkers and the destructor are all
 //! iterative, so depth costs heap proportional to the line (which is bounded by
 //! [`MAX_TRANSCRIPT_BYTES`]) and never stack. Heap is capped too, by
-//! [`MAX_JSON_DEPTH`]: past it a line is scanned as plain text rather than
-//! built into a tree. Everything else matches Python.
+//! [`MAX_JSON_DEPTH`] and [`MAX_JSON_NODES`]: past either a line is read by a
+//! token walk instead of being built into a tree. Everything else matches
+//! Python.
 //!
 //! JSON inside a string is unwrapped exactly one level, as in Python: only
 //! strings of the transcript itself are re-parsed, and a string inside such a
@@ -40,7 +41,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
 use vahta_detect::{
-    classify_value, is_secret_name, looks_like_json_container, scan_texts, Confidence, HitSet,
+    classify_value, is_secret_name, looks_like_json_container, scan_text_hits, scan_texts,
+    Confidence, HitSet,
 };
 
 use crate::content::{findings_for_path, path_name, path_str};
@@ -323,19 +325,38 @@ fn secret_keyed_strings(root: &Value, f: &mut dyn FnMut(&str, &str)) {
     }
 }
 
+/// One secret-named key whose string value classified as likely or possible:
+/// what `_apply_secret_keys` records, kept so a tree can be dropped before the
+/// record is applied. Holds the name, never the value.
+type KeyRecord = (String, Confidence, Vec<String>);
+
+fn key_record(key: &str, val: &str) -> Option<KeyRecord> {
+    let (tier, reason) = classify_value(val);
+    if !matches!(tier, Confidence::Likely | Confidence::Possible) {
+        return None;
+    }
+    let reasons: Vec<String> = reason.map(|r| vec![r.to_string()]).unwrap_or_default();
+    Some((key.to_string(), tier, reasons))
+}
+
+fn key_records(node: &Value) -> Vec<KeyRecord> {
+    let mut out = Vec::new();
+    secret_keyed_strings(node, &mut |key, val| out.extend(key_record(key, val)));
+    out
+}
+
+fn apply_key_records(acc: &mut HitSet, records: &[KeyRecord]) {
+    for (key, tier, reasons) in records {
+        let mut extra = HitSet::default();
+        extra.record_assignment(key, *tier, reasons);
+        acc.merge(&extra);
+    }
+}
+
 /// `_apply_secret_keys`: classify secret-named dict keys that never appear as
 /// assignment text.
 pub fn apply_secret_keys(acc: &mut HitSet, node: &Value) {
-    secret_keyed_strings(node, &mut |key, val| {
-        let (tier, reason) = classify_value(val);
-        if !matches!(tier, Confidence::Likely | Confidence::Possible) {
-            return;
-        }
-        let mut extra = HitSet::default();
-        let reasons: Vec<String> = reason.map(|r| vec![r.to_string()]).unwrap_or_default();
-        extra.record_assignment(key, tier, &reasons);
-        acc.merge(&extra);
-    });
+    apply_key_records(acc, &key_records(node));
 }
 
 /// How deeply one transcript line (or one JSON document inside a string) may
@@ -348,16 +369,121 @@ pub fn apply_secret_keys(acc: &mut HitSet, node: &Value) {
 /// past anything a real transcript holds (a few dozen levels) and past the
 /// depth at which Python itself gives up.
 ///
-/// Over the cap the tree is never built. The line is scanned as plain text
-/// instead, by the same detector and with its hits attributed to the same line
-/// number as any parsed line's, so nothing is skipped and the scan does not
-/// abort: a key inside a million-deep line is still found, by its prefix or by
-/// the assignment form that the serialised text spells out. What the fallback
-/// loses is only the walk over secret-named keys, which needs the tree.
+/// Over the cap the tree is never built. The line is read without one (see
+/// `scan_unparsed_line`), with its hits attributed to the same line number as
+/// any parsed line's, so nothing is skipped and the scan does not abort: a key
+/// inside a million-deep line is still found, by its prefix, by assignment
+/// text, or by a secret-named key, escaped spellings included.
 ///
 /// A line over the cap is not checked for being valid JSON; if it is not, it
 /// is still scanned as text, which at worst reports a secret in garbage.
 pub const MAX_JSON_DEPTH: usize = 1_000_000;
+
+/// How many values one transcript line (or one JSON document inside a string)
+/// may hold before it is no longer parsed into a tree.
+///
+/// Depth alone does not bound memory: a shallow but wide line, `[1,1,1,...]`,
+/// is two bytes of text per value and tens of bytes of tree, so a 100 MB line
+/// would be gigabytes. Two million values is a few hundred megabytes at most,
+/// and far past a real transcript line. Over it the line takes the same
+/// text path as one over [`MAX_JSON_DEPTH`].
+pub const MAX_JSON_NODES: usize = 2_000_000;
+
+/// The product's limits for one transcript line.
+pub const TRANSCRIPT_LIMITS: json::Limits =
+    json::Limits { depth: MAX_JSON_DEPTH, nodes: MAX_JSON_NODES };
+
+/// What one document unwrapped out of a string contributes: the hits of its
+/// strings, and its secret-named keys. Computed as soon as the document is
+/// parsed, so the tree is dropped before the next one is built and a line
+/// holding thousands of such strings holds one tree at a time.
+struct Nested {
+    text: Option<HitSet>,
+    keys: Vec<KeyRecord>,
+}
+
+impl Nested {
+    fn of_tree(doc: &Value) -> Nested {
+        let mut batch: Vec<&str> = Vec::new();
+        collect_strings(doc, &mut |s| {
+            if !looks_like_json_container(s) {
+                batch.push(s);
+            }
+        });
+        let text = (!batch.is_empty()).then(|| scan_texts(&batch));
+        Nested { text, keys: key_records(doc) }
+    }
+
+    /// The same, from a token walk, for a document too big to parse. Strings
+    /// that again look like JSON are dropped, as from a tree.
+    fn of_text(doc: &str) -> Nested {
+        let mut text: Option<HitSet> = None;
+        let mut keys = Vec::new();
+        json::for_each_string(doc, &mut |key, s| {
+            if let Some(key) = key.filter(|k| is_secret_name(k)) {
+                keys.extend(key_record(key, s));
+            }
+            if !looks_like_json_container(s) {
+                text.get_or_insert_with(HitSet::default).merge(&scan_text_hits(s));
+            }
+        });
+        Nested { text, keys }
+    }
+}
+
+/// A document in a string, unwrapped within `limits`; `None` when it is not a
+/// JSON container (it is then scanned as text). Past the limits it is read by
+/// the token walk instead of being built.
+fn unwrap_nested(s: &str, limits: json::Limits) -> Option<Nested> {
+    match json::parse_limited(s, limits) {
+        Ok(v) if v.is_container() => Some(Nested::of_tree(&v)),
+        Ok(_) | Err(json::ParseError::Invalid) => None,
+        Err(json::ParseError::TooDeep | json::ParseError::TooMany) => Some(Nested::of_text(s)),
+    }
+}
+
+fn finish(mut acc: HitSet, nested: &[Nested], top_keys: &[KeyRecord]) -> HitSet {
+    for n in nested {
+        if let Some(text) = &n.text {
+            acc.merge(text);
+        }
+    }
+    apply_key_records(&mut acc, top_keys);
+    for n in nested {
+        apply_key_records(&mut acc, &n.keys);
+    }
+    acc
+}
+
+/// A transcript line too big to parse into a tree (past [`TRANSCRIPT_LIMITS`]),
+/// scanned without one.
+///
+/// The whole line goes through the detector as text, which reads anything
+/// outside strings too, valid JSON or not. Then a token walk scans each decoded
+/// string the way a parsed line's strings are scanned — unwrapping strings that
+/// hold JSON, and classifying secret-named keys — so a name spelled with a
+/// `\\u` escape is found as it would be from the tree. Memory is the largest
+/// single string plus one unwrapped document at a time.
+fn scan_unparsed_line(line: &str, limits: json::Limits) -> HitSet {
+    let mut acc = scan_texts(&[line]);
+    let mut text = HitSet::default();
+    let mut nested: Vec<Nested> = Vec::new();
+    let mut top_keys: Vec<KeyRecord> = Vec::new();
+    json::for_each_string(line, &mut |key, s| {
+        if let Some(key) = key.filter(|k| is_secret_name(k)) {
+            top_keys.extend(key_record(key, s));
+        }
+        if looks_like_json_container(s) {
+            if let Some(n) = unwrap_nested(s, limits) {
+                nested.push(n);
+                return;
+            }
+        }
+        text.merge(&scan_text_hits(s));
+    });
+    acc.merge(&finish(text, &nested, &top_keys));
+    acc
+}
 
 /// `_scan_transcript_payload`: run the detector over a parsed line's strings
 /// and its secret-named keys.
@@ -368,51 +494,43 @@ pub const MAX_JSON_DEPTH: usize = 1_000_000;
 /// one of those that again looks like JSON is dropped, as in Python. Never
 /// returns values.
 pub fn scan_transcript_payload(obj: &Value) -> HitSet {
-    scan_transcript_payload_bounded(obj, MAX_JSON_DEPTH)
+    scan_transcript_payload_limited(obj, TRANSCRIPT_LIMITS)
 }
 
 /// [`scan_transcript_payload`] with the depth limit for strings that hold JSON
-/// given explicitly. A string nested past it is not unwrapped: it is scanned
-/// as text like any string that fails to parse.
+/// given explicitly (the node limit stays [`MAX_JSON_NODES`]).
 pub fn scan_transcript_payload_bounded(obj: &Value, max_depth: usize) -> HitSet {
-    let mut acc = HitSet::default();
-    let mut nested_objs: Vec<Value> = Vec::new();
+    scan_transcript_payload_limited(obj, json::Limits { depth: max_depth, nodes: MAX_JSON_NODES })
+}
 
-    {
-        let mut batch: Vec<&str> = Vec::new();
-        collect_strings(obj, &mut |s| {
-            if looks_like_json_container(s) {
-                if let Ok(v) = json::parse_bounded(s, max_depth) {
-                    if v.is_container() {
-                        nested_objs.push(v);
-                        return;
-                    }
+/// [`scan_transcript_payload`] within `limits`. A string holding JSON past
+/// them is not built into a tree: it is scanned as text, as before, and also
+/// read by the token walk, so its keys and strings still count.
+pub fn scan_transcript_payload_limited(obj: &Value, limits: json::Limits) -> HitSet {
+    let mut acc = HitSet::default();
+    let mut nested: Vec<Nested> = Vec::new();
+
+    let mut batch: Vec<&str> = Vec::new();
+    collect_strings(obj, &mut |s| {
+        if looks_like_json_container(s) {
+            match json::parse_limited(s, limits) {
+                Ok(v) if v.is_container() => {
+                    nested.push(Nested::of_tree(&v));
+                    return;
+                }
+                Ok(_) | Err(json::ParseError::Invalid) => {}
+                Err(json::ParseError::TooDeep | json::ParseError::TooMany) => {
+                    nested.push(Nested::of_text(s));
                 }
             }
-            batch.push(s);
-        });
-        if !batch.is_empty() {
-            acc.merge(&scan_texts(&batch));
         }
+        batch.push(s);
+    });
+    if !batch.is_empty() {
+        acc.merge(&scan_texts(&batch));
     }
 
-    for nested in &nested_objs {
-        let mut batch: Vec<&str> = Vec::new();
-        collect_strings(nested, &mut |s| {
-            if !looks_like_json_container(s) {
-                batch.push(s);
-            }
-        });
-        if !batch.is_empty() {
-            acc.merge(&scan_texts(&batch));
-        }
-    }
-
-    apply_secret_keys(&mut acc, obj);
-    for nested in &nested_objs {
-        apply_secret_keys(&mut acc, nested);
-    }
-    acc
+    finish(acc, &nested, &key_records(obj))
 }
 
 // --- one transcript ----------------------------------------------------------
@@ -455,7 +573,7 @@ pub fn findings_for_transcript<E>(
     scope: Scope,
     progress: Option<&mut ProgressFn<'_, E>>,
 ) -> Result<Vec<Finding>, DeepError<E>> {
-    findings_for_transcript_with_depth(path, scope, progress, MAX_JSON_DEPTH)
+    findings_for_transcript_with_limits(path, scope, progress, TRANSCRIPT_LIMITS)
 }
 
 /// [`findings_for_transcript`] with the nesting limit given explicitly (see
@@ -464,8 +582,19 @@ pub fn findings_for_transcript<E>(
 pub fn findings_for_transcript_with_depth<E>(
     path: &Path,
     scope: Scope,
-    mut progress: Option<&mut ProgressFn<'_, E>>,
+    progress: Option<&mut ProgressFn<'_, E>>,
     max_depth: usize,
+) -> Result<Vec<Finding>, DeepError<E>> {
+    let limits = json::Limits { depth: max_depth, nodes: MAX_JSON_NODES };
+    findings_for_transcript_with_limits(path, scope, progress, limits)
+}
+
+/// [`findings_for_transcript`] within explicit `limits`; tests pass small ones.
+pub fn findings_for_transcript_with_limits<E>(
+    path: &Path,
+    scope: Scope,
+    mut progress: Option<&mut ProgressFn<'_, E>>,
+    limits: json::Limits,
 ) -> Result<Vec<Finding>, DeepError<E>> {
     let Ok(meta) = std::fs::metadata(path) else { return Ok(Vec::new()) };
     if meta.len() > MAX_TRANSCRIPT_BYTES {
@@ -500,11 +629,13 @@ pub fn findings_for_transcript_with_depth<E>(
         if line.is_empty() {
             continue;
         }
-        let hits = match json::parse_bounded(line, max_depth) {
-            Ok(obj) => scan_transcript_payload_bounded(&obj, max_depth),
+        let hits = match json::parse_limited(line, limits) {
+            Ok(obj) => scan_transcript_payload_limited(&obj, limits),
             Err(json::ParseError::Invalid) => continue,
-            // Too deep to hold as a tree: scan the line as text instead.
-            Err(json::ParseError::TooDeep) => scan_texts(&[line]),
+            // Too big to hold as a tree: scan it without one.
+            Err(json::ParseError::TooDeep | json::ParseError::TooMany) => {
+                scan_unparsed_line(line, limits)
+            }
         };
 
         let has_certain = hits.prefix.is_some();
@@ -952,6 +1083,61 @@ mod tests {
     }
 
     #[test]
+    fn a_line_over_the_node_limit_is_read_without_a_tree_and_loses_nothing() {
+        let t = Tree::new("wide");
+        let lim = json::Limits { depth: MAX_JSON_DEPTH, nodes: 1000 };
+        let filler = "1,".repeat(5000);
+        // Wide, not deep: an escaped secret-named key, a planted vendor key, and
+        // an assignment inside JSON inside a string, past five thousand values.
+        let wide = format!(
+            "[{filler}{}, \"x {} y\", {}]",
+            escaped_key_object(),
+            prefixed(),
+            serde_free_quote(&format!("{{\"note\": {}}}", quoted_assignment())),
+        );
+        let p = t.text("w.jsonl", &format!("{{\"t\": \"ok\"}}\n{wide}\n"));
+        let found = findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, lim).expect("scan");
+        let of = |conf: &str| found.iter().find(|f| f.confidence == conf).expect(conf);
+        assert_eq!(of("certain").hit_lines, vec![2]);
+        assert_eq!(of("certain").secret_names, vec!["Anthropic-style key"]);
+        let roomy = findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, TRANSCRIPT_LIMITS)
+            .expect("scan");
+        // The token walk finds the same names the parse does.
+        let names = |f: &[Finding]| {
+            let mut n: Vec<String> = f.iter().flat_map(|x| x.secret_names.clone()).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&found), names(&roomy));
+        assert!(names(&found).iter().any(|n| n == "API_KEY"));
+        assert!(!format!("{found:?}").contains(LIKELY_VALUE));
+    }
+
+    /// `s` as a JSON string literal.
+    fn serde_free_quote(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    #[test]
+    fn a_string_holding_json_past_the_limits_is_still_read() {
+        let t = Tree::new("nested-wide");
+        let lim = json::Limits { depth: MAX_JSON_DEPTH, nodes: 100 };
+        let inner = format!("[{}{}]", "1,".repeat(500), escaped_key_object());
+        let p = t.text("n.jsonl", &format!("{{\"out\": {}}}\n", serde_free_quote(&inner)));
+        let found = findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, lim).expect("scan");
+        assert!(found.iter().any(|f| f.secret_names.iter().any(|n| n == "API_KEY")), "{found:?}");
+    }
+
+    #[test]
     fn a_line_a_million_deep_is_scanned_without_overflowing_the_stack() {
         let t = Tree::new("deep");
         let n = 1_000_000;
@@ -976,16 +1162,16 @@ mod tests {
         findings_for_transcript_with_depth::<()>(path, Scope::Deep, None, max_depth).expect("scan")
     }
 
-    /// The name spelled through a JSON escape (`API\u005fKEY`): the parsed key
+    /// The name spelled through a JSON escape (`API\u005fKEY`): the decoded key
     /// is `API_KEY`, which the key walk reports, but the raw text spells no
-    /// assignment the text matcher could read. So a hit on it proves the line
-    /// was parsed, and no hit proves it was scanned as text.
+    /// assignment the text matcher could read. A hit on it proves the strings
+    /// were decoded — by the parse, or past the cap by the token walk.
     fn escaped_key_object() -> String {
         format!("{{\"API\\u005fKEY\": \"{LIKELY_VALUE}\"}}")
     }
 
     #[test]
-    fn a_line_just_under_the_cap_is_parsed_and_one_just_over_is_scanned_as_text() {
+    fn a_line_over_the_cap_is_read_without_a_tree_and_loses_nothing() {
         let t = Tree::new("cap-edge");
         let cap = 50;
         // The object itself is one level: `cap - 1` arrays around it is depth `cap`.
@@ -1000,10 +1186,10 @@ mod tests {
         let found = scan_capped(&p, cap);
         let of = |conf: &str| found.iter().find(|f| f.confidence == conf);
 
-        // Line 1 (at the cap) was parsed: the escaped key was read as a key.
-        // Line 2 (over) was text: the same content yields nothing.
+        // Line 1 (at the cap) was parsed; line 2 (over) was token-walked, and
+        // the escaped key is read as a key in both.
         let likely = of("likely").expect("likely finding");
-        assert_eq!(likely.hit_lines, vec![1, 4]);
+        assert_eq!(likely.hit_lines, vec![1, 2, 4]);
         // Line 3: the planted vendor key is found in the fallback, and counted
         // against its own line number like a parsed line's.
         let certain = of("certain").expect("certain finding");
