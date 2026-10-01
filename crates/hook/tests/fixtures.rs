@@ -87,3 +87,44 @@ fn manifests_parse() {
         assert_eq!(m.name, h);
     }
 }
+
+/// Run the hook on a raw stdin string; returns stdout.
+fn run_raw(harness: &str, event: &str, stdin: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vahta-hook"))
+        .args(["--harness", harness, "--event", event])
+        .env_remove("VAHTA_HOOK_DISABLE")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn vahta-hook");
+    child.stdin.take().expect("stdin").write_all(stdin.as_bytes()).expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// serde_json stops at 128 levels. A secret wrapped deeper than that must not
+/// pass just because the payload could not be parsed: the hook falls back to
+/// reading every string, escapes decoded, at any depth.
+#[test]
+fn a_secret_nested_past_serde_depth_is_still_denied() {
+    let mut input = format!("{{\"x\": \"{}\"}}", secret_anthropic());
+    for _ in 0..5000 {
+        input = format!("{{\"a\": {input}}}");
+    }
+    let payload = format!(
+        "{{\"hook_event_name\": \"PreToolUse\", \"tool_name\": \"mcp__srv__do\", \"tool_input\": {input}}}"
+    );
+    for harness in ["claude", "codex"] {
+        let out = run_raw(harness, "before_tool", &payload);
+        assert!(out.contains("\"deny\""), "{harness}: {out}");
+        assert!(!out.contains(&secret_anthropic()), "{harness}: value echoed");
+    }
+    // The same with the secret spelled through a JSON escape.
+    let escaped = secret_anthropic().replacen('k', "\\u006b", 1);
+    let deep_escaped = payload.replace(&secret_anthropic(), &escaped);
+    assert!(run_raw("claude", "before_tool", &deep_escaped).contains("\"deny\""));
+    // And a clean deep payload is still allowed.
+    let clean = payload.replace(&secret_anthropic(), "nothing here");
+    assert_eq!(run_raw("claude", "before_tool", &clean), "");
+}

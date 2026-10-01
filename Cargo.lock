@@ -292,6 +292,7 @@ dependencies = [
  "serde_json",
  "vahta-detect",
  "vahta-harness",
+ "vahta-scan",
 ]
 
 [[package]]

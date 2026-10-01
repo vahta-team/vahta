@@ -70,6 +70,18 @@ fn decide(kind: Kind, ev: &Event) -> Decision {
     }
 }
 
+/// An event from a payload serde_json could not read: all of its strings,
+/// for the kinds that are decided on text. A file read needs its fields, so
+/// it is left to fail open.
+fn unparsed_event(kind: Kind, raw: &str) -> Option<Event> {
+    if raw.trim().is_empty() || kind == Kind::BeforeRead {
+        return None;
+    }
+    let mut strings: Vec<String> = Vec::new();
+    vahta_scan::json::for_each_string(raw, &mut |_, s| strings.push(s.to_string()));
+    Some(Event { kind: Some(kind), text: strings.join("\n"), ..Event::default() })
+}
+
 fn run() -> Option<vahta_harness::Output> {
     if std::env::var_os(DISABLE_ENV).is_some_and(|v| !v.is_empty()) {
         return None;
@@ -78,8 +90,15 @@ fn run() -> Option<vahta_harness::Output> {
     let manifest: Manifest = vahta_harness::manifest(&harness)?.ok()?;
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw).ok()?;
-    let payload: Value = serde_json::from_str(&raw).ok()?;
-    let event = manifest.normalise(kind, &payload)?;
+    let event = match serde_json::from_str::<Value>(&raw) {
+        Ok(payload) => manifest.normalise(kind, &payload)?,
+        // serde_json refuses documents nested past 128 levels, and failing
+        // open there would let a secret through simply by wrapping it deeply
+        // (the Python hook reads ~1000 levels). Any payload serde cannot read
+        // is instead read by the scanner's tree-free token walk: every string,
+        // escapes decoded, no depth limit. It may deny; it never builds a tree.
+        Err(_) => unparsed_event(kind, &raw)?,
+    };
     let out = manifest.render(kind, &decide(kind, &event));
     Some(out)
 }

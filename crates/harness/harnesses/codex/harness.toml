@@ -80,8 +80,10 @@ body = { decision = "block", reason = "{user_message}" }
 
 [replies.after_tool.notice]
 style = "json"
-# The docs only show decision:"block" for PostToolUse, which replaces the
-# result with the reason; we do not want that. additionalContext and
-# systemMessage follow the shared Claude/Codex output contract. UNVERIFIED
-# against a live Codex: if ignored, the signal is silently lost (fail open).
-body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
+# Codex's PostToolUse output accepts only systemMessage, continue,
+# stopReason, decision and reason. Any other field (e.g. Claude's
+# hookSpecificOutput.additionalContext) marks the hook run as failed and the
+# notice is lost. decision:"block" would replace the whole tool result, which
+# is redaction by another name and deferred with it. So: systemMessage only,
+# surfaced to the user as a warning.
+body = { systemMessage = "{user_message}" }
