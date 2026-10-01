@@ -296,6 +296,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vahta-json"
+version = "0.0.0"
+
+[[package]]
 name = "vahta-pyext"
 version = "0.0.0"
 dependencies = [
@@ -316,6 +320,7 @@ name = "vahta-scan"
 version = "0.0.0"
 dependencies = [
  "vahta-detect",
+ "vahta-json",
 ]
 
 [[package]]

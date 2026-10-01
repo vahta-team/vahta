@@ -1,16 +1,15 @@
 [package]
-name = "vahta-scan"
+name = "vahta-json"
 version = "0.0.0"
-description = "Finds plaintext credentials an agent can read: files, names and counts, never values"
+description = "A json.loads-compatible, iterative JSON parser for hostile input: unbounded depth, limits, tree-free string walk"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-vahta-detect = { path = "../detect" }
-vahta-json = { path = "../json" }
