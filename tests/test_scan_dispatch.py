@@ -29,7 +29,7 @@ PYTHON_ONLY = pytest.mark.skipif(
 
 def test_names_the_extension_lacks_come_from_python() -> None:
     assert scan_mod.STRICT_HIGH is scan_py.STRICT_HIGH
-    assert scan_mod.scan_deep is scan_py.scan_deep
+    assert scan_mod._scan_transcript_payload is scan_py._scan_transcript_payload
     assert scan_mod.Finding is scan_py.Finding
 
 
