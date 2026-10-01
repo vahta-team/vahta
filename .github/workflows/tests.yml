@@ -164,6 +164,20 @@ jobs:
           cargo build --release -p vahta-detect --example dump_unicode
           "${{ steps.py.outputs.python }}" benchmarks/diff_unicode.py
 
+      # The local install script, against a throwaway prefix and HOME so it
+      # cannot touch the runner's own configs. Cargo and rustup keep their real
+      # homes. No setup step: no harness is installed here.
+      - name: Local install script
+        if: matrix.impl == 'rust'
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export HOME="$(mktemp -d)"
+          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --no-setup
+          test -x "$RUNNER_TEMP/vahta-bin/vahta" && test -x "$RUNNER_TEMP/vahta-bin/vahta-hook"
+          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --uninstall
+          test ! -e "$RUNNER_TEMP/vahta-bin/vahta" && test ! -e "$RUNNER_TEMP/vahta-bin/vahta-hook"
+
       # The checkable promise: the open build cannot make a network request,
       # because nothing in its dependency tree is an HTTP or TLS client.
       # Dependencies are welcome; network-capable ones are not.

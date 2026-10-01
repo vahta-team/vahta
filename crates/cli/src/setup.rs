@@ -25,6 +25,7 @@ pub const USAGE: &str = "\
 usage: vahta setup
        vahta setup --claude|--codex|--cursor [--force] [--dry-run] [--uninstall]
        vahta setup --all [--dry-run] [--uninstall]
+       vahta setup --refresh [--dry-run]
 
 Register vahta-hook with the coding agents on this machine.
 
@@ -40,6 +41,11 @@ options:
   --force                install even though the harness was not found
   --dry-run              print what would change as a unified diff; write nothing
   --uninstall            remove our entries and leave everything else alone
+  --refresh              reinstall in every harness that already has entries of
+                         ours, whatever their state (current, outdated, or pointing
+                         at another vahta-hook), and leave the others alone. Writes
+                         nothing when nothing of ours is installed. Takes only
+                         --dry-run; run it after moving or reinstalling vahta
   -h, --help             show this help
 
 Setup adds one hook entry per event to the harness's user-level config, after
@@ -54,6 +60,7 @@ struct Args {
     force: bool,
     dry_run: bool,
     uninstall: bool,
+    refresh: bool,
 }
 
 enum Parsed {
@@ -63,7 +70,7 @@ enum Parsed {
 }
 
 fn parse(args: &[String]) -> Parsed {
-    let mut out = Args { harnesses: Vec::new(), all: false, force: false, dry_run: false, uninstall: false };
+    let mut out = Args { harnesses: Vec::new(), all: false, force: false, dry_run: false, uninstall: false, refresh: false };
     for a in args {
         match a.as_str() {
             "-h" | "--help" => return Parsed::Help,
@@ -71,6 +78,7 @@ fn parse(args: &[String]) -> Parsed {
             "--force" => out.force = true,
             "--dry-run" => out.dry_run = true,
             "--uninstall" => out.uninstall = true,
+            "--refresh" => out.refresh = true,
             other => match other.strip_prefix("--").filter(|n| HARNESSES.contains(n)) {
                 Some(name) => {
                     if !out.harnesses.iter().any(|h| h == name) {
@@ -82,6 +90,14 @@ fn parse(args: &[String]) -> Parsed {
         }
     }
     let named = !out.harnesses.is_empty();
+    if out.refresh {
+        if out.uninstall || out.all || named || out.force {
+            return Parsed::Error(
+                "--refresh goes with --dry-run only, not --uninstall, --all, --force or a harness flag".into(),
+            );
+        }
+        return Parsed::Run(out);
+    }
     if out.all && named {
         return Parsed::Error("--all and a harness flag cannot be combined".into());
     }
@@ -106,22 +122,23 @@ fn manifests() -> Vec<Manifest> {
 /// three config files and nothing else. Always stderr, so JSON on stdout stays
 /// clean.
 pub fn stale_notice(env: &SetupEnv, stderr: &mut dyn Write) {
+    let mut affected: Vec<(Manifest, bool)> = Vec::new();
     for m in manifests() {
         let i = vahta_setup::inspect(&m, env);
         let missing = i.problems.iter().any(|p| matches!(p, HookProblem::Missing(_)));
-        if missing {
+        if missing || i.state == State::Outdated {
+            affected.push((m, missing));
+        }
+    }
+    // One harness: name it. Several: one command fixes them all.
+    let many = affected.len() > 1;
+    for (m, missing) in &affected {
+        let fix = if many { "vahta setup --refresh".to_string() } else { format!("vahta setup --{}", m.name) };
+        if *missing {
             // The harness runs a hook that is gone: no protection, and no error.
-            let _ = writeln!(
-                stderr,
-                "vahta: the hook set up for {} no longer exists; run `vahta setup --{}`",
-                m.title, m.name
-            );
-        } else if i.state == State::Outdated {
-            let _ = writeln!(
-                stderr,
-                "vahta: setup for {} is outdated; run `vahta setup --{}`",
-                m.title, m.name
-            );
+            let _ = writeln!(stderr, "vahta: the hook set up for {} no longer exists; run `{fix}`", m.title);
+        } else {
+            let _ = writeln!(stderr, "vahta: setup for {} is outdated; run `{fix}`", m.title);
         }
     }
 }
@@ -223,14 +240,15 @@ pub fn run(
     };
     let ms = manifests();
 
-    if parsed.harnesses.is_empty() && !parsed.all {
+    if parsed.harnesses.is_empty() && !parsed.all && !parsed.refresh {
         let statuses: Vec<Status> = ms.iter().map(|m| vahta_setup::status(m, env)).collect();
         print_table(&statuses, stdout);
         return EXIT_CLEAN;
     }
 
     let action = if parsed.uninstall { Action::Uninstall } else { Action::Install };
-    if action == Action::Install && !env.hook.is_file() {
+    // A refresh with nothing to repoint has no use for the hook, so it checks later.
+    if action == Action::Install && !parsed.refresh && !env.hook.is_file() {
         let _ = writeln!(
             stderr,
             "vahta setup: error: vahta-hook not found at {}; it must sit next to vahta",
@@ -242,7 +260,30 @@ pub fn run(
     // Choose the harnesses.
     let mut chosen: Vec<&Manifest> = Vec::new();
     let mut refused = false;
-    if parsed.all {
+    if parsed.refresh {
+        // Whatever the state, as long as there is something of ours to repoint.
+        for m in &ms {
+            match vahta_setup::inspect(m, env).state {
+                State::Current | State::Outdated => chosen.push(m),
+                State::None => {}
+                State::Unreadable(why) => {
+                    let _ = writeln!(stdout, "{}: skipped, config {why}", m.title);
+                }
+            }
+        }
+        if chosen.is_empty() {
+            let _ = writeln!(stdout, "nothing of ours is installed in any harness; nothing to refresh");
+            return EXIT_CLEAN;
+        }
+        if !env.hook.is_file() {
+            let _ = writeln!(
+                stderr,
+                "vahta setup: error: vahta-hook not found at {}; it must sit next to vahta",
+                env.hook.display()
+            );
+            return EXIT_FAILED;
+        }
+    } else if parsed.all {
         for m in &ms {
             let found = vahta_setup::detect(m, env);
             let has_ours = matches!(
