@@ -402,6 +402,27 @@ def cmd_setup(args: argparse.Namespace) -> int:
     terminal_only = bool(getattr(args, "terminal_only", False))
     reconfigure_terminal = bool(getattr(args, "reconfigure_terminal", False))
     yes = bool(getattr(args, "yes", False))
+    uninstall = bool(getattr(args, "uninstall", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+    force = bool(getattr(args, "force", False))
+    if (dry_run or force) and not uninstall:
+        theme.error("--dry-run and --force only apply to --uninstall.")
+        return 2
+    if uninstall:
+        if (
+            skills_only
+            or hook_only
+            or permissions_only
+            or permissions_remove
+            or terminal_only
+            or reconfigure_terminal
+            or yes
+        ):
+            theme.error("--uninstall cannot be combined with other setup flags.")
+            return 2
+        from key_amnesia.uninstall_cmd import run_uninstall
+
+        return run_uninstall(Path.home(), dry_run=dry_run, force=force)
     only_flags = [
         skills_only,
         hook_only,

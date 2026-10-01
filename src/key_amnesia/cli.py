@@ -438,6 +438,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ask again even if a terminal is already configured",
     )
     p_setup.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove what `ka setup` installed (hook entries, OpenCode plugin, "
+        "copied skills, the exact allow/deny entries it added) and nothing else: "
+        "foreign hooks (including vahta-hook) and settings stay intact. Never "
+        "touches the vault, .amnesia/ directories, config or any data. Edited "
+        "skills are kept unless --force. Each JSON file is backed up once to "
+        "<file>.ka-backup; a malformed file is reported and left alone",
+    )
+    p_setup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --uninstall: print what would be removed; write nothing",
+    )
+    p_setup.add_argument(
+        "--force",
+        action="store_true",
+        help="With --uninstall: also remove skills whose content was edited",
+    )
+    p_setup.add_argument(
         "--yes",
         action="store_true",
         help="Do not prompt before writing permission files (never deletes user allows)",
