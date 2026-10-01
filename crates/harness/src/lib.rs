@@ -10,8 +10,8 @@ mod normalise;
 mod reply;
 
 pub use manifest::{
-    Config, EventSpec, Group, Kind, KindReplies, Manifest, OneOrMany, Paths, Replies, Reply,
-    Require, Style, ToolGroup,
+    Config, Detect, EventSpec, Group, Kind, KindReplies, Manifest, OneOrMany, Paths, Replies, Reply,
+    Require, Shape, Style, ToolGroup,
 };
 pub use normalise::Event;
 pub use reply::{Decision, Output};

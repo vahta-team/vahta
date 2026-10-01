@@ -1,0 +1,58 @@
+{
+  "setup_version": 1,
+  "fragment": {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{hook} --harness claude --event before_tool --setup 1"
+            }
+          ]
+        },
+        {
+          "matcher": "Read|Grep",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{hook} --harness claude --event before_read --setup 1"
+            }
+          ]
+        }
+      ],
+      "SessionStart": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{hook} --harness claude --event session_start --setup 1"
+            }
+          ]
+        }
+      ],
+      "UserPromptSubmit": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{hook} --harness claude --event prompt --setup 1"
+            }
+          ]
+        }
+      ],
+      "PostToolUse": [
+        {
+          "matcher": "Bash|Read|Grep|Glob|mcp__.*",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{hook} --harness claude --event after_tool --setup 1"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

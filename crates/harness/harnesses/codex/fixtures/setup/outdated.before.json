@@ -1,0 +1,35 @@
+{
+  "theme": "dark",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/old/place/vahta-hook --harness codex --event session_start --setup 0"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/audit-log --pre"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/old/place/vahta-hook --harness codex --event before_tool --setup 0"
+          }
+        ]
+      }
+    ]
+  }
+}

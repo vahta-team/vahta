@@ -1,0 +1,101 @@
+{
+  "model": "opus",
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/u/.local/bin/key-amnesia-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/audit-log --pre"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 1"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 1"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/u/.local/bin/key-amnesia-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Read|Grep|Glob|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 1"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "notify-send claude"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 1"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 1"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "FOO": "1"
+  }
+}

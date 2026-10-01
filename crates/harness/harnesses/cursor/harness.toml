@@ -9,6 +9,11 @@ unnamed_tool_group = "write"
 
 [config]
 format = "json"
+# Flat layout (docs read 2026-10-01, https://cursor.com/docs/agent/hooks):
+# hooks.<event> is an array of {command, matcher?, ...}, no inner group. The
+# matcher is a regex; on preToolUse it matches the tool type (Shell, Read,
+# Write, MCP:<name>), on beforeReadFile the literals Read / Write.
+shape = "flat"
 
 # hooks.json must carry `"version": 1`, or Cursor ignores the file.
 [config.require]
@@ -19,6 +24,13 @@ value = 1
 linux = ["~/.cursor/hooks.json"]
 macos = ["~/.cursor/hooks.json"]
 windows = ["~/.cursor/hooks.json"]
+
+# --- detection --------------------------------------------------------------
+# Used by `vahta setup`. Found when any rule matches. `cursor-agent` is the
+# command-line agent, `cursor` the editor's launcher; either one has hooks.
+[detect]
+dirs = ["~/.cursor"]
+binaries = ["cursor", "cursor-agent"]
 
 [[events]]
 name = "preToolUse"

@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/audit-log --pre"
+          },
+          {
+            "type": "command",
+            "command": "/old/place/vahta-hook --harness codex --event before_tool --setup 0"
+          },
+          {
+            "type": "command",
+            "command": "/home/u/.local/bin/key-amnesia-hook"
+          }
+        ]
+      }
+    ]
+  }
+}

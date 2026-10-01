@@ -24,6 +24,17 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The spelling used on the hook's command line (`--event <kind>`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::BeforeTool => "before_tool",
+            Kind::BeforeRead => "before_read",
+            Kind::Prompt => "prompt",
+            Kind::AfterTool => "after_tool",
+            Kind::SessionStart => "session_start",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Kind> {
         match s {
             "before_tool" => Some(Kind::BeforeTool),
@@ -75,6 +86,8 @@ pub struct Manifest {
     /// The hook command carries the version it was installed at (`--setup N`).
     pub setup_version: u32,
     pub config: Config,
+    /// How `vahta setup` decides the harness is installed.
+    pub detect: Detect,
     #[serde(default)]
     pub events: Vec<EventSpec>,
     #[serde(default)]
@@ -95,8 +108,33 @@ pub struct Config {
     /// environment variable. Candidates are tried in order; one whose variable
     /// is unset is skipped.
     pub path: Paths,
+    /// How hook entries are laid out in the file.
+    pub shape: Shape,
     /// A field the file must carry, e.g. Cursor's `version: 1`.
     pub require: Option<Require>,
+}
+
+/// The two layouts of a hook registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shape {
+    /// Claude and Codex: `hooks.<Event>[] = {matcher?, hooks: [{type, command}]}`.
+    Grouped,
+    /// Cursor: `hooks.<event>[] = {command, matcher?}`.
+    Flat,
+}
+
+/// Evidence that a harness is installed. Found means any rule matches.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Detect {
+    /// Config directories (`~` and `$VAR` as in `config.path`; one whose
+    /// variable is unset is skipped). Found when one exists.
+    #[serde(default)]
+    pub dirs: Vec<String>,
+    /// Executable names looked up on `PATH`.
+    #[serde(default)]
+    pub binaries: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

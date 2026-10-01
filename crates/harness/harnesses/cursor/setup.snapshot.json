@@ -1,0 +1,39 @@
+{
+  "setup_version": 1,
+  "fragment": {
+    "version": 1,
+    "hooks": {
+      "preToolUse": [
+        {
+          "command": "{hook} --harness cursor --event before_tool --setup 1",
+          "matcher": "Shell|Write"
+        }
+      ],
+      "beforeMCPExecution": [
+        {
+          "command": "{hook} --harness cursor --event before_tool --setup 1"
+        }
+      ],
+      "beforeReadFile": [
+        {
+          "command": "{hook} --harness cursor --event before_read --setup 1"
+        }
+      ],
+      "sessionStart": [
+        {
+          "command": "{hook} --harness cursor --event session_start --setup 1"
+        }
+      ],
+      "beforeSubmitPrompt": [
+        {
+          "command": "{hook} --harness cursor --event prompt --setup 1"
+        }
+      ],
+      "postToolUse": [
+        {
+          "command": "{hook} --harness cursor --event after_tool --setup 1"
+        }
+      ]
+    }
+  }
+}

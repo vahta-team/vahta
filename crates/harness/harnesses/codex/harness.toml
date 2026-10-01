@@ -9,6 +9,11 @@ unnamed_tool_group = "write"
 
 [config]
 format = "json"
+# Same layout as Claude's (docs read 2026-10-01, https://learn.chatgpt.com/docs/hooks):
+# hooks.<Event> is an array of {matcher?, hooks: [{type, command}]}. Hooks are on
+# by default; `[features] hooks = false` in config.toml turns them off. Setup
+# does not touch config.toml in v1.
+shape = "grouped"
 
 # $CODEX_HOME wins when set; otherwise the default ~/.codex. (Codex can also
 # read hooks from config.toml; setup uses hooks.json.)
@@ -16,6 +21,13 @@ format = "json"
 linux = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
 macos = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
 windows = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+
+# --- detection --------------------------------------------------------------
+# Used by `vahta setup`. Found when any rule matches. $CODEX_HOME relocates
+# Codex's home, so it is a candidate as well as the default ~/.codex.
+[detect]
+dirs = ["$CODEX_HOME", "~/.codex"]
+binaries = ["codex"]
 
 [[events]]
 name = "PreToolUse"

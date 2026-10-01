@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/detect", "crates/scan", "crates/json", "crates/pyext", "crates/pyext-scan", "crates/cli", "crates/harness", "crates/hook"]
+members = ["crates/detect", "crates/scan", "crates/json", "crates/pyext", "crates/pyext-scan", "crates/cli", "crates/harness", "crates/hook", "crates/setup"]
 
 [workspace.package]
 edition = "2024"
