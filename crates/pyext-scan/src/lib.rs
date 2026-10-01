@@ -347,18 +347,27 @@ fn iter_agent_transcript_files<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, *, scope, progress=None))]
+#[pyo3(signature = (path, *, scope, progress=None, max_json_depth=None))]
 fn _findings_for_transcript<'py>(
     py: Python<'py>,
     path: PathBuf,
     scope: &str,
     progress: Option<Py<PyAny>>,
+    max_json_depth: Option<usize>,
 ) -> PyResult<Bound<'py, PyList>> {
     let scope = scope_from_str(scope);
     let found = py
         .detach(move || {
             let mut call = progress_caller(progress);
-            deep::findings_for_transcript(&path, scope, Some(&mut call))
+            // `max_json_depth` exists for the differential and unit tests, which
+            // cannot afford a million-deep line per case. The product path
+            // never passes it and gets `deep::MAX_JSON_DEPTH`.
+            deep::findings_for_transcript_with_depth(
+                &path,
+                scope,
+                Some(&mut call),
+                max_json_depth.unwrap_or(deep::MAX_JSON_DEPTH),
+            )
         })
         .map_err(deep_error)?;
     list_to_python(py, &found)
@@ -389,6 +398,8 @@ fn _json_canonical(py: Python<'_>, text: &str) -> String {
     py.detach(|| match json::parse(text) {
         Ok(v) => v.canonical(),
         Err(ParseError::Invalid) => "!invalid".to_string(),
+        // `parse` is unbounded; only `parse_bounded` can say this.
+        Err(ParseError::TooDeep) => "!too-deep".to_string(),
     })
 }
 

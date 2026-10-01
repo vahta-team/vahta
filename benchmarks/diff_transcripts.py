@@ -546,7 +546,17 @@ def outcome(fn):
         return ("raise", type(e).__name__)
 
 
+# Nesting cap for the Rust side of the transcript layers. The product's cap
+# (`MAX_JSON_DEPTH`, a million) would make every over-cap case cost hundreds of
+# megabytes; this exercises the same fallback at a depth the generated hostile
+# lines (1500..60000) straddle. Python has no such cap, and where it raises the
+# comparison already goes through the blanked-line superset check.
+HARNESS_JSON_DEPTH = 10_000
+
+
 def run_transcript(path: Path, impl, progress=None):
+    if impl is _scan_rs:
+        return impl._findings_for_transcript(path, scope="deep", progress=progress, max_json_depth=HARNESS_JSON_DEPTH)
     return impl._findings_for_transcript(path, scope="deep", progress=progress)
 
 
@@ -674,6 +684,27 @@ def layer_transcripts(rng: random.Random, scale: int) -> tuple[int, list[str]]:
                 return checked, failures
             continue
         path.unlink()
+
+    # The depth cap: a line at the cap is parsed, one past it is scanned as
+    # text, and in both a planted key is reported on its own line, between
+    # neighbours that are unaffected. A secret-named key spelled with an escape
+    # is read only from a parsed tree, which tells the two paths apart.
+    secret = "prefix " + "s" + "k" + "-" + "ant" + "-" + "abcdefghijklmnopqrstuvwxyz0123" + " suffix"
+    escaped_key = '{"API\\u005fKEY": "aB3xQ9mK2pL7vN4wZ8"}'
+    for over in (False, True):
+        n = HARNESS_JSON_DEPTH + (1 if over else 0)
+        planted = "[" * n + json.dumps(secret) + "]" * n
+        keyed = "[" * (n - 1) + escaped_key + "]" * (n - 1)
+        body = f'{{"t": "ok"}}\n{planted}\n{keyed}\n{{"t": "ok"}}\n'
+        path = tmp / f"cap-{'over' if over else 'at'}.jsonl"
+        path.write_text(body, encoding="utf-8")
+        found = {f["confidence"]: f["hit_lines"] for f in (asdict(x) for x in run_transcript(path, _scan_rs))}
+        checked += 1
+        tally(f"depth-cap lines {'over' if over else 'at'} the cap")
+        # Over the cap the escaped key is text, which spells no assignment.
+        want = {"certain": [2]} if over else {"certain": [2], "likely": [3]}
+        if found != want:
+            failures.append(f"depth cap ({'over' if over else 'at'}): want {want}, rust {found}")
 
     # Cadence: a long file, blank lines included, and a callback that raises.
     n = scan_py._PROGRESS_LINE_EVERY * 3 + 17

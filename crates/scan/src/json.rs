@@ -51,8 +51,10 @@
 //! # Depth
 //!
 //! The parser is iterative, so nesting cannot overflow the stack, and [`Value`]
-//! has an iterative `Drop`. There is no depth limit: depth is bounded by the
-//! length of the input.
+//! has an iterative `Drop`. [`parse`] has no depth limit: depth is bounded by
+//! the length of the input. A caller that must bound memory uses
+//! [`parse_bounded`], which gives up with [`ParseError::TooDeep`] as soon as
+//! nesting passes its limit, before the tree is built.
 //!
 //! # Where this deliberately differs from CPython
 //!
@@ -89,6 +91,9 @@ pub enum Value {
 pub enum ParseError {
     /// `json.JSONDecodeError`. Callers skip the input.
     Invalid,
+    /// Nesting passed the limit given to [`parse_bounded`]. Says nothing about
+    /// whether the text is valid JSON: the parse stopped at the limit.
+    TooDeep,
 }
 
 impl Value {
@@ -415,6 +420,17 @@ fn scalar(cp: u32) -> char {
 
 /// `json.loads(text)`.
 pub fn parse(text: &str) -> Result<Value, ParseError> {
+    parse_bounded(text, usize::MAX)
+}
+
+/// [`parse`], refusing nesting deeper than `max_depth`.
+///
+/// Depth is the number of containers open at once, an empty `[]` or `{}`
+/// counting as one: `[[1]]` is depth 2, and `max_depth` itself is allowed. The
+/// check is made when a container opens, so a hostile document costs at most
+/// `max_depth` open frames before the parse stops with
+/// [`ParseError::TooDeep`] — the memory a caller is bounding.
+pub fn parse_bounded(text: &str, max_depth: usize) -> Result<Value, ParseError> {
     let mut p = Parser { text, b: text.as_bytes(), i: 0 };
     let mut stack: Vec<Frame> = Vec::new();
     p.skip_ws();
@@ -427,6 +443,9 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
                 Value::Str(p.string()?)
             }
             b'{' => {
+                if stack.len() >= max_depth {
+                    return Err(ParseError::TooDeep);
+                }
                 p.i += 1;
                 p.skip_ws();
                 if p.peek() == Some(b'}') {
@@ -444,6 +463,9 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
                 }
             }
             b'[' => {
+                if stack.len() >= max_depth {
+                    return Err(ParseError::TooDeep);
+                }
                 p.i += 1;
                 p.skip_ws();
                 if p.peek() == Some(b']') {
@@ -732,6 +754,29 @@ mod tests {
         assert_ne!(ok("{\"a\":1,\"b\":2}").canonical(), ok("{\"b\":2,\"a\":1}").canonical());
         assert_ne!(ok("0.0").canonical(), ok("-0.0").canonical());
         assert_eq!(ok("NaN").canonical(), ok("[NaN]").canonical().replace(['[', ']'], ""));
+    }
+
+    #[test]
+    fn the_depth_bound_allows_its_limit_and_refuses_one_more() {
+        let arrays = |n: usize| format!("{}1{}", "[".repeat(n), "]".repeat(n));
+        let objects = |n: usize| format!("{}1{}", "{\"a\":".repeat(n), "}".repeat(n));
+        for limit in [1usize, 2, 17, 1000] {
+            assert!(parse_bounded(&arrays(limit), limit).is_ok());
+            assert!(parse_bounded(&objects(limit), limit).is_ok());
+            assert_eq!(parse_bounded(&arrays(limit + 1), limit), Err(ParseError::TooDeep));
+            assert_eq!(parse_bounded(&objects(limit + 1), limit), Err(ParseError::TooDeep));
+        }
+        // An empty container is a level too, and the innermost one is where
+        // the count tips over.
+        assert!(parse_bounded("[[]]", 2).is_ok());
+        assert_eq!(parse_bounded("[[]]", 1), Err(ParseError::TooDeep));
+        assert_eq!(parse_bounded("{}", 0), Err(ParseError::TooDeep));
+        // Scalars have no depth, and siblings do not accumulate.
+        assert!(parse_bounded("1", 0).is_ok());
+        assert!(parse_bounded("[[1],[2],[3]]", 2).is_ok());
+        // Stopping at the limit says nothing about validity beyond it.
+        assert_eq!(parse_bounded("[[[[x", 2), Err(ParseError::TooDeep));
+        assert_eq!(parse_bounded("[x", 2), Err(ParseError::Invalid));
     }
 
     #[test]

@@ -226,5 +226,49 @@ def test_rust_still_skips_an_invalid_line_ahead_of_a_huge_integer(tmp_path) -> N
     assert _scan(tmp_path, "[" + "9" * 4301 + ", x]\n") == []
 
 
+_PREFIXED = "s" + "k-" + "ant-" + "abcdefghijklmnopqrstuvwxyz0123"
+_OVER_CAP = 1_000_001  # one past vahta_scan::deep::MAX_JSON_DEPTH
+
+
+@RUST_ONLY
+def test_rust_line_over_the_depth_cap_is_scanned_as_text_not_skipped(tmp_path) -> None:
+    """A line nested past MAX_JSON_DEPTH is never built into a tree (bounded
+    memory), but is scanned as text, so a key in it is still found, on its own
+    line number, between neighbours that are unaffected."""
+    keyed = "[" * _OVER_CAP + json.dumps("x %s y" % _PREFIXED) + "]" * _OVER_CAP
+    assigned = "[" * _OVER_CAP + json.dumps("%s=%s" % (_NAME, _VALUE)) + "]" * _OVER_CAP
+    clean = "[" * _OVER_CAP + "1" + "]" * _OVER_CAP
+    findings = _scan(tmp_path, _assign() + "\n" + keyed + "\n" + clean + "\n" + assigned + "\n" + _assign() + "\n")
+    by_conf = {f.confidence: f for f in findings}
+    assert by_conf["certain"].hit_lines == [2]
+    assert by_conf["certain"].secret_names == ["Anthropic-style key"]
+    assert by_conf["likely"].hit_lines == [1, 4, 5]
+    assert _VALUE not in repr(findings)
+
+
+@RUST_ONLY
+def test_rust_json_in_a_string_over_the_depth_cap_falls_back_to_text(tmp_path) -> None:
+    inner = "[" * _OVER_CAP + json.dumps("x %s y" % _PREFIXED) + "]" * _OVER_CAP
+    findings = _scan(tmp_path, json.dumps({"a": inner}) + "\n")
+    assert [(f.confidence, f.hit_lines) for f in findings] == [("certain", [1])]
+
+
+@RUST_ONLY
+def test_rust_depth_cap_is_inclusive_and_overridable_per_call(tmp_path) -> None:
+    """The cap is a parameter for tests; the product path never passes it. An
+    escaped key name (``API\\u005fKEY``) is read only from a parsed tree, never
+    from raw text, so it tells the two paths apart."""
+    from key_amnesia import _scan_rs
+
+    obj = '{"API\\u005fKEY": "%s"}' % _VALUE
+    p = tmp_path / "t.jsonl"
+    p.write_text("[" * 49 + obj + "]" * 49 + "\n" + "[" * 50 + obj + "]" * 50 + "\n", encoding="utf-8")
+    capped = _scan_rs._findings_for_transcript(p, scope="deep", max_json_depth=50)
+    assert _hit_lines(capped) == [1]  # depth 50 parsed; depth 51 is text, which spells no assignment
+    roomy = _scan_rs._findings_for_transcript(p, scope="deep", max_json_depth=51)
+    assert _hit_lines(roomy) == [1, 2]
+    assert _hit_lines(_scan_rs._findings_for_transcript(p, scope="deep")) == [1, 2]
+
+
 def test_scalars_and_garbage_lines_are_skipped(tmp_path) -> None:
     assert _scan(tmp_path, '42\n"just text"\nnull\n[]\n{}\nnot json\n\n   \n') == []
