@@ -124,13 +124,104 @@ fn default_exclusions_apply_and_wide_lifts_them() {
     assert_eq!(vahta(t.path(), &["scan", "--wide"]).status.code(), Some(1));
 }
 
+/// `vahta` with a fake `$HOME`, so `--deep` never looks at the real one.
+fn vahta_home(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_vahta"))
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env_remove("APPDATA")
+        .args(args)
+        .output()
+        .expect("run vahta")
+}
+
+fn assignment_line() -> String {
+    format!("{{\"text\": \"{}={}\"}}\n", ["API", "_KEY"].concat(), value())
+}
+
 #[test]
-fn deep_is_a_usage_error_that_says_where_to_go() {
-    let t = Tree::new();
-    let out = vahta(t.path(), &["scan", "--deep"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(text(&out.stderr).contains("only available in the Python `ka scan`"));
-    assert!(out.stdout.is_empty());
+fn deep_scans_the_home_directory_and_never_shows_a_value() {
+    let project = Tree::new();
+    project.write("README.md", "nothing here\n");
+    let home = Tree::new();
+    home.write(".npmrc", "registry=https://example.invalid/\n");
+    home.write(".claude/projects/p/s.jsonl", &format!("{{}}\n{}", assignment_line()));
+    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains(".npmrc"), "{stdout}");
+    assert!(stdout.contains("s.jsonl"), "{stdout}");
+    assert!(stdout.contains("outside this project"), "{stdout}");
+    assert!(!stdout.contains(&value()));
+    assert!(!text(&out.stderr).contains(&value()));
+    assert!(out.stderr.is_empty(), "--quiet silences progress");
+}
+
+#[test]
+fn without_deep_the_home_directory_is_not_read() {
+    let project = Tree::new();
+    let home = Tree::new();
+    home.write(".npmrc", "x\n");
+    let out = vahta_home(project.path(), home.path(), &["scan"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!text(&out.stdout).contains(".npmrc"));
+}
+
+#[test]
+fn deep_progress_goes_to_stderr_and_names_no_content() {
+    let project = Tree::new();
+    let home = Tree::new();
+    home.write(".claude/projects/p/s.jsonl", &assignment_line());
+    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--json"]);
+    assert_eq!(text(&out.stderr), "agent transcripts 1/1\n");
+    assert!(text(&out.stdout).trim_start().starts_with('{'));
+}
+
+#[test]
+fn a_finding_already_seen_in_the_project_is_not_repeated_by_deep() {
+    // The project *is* the home directory: every path is seen twice.
+    let home = Tree::new();
+    home.write(".npmrc", "x\n");
+    let out = vahta_home(home.path(), home.path(), &["scan", "--deep", "--quiet", "--json"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(stdout.matches("\"path\"").count(), 1, "{stdout}");
+}
+
+#[test]
+fn a_clean_home_exits_zero() {
+    let project = Tree::new();
+    let home = Tree::new();
+    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet"]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn deep_stops_with_status_one_where_python_crashes() {
+    let project = Tree::new();
+    let home = Tree::new();
+    let line = format!("{}{}\n", "[".repeat(1500), "]".repeat(1500));
+    home.write(".claude/projects/p/s.jsonl", &format!("{}{line}", assignment_line()));
+    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "nothing is reported from a scan that did not finish");
+    assert!(text(&out.stderr).contains("nested too deeply"));
+
+    let big = Tree::new();
+    big.write(".claude/projects/p/s.jsonl", &format!("[{}]\n", "9".repeat(4301)));
+    let out = vahta_home(project.path(), big.path(), &["scan", "--deep", "--quiet"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("4300"));
+}
+
+#[test]
+fn a_home_that_does_not_exist_scans_clean() {
+    let project = Tree::new();
+    let out = vahta_home(
+        project.path(),
+        &project.path().join("no-such-home"),
+        &["scan", "--deep", "--quiet"],
+    );
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]
