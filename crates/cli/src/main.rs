@@ -1,8 +1,9 @@
 //! `vahta` — the command line.
 //!
-//! One subcommand so far: `vahta scan [PATH]`, the project path of
-//! `ka scan`, and with `--deep` the home dotfiles, MCP configs and agent
-//! session transcripts as well. Its flags, output and exit codes match the
+//! Two subcommands. `vahta setup` registers the hook with the coding agents
+//! (see `setup.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
+//! with `--deep` the home dotfiles, MCP configs and agent session transcripts
+//! as well. The scan's flags, output and exit codes match the
 //! Python command's, and `src/key_amnesia/scan_py.py` remains the
 //! specification.
 //!
@@ -21,6 +22,8 @@
 //!
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
+
+mod setup;
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -68,8 +71,9 @@ usage: vahta <command> [options]
 
 commands:
   scan    find plaintext secrets an agent can read in a project
+  setup   register vahta-hook with Claude Code, Codex and Cursor
 
-Run `vahta scan --help` for the options.
+Run `vahta scan --help` or `vahta setup --help` for the options.
 ";
 
 struct ScanArgs {
@@ -168,6 +172,8 @@ pub struct Env {
     pub appdata: Option<OsString>,
     /// `sys.stderr.isatty()`: decides whether progress rewrites one line.
     pub stderr_is_tty: bool,
+    /// What `vahta setup` needs; `None` without a home directory.
+    pub setup: Option<vahta_setup::Env>,
 }
 
 /// `_scan_progress_printer`: stage and counts on stderr, never contents.
@@ -327,7 +333,14 @@ pub fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
+    // Say on stderr, never stdout, when a setup we made has gone stale.
+    if args.first().map(String::as_str) != Some("setup") {
+        if let Some(setup_env) = &env.setup {
+            setup::stale_notice(setup_env, stderr);
+        }
+    }
     match args.first().map(String::as_str) {
+        Some("setup") => setup::run(&args[1..], env.setup.as_ref(), stdout, stderr),
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
@@ -367,6 +380,25 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// The setup environment of this process. The hook is the `vahta-hook` next to
+/// the running executable, whether or not it exists.
+fn setup_env(home: Option<PathBuf>) -> Option<vahta_setup::Env> {
+    let hook_name = format!("vahta-hook{}", std::env::consts::EXE_SUFFIX);
+    let hook = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join(&hook_name)))
+        .unwrap_or_else(|| PathBuf::from(hook_name));
+    Some(vahta_setup::Env {
+        home: home?,
+        vars: std::env::vars().collect(),
+        path: std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default(),
+        os: vahta_setup::Os::current(),
+        hook,
+    })
+}
+
 fn main() {
     // Non-UTF-8 arguments are lossily converted rather than panicking.
     let args: Vec<String> = std::env::args_os()
@@ -382,9 +414,11 @@ fn main() {
     };
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
+    let home = home_dir();
     let env = Env {
         cwd,
-        home: home_dir(),
+        setup: setup_env(home.clone()),
+        home,
         appdata: std::env::var_os("APPDATA"),
         stderr_is_tty: stderr.is_terminal(),
     };

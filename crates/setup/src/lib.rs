@@ -498,11 +498,11 @@ pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
 /// A unified diff of one file's change, for `--dry-run`.
 pub fn unified_diff(path: &Path, before: Option<&str>, after: &str) -> String {
     let shown = path.display().to_string();
-    let old = if before.is_some() { format!("a/{shown}") } else { "/dev/null".to_string() };
+    let old = if before.is_some() { shown.clone() } else { "/dev/null".to_string() };
     similar::TextDiff::from_lines(before.unwrap_or(""), after)
         .unified_diff()
         .context_radius(3)
-        .header(&old, &format!("b/{shown}"))
+        .header(&old, &shown)
         .to_string()
 }
 
@@ -610,10 +610,8 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
     for (_, word) in &have {
         let missing = HookProblem::Missing(word.clone());
         let elsewhere = HookProblem::Elsewhere(word.clone());
-        if !Path::new(word).exists() {
-            if !problems.contains(&missing) {
-                problems.push(missing);
-            }
+        if !Path::new(word).exists() && !problems.contains(&missing) {
+            problems.push(missing);
         }
         if word.as_str() != here && !problems.contains(&elsewhere) {
             problems.push(elsewhere);

@@ -447,7 +447,7 @@ fn the_hook_path_is_quoted_when_it_needs_it() {
 #[test]
 fn the_diff_shows_a_change_and_nothing_for_none() {
     let d = vahta_setup::unified_diff(Path::new("/h/.claude/settings.json"), Some("{}\n"), "{\n  \"a\": 1\n}\n");
-    assert!(d.contains("--- a//h/.claude/settings.json") && d.contains("+  \"a\": 1"), "{d}");
+    assert!(d.contains("--- /h/.claude/settings.json") && d.contains("+  \"a\": 1"), "{d}");
     let d = vahta_setup::unified_diff(Path::new("/h/x.json"), None, "{}\n");
     assert!(d.contains("--- /dev/null") && d.contains("+{}"), "{d}");
 }

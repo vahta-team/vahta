@@ -18,3 +18,5 @@ path = "src/main.rs"
 
 [dependencies]
 vahta-scan = { path = "../scan" }
+vahta-harness = { path = "../harness" }
+vahta-setup = { path = "../setup" }
