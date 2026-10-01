@@ -91,6 +91,8 @@ fn json_is_the_documented_shape_and_hides_values() {
     assert!(stdout.contains("\"strict\": \"high\""));
     assert!(stdout.contains("\"secret_names\": [\n        \"API_KEY\"\n      ]"));
     assert!(!stdout.contains(&value()));
+    // The document and exactly one newline: no trailing blank line.
+    assert!(stdout.ends_with("}\n") && !stdout.ends_with("\n\n"));
 }
 
 #[test]

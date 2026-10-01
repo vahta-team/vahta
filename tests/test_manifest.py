@@ -121,7 +121,9 @@ def test_ka_check_ok_and_json(
     assert "API_KEY" not in out or "Missing" in out  # human form lists counts
 
     rc = main(["check", "--json"])
-    data = json.loads(capsys.readouterr().out)
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert out.endswith("}\n") and not out.endswith("\n\n")
     assert data["ok"] is True
     assert data["missing"] == []
     assert "API_KEY" in data["required"]
@@ -191,6 +193,17 @@ def test_ka_check_requires_project(
     err = capsys.readouterr().err
     assert rc == 1
     assert "project vault" in err.lower() or ".amnesia" in err
+
+
+def test_ka_check_json_without_project_is_one_document(
+    ka_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    rc = main(["check", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert json.loads(out)["ok"] is False
+    assert out.endswith("}\n") and not out.endswith("\n\n")
 
 
 def test_ka_run_fails_on_missing_required(

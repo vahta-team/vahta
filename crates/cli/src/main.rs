@@ -166,12 +166,10 @@ fn run_scan(
     let findings = scan_project(&root, parsed.include_excluded);
 
     if parsed.json {
-        // Python: `theme.out(json.dumps(obj, indent=2) + "\n")`, and
-        // `theme.out` appends a newline of its own, so stdout ends in a blank
-        // line. Reproduced so the two commands' output is byte-identical.
+        // Python: `theme.out(json.dumps(obj, indent=2))` — the document and
+        // exactly one newline, no trailing blank line.
         let text = findings_to_json(&findings, &root_str, &parsed.strict);
         let _ = writeln!(stdout, "{text}");
-        let _ = writeln!(stdout);
     } else {
         // Python: `theme.out(report)` then `theme.out("")`.
         let text = format_human_report(&findings, &root_str, &parsed.strict);

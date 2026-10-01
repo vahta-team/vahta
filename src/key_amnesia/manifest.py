@@ -280,7 +280,7 @@ def format_check_human(result: CheckResult) -> str:
 
 
 def format_check_json(result: CheckResult) -> str:
-    return json.dumps(result.to_dict(), indent=2) + "\n"
+    return json.dumps(result.to_dict(), indent=2)
 
 
 def missing_required_message(missing: list[str]) -> str:
