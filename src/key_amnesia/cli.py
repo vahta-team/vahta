@@ -938,7 +938,6 @@ def cmd_check(args: argparse.Namespace) -> int:
                     },
                     indent=2,
                 )
-                + "\n"
             )
         else:
             theme.error(msg)
@@ -1205,7 +1204,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 ),
                 indent=2,
             )
-            + "\n"
         )
     else:
         theme.out(

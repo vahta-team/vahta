@@ -54,6 +54,8 @@ def test_scan_finds_dotenv_names_not_values(ka_home, project_dir, capsys) -> Non
     captured = capsys.readouterr()
     data = json.loads(captured.out)
 
+    # The document and exactly one newline: no trailing blank line.
+    assert captured.out.endswith("}\n") and not captured.out.endswith("\n\n")
     assert rc == 1
     assert data["leak_count"] == 2
     assert data["possible_count"] == 0
