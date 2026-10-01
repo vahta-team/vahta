@@ -19,6 +19,15 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.13"]
+        impl: [python]
+        include:
+          # The compiled implementation, on one OS and one Python. 3.14 on
+          # purpose: the detector's Unicode tables are read out of CPython
+          # 3.14 (Unicode 16.0), and benchmarks/diff_unicode.py compares them
+          # against the running interpreter, so it only agrees on that version.
+          - os: ubuntu-latest
+            python-version: "3.14"
+            impl: rust
     runs-on: ${{ matrix.os }}
     # Cap hung runners; macOS pytest often needs 45-75m (historical greens
     # on master finished in ~1-2h). 30m cancelled healthy jobs mid-suite.
@@ -31,6 +40,12 @@ jobs:
     defaults:
       run:
         shell: bash
+    # `python` is each dispatcher's default, so the python legs behave exactly
+    # as they did before this variable existed. A missing extension falls back
+    # to Python silently, so the rust leg checks it is really in use below.
+    env:
+      KEY_AMNESIA_DETECT_IMPL: ${{ matrix.impl }}
+      KEY_AMNESIA_SCAN_IMPL: ${{ matrix.impl }}
     steps:
       - name: Checkout
         env:
@@ -118,6 +133,34 @@ jobs:
           "${PY}" -V
           "${PY}" -m pip install -U pip
           "${PY}" -m pip install -e ".[dev]"
+
+      - name: Build the Rust extensions
+        if: matrix.impl == 'rust'
+        run: |
+          set -euo pipefail
+          # Runners ship rustup and a stable cargo. pyo3 needs to know which
+          # interpreter to build against.
+          export PYO3_PYTHON="${{ steps.py.outputs.python }}"
+          cargo --version
+          cargo build --release -p vahta-pyext -p vahta-pyext-scan
+          cp target/release/lib_detect_rs.so src/key_amnesia/_detect_rs.so
+          cp target/release/lib_scan_rs.so src/key_amnesia/_scan_rs.so
+          "${{ steps.py.outputs.python }}" - <<'PY'
+          from key_amnesia import detect, scan
+          assert detect.active_impl == "rust", detect.active_impl
+          assert scan.active_impl == "rust", scan.active_impl
+          print("detect:", sorted(detect.implemented_natively()))
+          print("scan:", sorted(scan.implemented_natively()))
+          PY
+
+      - name: Rust tests and Unicode diff
+        if: matrix.impl == 'rust'
+        run: |
+          set -euo pipefail
+          export PYO3_PYTHON="${{ steps.py.outputs.python }}"
+          cargo test --workspace --release
+          cargo build --release -p vahta-detect --example dump_unicode
+          "${{ steps.py.outputs.python }}" benchmarks/diff_unicode.py
 
       - name: Test
         run: |
