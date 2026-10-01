@@ -15,10 +15,9 @@
 //! Python, unless `--quiet`.
 //!
 //! Where Python's deep scan *crashes* — a transcript line nested past its
-//! recursion limit, or an integer of more than 4300 digits — this reports the
-//! error on stderr and exits 1, the status an uncaught Python exception has.
-//! It does not skip the line: that would hide a divergence rather than reproduce
-//! one, and a scanner that quietly stops looking is the wrong way to fail.
+//! recursion limit, or an integer of more than 4300 digits — this scans the
+//! line like any other, on purpose: such a line may hold a real key, and one
+//! hostile line must not hide every other finding.
 //!
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
@@ -58,9 +57,8 @@ options:
   -h, --help             show this help
 
 --deep reads transcript lines and reports line numbers and names, never
-values. A transcript nested deeper than about 990 levels, or holding an
-integer of more than 4300 digits, stops the scan with an error and exit
-status 1, as `ka scan --deep` does.
+values. A line nested very deeply, or holding an integer of more than 4300
+digits, is scanned like any other (`ka scan --deep` stops on such a line).
 
 Not available here: --yes (import into a vault). Use the Python `ka scan`.
 ";
