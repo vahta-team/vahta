@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 vahta-detect = { path = "../detect" }
+vahta-json = { path = "../json" }

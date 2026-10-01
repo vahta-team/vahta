@@ -1,0 +1,108 @@
+# Codex. Docs: https://learn.chatgpt.com/docs/hooks (read 2026-10-01).
+# Codex shares Claude's PreToolUse / UserPromptSubmit shapes closely.
+
+name = "codex"
+title = "Codex"
+# Bump when what `vahta setup` writes for this harness changes.
+setup_version = 1
+# Codex runs a non-managed hook only after the person trusts its exact
+# definition; trust is recorded against the hook's hash, so new or changed
+# hooks are skipped until reviewed in /hooks (docs read 2026-10-01). Setup does
+# not write that trust: deciding to trust a hook is the person's, not ours.
+setup_notice = "Codex skips new or changed hooks until you trust them: open Codex, run /hooks and trust the vahta-hook entries. This is needed again after every setup change."
+unnamed_tool_group = "write"
+
+[config]
+format = "json"
+# Same layout as Claude's (docs read 2026-10-01, https://learn.chatgpt.com/docs/hooks):
+# hooks.<Event> is an array of {matcher?, hooks: [{type, command}]}. Hooks are on
+# by default; `[features] hooks = false` in config.toml turns them off. Setup
+# does not touch config.toml in v1.
+shape = "grouped"
+
+# $CODEX_HOME wins when set; otherwise the default ~/.codex. (Codex can also
+# read hooks from config.toml; setup uses hooks.json.)
+[config.path]
+linux = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+macos = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+windows = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+
+# --- detection --------------------------------------------------------------
+# Used by `vahta setup`. Found when any rule matches. $CODEX_HOME relocates
+# Codex's home, so it is a candidate as well as the default ~/.codex.
+[detect]
+dirs = ["$CODEX_HOME", "~/.codex"]
+binaries = ["codex"]
+
+[[events]]
+name = "PreToolUse"
+kind = "before_tool"
+# Codex's shell tool is canonically "Bash"; file edits go through apply_patch.
+matcher = "Bash|apply_patch|mcp__.*"
+tool_name = "tool_name"
+tool_input = "tool_input"
+cwd = "cwd"
+
+# No before_read event: Codex has no read tool. Its file reads go through the
+# shell, which before_tool checks for reader commands (cat, grep, ...).
+
+[[events]]
+name = "SessionStart"
+kind = "session_start"
+# Registered from v1 so that a later, outdated setup has a channel to say so.
+cwd = "cwd"
+
+[[events]]
+name = "UserPromptSubmit"
+kind = "prompt"
+# Documented as `prompt`; `user_prompt` accepted as a precaution.
+prompt = ["prompt", "user_prompt"]
+cwd = "cwd"
+
+[[events]]
+name = "PostToolUse"
+kind = "after_tool"
+matcher = "Bash|apply_patch|mcp__.*"
+tool_name = "tool_name"
+# Documented as `tool_response`; `tool_output` accepted as a precaution.
+tool_output = ["tool_response", "tool_output"]
+cwd = "cwd"
+
+[[tool_groups]]
+group = "mcp"
+prefixes = ["mcp__"]
+
+[[tool_groups]]
+group = "shell"
+tools = ["bash", "shell", "powershell"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+# apply_patch keeps the whole patch text under `command`.
+[[tool_groups]]
+group = "write"
+tools = ["write", "edit", "multiedit", "apply_patch"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+[replies.before_tool.deny]
+style = "json"
+# Same deny contract as Claude.
+body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "deny", permissionDecisionReason = "{agent_message}" }, systemMessage = "{user_message}" }
+
+[replies.prompt.deny]
+style = "json"
+body = { decision = "block", reason = "{user_message}" }
+
+[replies.after_tool.notice]
+style = "json"
+# Codex's PostToolUse output accepts only systemMessage, continue,
+# stopReason, decision and reason. Any other field (e.g. Claude's
+# hookSpecificOutput.additionalContext) marks the hook run as failed and the
+# notice is lost. decision:"block" would replace the whole tool result, which
+# is redaction by another name and deferred with it. So: systemMessage only,
+# surfaced to the user as a warning.
+body = { systemMessage = "{user_message}" }
+
+# SessionStart accepts systemMessage and additionalContext (docs read 2026-10-01).
+[replies.session_start.notice]
+style = "json"
+body = { systemMessage = "{user_message}" }

@@ -1,0 +1,19 @@
+{
+  "event": "before_read",
+  "env": {},
+  "files": {
+    ".env": "ANTHROPIC_API_KEY={{SECRET_ANTHROPIC}}\n",
+    "notes.md": "# hi\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Grep",
+    "tool_input": {
+      "pattern": "KEY",
+      "path": "{{TMP}}"
+    },
+    "cwd": "{{TMP}}"
+  },
+  "stdout": null,
+  "exit": 0
+}

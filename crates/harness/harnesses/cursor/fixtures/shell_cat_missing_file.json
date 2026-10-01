@@ -1,0 +1,19 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    ".env": "ANTHROPIC_API_KEY={{SECRET_ANTHROPIC}}\n",
+    "README.md": "# hello\n",
+    "my dir/.env": "ANTHROPIC_API_KEY={{SECRET_ANTHROPIC}}\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "cat nope.env"
+    },
+    "cwd": "{{TMP}}"
+  },
+  "stdout": null,
+  "exit": 0
+}

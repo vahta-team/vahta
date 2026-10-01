@@ -1,0 +1,11 @@
+{
+  "event": "session_start",
+  "args": [],
+  "env": {},
+  "stdin": {
+    "hook_event_name": "sessionStart",
+    "session_id": "s1"
+  },
+  "stdout": null,
+  "exit": 0
+}

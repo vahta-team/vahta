@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "/old/place/vahta-hook --harness cursor --event session_start --setup 0"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "./hooks/validate-tool.sh",
+        "matcher": "Shell"
+      },
+      {
+        "command": "/old/place/vahta-hook --harness cursor --event before_tool --setup 0",
+        "matcher": "Shell"
+      }
+    ]
+  }
+}

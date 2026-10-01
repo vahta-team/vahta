@@ -1,4 +1,14 @@
-//! A JSON parser that agrees with CPython's `json.loads`, and nothing else.
+//! `vahta-json`: a JSON parser that agrees with CPython's `json.loads`, built
+//! for hostile input.
+//!
+//! Purpose: read text an attacker or a careless agent wrote (agent transcripts,
+//! hook payloads) exactly the way Python's `json.loads` would, without being
+//! defeated by its shape. Iterative, so nesting cannot overflow the stack, and
+//! with **unbounded depth** unless a caller sets [`Limits`] (depth and node
+//! count) to bound memory. When a document is over the limits, or too big to
+//! parse, [`for_each_string`] is a tree-free token walk that still reports
+//! every string, decoded, in memory bounded by the largest one. No
+//! dependencies, no unsafe code.
 //!
 //! Hand-rolled, no dependencies, and **not** a general-purpose JSON library:
 //! it exists because a `--deep` scan must accept and reject exactly the lines

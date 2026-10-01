@@ -1,0 +1,12 @@
+{
+  "event": "before_read",
+  "env": {},
+  "files": {},
+  "stdin": {
+    "hook_event_name": "beforeReadFile",
+    "cwd": "{{TMP}}",
+    "file_path": "{{TMP}}/absent.env"
+  },
+  "stdout": null,
+  "exit": 0
+}

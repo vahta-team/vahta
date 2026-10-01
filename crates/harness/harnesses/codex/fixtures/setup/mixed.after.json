@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/audit-log --pre"
+          },
+          {
+            "type": "command",
+            "command": "/home/u/.local/bin/key-amnesia-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|apply_patch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event before_tool --setup 1"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event session_start --setup 1"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event prompt --setup 1"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event after_tool --setup 1"
+          }
+        ]
+      }
+    ]
+  }
+}

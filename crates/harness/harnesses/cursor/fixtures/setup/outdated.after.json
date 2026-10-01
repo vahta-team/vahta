@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event session_start --setup 1"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "./hooks/validate-tool.sh",
+        "matcher": "Shell"
+      },
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event before_tool --setup 1",
+        "matcher": "Shell|Write"
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event before_tool --setup 1"
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event before_read --setup 1"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event prompt --setup 1"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event after_tool --setup 1"
+      }
+    ]
+  }
+}

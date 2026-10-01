@@ -1,0 +1,11 @@
+{
+  "event": "prompt",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please add a test for the parser",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}

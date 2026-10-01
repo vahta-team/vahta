@@ -1,0 +1,16 @@
+{
+  "event": "session_start",
+  "args": [
+    "--setup",
+    "0"
+  ],
+  "env": {},
+  "stdin": {
+    "hook_event_name": "sessionStart",
+    "session_id": "s1"
+  },
+  "stdout": {
+    "additional_context": "vahta: setup for Cursor is outdated (v0 → v1); run `vahta setup --cursor`. Mention this to the user once."
+  },
+  "exit": 0
+}

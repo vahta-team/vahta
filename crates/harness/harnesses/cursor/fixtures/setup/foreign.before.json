@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "/home/u/.local/bin/key-amnesia-hook",
+        "matcher": "Shell|Write"
+      },
+      {
+        "command": "./hooks/validate-tool.sh",
+        "matcher": "Shell"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "./hooks/format.sh"
+      }
+    ]
+  },
+  "custom": {
+    "keep": true
+  }
+}

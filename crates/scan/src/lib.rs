@@ -12,13 +12,13 @@
 //! and agent session transcripts for three harnesses). The transcript path
 //! reads JSON, and Python's `json.loads` is the spec for what that accepts, so
 //! [`json`] is a parser written to agree with it rather than a general one.
-//! `cargo tree -p vahta-scan` shows one dependency, `vahta-detect`.
+//! `cargo tree -p vahta-scan` shows two path dependencies, `vahta-detect` and `vahta-json`.
 
 pub mod content;
 pub mod deep;
 pub mod filenames;
 pub mod finding;
-pub mod json;
+pub use vahta_json as json;
 pub mod par;
 pub mod report;
 pub mod walk;

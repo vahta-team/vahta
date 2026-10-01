@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "/home/u/.local/bin/key-amnesia-hook",
+        "matcher": "Shell|Write"
+      },
+      {
+        "command": "./hooks/validate-tool.sh",
+        "matcher": "Shell"
+      },
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event before_tool --setup 1",
+        "matcher": "Shell|Write"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "./hooks/format.sh"
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event before_tool --setup 1"
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event before_read --setup 1"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event session_start --setup 1"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event prompt --setup 1"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "/opt/vahta/bin/vahta-hook --harness cursor --event after_tool --setup 1"
+      }
+    ]
+  },
+  "custom": {
+    "keep": true
+  }
+}
