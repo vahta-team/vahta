@@ -8,13 +8,22 @@ expectation, because the whole point is to agree with Python where Python is odd
    nesting, whitespace Python does and does not allow, ...) and on many
    generated and *mutated* documents. Compared as a canonical re-serialisation
    (key order, code points, float bit patterns) or as the same failure class:
-   `JSONDecodeError`, `RecursionError`, or `ValueError` (integer digit cap).
+   `JSONDecodeError`. Where `json.loads` raises `RecursionError` or `ValueError`
+   (integer digit cap) Rust deliberately does not: it parses the document, and
+   the expectation is an oracle that does not share the limit (the interpreter
+   with the digit cap lifted, or the canonical form known by construction).
 2. **One transcript.** `scan_py._findings_for_transcript` against the Rust one
    on generated JSONL files: secret-shaped values assembled at run time from
    pieces, JSON-in-strings, duplicate keys, lone surrogates inside values,
    odd line terminators, invalid UTF-8, BOM, NBSP padding, hostile nesting, and
    the progress callback's exact calls (and an exception it raises). Findings
    compared field for field; exceptions compared by class.
+   **Where Python raises** (a line nested past its recursion limit, an integer
+   over 4300 digits) Rust is deliberately different: it scans such a line
+   instead of aborting. The expectation is then: Python on the same file with
+   the hostile lines blanked out (line numbers kept) equals Rust on that file
+   exactly; Rust on the original reports a superset of those line hits; and
+   every hostile line that carries a planted secret is reported.
 3. **The whole deep scan** over generated fake HOME trees, including symlinks
    and duplicates: `scan_deep`, `iter_agent_transcript_files` (in order) and
    `_deep_candidate_paths`, progress calls included. Never touches a real home.
@@ -33,6 +42,7 @@ import argparse
 import json
 import os
 import random
+import re
 import string
 import shutil
 import struct
@@ -123,8 +133,35 @@ def py_json(text: str) -> str:
         return "!intlimit"
 
 
+def py_json_uncapped(text: str) -> str:
+    """`py_json` with the integer digit cap lifted: the oracle where Rust has no cap."""
+    old = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        return py_json(text)
+    finally:
+        sys.set_int_max_str_digits(old)
+
+
 def rs_json(text: str) -> str:
     return _scan_rs._json_canonical(text)
+
+
+def expected_json(text: str, known: dict[str, str]) -> str:
+    """What Rust must return: Python's answer, except where Python gives up.
+
+    Python's `ValueError` is checked against Python itself with the cap lifted.
+    Its `RecursionError` has no oracle but construction: `known` maps those
+    texts to their canonical form (or "!invalid").
+    """
+    want = py_json(text)
+    if want == "!intlimit":
+        want = py_json_uncapped(text)
+    if want == "!recursion":
+        if text not in known:
+            raise AssertionError(f"no oracle for a text Python cannot parse: {text[:60]!r}")
+        want = known[text]
+    return want
 
 
 JSON_HAZARDS = [
@@ -161,17 +198,21 @@ JSON_HAZARDS = [
 ]
 
 
-def deep_cases() -> list[str]:
-    cases = []
-    for n in (10, 500, 990, 1100, 5000, 40000, 51000):
-        cases.append("[" * n + "]" * n)
-        cases.append('{"a":' * n + "1" + "}" * n)
-        cases.append("[" * n)  # unterminated: invalid, unless past the limit
-    for n in (60000, 100000, 1_000_000):
-        cases.append("[" * n + "]" * n)
-        cases.append("[" * n)  # unterminated but already too deep: RecursionError
-        cases.append('{"a":' * n)
-    return cases
+def deep_cases() -> tuple[list[str], dict[str, str]]:
+    """Deeply nested texts, and for each its canonical form known by construction."""
+    cases: list[str] = []
+    known: dict[str, str] = {}
+
+    def add(text: str, canonical: str) -> None:
+        cases.append(text)
+        known[text] = canonical
+
+    for n in (10, 500, 990, 1100, 5000, 40000, 51000, 60000, 100000, 1_000_000):
+        add("[" * n + "]" * n, "[" * n + "]" * n)
+        add('{"a":' * n + "1" + "}" * n, "{s61;|" * n + "i1;" + "}" * n)
+        add("[" * n, "!invalid")  # unterminated
+        add('{"a":' * n, "!invalid")
+    return cases, known
 
 
 ALPHABET = list('abcXYZ019 _-.:/,"\\\n\t') + ["é", "世", "😀", "\x7f", "\x85", " ", "\U0010f800"]
@@ -254,7 +295,8 @@ def surrogate_free(text: str) -> bool:
 
 
 def layer_json(rng: random.Random, scale: int) -> tuple[int, list[str]]:
-    texts = list(JSON_HAZARDS) + deep_cases()
+    deep, known = deep_cases()
+    texts = list(JSON_HAZARDS) + deep
     for _ in range(3000 * scale):
         value = rand_json(rng)
         text = dump_random(rng, value)
@@ -267,7 +309,7 @@ def layer_json(rng: random.Random, scale: int) -> tuple[int, list[str]]:
         if not surrogate_free(text):
             continue
         checked += 1
-        want, got = py_json(text), rs_json(text)
+        want, got = expected_json(text, known), rs_json(text)
         if want != got:
             failures.append(f"json {text[:80]!r}{'...' if len(text) > 80 else ''}\n   python: {want[:100]}\n   rust:   {got[:100]}")
             if len(failures) >= 20:
@@ -404,25 +446,49 @@ def json_line(rng: random.Random) -> str:
     return json.dumps(rng.choice([1, 2.5, None, True, "plain string", [], {}, [1, [2, [3]]]]))
 
 
-def hostile_line(rng: random.Random) -> str:
-    k = rng.randrange(9)
+def planted_secret(rng: random.Random) -> str:
+    """Text that always reports as certain: a vendor-prefixed key, built at run time."""
+    return "prefix " + "s" + "k" + "-" + "ant" + "-" + "".join(rng.choice(ALNUM + "_-") for _ in range(34)) + " suffix"
+
+
+def hostile_line(rng: random.Random) -> tuple[str, bool]:
+    """A line, and whether it carries a planted secret that must be reported.
+
+    The nesting and big-integer kinds are the ones Python cannot scan: it raises
+    and the whole scan aborts. Rust scans them, secret included.
+    """
+    k = rng.randrange(14)
+    plant = rng.random() < 0.6
+    core = json.dumps(planted_secret(rng)) if plant else "1"
+    depth = rng.choice([1500, 3000, 5000, 20000, 60000])
     if k == 0:
-        return "not json at all"
+        return "not json at all", False
     if k == 1:
-        return "{" + '"a":' * 3
+        return "{" + '"a":' * 3, False
     if k == 2:
-        return rng.choice(["NaN", "[NaN]", '{"a":Infinity,"api_key":"%s"}' % rand_value(rng), "-Infinity"])
+        return rng.choice(["NaN", "[NaN]", '{"a":Infinity,"api_key":"%s"}' % rand_value(rng), "-Infinity"]), False
     if k == 3:
-        return "[" * 1500 + "]" * 1500  # past the recursion limit
+        return "[" * depth + core + "]" * depth, plant  # past the recursion limit
     if k == 4:
-        return json.dumps({"a": "[" * 1500 + "]" * 1500})  # nested in a string
+        return '{"a":' * depth + core + "}" * depth, plant
     if k == 5:
-        return "[" + "9" * 4301 + "]"  # ValueError, not a decode error
+        return json.dumps({"a": "[" * depth + core + "]" * depth}), plant  # nested in a string
     if k == 6:
-        return json.dumps({"a": "[" + "9" * 4301 + "]"})
+        return "[" + "9" * 4301 + ", " + core + "]", plant  # ValueError, not a decode error
     if k == 7:
-        return "[" * 900 + '"%s=%s"' % (pick_name(rng), rand_value(rng)) + "]" * 900  # deep but fine
-    return "{'single': 'quotes'}"
+        return json.dumps({"a": "[" + "9" * 4301 + ", " + core + "]"}), plant
+    if k == 8:
+        return "[" * depth + json.dumps({pick_name(rng): "x"}) + "]" * depth, False  # deep, no secret
+    if k == 9:
+        return "[" + "9" * 4301 + "]", False
+    if k == 10:
+        # A secret-named key at the bottom, found by the key walk alone.
+        return "[" * depth + '{"%s": %s}' % (rng.choice(["api_key", "token", "password"]), json.dumps(rand_value(rng) or "abc12345")) + "]" * depth, False
+    if k == 11:
+        return "[" * 900 + '"%s=%s"' % (pick_name(rng), rand_value(rng)) + "]" * 900, False  # deep but fine
+    if k == 12:
+        return "[x, " + "9" * 4301 + "]", False  # a syntax error first: skipped by both
+    return "{'single': 'quotes'}", False
 
 
 JUNK_BYTES = [b"\xff", b"\xc0\xaf", b"\xed\xa0\x80", b"\xf0\x9f\x92", b"\xe2\x82", b"\x80"]
@@ -430,27 +496,45 @@ PAD = ["", "", "", " ", "\t", "\xa0", " ", "\x0b", "\x0c", "\x1c", "\x85", "�
 TERMS = [b"\n", b"\n", b"\n", b"\r\n", b"\r"]
 
 
+# Transcript bytes -> the 1-based lines that carry a planted secret in a line
+# Python cannot scan. Keyed by content so it survives being written to a tree.
+PLANTED: dict[bytes, list[int]] = {}
+
+
 def make_transcript(rng: random.Random, hazard_rate: float) -> bytes:
     lines: list[bytes] = []
+    planted: list[int] = []
     for _ in range(rng.randrange(1, 25)):
         r = rng.random()
+        carries = False
         if r < 0.08:
             text = ""
         elif r < 0.08 + hazard_rate:
-            text = hostile_line(rng)
+            text, carries = hostile_line(rng)
         else:
             text = json_line(rng)
-        text = rng.choice(PAD) + text + rng.choice(PAD)
+        pad_a, pad_b = rng.choice(PAD), rng.choice(PAD)
+        if "\ufeff" in pad_a + pad_b:
+            carries = False  # a BOM is not whitespace to `str.strip`: the line is not JSON
+        text = pad_a + text + pad_b
         raw = text.encode("utf-8", errors="surrogatepass")
         if rng.random() < 0.06:
             at = rng.randrange(len(raw) + 1)
             raw = raw[:at] + rng.choice(JUNK_BYTES) + raw[at:]
+            carries = False
         lines.append(raw)
+        if carries:
+            planted.append(len(lines))
     out = b""
-    for line in lines:
-        out += line + rng.choice(TERMS)
+    for n, line in enumerate(lines):
+        term = rng.choice(TERMS)
+        if term == b"\r" and n + 1 < len(lines) and lines[n + 1] == b"":
+            term = b"\n"  # a CR before an empty line could fuse with its LF and shift the numbering
+        out += line + term
     if rng.random() < 0.2:
         out = out.rstrip(b"\r\n")  # no final newline
+    if planted:
+        PLANTED[out] = planted
     return out
 
 
@@ -467,6 +551,66 @@ def run_transcript(path: Path, impl, progress=None):
 
 
 COVERAGE: dict[str, int] = {}
+
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def blank_hostile_lines(data: bytes, probe_dir: Path) -> tuple[bytes, list[int]]:
+    """Blank every line Python's scan raises on, keeping the line numbers.
+
+    Each non-blank line is scanned on its own, as a file, by the Python
+    implementation; one that raises `RecursionError` or `ValueError` is the
+    hostile kind. Any other exception is a harness bug and propagates.
+    """
+    text = data.decode("utf-8", errors="replace")
+    parts = _LINE_BREAK.split(text)
+    if parts and parts[-1] == "":
+        parts.pop()
+    probe = probe_dir / "probe.jsonl"
+    hostile: list[int] = []
+    for i, line in enumerate(parts):
+        if not line.strip():
+            continue
+        probe.write_text(line + "\n", encoding="utf-8", newline="")
+        try:
+            scan_py._findings_for_transcript(probe, scope="deep")
+        except (RecursionError, ValueError):
+            hostile.append(i + 1)
+            parts[i] = ""
+    return ("\n".join(parts) + "\n").encode("utf-8"), hostile
+
+
+def hit_map(findings, by_name: bool = False) -> dict[tuple, set[int]]:
+    """(resolved path, confidence) -> hit lines, for the superset comparison.
+
+    `by_name` keys on the file name alone, for comparing two copies of one file.
+    """
+    out: dict[tuple, set[int]] = {}
+    for f in findings:
+        d = f if isinstance(f, dict) else asdict(f)
+        key = (Path(d["path"]).name if by_name else str(Path(d["path"]).resolve()), d["confidence"])
+        out.setdefault(key, set()).update(d["hit_lines"])
+    return out
+
+
+def superset_problems(clean, original, by_name: bool = False) -> list[str]:
+    """Problems if `original` fails to report everything `clean` does."""
+    have, need = hit_map(original, by_name), hit_map(clean, by_name)
+    out = []
+    for key, lines in need.items():
+        if not lines <= have.get(key, set()):
+            out.append(f"{key[1]} lines {sorted(lines - have.get(key, set()))} of {Path(key[0]).name} lost")
+    return out
+
+
+def planted_problems(data: bytes, path: Path, original) -> list[str]:
+    """Problems if a planted secret in `data` (written at `path`) is not reported."""
+    lines = PLANTED.get(data)
+    if not lines:
+        return []
+    tally("hostile lines with a planted secret checked")
+    certain = hit_map(original).get((str(path.resolve()), "certain"), set())
+    return [f"planted secret on line {n} of {path.name} not reported as certain" for n in lines if n not in certain]
 
 
 def tally(key: str) -> None:
@@ -487,15 +631,45 @@ def layer_transcripts(rng: random.Random, scale: int) -> tuple[int, list[str]]:
         want = outcome(lambda: run_transcript(path, scan_py, lambda *a: calls_py.append(a)))
         got = outcome(lambda: run_transcript(path, _scan_rs, lambda *a: calls_rs.append(a)))
         checked += 1
+        problems: list[str] = []
         if want[0] == "raise":
             tally(f"transcripts raising {want[1]}")
+            if want[1] not in ("RecursionError", "ValueError"):
+                problems.append(f"python raised {want[1]}, which is not a known hostile-input failure")
+            else:
+                clean_data, hostile = blank_hostile_lines(data, tmp)
+                if not hostile:
+                    problems.append("python raised but no single line reproduces it")
+                (tmp / f"clean{i}").mkdir()
+                clean = tmp / f"clean{i}" / path.name  # same name: findings are compared by it
+                clean.write_bytes(clean_data)
+                calls_clean_py: list = []
+                calls_clean_rs: list = []
+                want_clean = outcome(lambda: run_transcript(clean, scan_py, lambda *a: calls_clean_py.append(a)))
+                got_clean = outcome(lambda: run_transcript(clean, _scan_rs, lambda *a: calls_clean_rs.append(a)))
+                if want_clean[0] != "ok":
+                    problems.append(f"python still raises with the hostile lines blanked: {want_clean}")
+                if want_clean != got_clean or calls_clean_py != calls_clean_rs:
+                    problems.append(f"clean file differs\n   python: {str(want_clean)[:300]}\n   rust:   {str(got_clean)[:300]}")
+                if got[0] != "ok":
+                    problems.append(f"rust raised on the original: {got}")
+                else:
+                    if calls_rs != calls_clean_rs:
+                        problems.append("progress calls differ between original and clean")
+                    if want_clean[0] == "ok":
+                        problems += superset_problems(want_clean[1], got[1], by_name=True)
+                    problems += planted_problems(data, path, got[1])
+                clean.unlink()
+                clean.parent.rmdir()
         else:
             for f in want[1]:
                 tally(f"transcript findings: {f['confidence']}")
             if not want[1]:
                 tally("transcripts with no findings")
-        if want != got or calls_py != calls_rs:
-            failures.append(f"transcript {path.name} ({len(data)} bytes) kept at {path}\n   python: {str(want)[:300]}\n   rust:   {str(got)[:300]}")
+            if want != got or calls_py != calls_rs:
+                problems.append(f"python: {str(want)[:300]}\n   rust:   {str(got)[:300]}")
+        if problems:
+            failures.append(f"transcript {path.name} ({len(data)} bytes) kept at {path}\n   " + "\n   ".join(problems))
             if len(failures) >= 10:
                 return checked, failures
             continue
@@ -636,6 +810,51 @@ def build_home(rng: random.Random, root: Path, hazard: float = 0.1) -> Path:
     return home
 
 
+def deep_crash_problems(home: Path, root: Path, got, pb) -> list[str]:
+    """Rust against a Python that aborted, on a fake HOME. Mutates `home`.
+
+    Blanks the lines Python cannot scan (in place, in real files only, once
+    each), then checks what `layer_transcripts` checks for one file, for the
+    whole scan: the blanked tree agrees exactly between the two, and the
+    original, scanned by Rust, reports a superset plus every planted secret.
+    """
+    shutil.copytree(home, root / "home-before-blanking", symlinks=True)  # for reproducing
+    probe = root / "probe"
+    probe.mkdir()
+    problems: list[str] = []
+    originals: dict[Path, bytes] = {}
+    hostile_lines = 0
+    for p in scan_py.iter_agent_transcript_files(home):
+        rp = p.resolve()
+        if rp in originals:
+            continue
+        data = originals[rp] = rp.read_bytes()
+        clean, hostile = blank_hostile_lines(data, probe)
+        if hostile:
+            hostile_lines += len(hostile)
+            rp.write_bytes(clean)
+    if not hostile_lines:
+        problems.append("python raised but no single line reproduces it")
+    pa2: list = []
+    pb2: list = []
+    want_clean = outcome(lambda: scan_py.scan_deep(home, progress=lambda *a: pa2.append(a)))
+    got_clean = outcome(lambda: _scan_rs.scan_deep(home, progress=lambda *a: pb2.append(a)))
+    if want_clean[0] != "ok":
+        problems.append(f"python still raises with the hostile lines blanked: {want_clean}")
+    if want_clean != got_clean or pa2 != pb2:
+        problems.append(f"blanked tree differs\n     python {str(want_clean)[:300]}\n     rust   {str(got_clean)[:300]}")
+    if got[0] != "ok":
+        problems.append(f"rust raised on the original: {got}")
+        return problems
+    if pb != pb2:
+        problems.append("progress calls differ between the original and the blanked tree")
+    if want_clean[0] == "ok":
+        problems += superset_problems(want_clean[1], got[1])
+    for rp, data in originals.items():
+        problems += planted_problems(data, rp, got[1])
+    return problems
+
+
 def layer_deep(rng: random.Random, scale: int) -> tuple[int, list[str]]:
     failures: list[str] = []
     checked = 0
@@ -669,6 +888,11 @@ def layer_deep(rng: random.Random, scale: int) -> tuple[int, list[str]]:
             got = outcome(lambda: _scan_rs.scan_deep(home, progress=lambda *a: pb.append(a)))
             want_np = outcome(lambda: scan_py.scan_deep(home))
             got_np = outcome(lambda: _scan_rs.scan_deep(home))
+            raised = want[0] == "raise"
+            if raised:
+                tally(f"deep scans raising {want[1]}")
+                crash = deep_crash_problems(home, root, got, pb) if want[1] in ("RecursionError", "ValueError") else [
+                    f"python raised {want[1]}, which is not a known hostile-input failure"]
         finally:
             if old is None:
                 os.environ.pop("APPDATA", None)
@@ -680,12 +904,17 @@ def layer_deep(rng: random.Random, scale: int) -> tuple[int, list[str]]:
             problems.append(f"transcript order\n     python {order_py}\n     rust   {order_rs}")
         if cand_py != cand_rs:
             problems.append("candidate paths differ")
-        if want != got:
-            problems.append(f"scan_deep\n     python {str(want)[:300]}\n     rust   {str(got)[:300]}")
-        if want_np != got_np:
-            problems.append("scan_deep without progress")
-        if pa != pb:
-            problems.append(f"progress calls\n     python {pa[:6]}\n     rust   {pb[:6]}")
+        if raised:
+            problems += crash
+            if want_np[0] != "raise" or got_np != got:
+                problems.append("scan_deep without progress differs from the one with")
+        else:
+            if want != got:
+                problems.append(f"scan_deep\n     python {str(want)[:300]}\n     rust   {str(got)[:300]}")
+            if want_np != got_np:
+                problems.append("scan_deep without progress")
+            if pa != pb:
+                problems.append(f"progress calls\n     python {pa[:6]}\n     rust   {pb[:6]}")
         if problems:
             failures.append(f"deep tree {home} (kept): " + "; ".join(problems))
             if len(failures) >= 5:
@@ -718,6 +947,8 @@ def main() -> int:
     # A harness that stops exercising a hazard is a harness that stopped
     # checking it: require each class of outcome to occur.
     for need in ("transcripts raising RecursionError", "transcripts raising ValueError",
+                 "deep scans raising RecursionError", "deep scans raising ValueError",
+                 "hostile lines with a planted secret checked",
                  "transcript findings: certain", "transcript findings: likely", "transcript findings: possible"):
         if COVERAGE.get(need, 0) == 0:
             bad.append(f"coverage: no case produced {need!r}")
