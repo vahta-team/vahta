@@ -106,7 +106,16 @@ fn manifests() -> Vec<Manifest> {
 /// clean.
 pub fn stale_notice(env: &SetupEnv, stderr: &mut dyn Write) {
     for m in manifests() {
-        if vahta_setup::inspect(&m, env).state == State::Outdated {
+        let i = vahta_setup::inspect(&m, env);
+        let missing = i.problems.iter().any(|p| matches!(p, HookProblem::Missing(_)));
+        if missing {
+            // The harness runs a hook that is gone: no protection, and no error.
+            let _ = writeln!(
+                stderr,
+                "vahta: the hook set up for {} no longer exists; run `vahta setup --{}`",
+                m.title, m.name
+            );
+        } else if i.state == State::Outdated {
             let _ = writeln!(
                 stderr,
                 "vahta: setup for {} is outdated; run `vahta setup --{}`",

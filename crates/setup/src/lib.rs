@@ -189,6 +189,25 @@ fn is_ours_word(word: &str) -> bool {
     stem == "vahta-hook"
 }
 
+/// A command with its program word cut off: what remains are our arguments.
+fn arguments(command: &str, os: Os) -> String {
+    let rest = command.trim_start();
+    let mut quote: Option<char> = None;
+    let mut chars = rest.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match (quote, c) {
+            (None, c) if c.is_whitespace() => return rest[i..].trim().to_string(),
+            (None, '\'') | (None, '"') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (_, '\\') if os != Os::Windows && quote != Some('\'') => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    String::new()
+}
+
 /// The program of one of our commands, or `None` for a foreign command.
 fn our_program(command: &str, os: Os) -> Option<String> {
     first_word(command, os).filter(|w| is_ours_word(w))
@@ -512,7 +531,7 @@ pub fn unified_diff(path: &Path, before: Option<&str>, after: &str) -> String {
 pub enum State {
     /// No entry of ours in the file (or no file).
     None,
-    /// Ours match exactly what this binary would write now.
+    /// Ours match what this binary would write now, up to the hook's path.
     Current,
     /// Ours are there but differ from what this binary would write.
     Outdated,
@@ -598,9 +617,12 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
     if have.is_empty() {
         return Inspect { config_path, state: State::None, problems: Vec::new() };
     }
-    let program = quote_word(&env.hook.to_string_lossy(), env.os);
-    let mut want = entries(m, &program);
-    let mut got: Vec<Entry> = have.iter().map(|(e, _)| e.clone()).collect();
+    // Compared without the program path: a dev build and an installed `vahta`
+    // must agree on whether the setup is current. Where the hook lives is
+    // reported separately, as a problem below.
+    let args_only = |e: &Entry| Entry { command: arguments(&e.command, env.os), ..e.clone() };
+    let mut want: Vec<Entry> = entries(m, "vahta-hook").iter().map(args_only).collect();
+    let mut got: Vec<Entry> = have.iter().map(|(e, _)| args_only(e)).collect();
     want.sort();
     got.sort();
     let state = if want == got { State::Current } else { State::Outdated };

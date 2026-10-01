@@ -260,5 +260,11 @@ fn a_hook_path_that_no_longer_exists_is_flagged_in_the_table() {
     fs::remove_file(s.hook()).unwrap();
     let o = text(&s.vahta(&["setup"]).stdout);
     assert!(o.contains("does not exist"), "{o}");
+    // And on every other command: the harness now runs nothing.
+    let out = s.vahta(&["scan", "--json", "."]);
+    assert_eq!(
+        text(&out.stderr),
+        "vahta: the hook set up for Claude Code no longer exists; run `vahta setup --claude`\n"
+    );
 }
 

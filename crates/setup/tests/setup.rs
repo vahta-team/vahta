@@ -386,7 +386,15 @@ fn status_none_current_outdated_and_hook_paths() {
     let other = t.write("elsewhere/vahta-hook", "");
     env.hook = other.clone();
     let s = inspect(&mf, &env);
-    assert_eq!(s.state, State::Outdated, "another path is another command");
+    assert_eq!(s.state, State::Current, "the path is a problem, not staleness");
+    // A path with spaces, quoted, is still the same setup.
+    let spaced = t.write("with space/vahta-hook", "");
+    env.hook = spaced;
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    env.hook = other.clone();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    fs::write(&path, &text).unwrap();
     assert!(s.problems.contains(&HookProblem::Elsewhere(hook.to_string_lossy().into())));
 
     // A broken file is reported, not guessed at.
