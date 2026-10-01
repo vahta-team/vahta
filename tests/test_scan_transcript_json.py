@@ -17,7 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from key_amnesia import scan as _scan_mod
 from key_amnesia.scan import _findings_for_transcript
+
+RUST = _scan_mod.active_impl == _scan_mod.IMPL_RUST
+PYTHON_ONLY = pytest.mark.skipif(
+    RUST, reason="Rust scans such lines instead of aborting — deliberate divergence"
+)
+RUST_ONLY = pytest.mark.skipif(not RUST, reason="pins the Rust implementation's deliberate divergence")
 
 _NAME = "API" + "_KEY"
 _VALUE = "aB3xQ9" + "mK2pL7" + "vN4wZ8"
@@ -146,11 +153,12 @@ def test_progress_exceptions_propagate(tmp_path) -> None:
         _scan(tmp_path, '{"t": "ok"}\n' * 2001, progress=boom)
 
 
+@PYTHON_ONLY
 def test_nesting_past_the_recursion_limit_raises_rather_than_skips(tmp_path) -> None:
     """Not a JSONDecodeError, so Python's caller does not catch it.
 
     Uncaught, one such line aborts the whole ``--deep`` scan. The Rust port
-    reproduces that instead of quietly skipping the line.
+    deliberately does not reproduce that: see the ``rust`` counterparts below.
     """
     findings = _scan(tmp_path, "[" * 300 + "]" * 300 + "\n" + _assign() + "\n")
     assert _hit_lines(findings) == [2]
@@ -160,6 +168,7 @@ def test_nesting_past_the_recursion_limit_raises_rather_than_skips(tmp_path) -> 
         _scan(tmp_path, json.dumps({"a": "[" * 3000 + "]" * 3000}) + "\n")
 
 
+@PYTHON_ONLY
 def test_integers_over_4300_digits_raise_value_error(tmp_path) -> None:
     assert _scan(tmp_path, "[" + "9" * 4300 + "]\n") == []
     with pytest.raises(ValueError):
@@ -169,6 +178,52 @@ def test_integers_over_4300_digits_raise_value_error(tmp_path) -> None:
     # Floats have no such limit, and a syntax error earlier on the line wins.
     assert _scan(tmp_path, "[" + "9" * 4301 + ".5]\n") == []
     assert _scan(tmp_path, "[x, " + "9" * 4301 + "]\n") == []
+
+
+def _hostile_lines() -> dict[str, str]:
+    """Lines Python cannot scan, each holding the assignment at its core."""
+    quoted = json.dumps("%s=%s" % (_NAME, _VALUE))
+    nested = lambda n: "[" * n + quoted + "]" * n  # noqa: E731
+    return {
+        "3000-deep": nested(3000),
+        "5000-deep": nested(5000),
+        "5000-deep objects": '{"a":' * 5000 + quoted + "}" * 5000,
+        "60000-deep": nested(60000),  # past what json.loads itself accepts
+        "4301-digit int": "[" + "9" * 4301 + ", " + quoted + "]",
+        "huge int": '{"n": ' + "9" * 100000 + ", " + '"t": ' + quoted + "}",
+        "deep JSON in a string": json.dumps({"a": nested(5000)}),
+        "huge int in JSON in a string": json.dumps({"a": "[" + "9" * 4301 + ", " + quoted + "]"}),
+        "secret-keyed value, deep": "[" * 5000 + json.dumps({_NAME.lower(): _VALUE}) + "]" * 5000,
+    }
+
+
+@RUST_ONLY
+@pytest.mark.parametrize("name", sorted(_hostile_lines()))
+def test_rust_scans_lines_python_cannot_instead_of_aborting(tmp_path, name) -> None:
+    """Python's RecursionError / ValueError abort the scan; Rust scans the line.
+
+    The hostile line may still hold a real key, and must not hide the key on
+    the line before it or the line after it.
+    """
+    hostile = _hostile_lines()[name]
+    findings = _scan(tmp_path, _assign() + "\n" + hostile + "\n" + _assign() + "\n")
+    assert _hit_lines(findings) == [1, 2, 3]
+    assert _hit_lines(_scan(tmp_path, hostile + "\n")) == [1]
+    assert _hit_lines(_scan(tmp_path, hostile + "\n" + _assign() + "\n")) == [1, 2]
+
+
+@RUST_ONLY
+def test_rust_hostile_lines_without_a_secret_are_clean_and_do_not_stop_the_scan(tmp_path) -> None:
+    deep = "[" * 5000 + "]" * 5000
+    big = "[" + "9" * 4301 + "]"
+    findings = _scan(tmp_path, deep + "\n" + big + "\n" + _assign() + "\n" + deep + "\n")
+    assert _hit_lines(findings) == [3]
+
+
+@RUST_ONLY
+def test_rust_still_skips_an_invalid_line_ahead_of_a_huge_integer(tmp_path) -> None:
+    assert _scan(tmp_path, "[x, " + "9" * 4301 + "]\n") == []
+    assert _scan(tmp_path, "[" + "9" * 4301 + ", x]\n") == []
 
 
 def test_scalars_and_garbage_lines_are_skipped(tmp_path) -> None:
