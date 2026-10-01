@@ -268,3 +268,17 @@ fn a_hook_path_that_no_longer_exists_is_flagged_in_the_table() {
     );
 }
 
+
+#[test]
+fn codex_setup_says_to_trust_the_hooks_in_codex() {
+    let s = Sandbox::new(true);
+    s.found(".codex");
+    let o = text(&s.vahta(&["setup", "--codex"]).stdout);
+    assert!(o.contains("run /hooks and trust"), "{o}");
+    // The table keeps saying it while the setup is there, and only for Codex.
+    let o = text(&s.vahta(&["setup"]).stdout);
+    assert!(o.contains("Codex: Codex skips new or changed hooks"), "{o}");
+    assert!(!o.contains("Claude Code: Codex"), "{o}");
+    // An uninstall does not ask for trust.
+    assert!(!text(&s.vahta(&["setup", "--codex", "--uninstall"]).stdout).contains("run /hooks"));
+}

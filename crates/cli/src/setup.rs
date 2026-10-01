@@ -126,6 +126,11 @@ pub fn stale_notice(env: &SetupEnv, stderr: &mut dyn Write) {
     }
 }
 
+/// The manifest's after-setup notice for a harness, by name.
+fn notice_of(name: &str) -> Option<String> {
+    manifests().into_iter().find(|m| m.name == name)?.setup_notice
+}
+
 fn state_word(s: &State) -> &'static str {
     match s {
         State::None => "none",
@@ -163,6 +168,11 @@ fn print_table(statuses: &[Status], stdout: &mut dyn Write) {
     for s in statuses {
         if !s.detection.found {
             notes.push(format!("{}: not found ({})", s.title, s.detection.why));
+        }
+        if matches!(s.inspect.state, State::Current | State::Outdated) {
+            if let Some(n) = notice_of(&s.name) {
+                notes.push(format!("{}: {n}", s.title));
+            }
         }
         if let State::Unreadable(why) = &s.inspect.state {
             notes.push(format!("{}: config {why}", s.title));
@@ -308,6 +318,9 @@ pub fn run(
                 };
                 let kept = backup.map_or(String::new(), |b| format!(" (old file kept as {})", b.display()));
                 let _ = writeln!(stdout, "{}: {verb} {path}{kept}", m.title);
+                if let (Action::Install, Some(n)) = (action, &m.setup_notice) {
+                    let _ = writeln!(stdout, "  {n}");
+                }
             }
             Err(e) => {
                 let _ = writeln!(stderr, "vahta setup: {}: cannot write {path}: {e}", m.title);

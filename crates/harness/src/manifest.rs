@@ -85,6 +85,10 @@ pub struct Manifest {
     /// Bumped whenever what `vahta setup` writes for this harness changes.
     /// The hook command carries the version it was installed at (`--setup N`).
     pub setup_version: u32,
+    /// Something the person must do in the harness itself after setup writes,
+    /// which setup cannot and should not do for them (Codex's hook trust).
+    #[serde(default)]
+    pub setup_notice: Option<String>,
     pub config: Config,
     /// How `vahta setup` decides the harness is installed.
     pub detect: Detect,

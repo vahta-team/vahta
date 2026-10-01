@@ -5,6 +5,11 @@ name = "codex"
 title = "Codex"
 # Bump when what `vahta setup` writes for this harness changes.
 setup_version = 1
+# Codex runs a non-managed hook only after the person trusts its exact
+# definition; trust is recorded against the hook's hash, so new or changed
+# hooks are skipped until reviewed in /hooks (docs read 2026-10-01). Setup does
+# not write that trust: deciding to trust a hook is the person's, not ours.
+setup_notice = "Codex skips new or changed hooks until you trust them: open Codex, run /hooks and trust the vahta-hook entries. This is needed again after every setup change."
 unnamed_tool_group = "write"
 
 [config]
