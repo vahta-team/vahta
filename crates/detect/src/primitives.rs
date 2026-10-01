@@ -124,20 +124,27 @@ pub fn is_digit_python(c: char) -> bool {
 /// disagreed with Python on 2179 of them — always in the last one or two
 /// digits, which is exactly the size of error that decides a tier at the
 /// `SHANNON_POSSIBLE_FLOOR` boundary while being invisible everywhere else.
-fn neumaier_sum(terms: &[f64]) -> f64 {
-    let mut sum = 0.0f64;
-    let mut compensation = 0.0f64;
+#[derive(Default)]
+struct Neumaier {
+    sum: f64,
+    compensation: f64,
+}
 
-    for &x in terms {
-        let t = sum + x;
-        if sum.abs() >= x.abs() {
-            compensation += (sum - t) + x;
+impl Neumaier {
+    #[inline]
+    fn add(&mut self, x: f64) {
+        let t = self.sum + x;
+        if self.sum.abs() >= x.abs() {
+            self.compensation += (self.sum - t) + x;
         } else {
-            compensation += (x - t) + sum;
+            self.compensation += (x - t) + self.sum;
         }
-        sum = t;
+        self.sum = t;
     }
-    sum + compensation
+
+    fn finish(&self) -> f64 {
+        self.sum + self.compensation
+    }
 }
 
 /// Shannon entropy in bits.
@@ -152,8 +159,63 @@ fn neumaier_sum(terms: &[f64]) -> f64 {
 ///   is insertion order, so first occurrence. Reproduced here rather than
 ///   sorted, because sorting would mean changing the Python side too, and
 ///   this milestone changes no behaviour.
-/// * the **algorithm** — see [`neumaier_sum`].
+/// * the **algorithm** — see [`Neumaier`].
 pub fn entropy(s: &str) -> f64 {
+    if s.is_ascii() {
+        return entropy_ascii(s.as_bytes());
+    }
+    entropy_general(s)
+}
+
+/// [`entropy`] for ASCII input, with no allocation and no linear search.
+///
+/// The general path finds each character's slot with a scan of the distinct
+/// characters seen so far, which on a 40-character key with ~35 distinct
+/// characters is most of the cost of classifying it. Here the counts live in a
+/// table indexed by the byte, and a separate list records first-occurrence
+/// order, because the order the terms are summed in is part of the contract
+/// (see above). Same terms, same order, same arithmetic: the same bits out.
+fn entropy_ascii(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0u32; 128];
+    let mut order = [0u8; 128];
+    let mut distinct = 0usize;
+    for &b in bytes {
+        let slot = &mut counts[b as usize];
+        if *slot == 0 {
+            order[distinct] = b;
+            distinct += 1;
+        }
+        *slot += 1;
+    }
+    let n = bytes.len() as f64;
+    // `p * log2(p)` depends only on the count (n is fixed), and counts repeat
+    // heavily — most characters of a random key occur once or twice — so each
+    // small count's term is computed once, by the very same expression.
+    let mut memo = [0.0f64; 64];
+    let mut seen = 0u64;
+    let mut acc = Neumaier::default();
+    for &b in &order[..distinct] {
+        let count = counts[b as usize] as usize;
+        let term = if count < 64 {
+            if seen & (1 << count) == 0 {
+                let p = count as f64 / n;
+                memo[count] = p * p.log2();
+                seen |= 1 << count;
+            }
+            memo[count]
+        } else {
+            let p = count as f64 / n;
+            p * p.log2()
+        };
+        acc.add(term);
+    }
+    -acc.finish()
+}
+
+fn entropy_general(s: &str) -> f64 {
     let mut counts: Vec<(char, usize)> = Vec::new();
     let mut total: usize = 0;
 
@@ -170,15 +232,14 @@ pub fn entropy(s: &str) -> f64 {
     }
 
     let n = total as f64;
-    let terms: Vec<f64> = counts
-        .iter()
-        .map(|(_, count)| {
-            let p = *count as f64 / n;
-            p * p.log2()
-        })
-        .collect();
-
-    -neumaier_sum(&terms)
+    // Same terms, same order, same compensated sum as `neumaier_sum` — just
+    // fed one at a time instead of through a temporary `Vec<f64>`.
+    let mut acc = Neumaier::default();
+    for (_, count) in &counts {
+        let p = *count as f64 / n;
+        acc.add(p * p.log2());
+    }
+    -acc.finish()
 }
 
 /// Fraction of adjacent character pairs that change class.
@@ -231,53 +292,60 @@ pub fn transition_rate(s: &str) -> f64 {
 /// `Server`); and a run of digits.
 pub fn word_segments(value: &str) -> Vec<String> {
     let mut out = Vec::new();
+    for_each_segment(value, |seg| out.push(seg.to_string()));
+    out
+}
 
+/// [`word_segments`] without allocating: each segment is handed to `f` as a
+/// slice of `value`. The vowel-segment count, which runs for every candidate
+/// value, uses this directly.
+fn for_each_segment(value: &str, mut f: impl FnMut(&str)) {
     for part in value.split(|c: char| !c.is_ascii_alphanumeric()) {
         if part.is_empty() {
             continue;
         }
-        let found = camel_segments(part);
-        if found.is_empty() {
-            out.push(part.to_string());
-        } else {
-            out.extend(found);
+        let mut found = false;
+        camel_segments(part, |seg| {
+            found = true;
+            f(seg);
+        });
+        if !found {
+            f(part);
         }
     }
-    out
 }
 
-fn camel_segments(part: &str) -> Vec<String> {
-    let chars: Vec<char> = part.chars().collect();
-    let mut out: Vec<String> = Vec::new();
+/// `part` holds ASCII alphanumerics only (it came out of the split above), so
+/// byte offsets are character offsets and every slice is on a boundary.
+fn camel_segments(part: &str, mut emit: impl FnMut(&str)) {
+    let chars = part.as_bytes();
     let mut i = 0usize;
 
     while i < chars.len() {
         let c = chars[i];
 
-        // `[A-Z]?[a-z]+`
-        if c.is_ascii_uppercase()
-            && i + 1 < chars.len()
-            && chars[i + 1].is_ascii_lowercase()
-        {
+        // `[A-Z]?[a-z]+`, with the capital.
+        if c.is_ascii_uppercase() && i + 1 < chars.len() && chars[i + 1].is_ascii_lowercase() {
             let start = i;
             i += 1;
             while i < chars.len() && chars[i].is_ascii_lowercase() {
                 i += 1;
             }
-            out.push(chars[start..i].iter().collect());
+            emit(&part[start..i]);
             continue;
         }
+        // `[a-z]+`
         if c.is_ascii_lowercase() {
             let start = i;
             while i < chars.len() && chars[i].is_ascii_lowercase() {
                 i += 1;
             }
-            out.push(chars[start..i].iter().collect());
+            emit(&part[start..i]);
             continue;
         }
 
-        // `[A-Z]+(?![a-z])` — take capitals, then give back the last one if a
-        // lowercase follows, because it belongs to the next segment.
+        // `[A-Z]+(?![a-z])`: a run of capitals, giving back the last one if a
+        // lowercase letter follows it (it belongs to the next word).
         if c.is_ascii_uppercase() {
             let start = i;
             while i < chars.len() && chars[i].is_ascii_uppercase() {
@@ -287,11 +355,9 @@ fn camel_segments(part: &str) -> Vec<String> {
                 i -= 1;
             }
             if i > start {
-                out.push(chars[start..i].iter().collect());
+                emit(&part[start..i]);
                 continue;
             }
-            // A single capital directly before a lowercase was handled above;
-            // reaching here means the alternative cannot match, so skip it.
             i += 1;
             continue;
         }
@@ -302,28 +368,28 @@ fn camel_segments(part: &str) -> Vec<String> {
             while i < chars.len() && chars[i].is_ascii_digit() {
                 i += 1;
             }
-            out.push(chars[start..i].iter().collect());
+            emit(&part[start..i]);
             continue;
         }
 
         i += 1;
     }
-    out
 }
 
+#[cfg(test)]
 const VOWELS: &str = "aeiouAEIOUyY";
 
 /// True if the segment carries a vowel. `y` counts, as in Python.
 pub fn has_vowel(seg: &str) -> bool {
-    seg.chars().any(|c| VOWELS.contains(c))
+    // Membership in `VOWELS`, spelled out so it compiles to a byte test.
+    seg.chars().any(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U' | 'y' | 'Y'))
 }
 
 /// Number of vowel-bearing segments in a value.
 pub fn vowel_bearing_segments(value: &str) -> usize {
-    word_segments(value)
-        .iter()
-        .filter(|seg| has_vowel(seg))
-        .count()
+    let mut n = 0usize;
+    for_each_segment(value, |seg| n += usize::from(has_vowel(seg)));
+    n
 }
 
 #[cfg(test)]
@@ -406,6 +472,31 @@ mod tests {
         assert_eq!(word_segments("___"), Vec::<String>::new());
         assert_eq!(word_segments("Я"), Vec::<String>::new());
         assert_eq!(word_segments("ЯблокоTest"), vec!["Test"]);
+    }
+
+    #[test]
+    fn has_vowel_matches_the_vowel_string_for_every_char() {
+        for cp in 0..=0x2FFu32 {
+            let c = char::from_u32(cp).unwrap();
+            assert_eq!(has_vowel(&c.to_string()), VOWELS.contains(c), "{cp:#x}");
+        }
+    }
+
+    #[test]
+    fn entropy_fast_path_is_bit_identical_to_the_general_one() {
+        // Deterministic mixed inputs, including counts above the memo size.
+        let mut x = 0x2545F4914F6CDD1Du64;
+        for len in 1..300usize {
+            let mut s = String::new();
+            for _ in 0..len {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let span = 1 + (len as u64 % 90);
+                s.push((33 + (x % span)) as u8 as char);
+            }
+            assert_eq!(entropy_ascii(s.as_bytes()).to_bits(), entropy_general(&s).to_bits());
+        }
     }
 
     #[test]

@@ -99,11 +99,31 @@ fn strip_quotes(value: &str) -> &str {
 /// for the simple cases; `to_lowercase` matches it for everything reachable
 /// here. Compared against a fixed ASCII set, so only ASCII can match anyway.
 pub fn is_placeholder(value: &str) -> bool {
-    let v = strip_quotes(value).to_lowercase();
+    let stripped = strip_quotes(value);
+    if stripped.is_ascii() {
+        // Fast path, no allocation. For ASCII input `str::to_lowercase` is
+        // exactly ASCII lowercasing, so comparing case-insensitively against
+        // the (lowercase) table is the same test. Non-ASCII input takes the
+        // exact path below: U+212A KELVIN SIGN lowercases to ASCII `k`, so it
+        // can spell `your_api_key` and must keep doing so.
+        return PLACEHOLDER_VALUES
+            .iter()
+            .any(|p| stripped.eq_ignore_ascii_case(p))
+            || is_run_of_ascii(stripped, b'x', 6)
+            || is_run_of_ascii(stripped, b'0', 6)
+            || is_run_of_ascii(stripped, b'1', 6);
+    }
+    let v = stripped.to_lowercase();
     if PLACEHOLDER_VALUES.contains(&v.as_str()) {
         return true;
     }
     is_run_of(&v, 'x', 6) || is_run_of(&v, '0', 6) || is_run_of(&v, '1', 6)
+}
+
+/// [`is_run_of`] over an ASCII string that has not been lowercased yet:
+/// `want` is lowercase, and matches either case.
+fn is_run_of_ascii(s: &str, want: u8, min: usize) -> bool {
+    s.len() >= min && s.bytes().all(|b| b.to_ascii_lowercase() == want)
 }
 
 /// `re.fullmatch(r"c{min,}")` — the whole string is one character, repeated at
@@ -124,13 +144,22 @@ pub fn compact_hex(value: &str) -> String {
 }
 
 pub fn is_nil_or_all_zero(value: &str) -> bool {
-    let compact = compact_hex(value);
-    !compact.is_empty() && compact.chars().all(|c| c == '0')
+    // `compact_hex(value)` without building it: skip the dashes in place.
+    let mut any = false;
+    for c in value.chars().filter(|&c| c != '-') {
+        if c != '0' {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
-fn is_hex_run(s: &str, min_len: usize) -> bool {
+/// `^[0-9a-fA-F]{8}-{4}-{4}-{4}-{12}$`
+/// `is_hex_run(&compact_hex(s), min_len)` without the intermediate string.
+fn is_dashless_hex_run(s: &str, min_len: usize) -> bool {
     let mut n = 0usize;
-    for c in s.chars() {
+    for c in s.chars().filter(|&c| c != '-') {
         if !c.is_ascii_hexdigit() {
             return false;
         }
@@ -139,17 +168,19 @@ fn is_hex_run(s: &str, min_len: usize) -> bool {
     n >= min_len
 }
 
-/// `^[0-9a-fA-F]{8}-{4}-{4}-{4}-{12}$`
 fn is_uuid_shape(value: &str) -> bool {
-    let groups: Vec<&str> = value.split('-').collect();
-    if groups.len() != 5 {
-        return false;
-    }
     const WIDTHS: [usize; 5] = [8, 4, 4, 4, 12];
-    groups
-        .iter()
-        .zip(WIDTHS)
-        .all(|(g, w)| g.chars().count() == w && g.chars().all(|c| c.is_ascii_hexdigit()))
+    // Exactly five dash-separated groups, checked without collecting them.
+    let mut groups = value.split('-');
+    for w in WIDTHS {
+        let Some(g) = groups.next() else {
+            return false;
+        };
+        if g.chars().count() != w || !g.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    groups.next().is_none()
 }
 
 /// Hyphenated UUID or 32-character hex. Nil is excluded before this is called.
@@ -157,8 +188,17 @@ pub fn uuid_or_stripped_hex(value: &str) -> bool {
     if is_uuid_shape(value) {
         return true;
     }
-    let compact = compact_hex(value);
-    compact.chars().count() == STRIPPED_UUID_LEN && is_hex_run(&compact, HEX_LIKELY_MIN_LEN)
+    // The dash-stripped form, counted and checked in place. 32 hex digits
+    // satisfy the 16-digit run minimum too, so only the count and the digit
+    // test remain.
+    let mut n = 0usize;
+    for c in value.chars().filter(|&c| c != '-') {
+        if !c.is_ascii_hexdigit() {
+            return false;
+        }
+        n += 1;
+    }
+    n == STRIPPED_UUID_LEN && n >= HEX_LIKELY_MIN_LEN
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -170,12 +210,20 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Length in characters of the identifier starting at `chars[i]`, or 0.
-fn ident_len(chars: &[char], i: usize) -> usize {
-    if i >= chars.len() || !is_ident_start(chars[i]) {
+/// Length of the ASCII identifier starting at byte `i`, 0 if none.
+///
+/// The identifier alphabet is ASCII, so scanning bytes gives the same lengths
+/// as scanning characters, and a byte offset reached this way is also the
+/// character offset (everything before it was ASCII). The callers below rely
+/// on that to avoid collecting the value into a `Vec<char>`; the only other
+/// things they test are ASCII punctuation, which no UTF-8 continuation byte
+/// can imitate.
+fn ident_len(bytes: &[u8], i: usize) -> usize {
+    if i >= bytes.len() || !is_ident_start(bytes[i] as char) {
         return 0;
     }
     let mut j = i + 1;
-    while j < chars.len() && is_ident_char(chars[j]) {
+    while j < bytes.len() && is_ident_char(bytes[j] as char) {
         j += 1;
     }
     j - i
@@ -184,13 +232,13 @@ fn ident_len(chars: &[char], i: usize) -> usize {
 /// `^ident(\.ident)*\(.*\)$` — a call expression, which is code rather than a
 /// credential. Named weakening 1.
 pub fn is_function_call(value: &str) -> bool {
-    let chars: Vec<char> = value.chars().collect();
-    let mut i = ident_len(&chars, 0);
+    let chars = value.as_bytes();
+    let mut i = ident_len(chars, 0);
     if i == 0 {
         return false;
     }
-    while i < chars.len() && chars[i] == '.' {
-        let n = ident_len(&chars, i + 1);
+    while i < chars.len() && chars[i] == b'.' {
+        let n = ident_len(chars, i + 1);
         if n == 0 {
             return false;
         }
@@ -198,27 +246,27 @@ pub fn is_function_call(value: &str) -> bool {
     }
     // `\(.*\)$` — `.` does not match a newline in Python without DOTALL, so a
     // value containing one cannot satisfy the tail.
-    if i >= chars.len() || chars[i] != '(' || *chars.last().unwrap() != ')' {
+    if i >= chars.len() || chars[i] != b'(' || *chars.last().unwrap() != b')' {
         return false;
     }
     if chars.len() < i + 2 {
         return false;
     }
-    !chars[i + 1..chars.len() - 1].contains(&'\n')
+    !chars[i + 1..chars.len() - 1].contains(&b'\n')
 }
 
 /// `^ident\[.+\]$` — a subscripted type. Named weakening 2.
 pub fn is_type_annotation(value: &str) -> bool {
-    let chars: Vec<char> = value.chars().collect();
-    let i = ident_len(&chars, 0);
-    if i == 0 || i >= chars.len() || chars[i] != '[' {
+    let chars = value.as_bytes();
+    let i = ident_len(chars, 0);
+    if i == 0 || i >= chars.len() || chars[i] != b'[' {
         return false;
     }
-    if *chars.last().unwrap() != ']' {
+    if *chars.last().unwrap() != b']' {
         return false;
     }
     let inner = &chars[i + 1..chars.len() - 1];
-    !inner.is_empty() && !inner.contains(&'\n')
+    !inner.is_empty() && !inner.contains(&b'\n')
 }
 
 /// Classify a captured value. Never returns the value.
@@ -285,8 +333,7 @@ pub fn classify_value(value: &str) -> (Confidence, Option<&'static str>) {
         };
     }
 
-    let compact = compact_hex(v);
-    if is_hex_run(&compact, HEX_LIKELY_MIN_LEN) {
+    if is_dashless_hex_run(v, HEX_LIKELY_MIN_LEN) {
         return (Confidence::Likely, None);
     }
 
