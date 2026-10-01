@@ -130,8 +130,17 @@ pub(crate) fn path_name(path: &Path) -> String {
 /// The NUL guard reads `data[:4096]` of the *already truncated* buffer, so a
 /// `limit` below 4096 shrinks the window the guard sees too.
 pub fn safe_read_text(path: &std::path::Path, limit: usize) -> Option<String> {
-    let data = std::fs::read(path).ok()?;
-    safe_text_from_bytes(&data, limit)
+    safe_text_from_bytes(&read_prefix(path, limit)?, limit)
+}
+
+/// The first `limit` bytes of the file (`None` on an OS error). Python reads
+/// the whole file and slices; only the prefix is ever looked at, so reading
+/// just the prefix decides the same and keeps a `tail big.log` check cheap.
+fn read_prefix(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut data = Vec::new();
+    std::fs::File::open(path).ok()?.take(limit as u64).read_to_end(&mut data).ok()?;
+    Some(data)
 }
 
 /// [`safe_read_text`] on bytes already in hand.
@@ -917,7 +926,10 @@ fn file_bytes<'a>(path: &Path, given: Option<&'a [u8]>) -> Option<std::borrow::C
 
 /// `_safe_read_text` at its default limit, from `given` or the disk.
 fn text_of(path: &Path, given: Option<&[u8]>) -> Option<String> {
-    safe_text_from_bytes(&file_bytes(path, given)?, crate::MAX_CONTENT_BYTES)
+    match given {
+        Some(b) => safe_text_from_bytes(b, crate::MAX_CONTENT_BYTES),
+        None => safe_read_text_default(path),
+    }
 }
 
 fn findings_from(path: &std::path::Path, scope: Scope, given: Option<&[u8]>) -> Vec<Finding> {
