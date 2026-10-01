@@ -282,3 +282,126 @@ fn codex_setup_says_to_trust_the_hooks_in_codex() {
     // An uninstall does not ask for trust.
     assert!(!text(&s.vahta(&["setup", "--codex", "--uninstall"]).stdout).contains("run /hooks"));
 }
+
+#[test]
+fn refresh_reinstalls_only_the_harnesses_that_have_ours() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    s.found(".cursor");
+    s.vahta(&["setup", "--claude"]);
+    assert!(!s.exists(".cursor/hooks.json"));
+
+    // Outdated in Claude Code; Cursor is found but has nothing of ours.
+    let cfg = s.home().join(CLAUDE);
+    fs::write(&cfg, fs::read_to_string(&cfg).unwrap().replace("--setup 1", "--setup 0")).unwrap();
+    let out = s.vahta(&["setup", "--refresh"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("Claude Code: installed"), "{}", text(&out.stdout));
+    assert!(s.read(CLAUDE).contains("--setup 1") && !s.read(CLAUDE).contains("--setup 0"));
+    assert!(!s.exists(".cursor/hooks.json"), "a harness with none of ours is left alone");
+    assert!(text(&s.vahta(&["setup"]).stdout).contains("Claude Code  yes    current"));
+}
+
+#[test]
+fn refresh_repoints_a_hook_path_that_points_elsewhere() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    s.vahta(&["setup", "--claude"]);
+    let other = s.0.join("elsewhere");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("vahta-hook"), "#!/bin/sh\n").unwrap();
+    let (here, there) = (s.hook().display().to_string(), other.join("vahta-hook").display().to_string());
+    let cfg = s.home().join(CLAUDE);
+    fs::write(&cfg, fs::read_to_string(&cfg).unwrap().replace(&here, &there)).unwrap();
+    assert!(text(&s.vahta(&["setup"]).stdout).contains("is not the vahta-hook next to this vahta"));
+
+    let out = s.vahta(&["setup", "--refresh"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let after = s.read(CLAUDE);
+    assert!(after.contains(&format!("{here} --harness claude")) && !after.contains(&there), "{after}");
+    assert!(!text(&s.vahta(&["setup"]).stdout).contains("is not the vahta-hook"));
+}
+
+#[test]
+fn refresh_leaves_foreign_entries_alone() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    let before = r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "key-amnesia-hook"}]}]}}"#;
+    fs::write(s.home().join(CLAUDE), before).unwrap();
+    // Only a foreign entry: that is not ours, so nothing is written.
+    let out = s.vahta(&["setup", "--refresh"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(s.read(CLAUDE), before);
+
+    s.vahta(&["setup", "--claude"]);
+    s.vahta(&["setup", "--refresh"]);
+    let back = s.read(CLAUDE);
+    assert!(back.contains("key-amnesia-hook") && back.contains("\"model\": \"opus\""), "{back}");
+    s.vahta(&["setup", "--claude", "--uninstall"]);
+    assert_eq!(serde_like::parse(&s.read(CLAUDE)), serde_like::parse(before));
+}
+
+#[test]
+fn refresh_does_nothing_when_nothing_is_set_up() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    let out = s.vahta(&["setup", "--refresh"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out.stdout).contains("nothing of ours is installed"), "{}", text(&out.stdout));
+    assert!(!s.exists(CLAUDE));
+    // Not even when the hook binary is absent: there is nothing to repoint.
+    let s = Sandbox::new(false);
+    s.found(".claude");
+    assert_eq!(s.vahta(&["setup", "--refresh"]).status.code(), Some(0));
+}
+
+#[test]
+fn refresh_rejects_other_flags() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    for args in [
+        &["setup", "--refresh", "--uninstall"][..],
+        &["setup", "--refresh", "--all"],
+        &["setup", "--refresh", "--claude"],
+        &["setup", "--refresh", "--force"],
+    ] {
+        let out = s.vahta(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(text(&out.stderr).contains("--refresh goes with --dry-run only"), "{args:?}");
+    }
+    assert!(!s.exists(CLAUDE));
+}
+
+#[test]
+fn refresh_dry_run_writes_nothing() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    s.vahta(&["setup", "--claude"]);
+    let cfg = s.home().join(CLAUDE);
+    fs::write(&cfg, fs::read_to_string(&cfg).unwrap().replace("--setup 1", "--setup 0")).unwrap();
+    let before = s.read(CLAUDE);
+    let out = s.vahta(&["setup", "--refresh", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("would change") && text(&out.stdout).contains("+++ /"), "{}", text(&out.stdout));
+    assert_eq!(s.read(CLAUDE), before);
+}
+
+#[test]
+fn the_stale_notice_suggests_refresh_when_several_harnesses_are_affected() {
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    s.found(".cursor");
+    s.vahta(&["setup", "--all"]);
+    for f in [CLAUDE, ".cursor/hooks.json"] {
+        let cfg = s.home().join(f);
+        fs::write(&cfg, fs::read_to_string(&cfg).unwrap().replace("--setup 1", "--setup 0")).unwrap();
+    }
+    let e = text(&s.vahta(&["scan", "--json", "."]).stderr);
+    assert!(e.contains("Claude Code is outdated; run `vahta setup --refresh`"), "{e}");
+    assert!(e.contains("Cursor is outdated; run `vahta setup --refresh`"), "{e}");
+    // The hook gone: the same rule for the missing-hook notice.
+    s.vahta(&["setup", "--refresh"]);
+    fs::remove_file(s.hook()).unwrap();
+    let e = text(&s.vahta(&["scan", "--json", "."]).stderr);
+    assert!(e.contains("no longer exists; run `vahta setup --refresh`"), "{e}");
+}
