@@ -1,10 +1,12 @@
 name: tests
 
 on:
+  # `master` is what has been released; `release/**` is where the next
+  # release is assembled from pull requests, and needs the same gate.
   push:
-    branches: [master]
+    branches: [master, "release/**"]
   pull_request:
-    branches: [master]
+    branches: [master, "release/**"]
   # Manual re-run after GitHub Actions infra flakes without a no-op commit.
   # UI: Actions → tests → Run workflow → master
   workflow_dispatch:
