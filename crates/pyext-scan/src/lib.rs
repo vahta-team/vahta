@@ -22,8 +22,8 @@
 //! that patches either reaches the Rust code. `progress` is the caller's own
 //! callable, called with the same arguments at the same cadence as Python's, and
 //! an exception it raises propagates. Python's `RecursionError` and
-//! `ValueError` for hostile JSON are raised as the same types (see
-//! `vahta_scan::deep`).
+//! `ValueError` for hostile JSON are *not* reproduced: such a line is scanned
+//! (see `vahta_scan::deep`).
 //!
 //! Choices a reviewer should check:
 //!
@@ -39,7 +39,7 @@
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyRecursionError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyFrozenSet, PyList, PyString};
 
@@ -298,10 +298,6 @@ fn appdata(py: Python<'_>) -> PyResult<Option<String>> {
 
 fn deep_error(e: DeepError<PyErr>) -> PyErr {
     match e {
-        DeepError::Recursion => PyRecursionError::new_err("maximum recursion depth exceeded"),
-        DeepError::IntLimit => PyValueError::new_err(
-            "Exceeds the limit (4300 digits) for integer string conversion",
-        ),
         DeepError::Progress(e) => e,
     }
 }
@@ -387,15 +383,12 @@ fn scan_deep<'py>(
 }
 
 /// A diagnostic hook for `benchmarks/diff_transcripts.py`: parse `text` with the
-/// Rust JSON parser and return its canonical form, or `"!invalid"`,
-/// `"!recursion"`, `"!intlimit"`. Not part of `scan_py`'s surface.
+/// Rust JSON parser and return its canonical form, or `"!invalid"`. Not part of `scan_py`'s surface.
 #[pyfunction]
 fn _json_canonical(py: Python<'_>, text: &str) -> String {
     py.detach(|| match json::parse(text) {
         Ok(v) => v.canonical(),
         Err(ParseError::Invalid) => "!invalid".to_string(),
-        Err(ParseError::Recursion) => "!recursion".to_string(),
-        Err(ParseError::IntLimit) => "!intlimit".to_string(),
     })
 }
 

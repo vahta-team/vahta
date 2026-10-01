@@ -13,26 +13,25 @@
 //! Never carries secret values: it parses transcripts, hands the strings to
 //! the detector, and keeps names, tiers and line numbers.
 //!
-//! # Where Python crashes, this reports an error rather than skipping
+//! # Where this deliberately diverges from Python
 //!
 //! Three inputs make Python's transcript scan *raise* instead of skipping the
-//! line, because the exception is not a `json.JSONDecodeError`:
+//! line, because the exception is not a `json.JSONDecodeError`: nesting deeper
+//! than about 990 levels (`collect_strings` is a recursive generator),
+//! nesting deeper than the JSON scanner tolerates (`RecursionError`), and an
+//! integer of more than 4300 digits (`ValueError`). Uncaught, each aborts the
+//! whole `ka scan --deep` and discards every finding, so one hostile line hides
+//! every other secret, including one on that very line.
 //!
-//! * nesting deeper than about 990 levels: `collect_strings` is a recursive
-//!   generator and hits the interpreter's recursion limit
-//!   ([`DeepError::Recursion`]);
-//! * nesting deeper than the JSON scanner itself tolerates, also a
-//!   `RecursionError` ([`DeepError::Recursion`]);
-//! * an integer of more than 4300 digits, a `ValueError`
-//!   ([`DeepError::IntLimit`]).
+//! That is a bug, and it is not reproduced. Such a line is parsed and scanned
+//! like any other: the parser, the walkers and the destructor are all
+//! iterative, so depth costs heap proportional to the line (which is bounded by
+//! [`MAX_TRANSCRIPT_BYTES`]) and never stack. Everything else matches Python.
 //!
-//! Uncaught, each aborts the whole `ka scan --deep`, discarding every finding.
-//! That is arguably a Python bug — one hostile line hides every other secret —
-//! but this port reproduces it and reports it. The depth thresholds are
-//! **calibrated against CPython 3.14 at the call depth of `ka scan --deep`**
-//! (see [`COLLECT_MAX_DEPTH`]); Python itself gives different numbers under a
-//! test runner or on another version, so only inputs well clear of the
-//! boundary are comparable.
+//! JSON inside a string is unwrapped exactly one level, as in Python: only
+//! strings of the transcript itself are re-parsed, and a string inside such a
+//! document that itself looks like JSON is neither re-parsed nor scanned. That
+//! bounds the extra work to one parse per string, so nothing can multiply.
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
@@ -44,7 +43,7 @@ use vahta_detect::{
 
 use crate::content::{findings_for_path, path_name, path_str};
 use crate::finding::{Finding, Scope};
-use crate::json::{self, ParseError, Value};
+use crate::json::{self, Value};
 use crate::walk::sort_findings;
 
 /// Tick the progress callback every this many JSONL lines (`_PROGRESS_LINE_EVERY`).
@@ -53,46 +52,12 @@ pub const PROGRESS_LINE_EVERY: usize = 2000;
 /// Transcripts larger than this are not opened (`_MAX_TRANSCRIPT_BYTES`).
 pub const MAX_TRANSCRIPT_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Deepest value, counting the root as 1 and scalars as nodes, that
-/// `collect_strings(obj)` survives inside `_scan_transcript_payload`.
-///
-/// `collect_strings` and `iter_secret_keyed_strings` are recursive generators,
-/// one Python frame per node, so the limit is the interpreter's recursion limit
-/// (1000) less the frames already live. Measured for 3.14 under
-/// `ka scan --deep`: arrays 991 deep and objects 990 deep (991 nodes) pass and
-/// one more fails. Approximate by nature; see the module docs.
-pub const COLLECT_MAX_DEPTH: usize = 991;
-
-/// The same walk over a *nested* (JSON-in-a-string) document, which Python
-/// starts from one frame shallower. The secret-key walk then applies
-/// [`COLLECT_MAX_DEPTH`] to it, so in practice that one decides.
-pub const NESTED_COLLECT_MAX_DEPTH: usize = 992;
-
 /// Why a deep scan stopped. `E` is whatever the progress callback fails with.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeepError<E> {
-    /// Python's `RecursionError`.
-    Recursion,
-    /// Python's `ValueError` for an integer over 4300 digits.
-    IntLimit,
     /// The progress callback raised; propagated, as in Python.
     Progress(E),
 }
-
-impl<E> From<ParseError> for DeepError<E> {
-    fn from(e: ParseError) -> Self {
-        match e {
-            ParseError::Recursion => DeepError::Recursion,
-            ParseError::IntLimit => DeepError::IntLimit,
-            // Callers catch `Invalid` before converting; a stray one is the
-            // closest thing to a decode error that is still not a skip.
-            ParseError::Invalid => DeepError::Recursion,
-        }
-    }
-}
-
-/// Receives each `(secret-named key, string value)` pair the key walk finds.
-type PairFn<'f, E> = dyn FnMut(&str, &str) -> Result<(), DeepError<E>> + 'f;
 
 /// `progress(stage, done, total)`.
 pub type ProgressFn<'a, E> = dyn FnMut(&str, usize, usize) -> Result<(), E> + 'a;
@@ -312,97 +277,63 @@ pub fn iter_agent_transcript_files(home: &Path) -> Vec<PathBuf> {
 
 // --- the transcript payload -------------------------------------------------
 
-/// `collect_strings`, with Python's recursion limit modelled. Iterative, in
-/// the same pre-order, calling `f` as each string is reached so that an error
-/// raised for an earlier string beats one a later, deeper value would raise.
-fn collect_strings<'a, E>(
-    root: &'a Value,
-    max_depth: usize,
-    f: &mut dyn FnMut(&'a str) -> Result<(), DeepError<E>>,
-) -> Result<(), DeepError<E>> {
-    let mut stack: Vec<(&'a Value, usize)> = vec![(root, 1)];
-    while let Some((node, depth)) = stack.pop() {
-        if depth > max_depth {
-            return Err(DeepError::Recursion);
-        }
+/// `collect_strings`: every string value, pre-order. Iterative, so depth is
+/// unlimited.
+fn collect_strings<'a>(root: &'a Value, f: &mut dyn FnMut(&'a str)) {
+    let mut stack: Vec<&'a Value> = vec![root];
+    while let Some(node) = stack.pop() {
         match node {
-            Value::Str(s) => f(s)?,
-            Value::Array(items) => {
-                for item in items.iter().rev() {
-                    stack.push((item, depth + 1));
-                }
-            }
-            Value::Object(entries) => {
-                for (_, v) in entries.iter().rev() {
-                    stack.push((v, depth + 1));
-                }
-            }
+            Value::Str(s) => f(s),
+            Value::Array(items) => stack.extend(items.iter().rev()),
+            Value::Object(entries) => stack.extend(entries.iter().rev().map(|(_, v)| v)),
             _ => {}
         }
     }
-    Ok(())
 }
 
 /// `iter_secret_keyed_strings`: `(key, value)` where the key is in the
 /// secret-name vocabulary and the value is a string, pre-order, a pair before
-/// anything inside its value. Every node costs a frame, scalars included.
-fn secret_keyed_strings<E>(
-    root: &Value,
-    max_depth: usize,
-    f: &mut PairFn<'_, E>,
-) -> Result<(), DeepError<E>> {
+/// anything inside its value. Iterative, so depth is unlimited.
+fn secret_keyed_strings(root: &Value, f: &mut dyn FnMut(&str, &str)) {
     enum Item<'a> {
-        Node(&'a Value, usize),
-        Entry(&'a str, &'a Value, usize),
+        Node(&'a Value),
+        Entry(&'a str, &'a Value),
     }
-    let mut stack = vec![Item::Node(root, 1)];
+    let mut stack = vec![Item::Node(root)];
     while let Some(item) = stack.pop() {
         match item {
-            Item::Node(node, depth) => {
-                if depth > max_depth {
-                    return Err(DeepError::Recursion);
+            Item::Node(node) => match node {
+                Value::Object(entries) => {
+                    stack.extend(entries.iter().rev().map(|(k, v)| Item::Entry(k, v)));
                 }
-                match node {
-                    Value::Object(entries) => {
-                        for (k, v) in entries.iter().rev() {
-                            stack.push(Item::Entry(k, v, depth + 1));
-                        }
-                    }
-                    Value::Array(items) => {
-                        for v in items.iter().rev() {
-                            stack.push(Item::Node(v, depth + 1));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Item::Entry(key, value, depth) => {
+                Value::Array(items) => stack.extend(items.iter().rev().map(Item::Node)),
+                _ => {}
+            },
+            Item::Entry(key, value) => {
                 if let Value::Str(s) = value {
                     if is_secret_name(key) {
-                        f(key, s)?;
+                        f(key, s);
                     }
                 }
-                stack.push(Item::Node(value, depth));
+                stack.push(Item::Node(value));
             }
         }
     }
-    Ok(())
 }
 
 /// `_apply_secret_keys`: classify secret-named dict keys that never appear as
 /// assignment text.
-pub fn apply_secret_keys<E>(acc: &mut HitSet, node: &Value) -> Result<(), DeepError<E>> {
-    secret_keyed_strings(node, COLLECT_MAX_DEPTH, &mut |key, val| {
+pub fn apply_secret_keys(acc: &mut HitSet, node: &Value) {
+    secret_keyed_strings(node, &mut |key, val| {
         let (tier, reason) = classify_value(val);
         if !matches!(tier, Confidence::Likely | Confidence::Possible) {
-            return Ok(());
+            return;
         }
         let mut extra = HitSet::default();
         let reasons: Vec<String> = reason.map(|r| vec![r.to_string()]).unwrap_or_default();
         extra.record_assignment(key, tier, &reasons);
         acc.merge(&extra);
-        Ok(())
-    })
+    });
 }
 
 /// `_scan_transcript_payload`: run the detector over a parsed line's strings
@@ -410,28 +341,26 @@ pub fn apply_secret_keys<E>(acc: &mut HitSet, node: &Value) -> Result<(), DeepEr
 ///
 /// A string that is itself a JSON object or array is unwrapped once and not
 /// scanned as text (the assignment matcher on serialised JSON plus the key walk
-/// would count it twice); strings of the unwrapped document are scanned. Never
+/// would count it twice); strings of the unwrapped document are scanned, and
+/// one of those that again looks like JSON is dropped, as in Python. Never
 /// returns values.
-pub fn scan_transcript_payload<E>(obj: &Value) -> Result<HitSet, DeepError<E>> {
+pub fn scan_transcript_payload(obj: &Value) -> HitSet {
     let mut acc = HitSet::default();
     let mut nested_objs: Vec<Value> = Vec::new();
 
     {
         let mut batch: Vec<&str> = Vec::new();
-        collect_strings(obj, COLLECT_MAX_DEPTH, &mut |s| {
+        collect_strings(obj, &mut |s| {
             if looks_like_json_container(s) {
-                match json::parse(s) {
-                    Ok(v) if v.is_container() => {
+                if let Ok(v) = json::parse(s) {
+                    if v.is_container() {
                         nested_objs.push(v);
-                        return Ok(());
+                        return;
                     }
-                    Ok(_) | Err(ParseError::Invalid) => {}
-                    Err(e) => return Err(e.into()),
                 }
             }
             batch.push(s);
-            Ok(())
-        })?;
+        });
         if !batch.is_empty() {
             acc.merge(&scan_texts(&batch));
         }
@@ -439,22 +368,21 @@ pub fn scan_transcript_payload<E>(obj: &Value) -> Result<HitSet, DeepError<E>> {
 
     for nested in &nested_objs {
         let mut batch: Vec<&str> = Vec::new();
-        collect_strings(nested, NESTED_COLLECT_MAX_DEPTH, &mut |s| {
+        collect_strings(nested, &mut |s| {
             if !looks_like_json_container(s) {
                 batch.push(s);
             }
-            Ok(())
-        })?;
+        });
         if !batch.is_empty() {
             acc.merge(&scan_texts(&batch));
         }
     }
 
-    apply_secret_keys(&mut acc, obj)?;
+    apply_secret_keys(&mut acc, obj);
     for nested in &nested_objs {
-        apply_secret_keys(&mut acc, nested)?;
+        apply_secret_keys(&mut acc, nested);
     }
-    Ok(acc)
+    acc
 }
 
 // --- one transcript ----------------------------------------------------------
@@ -530,12 +458,8 @@ pub fn findings_for_transcript<E>(
         if line.is_empty() {
             continue;
         }
-        let obj = match json::parse(line) {
-            Ok(v) => v,
-            Err(ParseError::Invalid) => continue,
-            Err(e) => return Err(e.into()),
-        };
-        let hits = scan_transcript_payload::<E>(&obj)?;
+        let Ok(obj) = json::parse(line) else { continue };
+        let hits = scan_transcript_payload(&obj);
 
         let has_certain = hits.prefix.is_some();
         let has_likely = !hits.likely_names.is_empty() || hits.bearer_likely;
@@ -972,79 +896,74 @@ mod tests {
         assert!(scan(&t.root).is_empty()); // a directory
     }
 
-    fn nested_array(depth: usize) -> String {
-        format!("{}{}", "[".repeat(depth), "]".repeat(depth))
+    /// `depth` arrays around `inner`.
+    fn wrapped_in_arrays(depth: usize, inner: &str) -> String {
+        format!("{}{inner}{}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    fn quoted_assignment() -> String {
+        format!("\"{}={}\"", name(), LIKELY_VALUE)
     }
 
     #[test]
-    fn nesting_past_the_recursion_limit_aborts_like_python() {
+    fn a_line_a_million_deep_is_scanned_without_overflowing_the_stack() {
         let t = Tree::new("deep");
-        let fine = t.text("a.jsonl", &format!("{}\n", nested_array(900)));
-        assert!(scan(&fine).is_empty());
-        let too_deep = t.text("b.jsonl", &format!("{}\n", nested_array(1500)));
-        assert_eq!(
-            findings_for_transcript::<()>(&too_deep, Scope::Deep, None).err(),
-            Some(DeepError::Recursion)
+        let n = 1_000_000;
+        // Arrays, objects, and a secret at the bottom of each.
+        let arrays = wrapped_in_arrays(n, &quoted_assignment());
+        let objects = format!("{}{}{}", "{\"a\":".repeat(n), quoted_assignment(), "}".repeat(n));
+        // A secret-named key whose value is a string, at the bottom.
+        let keyed = format!("{}{{\"{}\":\"{LIKELY_VALUE}\"}}{}", "[".repeat(n), name().to_lowercase(), "]".repeat(n));
+        // The same inside a string, which is unwrapped and walked.
+        let inside = format!("{{\"a\": \"{}\"}}", wrapped_in_arrays(n, &quoted_assignment().replace('"', "\\\"")));
+        let p = t.text(
+            "s.jsonl",
+            &format!("{}\n{arrays}\n{objects}\n{keyed}\n{inside}\n", assignment_line()),
         );
-        // The same inside a string: unwrapped, then walked.
-        let wrapped = t.text("c.jsonl", &format!("{{\"a\": \"{}\"}}\n", nested_array(1500)));
-        assert_eq!(
-            findings_for_transcript::<()>(&wrapped, Scope::Deep, None).err(),
-            Some(DeepError::Recursion)
-        );
-        // Objects reach the limit one level sooner: the leaf is a node too.
-        let obj = |n: usize| format!("{}1{}\n", "{\"a\":".repeat(n), "}".repeat(n));
-        assert!(scan(&t.text("d.jsonl", &obj(990))).is_empty());
-        assert_eq!(
-            findings_for_transcript::<()>(&t.text("e.jsonl", &obj(991)), Scope::Deep, None).err(),
-            Some(DeepError::Recursion)
-        );
-        assert!(scan(&t.text("f.jsonl", &format!("{}\n", nested_array(991)))).is_empty());
-        assert_eq!(
-            findings_for_transcript::<()>(
-                &t.text("g.jsonl", &format!("{}\n", nested_array(992))),
-                Scope::Deep,
-                None
-            )
-            .err(),
-            Some(DeepError::Recursion)
-        );
+        let found = scan(&p);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].hit_lines, vec![1, 2, 3, 4, 5]);
+        assert!(!format!("{found:?}").contains(LIKELY_VALUE));
     }
 
     #[test]
-    fn a_hostile_line_discards_the_findings_before_it_as_python_does() {
-        let t = Tree::new("hostile");
-        let p = t.text("s.jsonl", &format!("{}\n{}\n", assignment_line(), nested_array(1500)));
-        assert_eq!(
-            findings_for_transcript::<()>(&p, Scope::Deep, None).err(),
-            Some(DeepError::Recursion)
-        );
+    fn deep_lines_without_secrets_are_clean_and_do_not_stop_the_scan() {
+        let t = Tree::new("deep-clean");
+        let deep = wrapped_in_arrays(1_000_000, "1");
+        let p = t.text("s.jsonl", &format!("{deep}\n{}\n{deep}\n", assignment_line()));
+        assert_eq!(scan(&p)[0].hit_lines, vec![2]);
     }
 
     #[test]
-    fn an_integer_over_4300_digits_aborts_with_a_value_error_not_a_skip() {
+    fn integers_over_4300_digits_are_numbers_and_the_line_is_scanned() {
         let t = Tree::new("bigint");
-        let big = "9".repeat(4301);
-        let ok = t.text("a.jsonl", &format!("[{}]\n", "9".repeat(4300)));
-        assert!(scan(&ok).is_empty());
-        let top = t.text("b.jsonl", &format!("[{big}]\n"));
-        assert_eq!(findings_for_transcript::<()>(&top, Scope::Deep, None).err(), Some(DeepError::IntLimit));
-        let inner = t.text("c.jsonl", &format!("{{\"a\": \"[{big}]\"}}\n"));
-        assert_eq!(findings_for_transcript::<()>(&inner, Scope::Deep, None).err(), Some(DeepError::IntLimit));
-        // A syntax error earlier on the same line wins: skipped, not aborted.
-        let invalid_first = t.text("d.jsonl", &format!("[x, {big}]\n"));
-        assert!(scan(&invalid_first).is_empty());
+        let big = "9".repeat(100_000);
+        let top = format!("[{big}, {}]", quoted_assignment());
+        let inner = format!("{{\"a\": \"[{big}, {}]\"}}", quoted_assignment().replace('"', "\\\""));
+        let before = format!("[x, {big}]"); // invalid first: skipped, as in Python
+        let p = t.text(
+            "s.jsonl",
+            &format!("{}\n{top}\n{inner}\n{before}\n[{big}]\n", assignment_line()),
+        );
+        assert_eq!(scan(&p)[0].hit_lines, vec![1, 2, 3]);
     }
 
     #[test]
-    fn the_first_error_in_reading_order_is_the_one_reported() {
-        let t = Tree::new("order");
-        let big = "9".repeat(4301);
-        let deep = nested_array(1500);
-        let int_first = t.text("a.jsonl", &format!("{{\"a\": \"[{big}]\", \"b\": {deep}}}\n"));
-        assert_eq!(findings_for_transcript::<()>(&int_first, Scope::Deep, None).err(), Some(DeepError::IntLimit));
-        let deep_first = t.text("b.jsonl", &format!("{{\"b\": {deep}, \"a\": \"[{big}]\"}}\n"));
-        assert_eq!(findings_for_transcript::<()>(&deep_first, Scope::Deep, None).err(), Some(DeepError::Recursion));
+    fn json_in_a_string_is_unwrapped_one_level_only() {
+        // As in Python: a string of the unwrapped document that itself looks
+        // like JSON is neither parsed again nor scanned, however deep the
+        // chain of such strings goes.
+        let t = Tree::new("levels");
+        let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let level1 = format!("{{\"v\": {}}}", quoted_assignment());
+        let level2 = format!("{{\"v\": \"{}\"}}", q(&level1));
+        let level3 = format!("{{\"v\": \"{}\"}}", q(&level2));
+        let p = t.text(
+            "s.jsonl",
+            &format!("{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n", q(&level1), q(&level2), q(&level3)),
+        );
+        // One level (line 1) is found; two or more levels (lines 2, 3) are not.
+        assert_eq!(scan(&p)[0].hit_lines, vec![1]);
     }
 
     #[test]
@@ -1259,11 +1178,7 @@ mod tests {
     fn the_secret_key_walk_sees_a_pair_before_anything_inside_its_value() {
         let v = json::parse(r#"{"a": {"token": "x"}, "token": "y", "z": [{"password": "w"}]}"#).expect("parse");
         let mut seen: Vec<(String, String)> = Vec::new();
-        secret_keyed_strings::<()>(&v, 50, &mut |k, s| {
-            seen.push((k.to_string(), s.to_string()));
-            Ok(())
-        })
-        .expect("walk");
+        secret_keyed_strings(&v, &mut |k, s| seen.push((k.to_string(), s.to_string())));
         let expect: Vec<(String, String)> = [("token", "x"), ("token", "y"), ("password", "w")]
             .iter()
             .map(|(a, b)| (a.to_string(), b.to_string()))

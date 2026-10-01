@@ -22,10 +22,7 @@
 //! * Duplicate object keys: the **last value wins**, at the **position of the
 //!   first** occurrence (`dict` semantics). Anything that iterates an object
 //!   sees that order.
-//! * Integers have no magnitude limit except CPython's own digit cap: more than
-//!   4300 digits raises `ValueError`, which is *not* a `JSONDecodeError` and so
-//!   is not caught by the caller; it aborts the scan. Floats saturate to
-//!   infinity (`1e999`).
+//! * Floats saturate to infinity (`1e999`).
 //! * Leading zeros, `1.`, `.5`, `+1`, trailing commas, single quotes and
 //!   comments are all errors.
 //!
@@ -54,25 +51,20 @@
 //! # Depth
 //!
 //! The parser is iterative, so nesting cannot overflow the stack, and [`Value`]
-//! has an iterative `Drop`. [`MAX_DEPTH`] stands in for the point where
-//! CPython's own scanner raises `RecursionError`.
+//! has an iterative `Drop`. There is no depth limit: depth is bounded by the
+//! length of the input.
+//!
+//! # Where this deliberately differs from CPython
+//!
+//! `json.loads` raises `RecursionError` on a document nested past a few tens
+//! of thousands of levels, and `ValueError` on an integer of more than 4300
+//! digits; neither is a `JSONDecodeError`, so in Python one such transcript
+//! line aborts the whole `--deep` scan. Here both are ordinary values: the
+//! line is parsed and scanned like any other, because it may hold a real key.
 //!
 //! Never carries or logs secret values beyond holding the strings it is given.
 
 use std::collections::HashMap;
-
-/// Container nesting at which `json.loads` raises `RecursionError`.
-///
-/// **Calibrated, not specified.** CPython 3.14's C scanner is limited by C
-/// stack depth rather than by `sys.getrecursionlimit()`; on this machine
-/// (8 MiB stack, 3.14.7) the largest accepted nesting is 52 092 and 52 093
-/// fails, whether the document is valid or not. Older interpreters differ.
-/// The differential harness stays well clear of the boundary.
-pub const MAX_DEPTH: usize = 52_000;
-
-/// More decimal digits than this in an integer is `ValueError` in CPython
-/// (`sys.get_int_max_str_digits()` default).
-pub const MAX_INT_DIGITS: usize = 4300;
 
 /// First of the 2048 private-use scalars standing in for `U+D800..=U+DFFF`.
 const SURROGATE_BASE: u32 = 0x10F800;
@@ -97,10 +89,6 @@ pub enum Value {
 pub enum ParseError {
     /// `json.JSONDecodeError`. Callers skip the input.
     Invalid,
-    /// `RecursionError`. Not a `JSONDecodeError`, so it is not caught.
-    Recursion,
-    /// `ValueError: Exceeds the limit (4300 digits)`. Not caught either.
-    IntLimit,
 }
 
 impl Value {
@@ -207,9 +195,11 @@ impl Drop for Value {
     }
 }
 
+/// An open container. Objects are boxed so a frame stays small: a document a
+/// million levels deep holds a million of these at once.
 enum Frame {
     Array(Vec<Value>),
-    Object(Object),
+    Object(Box<Object>),
 }
 
 struct Object {
@@ -224,7 +214,7 @@ const INDEX_AFTER: usize = 16;
 
 impl Object {
     fn new() -> Self {
-        Object { entries: Vec::new(), index: None, key: None }
+        Object { entries: Vec::with_capacity(1), index: None, key: None }
     }
 
     /// `dict[key] = value`: replaces in place, so the first position is kept.
@@ -358,7 +348,6 @@ impl<'a> Parser<'a> {
             Some(b'0') => self.i += 1,
             _ => return Err(ParseError::Invalid),
         }
-        let int_end = self.i;
         let mut is_float = false;
         if self.peek() == Some(b'.') && digit(self, self.i + 1) {
             is_float = true;
@@ -387,11 +376,8 @@ impl<'a> Parser<'a> {
             // `float()` does.
             return Ok(Value::Float(token.parse::<f64>().unwrap_or(f64::NAN)));
         }
-        let digits = &self.text[start..int_end];
-        let digits = digits.strip_prefix('-').unwrap_or(digits);
-        if digits.len() > MAX_INT_DIGITS {
-            return Err(ParseError::IntLimit);
-        }
+        // No digit cap: CPython's 4300-digit `ValueError` is not reproduced.
+        // The digits are kept as text; they never reach the detector.
         Ok(Value::Int(if token == "-0" { "0".to_string() } else { token.to_string() }))
     }
 
@@ -441,9 +427,6 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
                 Value::Str(p.string()?)
             }
             b'{' => {
-                if stack.len() >= MAX_DEPTH {
-                    return Err(ParseError::Recursion);
-                }
                 p.i += 1;
                 p.skip_ws();
                 if p.peek() == Some(b'}') {
@@ -456,21 +439,18 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
                     p.i += 1;
                     let mut obj = Object::new();
                     obj.key = Some(p.key()?);
-                    stack.push(Frame::Object(obj));
+                    stack.push(Frame::Object(Box::new(obj)));
                     continue 'value;
                 }
             }
             b'[' => {
-                if stack.len() >= MAX_DEPTH {
-                    return Err(ParseError::Recursion);
-                }
                 p.i += 1;
                 p.skip_ws();
                 if p.peek() == Some(b']') {
                     p.i += 1;
                     Value::Array(Vec::new())
                 } else {
-                    stack.push(Frame::Array(Vec::new()));
+                    stack.push(Frame::Array(Vec::with_capacity(1)));
                     continue 'value;
                 }
             }
@@ -618,19 +598,20 @@ mod tests {
     }
 
     #[test]
-    fn an_integer_over_4300_digits_is_value_error_not_a_decode_error() {
-        let at_limit = "9".repeat(MAX_INT_DIGITS);
-        assert!(parse(&at_limit).is_ok());
-        assert!(parse(&format!("-{at_limit}")).is_ok());
-        let over = "9".repeat(MAX_INT_DIGITS + 1);
-        assert_eq!(parse(&over).err(), Some(ParseError::IntLimit));
-        assert_eq!(parse(&format!("[1,{over}]")).err(), Some(ParseError::IntLimit));
-        // A float is not limited, however long.
-        assert!(parse(&format!("{over}.5")).is_ok());
-        assert!(parse(&format!("{over}e1")).is_ok());
-        // Order of failure is order of reading: invalid syntax first wins.
-        assert_eq!(parse(&format!("[x,{over}]")).err(), Some(ParseError::Invalid));
-        assert_eq!(parse(&format!("[{over},x]")).err(), Some(ParseError::IntLimit));
+    fn integers_have_no_digit_cap() {
+        // CPython raises ValueError over 4300 digits; this is a number.
+        for n in [4300, 4301, 100_000] {
+            let big = "9".repeat(n);
+            assert_eq!(ok(&big), Value::Int(big.clone()));
+            assert_eq!(ok(&format!("-{big}")), Value::Int(format!("-{big}")));
+            assert!(parse(&format!("[1,{big},{{\"a\":{big}}}]")).is_ok());
+            assert!(parse(&format!("{big}.5")).is_ok());
+            assert!(parse(&format!("{big}e1")).is_ok());
+        }
+        // Order of failure is order of reading, as ever.
+        let big = "9".repeat(5000);
+        assert_eq!(parse(&format!("[x,{big}]")).err(), Some(ParseError::Invalid));
+        assert_eq!(parse(&format!("[{big},x]")).err(), Some(ParseError::Invalid));
     }
 
     #[test]
@@ -755,24 +736,16 @@ mod tests {
 
     #[test]
     fn deep_nesting_neither_overflows_the_stack_nor_panics() {
-        // Tens of thousands deep, then dropped: the iterative drop is what is
-        // being exercised as much as the iterative parse.
-        let n = MAX_DEPTH;
+        // A million deep, then dropped: the iterative drop is exercised as
+        // much as the iterative parse. No depth limit, so no error either.
+        let n = 1_000_000;
         let arr = format!("{}{}", "[".repeat(n), "]".repeat(n));
         assert!(parse(&arr).is_ok());
         let obj = format!("{}1{}", "{\"a\":".repeat(n), "}".repeat(n));
         assert!(parse(&obj).is_ok());
-
-        let too_deep = format!("{}{}", "[".repeat(n + 1), "]".repeat(n + 1));
-        assert_eq!(parse(&too_deep).err(), Some(ParseError::Recursion));
-        // Unterminated, but already past the limit: still a recursion error,
-        // as in CPython, which fails on the way down.
-        assert_eq!(parse(&"[".repeat(n + 1)).err(), Some(ParseError::Recursion));
-        assert_eq!(parse(&"{\"a\":".repeat(n + 1)).err(), Some(ParseError::Recursion));
-        // Unterminated within the limit is merely invalid.
+        // Unterminated is merely invalid, however deep.
         assert_eq!(parse(&"[".repeat(n)).err(), Some(ParseError::Invalid));
-        // A million, to be sure nothing is proportional to the stack.
-        assert_eq!(parse(&"[".repeat(1_000_000)).err(), Some(ParseError::Recursion));
+        assert_eq!(parse(&"{\"a\":".repeat(n)).err(), Some(ParseError::Invalid));
     }
 
     #[test]

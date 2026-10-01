@@ -230,22 +230,6 @@ fn deep_findings(
     };
     match result {
         Ok(found) => Ok(found),
-        Err(DeepError::Recursion) => {
-            let _ = writeln!(
-                stderr,
-                "vahta scan: error: a transcript line is nested too deeply to scan \
-                 (Python: RecursionError); the --deep scan stopped"
-            );
-            Err(EXIT_LEAKS)
-        }
-        Err(DeepError::IntLimit) => {
-            let _ = writeln!(
-                stderr,
-                "vahta scan: error: a transcript line holds an integer of more than 4300 \
-                 digits (Python: ValueError); the --deep scan stopped"
-            );
-            Err(EXIT_LEAKS)
-        }
         Err(DeepError::Progress(never)) => match never {},
     }
 }

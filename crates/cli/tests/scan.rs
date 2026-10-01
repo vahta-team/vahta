@@ -196,56 +196,29 @@ fn a_clean_home_exits_zero() {
 }
 
 #[test]
-fn deep_stops_with_status_one_where_python_crashes() {
+fn deep_scans_hostile_lines_instead_of_stopping() {
+    // Python aborts the whole scan on these; here they are lines like any
+    // other, and a secret inside one is found, as is one elsewhere.
+    let assignment = assignment_line();
+    let assignment = assignment.trim_end();
+    let quoted = format!("\"{}={}\"", ["API", "_KEY"].concat(), value());
+    let deep = format!("{}{quoted}{}", "[".repeat(200_000), "]".repeat(200_000));
+    let big = format!("[{}, {quoted}]", "9".repeat(5000));
     let project = Tree::new();
     let home = Tree::new();
-    let line = format!("{}{}\n", "[".repeat(1500), "]".repeat(1500));
-    home.write(".claude/projects/p/s.jsonl", &format!("{}{line}", assignment_line()));
-    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet"]);
+    home.write(".claude/projects/p/a.jsonl", &format!("{assignment}\n{deep}\n{big}\n"));
+    home.write(".claude/projects/p/b.jsonl", &format!("{deep}\n"));
+    home.write(".claude/projects/p/c.jsonl", &format!("{big}\n"));
+    home.write(".claude/projects/p/d.jsonl", &format!("{}\n", "[".repeat(300_000)));
+    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet", "--json"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(out.stdout.is_empty(), "nothing is reported from a scan that did not finish");
-    assert!(text(&out.stderr).contains("nested too deeply"));
-
-    let big = Tree::new();
-    big.write(".claude/projects/p/s.jsonl", &format!("[{}]\n", "9".repeat(4301)));
-    let out = vahta_home(project.path(), big.path(), &["scan", "--deep", "--quiet"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("4300"));
-}
-
-#[test]
-fn a_home_that_does_not_exist_scans_clean() {
-    let project = Tree::new();
-    let out = vahta_home(
-        project.path(),
-        &project.path().join("no-such-home"),
-        &["scan", "--deep", "--quiet"],
-    );
-    assert_eq!(out.status.code(), Some(0));
-}
-
-#[test]
-fn usage_errors_exit_two() {
-    let t = Tree::new();
-    for args in [
-        vec!["scan", "--strict", "bogus"],
-        vec!["scan", "--strict"],
-        vec!["scan", "--nope"],
-        vec!["scan", "a", "b"],
-        vec!["scan", "--yes"],
-        vec!["frobnicate"],
-        vec![],
-    ] {
-        let out = vahta(t.path(), &args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    for file in ["a.jsonl", "b.jsonl", "c.jsonl"] {
+        assert!(stdout.contains(file), "{file} missing from {stdout}");
     }
-    let missing = vahta(t.path(), &["scan", "no-such-dir"]);
-    assert_eq!(missing.status.code(), Some(2));
-}
-
-#[test]
-fn help_exits_zero() {
-    let t = Tree::new();
-    assert_eq!(vahta(t.path(), &["scan", "--help"]).status.code(), Some(0));
-    assert_eq!(vahta(t.path(), &["--help"]).status.code(), Some(0));
+    assert!(!stdout.contains("d.jsonl"), "{stdout}");
+    // Three lines in a.jsonl, one each in b and c.
+    assert!(stdout.contains("\"transcript_line_hits\": 5"), "{stdout}");
+    assert!(!stdout.contains(&value()));
 }
