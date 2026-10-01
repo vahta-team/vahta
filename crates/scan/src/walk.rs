@@ -216,52 +216,71 @@ pub fn sort_findings(findings: &mut [Finding]) {
 /// directories, sorted descent makes it deterministic and this port
 /// reproduces it.
 pub fn scan_project(root: &Path, include_excluded: bool) -> Vec<Finding> {
-    let mut findings: Vec<Finding> = Vec::new();
+    scan_project_with_threads(root, include_excluded, crate::par::default_threads())
+}
+
+/// Files per worker below which another thread is not worth its spawn cost.
+const MIN_FILES_PER_THREAD: usize = 32;
+
+/// [`scan_project`] on `threads` worker threads. The output does not depend on
+/// `threads`: the walk, the `is_file` test and the de-duplication stay
+/// sequential and in walk order, only the per-file classification (read,
+/// detect) runs in parallel, and its results are consumed in walk order.
+/// `threads == 1` runs entirely on the calling thread.
+pub fn scan_project_with_threads(
+    root: &Path,
+    include_excluded: bool,
+    threads: usize,
+) -> Vec<Finding> {
     // Python keys the set on `str(path)`. A `PathBuf` key is used instead
     // because `Path::display()` is lossy for a non-UTF-8 path and could make
     // two genuinely different paths collide, dropping a real finding; Python's
     // surrogateescape decoding round-trips and never collides. For every
     // UTF-8 path the two are the same set.
     let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut files: Vec<PathBuf> = Vec::new();
 
     for path in project_files(root, include_excluded) {
-        // Python:
-        //     try:
-        //         if not path.is_file(): continue
-        //     except OSError:
-        //         continue
-        // Both branches `continue`, and `Path::is_file()` already returns
-        // `false` rather than erroring on a broken symlink or an unreadable
-        // parent — verified against the interpreter, so does Python's
-        // `is_file()`, which swallows OSError. So one test covers both.
+        // Python: `if not path.is_file(): continue` inside try/except OSError.
+        // `Path::is_file()` already returns `false` rather than erroring on a
+        // broken symlink or an unreadable parent, as Python's does.
         if !path.is_file() {
             continue;
         }
 
-        // Python:
-        //     key = str(path)
-        //     try:
-        //         key = str(path.resolve())
-        //     except OSError:
-        //         pass
-        // The fallback is the *unresolved* path, so a file whose resolution
-        // fails still gets scanned, keyed by how it was reached.
+        // Python: `key = str(path.resolve())`, falling back to the
+        // *unresolved* path on OSError, so a file whose resolution fails
+        // still gets scanned, keyed by how it was reached.
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if !seen.insert(key) {
             continue;
         }
-
-        for finding in crate::content::findings_for_path(&path, Scope::Project) {
-            // An empty `.env` is not a leak: no names and nothing counted.
-            if finding.kind == "dotenv"
-                && finding.secret_count == 0
-                && finding.secret_names.is_empty()
-            {
-                continue;
-            }
-            findings.push(finding);
-        }
+        files.push(path);
     }
+
+    let mut findings: Vec<Finding> = Vec::new();
+    let threads = threads.min(files.len() / MIN_FILES_PER_THREAD).max(1);
+    crate::par::ordered_map(
+        &files,
+        threads,
+        threads * 16,
+        u64::MAX,
+        |_| 0,
+        |_, path| crate::content::findings_for_path(path, Scope::Project),
+        |_, found| {
+            for finding in found {
+                // An empty `.env` is not a leak: no names and nothing counted.
+                if finding.kind == "dotenv"
+                    && finding.secret_count == 0
+                    && finding.secret_names.is_empty()
+                {
+                    continue;
+                }
+                findings.push(finding);
+            }
+            true
+        },
+    );
 
     sort_findings(&mut findings);
     findings
@@ -813,5 +832,36 @@ mod tests {
         let t = Tree::new("scan-emptyenv");
         std::fs::write(t.root.join(".env"), b"\n# just a comment\n").expect("write");
         assert!(scan_project(&t.root, false).is_empty());
+    }
+
+    #[test]
+    fn thread_count_does_not_change_the_project_scan() {
+        let t = Tree::new("par");
+        let name = ["API", "_KEY"].concat();
+        for d in 0..12 {
+            for f in 0..30 {
+                let rel = format!("d{d}/e{}/f{f}.env", f % 3);
+                let p = t.root.join(&rel);
+                std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+                let body = match f % 4 {
+                    0 => format!("{name}=aB3xQ9mK2pL7vN4wZ8{d}{f}\n"),
+                    1 => String::new(),
+                    2 => "# comment\n".repeat(f * 500),
+                    _ => format!("{name}=short\nOTHER=1\n"),
+                };
+                std::fs::write(&p, body).expect("write");
+            }
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(t.root.join("d0/e0/f0.env"), t.root.join("d1/link.env"));
+        }
+        let base = scan_project_with_threads(&t.root, false, 1);
+        assert!(base.len() > 50);
+        for _ in 0..3 {
+            for n in [2, 3, 8, 16, 64] {
+                assert_eq!(scan_project_with_threads(&t.root, false, n), base, "threads={n}");
+            }
+        }
     }
 }

@@ -19,6 +19,7 @@ pub mod deep;
 pub mod filenames;
 pub mod finding;
 pub mod json;
+pub mod par;
 pub mod report;
 pub mod walk;
 

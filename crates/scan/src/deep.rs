@@ -39,6 +39,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use vahta_detect::{
     classify_value, is_secret_name, looks_like_json_container, scan_text_hits, scan_texts,
@@ -784,7 +785,40 @@ fn add_count(counts: &mut Vec<(String, usize)>, reason: &str, n: usize) {
 pub fn scan_deep<E>(
     home: &Path,
     appdata: Option<&OsStr>,
+    progress: Option<&mut ProgressFn<'_, E>>,
+) -> Result<Vec<Finding>, DeepError<E>> {
+    scan_deep_with_threads(home, appdata, progress, crate::par::default_threads())
+}
+
+/// In-flight transcript bytes allowed at once in the parallel path.
+const TRANSCRIPT_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+
+/// What a worker hands back for one transcript.
+struct TranscriptResult {
+    key: PathBuf,
+    /// Line numbers at which the per-file progress callback would have fired.
+    ticks: Vec<usize>,
+    /// `None` only if the scan was cancelled before it finished.
+    findings: Option<Vec<Finding>>,
+}
+
+/// [`scan_deep`] on `threads` worker threads. The result and the sequence of
+/// `progress` calls (and the error that ends it, if any) do not depend on
+/// `threads`.
+///
+/// Transcripts are scanned by workers that record, rather than make, their
+/// progress calls. The calling thread consumes results in file order and
+/// replays, for each file, `("agent transcripts", i, n)`, then the de-dup
+/// decision, then the recorded line ticks; so `progress` is only ever called
+/// from the calling thread, in the sequential order, and the first error stops
+/// the replay and cancels work not yet started. The work done for a file that
+/// turns out to be a duplicate, or that comes after a failing call, is simply
+/// discarded. `threads == 1` is the plain sequential loop.
+pub fn scan_deep_with_threads<E>(
+    home: &Path,
+    appdata: Option<&OsStr>,
     mut progress: Option<&mut ProgressFn<'_, E>>,
+    threads: usize,
 ) -> Result<Vec<Finding>, DeepError<E>> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -808,17 +842,87 @@ pub fn scan_deep<E>(
 
     let transcripts = iter_agent_transcript_files(home);
     let total = transcripts.len();
-    for (index, path) in transcripts.iter().enumerate() {
-        if let Some(p) = progress.as_deref_mut() {
-            p("agent transcripts", index + 1, total).map_err(DeepError::Progress)?;
+    if threads.min(total) <= 1 {
+        for (index, path) in transcripts.iter().enumerate() {
+            if let Some(p) = progress.as_deref_mut() {
+                p("agent transcripts", index + 1, total).map_err(DeepError::Progress)?;
+            }
+            let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            for finding in findings_for_transcript(path, Scope::Deep, progress.as_deref_mut())? {
+                seen.insert(PathBuf::from(&finding.path));
+                findings.push(finding);
+            }
         }
-        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        if !seen.insert(key) {
-            continue;
-        }
-        for finding in findings_for_transcript(path, Scope::Deep, progress.as_deref_mut())? {
-            seen.insert(PathBuf::from(&finding.path));
-            findings.push(finding);
+    } else {
+        let want_ticks = progress.is_some();
+        let cancel = AtomicBool::new(false);
+        let mut failure: Option<E> = None;
+        crate::par::ordered_map(
+            &transcripts,
+            threads,
+            threads * 4,
+            TRANSCRIPT_BUDGET_BYTES,
+            |p| match std::fs::metadata(p) {
+                Ok(m) if m.len() <= MAX_TRANSCRIPT_BYTES => m.len(),
+                _ => 0,
+            },
+            |_, path| {
+                let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                let mut ticks = Vec::new();
+                if cancel.load(Ordering::Relaxed) {
+                    return TranscriptResult { key, ticks, findings: None };
+                }
+                let mut record = |_: &str, line: usize, _: usize| -> Result<(), ()> {
+                    ticks.push(line);
+                    if cancel.load(Ordering::Relaxed) {
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
+                };
+                let rec: Option<&mut ProgressFn<'_, ()>> =
+                    if want_ticks { Some(&mut record) } else { None };
+                let found = findings_for_transcript::<()>(path, Scope::Deep, rec).ok();
+                TranscriptResult { key, ticks, findings: found }
+            },
+            |index, mut result| {
+                let path = &transcripts[index];
+                let mut step = || -> Result<(), E> {
+                    if let Some(p) = progress.as_deref_mut() {
+                        p("agent transcripts", index + 1, total)?;
+                    }
+                    if !seen.insert(result.key.clone()) {
+                        return Ok(());
+                    }
+                    if let Some(p) = progress.as_deref_mut() {
+                        let name = path_name(path);
+                        for line in &result.ticks {
+                            p(&name, *line, 0)?;
+                        }
+                    }
+                    // `None` is only produced after `cancel`, which is only set
+                    // once this consumer has already stopped.
+                    for finding in result.findings.take().unwrap_or_default() {
+                        seen.insert(PathBuf::from(&finding.path));
+                        findings.push(finding);
+                    }
+                    Ok(())
+                };
+                match step() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        failure = Some(e);
+                        cancel.store(true, Ordering::Relaxed);
+                        false
+                    }
+                }
+            },
+        );
+        if let Some(e) = failure {
+            return Err(DeepError::Progress(e));
         }
     }
 
@@ -1500,5 +1604,95 @@ mod tests {
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect();
         assert_eq!(seen, expect);
+    }
+
+    // --- parallel determinism ----------------------------------------------
+
+    const THREAD_COUNTS: [usize; 6] = [1, 2, 3, 8, 16, 64];
+
+    /// A fake home with many transcripts of mixed sizes, some with findings,
+    /// one symlinked duplicate, and some long enough to tick line progress.
+    fn many_transcripts() -> Tree {
+        let t = Tree::new("par");
+        for n in 0..40usize {
+            let lines = match n % 5 {
+                0 => PROGRESS_LINE_EVERY * 2 + 7,
+                1 => 3,
+                2 => PROGRESS_LINE_EVERY + 1,
+                _ => 20,
+            };
+            let mut text = String::new();
+            for l in 0..lines {
+                if l % 97 == n % 97 && n % 3 != 1 {
+                    text.push_str(&assignment_line());
+                } else if l % 211 == 5 && n % 4 == 0 {
+                    text.push_str(&format!("{{\"t\": \"{}\"}}", prefixed()));
+                } else {
+                    text.push_str("{\"t\": \"ok\"}");
+                }
+                text.push('\n');
+            }
+            t.text(&format!(".claude/projects/p{}/s{n}.jsonl", n % 4), &text);
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(
+                t.root.join(".claude/projects/p0/s0.jsonl"),
+                t.root.join(".claude/projects/p1/link.jsonl"),
+            );
+        }
+        t
+    }
+
+    type Calls = Vec<(String, usize, usize)>;
+
+    /// Run with `fail_at` (1-based call index that errors, if any).
+    fn run(t: &Tree, threads: usize, fail_at: Option<usize>) -> (Calls, Result<Vec<Finding>, usize>) {
+        let mut calls: Calls = Vec::new();
+        let result = {
+            let mut cb = |s: &str, a: usize, b: usize| -> Result<(), usize> {
+                calls.push((s.to_string(), a, b));
+                if Some(calls.len()) == fail_at {
+                    Err(calls.len())
+                } else {
+                    Ok(())
+                }
+            };
+            scan_deep_with_threads(&t.root, None, Some(&mut cb), threads)
+                .map_err(|DeepError::Progress(e)| e)
+        };
+        (calls, result)
+    }
+
+    #[test]
+    fn parallel_deep_scan_matches_sequential_including_progress() {
+        let t = many_transcripts();
+        let (base_calls, base) = run(&t, 1, None);
+        assert!(base_calls.iter().any(|c| c.0 != "agent transcripts"));
+        assert!(!base.as_ref().expect("ok").is_empty());
+        for _ in 0..3 {
+            for &n in &THREAD_COUNTS[1..] {
+                let (calls, res) = run(&t, n, None);
+                assert_eq!(calls, base_calls, "threads={n}");
+                assert_eq!(res, base, "threads={n}");
+            }
+        }
+        // And with no callback at all.
+        let none = scan_deep_with_threads::<()>(&t.root, None, None, 8).expect("ok");
+        assert_eq!(Ok(none), base);
+    }
+
+    #[test]
+    fn progress_error_gives_same_calls_and_error_for_every_thread_count() {
+        let t = many_transcripts();
+        let total = run(&t, 1, None).0.len();
+        for k in [1, 2, 3, 7, total / 2, total - 1, total] {
+            let base = run(&t, 1, Some(k));
+            assert_eq!(base.1, Err(k));
+            assert_eq!(base.0.len(), k);
+            for &n in &THREAD_COUNTS[1..] {
+                assert_eq!(run(&t, n, Some(k)), base, "k={k} threads={n}");
+            }
+        }
     }
 }

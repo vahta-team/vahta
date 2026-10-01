@@ -26,10 +26,10 @@ use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
-use vahta_scan::deep::{scan_deep, DeepError};
+use vahta_scan::deep::{scan_deep_with_threads, DeepError};
 use vahta_scan::finding::leak_count;
 use vahta_scan::report::{findings_to_json, format_human_report};
-use vahta_scan::walk::scan_project;
+use vahta_scan::walk::scan_project_with_threads;
 
 /// Exit codes, as `ka scan` has them: 0 clean, 1 leaks at the gate, 2 usage.
 pub const EXIT_CLEAN: i32 = 0;
@@ -79,6 +79,9 @@ struct ScanArgs {
     include_excluded: bool,
     deep: bool,
     quiet: bool,
+    /// Worker threads; `None` is the default (available parallelism, capped).
+    /// Undocumented in `USAGE` on purpose: Python's `ka scan` has no such flag.
+    jobs: Option<usize>,
 }
 
 enum Parsed {
@@ -95,6 +98,7 @@ fn parse_scan(args: &[String]) -> Parsed {
         include_excluded: false,
         deep: false,
         quiet: false,
+        jobs: None,
     };
     let mut only_paths = false;
     let mut i = 0;
@@ -122,6 +126,13 @@ fn parse_scan(args: &[String]) -> Parsed {
                         .to_string(),
                 );
             }
+            "--jobs" => match args.get(i).and_then(|v| v.parse::<usize>().ok()) {
+                Some(n) if n >= 1 => {
+                    i += 1;
+                    out.jobs = Some(n);
+                }
+                _ => return Parsed::Error("--jobs expects a positive integer".to_string()),
+            },
             "--strict" => match args.get(i) {
                 Some(v) => {
                     i += 1;
@@ -201,6 +212,7 @@ impl<'a> Progress<'a> {
 fn deep_findings(
     env: &Env,
     quiet: bool,
+    jobs: usize,
     stderr: &mut dyn Write,
 ) -> Result<Vec<vahta_scan::Finding>, i32> {
     let Some(home) = &env.home else {
@@ -216,9 +228,9 @@ fn deep_findings(
                     p.tick(stage, done, total);
                     Ok::<(), std::convert::Infallible>(())
                 };
-                scan_deep(home, appdata, Some(&mut tick))
+                scan_deep_with_threads(home, appdata, Some(&mut tick), jobs)
             }
-            None => scan_deep::<std::convert::Infallible>(home, appdata, None),
+            None => scan_deep_with_threads::<std::convert::Infallible>(home, appdata, None, jobs),
         };
         // Python's `finally: finish_progress()`.
         if let Some(p) = printer.as_mut() {
@@ -268,13 +280,14 @@ fn run_scan(
     };
     let root_str = root.to_string_lossy().into_owned();
 
-    let mut findings = scan_project(&root, parsed.include_excluded);
+    let jobs = parsed.jobs.unwrap_or_else(vahta_scan::par::default_threads);
+    let mut findings = scan_project_with_threads(&root, parsed.include_excluded, jobs);
 
     if parsed.deep {
         // Avoid double-counting files already seen under the project tree when
         // the project is inside the home directory. Project findings stay
         // first and are not re-sorted against the deep ones, as in Python.
-        let deep = match deep_findings(env, parsed.quiet, stderr) {
+        let deep = match deep_findings(env, parsed.quiet, jobs, stderr) {
             Ok(d) => d,
             Err(code) => return code,
         };
