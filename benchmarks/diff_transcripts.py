@@ -565,12 +565,54 @@ COVERAGE: dict[str, int] = {}
 _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
+def _nesting_depth(line: str) -> int:
+    """Deepest `[`/`{` nesting outside string literals."""
+    depth = deepest = 0
+    in_str = esc = False
+    for c in line:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif c in "]}":
+            depth -= 1
+    return deepest
+
+
+def _is_text_fallback_line(line: str) -> bool:
+    """Invalid JSON nested past the Rust cap: Rust scans it as text, where
+    Python skips it as invalid. The second deliberate divergence."""
+    if _nesting_depth(line) <= HARNESS_JSON_DEPTH:
+        return False
+    try:
+        json.loads(line.strip())
+    except json.JSONDecodeError:
+        return True
+    except (RecursionError, ValueError):
+        return False  # valid but beyond Python: the raise branch handles it
+    return False
+
+
+def has_text_fallback_line(data: bytes) -> bool:
+    text = data.decode("utf-8", errors="replace")
+    return any(_is_text_fallback_line(l) for l in _LINE_BREAK.split(text) if l.strip())
+
+
 def blank_hostile_lines(data: bytes, probe_dir: Path) -> tuple[bytes, list[int]]:
-    """Blank every line Python's scan raises on, keeping the line numbers.
+    """Blank every line where Rust deliberately diverges, keeping line numbers.
 
     Each non-blank line is scanned on its own, as a file, by the Python
     implementation; one that raises `RecursionError` or `ValueError` is the
-    hostile kind. Any other exception is a harness bug and propagates.
+    hostile kind. Any other exception is a harness bug and propagates. An
+    invalid line nested past the Rust cap is the other kind.
     """
     text = data.decode("utf-8", errors="replace")
     parts = _LINE_BREAK.split(text)
@@ -585,6 +627,10 @@ def blank_hostile_lines(data: bytes, probe_dir: Path) -> tuple[bytes, list[int]]
         try:
             scan_py._findings_for_transcript(probe, scope="deep")
         except (RecursionError, ValueError):
+            hostile.append(i + 1)
+            parts[i] = ""
+            continue
+        if _is_text_fallback_line(line):
             hostile.append(i + 1)
             parts[i] = ""
     return ("\n".join(parts) + "\n").encode("utf-8"), hostile
@@ -642,9 +688,10 @@ def layer_transcripts(rng: random.Random, scale: int) -> tuple[int, list[str]]:
         got = outcome(lambda: run_transcript(path, _scan_rs, lambda *a: calls_rs.append(a)))
         checked += 1
         problems: list[str] = []
-        if want[0] == "raise":
-            tally(f"transcripts raising {want[1]}")
-            if want[1] not in ("RecursionError", "ValueError"):
+        fallback = want[0] != "raise" and has_text_fallback_line(data)
+        if want[0] == "raise" or fallback:
+            tally("transcripts with an invalid over-cap line" if fallback else f"transcripts raising {want[1]}")
+            if want[0] == "raise" and want[1] not in ("RecursionError", "ValueError"):
                 problems.append(f"python raised {want[1]}, which is not a known hostile-input failure")
             else:
                 clean_data, hostile = blank_hostile_lines(data, tmp)
