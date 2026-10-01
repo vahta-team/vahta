@@ -2,6 +2,9 @@
 # Hook command receives one JSON object on stdin; we answer on stdout, exit 0.
 
 name = "claude"
+title = "Claude Code"
+# Bump when what `vahta setup` writes for this harness changes.
+setup_version = 1
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -31,13 +34,22 @@ tool_input = "tool_input"
 cwd = "cwd"
 
 # Same Claude event, different job: reading a file. Claude has no dedicated
-# read event, so reads arrive as PreToolUse on the Read/Grep/Glob tools.
+# read event, so reads arrive as PreToolUse on the Read and Grep tools. This is a
+# separate entry (not a tool group inside before_tool) because the matcher is
+# what setup registers and the hook is told which job it has by --event; Glob
+# lists names, never contents, so it is not matched.
 [[events]]
 name = "PreToolUse"
 kind = "before_read"
-matcher = "Read|Grep|Glob"
+matcher = "Read|Grep"
 tool_name = "tool_name"
 file_path = ["tool_input.file_path", "tool_input.path"]
+cwd = "cwd"
+
+[[events]]
+name = "SessionStart"
+kind = "session_start"
+# Registered from v1 so that a later, outdated setup has a channel to say so.
 cwd = "cwd"
 
 [[events]]
@@ -85,7 +97,7 @@ text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "co
 
 [[tool_groups]]
 group = "read"
-tools = ["read", "grep", "glob"]
+tools = ["read", "grep"]
 
 # --- replies ----------------------------------------------------------------
 # Silence with exit 0 is allow. Placeholders: {reason} (= {agent_message}),
@@ -95,6 +107,10 @@ tools = ["read", "grep", "glob"]
 style = "json"
 # permissionDecision "deny" blocks the call; the reason goes to the model.
 # systemMessage is shown to the person.
+body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "deny", permissionDecisionReason = "{agent_message}" }, systemMessage = "{user_message}" }
+
+[replies.before_read.deny]
+style = "json"
 body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "deny", permissionDecisionReason = "{agent_message}" }, systemMessage = "{user_message}" }
 
 [replies.prompt.deny]
@@ -115,3 +131,8 @@ body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext
 #   style = "exit_code"
 #   exit_code = 2
 #   stderr = "{reason}"
+
+# SessionStart: systemMessage is shown to the person (docs read 2026-10-01).
+[replies.session_start.notice]
+style = "json"
+body = { systemMessage = "{user_message}" }

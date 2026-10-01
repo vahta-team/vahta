@@ -1,0 +1,13 @@
+{
+  "event": "before_read",
+  "env": {},
+  "files": {},
+  "stdin": {
+    "hook_event_name": "beforeReadFile",
+    "cwd": "{{TMP}}",
+    "file_path": "{{TMP}}/notes.md",
+    "content": "# hi\n"
+  },
+  "stdout": null,
+  "exit": 0
+}

@@ -1,9 +1,11 @@
 //! Runs the built `vahta-hook` against every fixture under
 //! `crates/harness/harnesses/<harness>/fixtures/`.
 //!
-//! A fixture is `{event, env, stdin | stdin_raw, stdout, exit}`. Secret-shaped
-//! values are never written in the files: `{{SECRET_ANTHROPIC}}` is replaced
-//! here, from pieces.
+//! A fixture is `{event, [args], [env], [files], stdin | stdin_raw, stdout, exit}`.
+//! Secret-shaped values are never written in the files: `{{SECRET_ANTHROPIC}}`
+//! is replaced here, from pieces. `files` maps a relative path to its content;
+//! the test writes them under a fresh temp directory, which `{{TMP}}` names
+//! everywhere in the fixture (also inside the file contents).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -19,10 +21,43 @@ fn harnesses_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../harness/harnesses")
 }
 
+/// A directory of our own (`tempfile` is not a dependency), removed on drop.
+struct Tmp(PathBuf);
+
+impl Tmp {
+    fn new() -> Tmp {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "vahta-hook-fx-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        Tmp(dir)
+    }
+}
+
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
+    let tmp = Tmp::new();
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let text = text.replace("{{SECRET_ANTHROPIC}}", &secret_anthropic());
+    let text = text
+        .replace("{{SECRET_ANTHROPIC}}", &secret_anthropic())
+        .replace("{{TMP}}", &tmp.0.to_string_lossy());
     let fx: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if let Some(files) = fx["files"].as_object() {
+        for (rel, content) in files {
+            let target = tmp.0.join(rel);
+            std::fs::create_dir_all(target.parent().ok_or("no parent")?).map_err(|e| e.to_string())?;
+            std::fs::write(&target, content.as_str().unwrap_or("")).map_err(|e| e.to_string())?;
+        }
+    }
     let stdin = match fx.get("stdin_raw") {
         Some(Value::String(raw)) => raw.clone(),
         _ => fx["stdin"].to_string(),
@@ -33,6 +68,9 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(extra) = fx["args"].as_array() {
+        cmd.args(extra.iter().filter_map(Value::as_str));
+    }
     if let Some(env) = fx["env"].as_object() {
         for (k, v) in env {
             cmd.env(k, v.as_str().unwrap_or(""));
@@ -76,7 +114,7 @@ fn every_fixture_matches() {
             }
         }
     }
-    assert!(count >= 36, "only {count} fixtures found");
+    assert!(count >= 65, "only {count} fixtures found");
     assert!(failures.is_empty(), "{} of {count} failed:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -104,8 +142,8 @@ fn run_raw(harness: &str, event: &str, stdin: &str) -> String {
 }
 
 /// serde_json stops at 128 levels. A secret wrapped deeper than that must not
-/// pass just because the payload could not be parsed: the hook falls back to
-/// reading every string, escapes decoded, at any depth.
+/// pass: the hook's own parser has no such limit, and past its generous limits
+/// it still walks every string, escapes decoded.
 #[test]
 fn a_secret_nested_past_serde_depth_is_still_denied() {
     let mut input = format!("{{\"x\": \"{}\"}}", secret_anthropic());
@@ -127,4 +165,22 @@ fn a_secret_nested_past_serde_depth_is_still_denied() {
     // And a clean deep payload is still allowed.
     let clean = payload.replace(&secret_anthropic(), "nothing here");
     assert_eq!(run_raw("claude", "before_tool", &clean), "");
+}
+
+/// Past the parser limits the payload is not built, but its strings are still
+/// read: size is never a way through.
+#[test]
+fn a_secret_in_a_payload_past_the_parser_limits_is_still_denied() {
+    let depth = 150_000;
+    let input = format!(
+        "{}{{\"x\": \"{}\"}}{}",
+        "{\"a\": ".repeat(depth),
+        secret_anthropic(),
+        "}".repeat(depth)
+    );
+    let payload = format!(
+        "{{\"hook_event_name\": \"PreToolUse\", \"tool_name\": \"mcp__srv__do\", \"tool_input\": {input}}}"
+    );
+    let out = run_raw("claude", "before_tool", &payload);
+    assert!(out.contains("\"deny\""), "{out}");
 }

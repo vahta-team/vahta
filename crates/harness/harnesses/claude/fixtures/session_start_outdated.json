@@ -1,0 +1,18 @@
+{
+  "event": "session_start",
+  "args": [
+    "--setup",
+    "0"
+  ],
+  "env": {},
+  "stdin": {
+    "hook_event_name": "SessionStart",
+    "session_id": "s1",
+    "source": "startup",
+    "cwd": "{{TMP}}"
+  },
+  "stdout": {
+    "systemMessage": "vahta: setup for Claude Code is outdated (v0 → v1); run `vahta setup --claude`"
+  },
+  "exit": 0
+}

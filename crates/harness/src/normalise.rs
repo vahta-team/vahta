@@ -1,6 +1,6 @@
 //! Payload to [`Event`]: read a harness's JSON the way its manifest says.
 
-use serde_json::Value;
+use vahta_json::Value;
 
 use crate::manifest::{EventSpec, Group, Kind, Manifest, OneOrMany};
 
@@ -19,13 +19,17 @@ pub struct Event {
     pub cwd: Option<String>,
 }
 
-/// Every string value, pre-order (Python's `collect_strings`).
+/// Every string value, pre-order (Python's `collect_strings`). Iterative:
+/// a payload is hostile input and may nest as deep as the parser allows.
 fn collect_strings<'a>(root: &'a Value, out: &mut Vec<&'a str>) {
-    match root {
-        Value::String(s) => out.push(s),
-        Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
-        Value::Object(map) => map.values().for_each(|v| collect_strings(v, out)),
-        _ => {}
+    let mut work = vec![root];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Str(s) => out.push(s),
+            Value::Array(items) => work.extend(items.iter().rev()),
+            Value::Object(entries) => work.extend(entries.iter().rev().map(|(_, v)| v)),
+            _ => {}
+        }
     }
 }
 
@@ -35,9 +39,21 @@ fn joined_strings(v: &Value) -> String {
     all.join("\n")
 }
 
+/// The member `key` of an object.
+fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    match v {
+        Value::Object(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+        _ => None,
+    }
+}
+
+fn is_null(v: &Value) -> bool {
+    matches!(v, Value::Null)
+}
+
 /// The value at a dotted path, if every step exists.
 fn at_path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(v, |cur, key| cur.as_object()?.get(key))
+    path.split('.').try_fold(v, |cur, key| get(cur, key))
 }
 
 /// First alternative present and not null.
@@ -46,11 +62,14 @@ fn field<'a>(payload: &'a Value, paths: &Option<OneOrMany>) -> Option<&'a Value>
         .as_ref()?
         .iter()
         .filter_map(|p| at_path(payload, p))
-        .find(|v| !v.is_null())
+        .find(|v| !is_null(v))
 }
 
 fn text_field(payload: &Value, paths: &Option<OneOrMany>) -> Option<String> {
-    field(payload, paths)?.as_str().map(str::to_string)
+    match field(payload, paths)? {
+        Value::Str(s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 /// Python's `str(x or "")` for a tool name: falsy values are "no name", any
@@ -58,11 +77,12 @@ fn text_field(payload: &Value, paths: &Option<OneOrMany>) -> Option<String> {
 fn tool_name(payload: &Value, spec: &EventSpec) -> String {
     match field(payload, &spec.tool_name) {
         None | Some(Value::Null) | Some(Value::Bool(false)) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) if n.as_f64() == Some(0.0) => String::new(),
+        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Int(n)) if n == "0" => String::new(),
+        Some(Value::Float(f)) if *f == 0.0 => String::new(),
         Some(Value::Array(a)) if a.is_empty() => String::new(),
         Some(Value::Object(o)) if o.is_empty() => String::new(),
-        Some(other) => other.to_string(),
+        Some(other) => other.canonical(),
     }
 }
 
@@ -82,7 +102,7 @@ fn classify(m: &Manifest, payload: &Value, tool: &str) -> Option<Group> {
         let by_marker = g
             .marker_fields
             .iter()
-            .any(|f| payload.get(f).is_some_and(|v| !v.is_null()));
+            .any(|f| get(payload, f).is_some_and(|v| !is_null(v)));
         if by_name || by_prefix || by_marker {
             return Some(g.group);
         }
@@ -95,19 +115,17 @@ fn classify(m: &Manifest, payload: &Value, tool: &str) -> Option<Group> {
 /// string counts and no key can shadow a sibling.
 fn call_text(tool_input: Option<&Value>, text_fields: &[String]) -> String {
     match tool_input {
-        Some(Value::Object(map)) => {
+        Some(v @ Value::Object(_)) => {
             for key in text_fields {
-                if let Some(Value::String(s)) = map.get(key) {
+                if let Some(Value::Str(s)) = get(v, key) {
                     if !strip(s).is_empty() {
                         return s.clone();
                     }
                 }
             }
-            let mut all = Vec::new();
-            map.values().for_each(|v| collect_strings(v, &mut all));
-            all.join("\n")
+            joined_strings(v)
         }
-        Some(Value::String(s)) => s.clone(),
+        Some(Value::Str(s)) => s.clone(),
         _ => String::new(),
     }
 }
@@ -117,7 +135,7 @@ impl Manifest {
     /// not an object, an event this manifest does not know, a tool outside the
     /// groups the kind covers. The caller allows.
     pub fn normalise(&self, kind: Kind, payload: &Value) -> Option<Event> {
-        if !payload.is_object() {
+        if !matches!(payload, Value::Object(_)) {
             return None;
         }
         let spec = self.event(kind)?;
@@ -159,11 +177,12 @@ impl Manifest {
                 ev.path = text_field(payload, &spec.file_path);
                 ev.content = text_field(payload, &spec.content);
             }
+            Kind::SessionStart => {}
             Kind::Prompt => ev.text = text_field(payload, &spec.prompt)?,
             Kind::AfterTool => {
                 ev.tool = tool_name(payload, spec);
                 ev.text = match field(payload, &spec.tool_output)? {
-                    Value::String(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
                     other => joined_strings(other),
                 };
             }

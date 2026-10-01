@@ -131,6 +131,11 @@ pub(crate) fn path_name(path: &Path) -> String {
 /// `limit` below 4096 shrinks the window the guard sees too.
 pub fn safe_read_text(path: &std::path::Path, limit: usize) -> Option<String> {
     let data = std::fs::read(path).ok()?;
+    safe_text_from_bytes(&data, limit)
+}
+
+/// [`safe_read_text`] on bytes already in hand.
+fn safe_text_from_bytes(data: &[u8], limit: usize) -> Option<String> {
     let data = &data[..data.len().min(limit)];
     let head = &data[..data.len().min(4096)];
     if head.contains(&0u8) {
@@ -648,7 +653,11 @@ pub fn json_key_names(path: &std::path::Path) -> Vec<String> {
     let Some(text) = safe_read_text_default(path) else {
         return Vec::new();
     };
-    match json_top_level(&text) {
+    json_key_names_of(&text)
+}
+
+fn json_key_names_of(text: &str) -> Vec<String> {
+    match json_top_level(text) {
         JsonTop::Object(keys) => keys,
         JsonTop::NotAnObject | JsonTop::Invalid => Vec::new(),
     }
@@ -677,7 +686,11 @@ pub fn scan_text_for_leaks(text: &str) -> (Vec<String>, Option<&'static str>) {
 pub fn dotenv_finding(path: &std::path::Path, scope: Scope) -> Option<Finding> {
     // `except OSError: return None`.
     let data = std::fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&data);
+    dotenv_finding_of(path, &data, scope)
+}
+
+fn dotenv_finding_of(path: &std::path::Path, data: &[u8], scope: Scope) -> Option<Finding> {
+    let text = String::from_utf8_lossy(data);
     let entries = parse_dotenv(&text);
 
     // Names only; drop empty values from the count (placeholders often empty).
@@ -883,13 +896,41 @@ fn git_config_url_credentials(text: &str) -> bool {
 
 /// `_findings_for_path`: the whole per-file decision.
 pub fn findings_for_path(path: &std::path::Path, scope: Scope) -> Vec<Finding> {
+    findings_from(path, scope, None)
+}
+
+/// [`findings_for_path`] for a file whose bytes the caller already holds (a
+/// harness that hands over the content it is about to read): the same
+/// decision, nothing read from disk. `path` still names the file, because the
+/// name decides the kind.
+pub fn findings_for_content(path: &std::path::Path, content: &[u8], scope: Scope) -> Vec<Finding> {
+    findings_from(path, scope, Some(content))
+}
+
+/// The bytes of the file: the caller's, or the disk's (`None` on an OS error).
+fn file_bytes<'a>(path: &Path, given: Option<&'a [u8]>) -> Option<std::borrow::Cow<'a, [u8]>> {
+    match given {
+        Some(b) => Some(std::borrow::Cow::Borrowed(b)),
+        None => std::fs::read(path).ok().map(std::borrow::Cow::Owned),
+    }
+}
+
+/// `_safe_read_text` at its default limit, from `given` or the disk.
+fn text_of(path: &Path, given: Option<&[u8]>) -> Option<String> {
+    safe_text_from_bytes(&file_bytes(path, given)?, crate::MAX_CONTENT_BYTES)
+}
+
+fn findings_from(path: &std::path::Path, scope: Scope, given: Option<&[u8]>) -> Vec<Finding> {
     let name = path_name(path);
     // `path.as_posix()`; on this platform `str(path)` already uses `/`.
     let posix = path_str(path);
     let kind = filename_kind(&posix, &name);
 
     if kind == Some("dotenv") {
-        return dotenv_finding(path, scope).into_iter().collect();
+        return file_bytes(path, given)
+            .and_then(|d| dotenv_finding_of(path, &d, scope))
+            .into_iter()
+            .collect();
     }
 
     if let Some(kind) = kind {
@@ -899,12 +940,12 @@ pub fn findings_for_path(path: &std::path::Path, scope: Scope) -> Vec<Finding> {
 
         match kind {
             "credentials.json" => {
-                names = json_key_names(path);
+                names = text_of(path, given).map(|t| json_key_names_of(&t)).unwrap_or_default();
                 count = names.len().max(1);
                 reason = format!("credentials.json ({count} top-level key name(s))");
             }
             "mcp_config" => {
-                names = json_key_names(path);
+                names = text_of(path, given).map(|t| json_key_names_of(&t)).unwrap_or_default();
                 count = names.len().max(1);
                 let confirmed = names.iter().any(|k| k == "mcpServers" || k == "servers");
                 if confirmed {
@@ -936,7 +977,7 @@ pub fn findings_for_path(path: &std::path::Path, scope: Scope) -> Vec<Finding> {
             }
             "shell_history" => {
                 // `if not text` is true for `None` *and* for `""`.
-                let text = safe_read_text_default(path).unwrap_or_default();
+                let text = text_of(path, given).unwrap_or_default();
                 if text.is_empty() {
                     return Vec::new();
                 }
@@ -950,7 +991,7 @@ pub fn findings_for_path(path: &std::path::Path, scope: Scope) -> Vec<Finding> {
                 );
             }
             "git_config" => {
-                let text = safe_read_text_default(path).unwrap_or_default();
+                let text = text_of(path, given).unwrap_or_default();
                 if !git_config_keyword_assign(&text) && !text.contains("://") {
                     // This inner test can never succeed here — see
                     // `git_config_url_credentials`. Kept verbatim anyway.
@@ -974,7 +1015,7 @@ pub fn findings_for_path(path: &std::path::Path, scope: Scope) -> Vec<Finding> {
     if !is_content_scannable(&name) {
         return Vec::new();
     }
-    let text = safe_read_text_default(path).unwrap_or_default();
+    let text = text_of(path, given).unwrap_or_default();
     if text.is_empty() {
         return Vec::new();
     }

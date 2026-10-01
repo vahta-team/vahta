@@ -16,4 +16,5 @@ workspace = true
 vahta-detect = { path = "../detect" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+vahta-json = { path = "../json" }
 toml = { version = "0.8", features = ["preserve_order"] }

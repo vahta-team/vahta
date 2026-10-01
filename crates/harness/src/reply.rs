@@ -69,6 +69,7 @@ impl Manifest {
             Kind::BeforeRead => self.replies.before_read.as_ref(),
             Kind::Prompt => self.replies.prompt.as_ref(),
             Kind::AfterTool => self.replies.after_tool.as_ref(),
+            Kind::SessionStart => self.replies.session_start.as_ref(),
         }
     }
 

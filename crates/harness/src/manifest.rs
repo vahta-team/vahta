@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-/// The four things the hook can be asked about, whatever the harness calls them.
+/// The five things the hook can be asked about, whatever the harness calls them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -19,6 +19,8 @@ pub enum Kind {
     Prompt,
     /// A tool finished and its output is about to reach the model.
     AfterTool,
+    /// A session has begun. Used to say that the installed setup is outdated.
+    SessionStart,
 }
 
 impl Kind {
@@ -28,6 +30,7 @@ impl Kind {
             "before_read" => Some(Kind::BeforeRead),
             "prompt" => Some(Kind::Prompt),
             "after_tool" => Some(Kind::AfterTool),
+            "session_start" => Some(Kind::SessionStart),
             _ => None,
         }
     }
@@ -66,6 +69,11 @@ impl OneOrMany {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub name: String,
+    /// How the harness is written in prose ("Claude Code").
+    pub title: String,
+    /// Bumped whenever what `vahta setup` writes for this harness changes.
+    /// The hook command carries the version it was installed at (`--setup N`).
+    pub setup_version: u32,
     pub config: Config,
     #[serde(default)]
     pub events: Vec<EventSpec>,
@@ -154,6 +162,7 @@ pub struct Replies {
     pub before_read: Option<KindReplies>,
     pub prompt: Option<KindReplies>,
     pub after_tool: Option<KindReplies>,
+    pub session_start: Option<KindReplies>,
 }
 
 /// What may be said for one kind of event. A missing `allow` means silence.

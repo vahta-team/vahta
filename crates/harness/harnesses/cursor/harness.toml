@@ -2,6 +2,9 @@
 # Cursor's payloads are flat and its replies use snake_case.
 
 name = "cursor"
+title = "Cursor"
+# Bump when what `vahta setup` writes for this harness changes.
+setup_version = 1
 unnamed_tool_group = "write"
 
 [config]
@@ -43,6 +46,11 @@ kind = "before_read"
 file_path = "file_path"
 content = "content"
 cwd = "cwd"
+
+[[events]]
+name = "sessionStart"
+kind = "session_start"
+# Registered from v1 so that a later, outdated setup has a channel to say so.
 
 [[events]]
 name = "beforeSubmitPrompt"
@@ -87,6 +95,12 @@ style = "json"
 # user_message to the person.
 body = { permission = "deny", user_message = "{user_message}", agent_message = "{agent_message}" }
 
+# beforeReadFile: permission allow|deny, user_message shown on deny. Cursor has
+# no separate agent field here, so the one message says what to do instead.
+[replies.before_read.deny]
+style = "json"
+body = { permission = "deny", user_message = "{user_message}" }
+
 [replies.prompt.deny]
 style = "json"
 # continue:false stops the prompt; user_message is shown to the person.
@@ -96,4 +110,11 @@ body = { continue = false, user_message = "{user_message}" }
 style = "json"
 # The docs list `additional_context` for postToolUse. (`updated_mcp_tool_output`
 # would rewrite an MCP result; we do not redact in v1.)
+body = { additional_context = "{agent_message}" }
+
+# Cursor's sessionStart accepts env and additional_context; its docs say user_message
+# is accepted but not enforced, so the notice goes to the agent as context, with a
+# request to pass it on (docs read 2026-10-01).
+[replies.session_start.notice]
+style = "json"
 body = { additional_context = "{agent_message}" }

@@ -1,0 +1,23 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    ".env": "ANTHROPIC_API_KEY={{SECRET_ANTHROPIC}}\n",
+    "README.md": "# hello\n",
+    "my dir/.env": "ANTHROPIC_API_KEY={{SECRET_ANTHROPIC}}\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "echo go; cat \"{{TMP}}/my dir/.env\" | head"
+    },
+    "cwd": "{{TMP}}"
+  },
+  "stdout": {
+    "permission": "deny",
+    "user_message": "vahta blocked reading `{{TMP}}/my dir/.env`: it holds credentials (dotenv). Do not read it; run the command that needs it with `vahta run` so the values never reach the transcript.",
+    "agent_message": "vahta blocked reading `{{TMP}}/my dir/.env`: it holds credentials (dotenv). Do not read it; run the command that needs it with `vahta run` so the values never reach the transcript."
+  },
+  "exit": 0
+}
