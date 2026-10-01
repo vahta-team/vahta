@@ -45,8 +45,39 @@ skills installed by `ka setup`. Cursor: `ka setup` never creates
 allowlist).
 
 Flags: `--skills-only`, `--hook-only`, `--permissions-only`,
-`--permissions-remove`, `--yes` (do not prompt before writing permission
+`--permissions-remove`, `--uninstall`, `--dry-run`, `--force`, `--yes` (do not prompt before writing permission
 files; never deletes user allows).
+
+### Uninstall
+
+```
+ka setup --uninstall --dry-run   # print what would be removed, write nothing
+ka setup --uninstall             # remove it
+```
+
+Removes only what `ka setup` put there, and leaves every other entry intact and
+in order (a `vahta-hook` entry or any unrelated hook is foreign):
+
+- the `key-amnesia-hook` command item in `~/.claude/settings.json`,
+  `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`) and
+  `~/.cursor/hooks.json`; a hook group, event array or `hooks` object is dropped
+  only when that removal emptied it;
+- the OpenCode plugin file `key-amnesia-secret-guard.js` (only if it carries the
+  ka marker) and its `plugin` entry in `opencode.json`;
+- the three skills (`key-amnesia-usage`, `-hygiene`, `-migrate`) from the Claude,
+  Cursor, Codex and `~/.agents` skills directories. A skill whose content differs
+  from what ka copies is kept and reported; `--force` removes it;
+- the exact allow/deny strings `ka setup` adds (Claude `permissions` and
+  `autoMode.allow`, Cursor `terminalAllowlist` / `allow_instructions` and
+  `cli-config.json`, OpenCode `permission.bash`).
+
+Never touched: the vault, `.amnesia/` directories, `config.json` (including the
+`terminal` setting), the audit log, and anything else holding your data. Each
+edited JSON file is backed up once to `<file>.ka-backup` and written through a
+temp file plus rename. A malformed JSON file is reported and left untouched
+(exit 1). With nothing of ours present it says so and exits 0. Entries written
+by an older ka whose text differs from today's are not recognised; remove those
+by hand.
 
 After any upgrade, re-run `ka setup` (it rewrites the hook command) and
 restart Claude Code / Cursor / Codex / OpenCode.

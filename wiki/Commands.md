@@ -20,6 +20,7 @@ notes live in the repository `DESIGN.md`.
 | `ka config show` / `ka config set KEY VALUE` | Settings |
 | `ka status` / `ka connect` | Session status (+ registry of live guards). `connect` is a **CLI alias** for `status` — not a sixth IPC verb |
 | `ka setup [--skills-only] [--hook-only] [--permissions-only] [--permissions-remove] [--terminal-only] [--reconfigure-terminal] [--yes]` | Install skills, secret-guard hook, and harness allow-lists (Claude / Cursor / Codex / OpenCode); on Linux, also pick the terminal that opens for the password |
+| `ka setup --uninstall [--dry-run] [--force]` | Remove only what `ka setup` installed (hook entries, OpenCode plugin, copied skills, the exact allow/deny entries); foreign entries stay. Never touches the vault, `.amnesia/`, or config |
 | `ka docs [--print]` | Print wiki URL; open browser unless `--print` |
 | `ka identity create` / `show` | Local X25519 identity for KAM2 |
 | `ka member add` / `list` / `remove` | Members/roles (first add enables KAM2) |

@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow the git tags `0.4.0` … `0.4.16`.
 
+## [Unreleased]
+
+### Added
+
+- **`ka setup --uninstall`** removes what `ka setup` installed and only that: the
+  `key-amnesia-hook` entries in Claude / Codex / Cursor hook files (a `vahta-hook`
+  or unrelated hook stays, in order; groups, event arrays and `hooks` are dropped
+  only when our removal emptied them), the OpenCode plugin, the three bundled
+  skills, and the exact allow/deny strings setup adds. An edited skill is kept
+  unless `--force`. `--dry-run` writes nothing. JSON files are backed up once to
+  `<file>.ka-backup` and written via temp file plus rename; a malformed file is
+  reported and left untouched. The vault, `.amnesia/` directories and config are
+  never touched. No separate `ka uninstall` verb: a new top-level verb would join
+  the agent allow/deny tables that setup writes.
+
 ## [0.4.16] — 2026-09-29
 
 > **Upgrade: re-run `ka setup`.** The tool-name matcher that decides which calls

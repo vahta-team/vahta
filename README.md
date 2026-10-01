@@ -105,6 +105,10 @@ a restart, re-run `ka setup`. Cursor: `ka setup` never creates
 `~/.cursor/permissions.json` (that file replaces the in-app terminal
 allowlist).
 
+To undo it: `ka setup --uninstall` (add `--dry-run` to preview). It removes only
+what setup wrote and leaves every other hook and setting alone; it never touches
+your vault, `.amnesia/` directories or config. See [Install](wiki/Install.md).
+
 Agent-facing `ka run` should be a **bare** command with `--cwd` rather than
 `cd && … | tail`:
 
