@@ -99,7 +99,7 @@ fn py_splitlines(text: &str) -> Vec<&str> {
 /// while this reproduces what it was handed. The walker is what builds these
 /// paths and it produces neither form, so normalising here would only add a
 /// second, disagreeing notion of a path.
-fn path_str(path: &Path) -> String {
+pub(crate) fn path_str(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
@@ -107,7 +107,7 @@ fn path_str(path: &Path) -> String {
 ///
 /// `Path::file_name` already returns `None` for `/`, `.` and a path ending in
 /// `..`, which is what `pathlib` calls `""`.
-fn path_name(path: &Path) -> String {
+pub(crate) fn path_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()

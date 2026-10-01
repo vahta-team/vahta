@@ -1,0 +1,782 @@
+//! A JSON parser that agrees with CPython's `json.loads`, and nothing else.
+//!
+//! Hand-rolled, no dependencies, and **not** a general-purpose JSON library:
+//! it exists because a `--deep` scan must accept and reject exactly the lines
+//! Python's does. A transcript line Python parses and this does not is a
+//! secret never looked at; one this parses and Python rejects is a finding
+//! Python would not report. Both are bugs, so where `json.loads` is odd, this
+//! is odd the same way. Every rule below is pinned by a test and by
+//! `benchmarks/diff_transcripts.py`, which compares this against the
+//! interpreter on generated input.
+//!
+//! # What Python's parser does that a strict RFC 8259 one does not
+//!
+//! * `NaN`, `Infinity` and `-Infinity` are values.
+//! * Only space, tab, LF and CR are whitespace. Not `\x0b`, `\x0c`, NBSP or
+//!   U+FEFF (which `json.loads` rejects up front as a BOM).
+//! * Control characters (below U+0020) inside a string are an error; DEL and
+//!   everything above are not.
+//! * `\u` takes exactly four hex digits. A high surrogate escape followed by a
+//!   low surrogate escape combines into one scalar; any other surrogate escape
+//!   is accepted on its own (see below).
+//! * Duplicate object keys: the **last value wins**, at the **position of the
+//!   first** occurrence (`dict` semantics). Anything that iterates an object
+//!   sees that order.
+//! * Integers have no magnitude limit except CPython's own digit cap: more than
+//!   4300 digits raises `ValueError`, which is *not* a `JSONDecodeError` and so
+//!   is not caught by the caller; it aborts the scan. Floats saturate to
+//!   infinity (`1e999`).
+//! * Leading zeros, `1.`, `.5`, `+1`, trailing commas, single quotes and
+//!   comments are all errors.
+//!
+//! # Lone surrogates
+//!
+//! `"\ud800"` is accepted by Python and yields a `str` holding a surrogate code
+//! point, which a Rust `String` cannot hold. What Python does with such a
+//! string next is: run the detector over it, and — only if it is a dict key —
+//! test it against the secret-name vocabulary, which is ASCII plus a few
+//! case-folding look-alikes and so can never contain a surrogate. In the
+//! detector a surrogate is a character that is not a letter, digit, space,
+//! quote or word character, it counts as one character, and two *different*
+//! surrogates count as two distinct characters for entropy.
+//!
+//! So each lone surrogate is mapped to its own private-use scalar,
+//! `U+10F800 + (surrogate - U+D800)`: also not a letter, digit, space or word
+//! character, one character, and distinct from every other surrogate. The two
+//! behave identically in the detector, which `diff_transcripts.py` checks
+//! rather than assumes. The one divergence this leaves is a document that
+//! contains a **real** character in `U+10F800..=U+10FFFF` alongside a lone
+//! surrogate in the same string, where entropy could differ by one distinct
+//! symbol. Those code points are unassigned private use in supplementary
+//! plane 16 and appear in no transcript; the alternative of refusing the line
+//! would diverge far more often.
+//!
+//! # Depth
+//!
+//! The parser is iterative, so nesting cannot overflow the stack, and [`Value`]
+//! has an iterative `Drop`. [`MAX_DEPTH`] stands in for the point where
+//! CPython's own scanner raises `RecursionError`.
+//!
+//! Never carries or logs secret values beyond holding the strings it is given.
+
+use std::collections::HashMap;
+
+/// Container nesting at which `json.loads` raises `RecursionError`.
+///
+/// **Calibrated, not specified.** CPython 3.14's C scanner is limited by C
+/// stack depth rather than by `sys.getrecursionlimit()`; on this machine
+/// (8 MiB stack, 3.14.7) the largest accepted nesting is 52 092 and 52 093
+/// fails, whether the document is valid or not. Older interpreters differ.
+/// The differential harness stays well clear of the boundary.
+pub const MAX_DEPTH: usize = 52_000;
+
+/// More decimal digits than this in an integer is `ValueError` in CPython
+/// (`sys.get_int_max_str_digits()` default).
+pub const MAX_INT_DIGITS: usize = 4300;
+
+/// First of the 2048 private-use scalars standing in for `U+D800..=U+DFFF`.
+const SURROGATE_BASE: u32 = 0x10F800;
+
+/// A parsed JSON value. Object entries are in `dict` order, duplicates
+/// already resolved.
+#[derive(Debug, PartialEq)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    /// Decimal digits with an optional leading `-`; `-0` is normalised to `0`
+    /// as Python's `int` does. Never a number the scanner would not read.
+    Int(String),
+    Float(f64),
+    Str(String),
+    Array(Vec<Value>),
+    Object(Vec<(String, Value)>),
+}
+
+/// Why a parse did not produce a [`Value`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseError {
+    /// `json.JSONDecodeError`. Callers skip the input.
+    Invalid,
+    /// `RecursionError`. Not a `JSONDecodeError`, so it is not caught.
+    Recursion,
+    /// `ValueError: Exceeds the limit (4300 digits)`. Not caught either.
+    IntLimit,
+}
+
+impl Value {
+    pub fn is_container(&self) -> bool {
+        matches!(self, Value::Array(_) | Value::Object(_))
+    }
+
+    /// An unambiguous, order-preserving text form, for comparing against the
+    /// interpreter. Strings are code point lists, floats are bit patterns
+    /// (`nan` for every NaN), so nothing depends on how either side prints.
+    /// Iterative: deep values are the point of the exercise.
+    pub fn canonical(&self) -> String {
+        enum Step<'a> {
+            Val(&'a Value),
+            Raw(&'static str),
+        }
+        let mut out = String::new();
+        let mut work = vec![Step::Val(self)];
+        while let Some(step) = work.pop() {
+            match step {
+                Step::Raw(s) => out.push_str(s),
+                Step::Val(v) => match v {
+                    Value::Null => out.push('n'),
+                    Value::Bool(true) => out.push('t'),
+                    Value::Bool(false) => out.push('f'),
+                    Value::Int(s) => {
+                        out.push('i');
+                        out.push_str(s);
+                        out.push(';');
+                    }
+                    Value::Float(f) => {
+                        out.push('d');
+                        if f.is_nan() {
+                            out.push_str("nan");
+                        } else {
+                            out.push_str(&format!("{:016x}", f.to_bits()));
+                        }
+                        out.push(';');
+                    }
+                    Value::Str(s) => canonical_str(&mut out, s),
+                    Value::Array(items) => {
+                        out.push('[');
+                        work.push(Step::Raw("]"));
+                        for item in items.iter().rev() {
+                            work.push(Step::Val(item));
+                        }
+                    }
+                    Value::Object(entries) => {
+                        out.push('{');
+                        work.push(Step::Raw("}"));
+                        for (_, val) in entries.iter().rev() {
+                            work.push(Step::Val(val));
+                        }
+                        // Keys are written up front, in order; values follow
+                        // as the worklist unwinds. Unambiguous because the
+                        // key count is fixed by the array of keys that opens.
+                        let mut keys = String::new();
+                        for (k, _) in entries {
+                            canonical_str(&mut keys, k);
+                        }
+                        out.push_str(&keys);
+                        out.push('|');
+                    }
+                },
+            }
+        }
+        out
+    }
+}
+
+fn canonical_str(out: &mut String, s: &str) {
+    out.push('s');
+    let mut first = true;
+    for c in s.chars() {
+        if !first {
+            out.push('.');
+        }
+        first = false;
+        out.push_str(&format!("{:x}", c as u32));
+    }
+    out.push(';');
+}
+
+impl Drop for Value {
+    /// Iterative, so dropping a document nested tens of thousands deep cannot
+    /// overflow the stack the way the derived recursive drop would.
+    fn drop(&mut self) {
+        fn take(v: &mut Value, work: &mut Vec<Value>) {
+            match v {
+                Value::Array(items) => work.append(items),
+                Value::Object(entries) => {
+                    for (_, val) in entries.drain(..) {
+                        work.push(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut work = Vec::new();
+        take(self, &mut work);
+        while let Some(mut v) = work.pop() {
+            take(&mut v, &mut work);
+        }
+    }
+}
+
+enum Frame {
+    Array(Vec<Value>),
+    Object(Object),
+}
+
+struct Object {
+    entries: Vec<(String, Value)>,
+    /// Built only once an object is large, so a many-keyed object is not
+    /// quadratic and a small one pays nothing.
+    index: Option<HashMap<String, usize>>,
+    key: Option<String>,
+}
+
+const INDEX_AFTER: usize = 16;
+
+impl Object {
+    fn new() -> Self {
+        Object { entries: Vec::new(), index: None, key: None }
+    }
+
+    /// `dict[key] = value`: replaces in place, so the first position is kept.
+    fn insert(&mut self, key: String, value: Value) {
+        if let Some(index) = &mut self.index {
+            if let Some(&at) = index.get(&key) {
+                self.entries[at].1 = value;
+            } else {
+                index.insert(key.clone(), self.entries.len());
+                self.entries.push((key, value));
+            }
+            return;
+        }
+        if let Some(at) = self.entries.iter().position(|(k, _)| *k == key) {
+            self.entries[at].1 = value;
+            return;
+        }
+        self.entries.push((key, value));
+        if self.entries.len() > INDEX_AFTER {
+            self.index = Some(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, _))| (k.clone(), i))
+                    .collect(),
+            );
+        }
+    }
+}
+
+struct Parser<'a> {
+    text: &'a str,
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn skip_ws(&mut self) {
+        while self.i < self.b.len() && matches!(self.b[self.i], b' ' | b'\t' | b'\n' | b'\r') {
+            self.i += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.b.get(self.i).copied()
+    }
+
+    /// Four hex digits at `at`; `None` when fewer than four or any is not
+    /// `[0-9a-fA-F]`.
+    fn hex4(&self, at: usize) -> Option<u32> {
+        let digits = self.b.get(at..at + 4)?;
+        let mut v = 0u32;
+        for &d in digits {
+            v = v * 16 + (d as char).to_digit(16)?;
+        }
+        Some(v)
+    }
+
+    /// A string body, with `self.i` just past the opening quote.
+    fn string(&mut self) -> Result<String, ParseError> {
+        let mut out = String::new();
+        let mut run = self.i;
+        loop {
+            let Some(&c) = self.b.get(self.i) else {
+                return Err(ParseError::Invalid); // Unterminated string
+            };
+            match c {
+                b'"' => {
+                    out.push_str(&self.text[run..self.i]);
+                    self.i += 1;
+                    return Ok(out);
+                }
+                b'\\' => {
+                    out.push_str(&self.text[run..self.i]);
+                    self.i += 1;
+                    let Some(&e) = self.b.get(self.i) else {
+                        return Err(ParseError::Invalid);
+                    };
+                    self.i += 1;
+                    match e {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let hi = self.hex4(self.i).ok_or(ParseError::Invalid)?;
+                            self.i += 4;
+                            let mut cp = hi;
+                            if (0xD800..0xDC00).contains(&hi)
+                                && self.b.get(self.i) == Some(&b'\\')
+                                && self.b.get(self.i + 1) == Some(&b'u')
+                            {
+                                // CPython reads the second escape eagerly: a
+                                // malformed one is an error even when the
+                                // first would have stood alone.
+                                let lo = self.hex4(self.i + 2).ok_or(ParseError::Invalid)?;
+                                if (0xDC00..0xE000).contains(&lo) {
+                                    cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                                    self.i += 6;
+                                }
+                            }
+                            out.push(scalar(cp));
+                        }
+                        _ => return Err(ParseError::Invalid), // Invalid \escape
+                    }
+                    run = self.i;
+                }
+                0x00..=0x1f => return Err(ParseError::Invalid), // Invalid control character
+                _ => self.i += 1,
+            }
+        }
+    }
+
+    /// A number starting at `self.i`, which is `-` or an ASCII digit.
+    fn number(&mut self) -> Result<Value, ParseError> {
+        let start = self.i;
+        let digit = |p: &Self, at: usize| p.b.get(at).is_some_and(u8::is_ascii_digit);
+        if self.peek() == Some(b'-') {
+            self.i += 1;
+        }
+        match self.peek() {
+            Some(b'1'..=b'9') => {
+                while digit(self, self.i) {
+                    self.i += 1;
+                }
+            }
+            Some(b'0') => self.i += 1,
+            _ => return Err(ParseError::Invalid),
+        }
+        let int_end = self.i;
+        let mut is_float = false;
+        if self.peek() == Some(b'.') && digit(self, self.i + 1) {
+            is_float = true;
+            self.i += 2;
+            while digit(self, self.i) {
+                self.i += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            let mut j = self.i + 1;
+            if matches!(self.b.get(j), Some(b'+' | b'-')) {
+                j += 1;
+            }
+            if digit(self, j) {
+                while digit(self, j) {
+                    j += 1;
+                }
+                is_float = true;
+                self.i = j;
+            }
+            // Otherwise the `e` is left unread and the caller rejects it.
+        }
+        let token = &self.text[start..self.i];
+        if is_float {
+            // Rust's parse rounds correctly and saturates to infinity, as
+            // `float()` does.
+            return Ok(Value::Float(token.parse::<f64>().unwrap_or(f64::NAN)));
+        }
+        let digits = &self.text[start..int_end];
+        let digits = digits.strip_prefix('-').unwrap_or(digits);
+        if digits.len() > MAX_INT_DIGITS {
+            return Err(ParseError::IntLimit);
+        }
+        Ok(Value::Int(if token == "-0" { "0".to_string() } else { token.to_string() }))
+    }
+
+    /// Does `word` start at `self.i`?
+    fn literal(&mut self, word: &str) -> bool {
+        if self.b[self.i..].starts_with(word.as_bytes()) {
+            self.i += word.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// `"key" :` with `self.i` just past the opening quote.
+    fn key(&mut self) -> Result<String, ParseError> {
+        let key = self.string()?;
+        self.skip_ws();
+        if self.peek() != Some(b':') {
+            return Err(ParseError::Invalid);
+        }
+        self.i += 1;
+        self.skip_ws();
+        Ok(key)
+    }
+}
+
+/// A code point as a `char`: a surrogate becomes its private-use stand-in.
+fn scalar(cp: u32) -> char {
+    if (0xD800..0xE000).contains(&cp) {
+        char::from_u32(SURROGATE_BASE + (cp - 0xD800)).unwrap_or('\u{fffd}')
+    } else {
+        char::from_u32(cp).unwrap_or('\u{fffd}')
+    }
+}
+
+/// `json.loads(text)`.
+pub fn parse(text: &str) -> Result<Value, ParseError> {
+    let mut p = Parser { text, b: text.as_bytes(), i: 0 };
+    let mut stack: Vec<Frame> = Vec::new();
+    p.skip_ws();
+
+    'value: loop {
+        // A value is expected at `p.i`.
+        let mut value = match p.peek().ok_or(ParseError::Invalid)? {
+            b'"' => {
+                p.i += 1;
+                Value::Str(p.string()?)
+            }
+            b'{' => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(ParseError::Recursion);
+                }
+                p.i += 1;
+                p.skip_ws();
+                if p.peek() == Some(b'}') {
+                    p.i += 1;
+                    Value::Object(Vec::new())
+                } else {
+                    if p.peek() != Some(b'"') {
+                        return Err(ParseError::Invalid);
+                    }
+                    p.i += 1;
+                    let mut obj = Object::new();
+                    obj.key = Some(p.key()?);
+                    stack.push(Frame::Object(obj));
+                    continue 'value;
+                }
+            }
+            b'[' => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(ParseError::Recursion);
+                }
+                p.i += 1;
+                p.skip_ws();
+                if p.peek() == Some(b']') {
+                    p.i += 1;
+                    Value::Array(Vec::new())
+                } else {
+                    stack.push(Frame::Array(Vec::new()));
+                    continue 'value;
+                }
+            }
+            b'n' if p.literal("null") => Value::Null,
+            b't' if p.literal("true") => Value::Bool(true),
+            b'f' if p.literal("false") => Value::Bool(false),
+            b'N' if p.literal("NaN") => Value::Float(f64::NAN),
+            b'I' if p.literal("Infinity") => Value::Float(f64::INFINITY),
+            b'-' if p.literal("-Infinity") => Value::Float(f64::NEG_INFINITY),
+            b'-' | b'0'..=b'9' => p.number()?,
+            _ => return Err(ParseError::Invalid),
+        };
+
+        // A value is complete: hand it to its container, closing containers
+        // for as long as they end.
+        loop {
+            match stack.last_mut() {
+                None => {
+                    p.skip_ws();
+                    return if p.i == p.b.len() { Ok(value) } else { Err(ParseError::Invalid) };
+                }
+                Some(Frame::Array(items)) => {
+                    items.push(value);
+                    p.skip_ws();
+                    match p.peek() {
+                        Some(b']') => {
+                            p.i += 1;
+                            let Some(Frame::Array(done)) = stack.pop() else {
+                                unreachable!("the frame was just matched as an array")
+                            };
+                            value = Value::Array(done);
+                        }
+                        Some(b',') => {
+                            p.i += 1;
+                            p.skip_ws();
+                            continue 'value;
+                        }
+                        _ => return Err(ParseError::Invalid),
+                    }
+                }
+                Some(Frame::Object(obj)) => {
+                    let key = obj.key.take().ok_or(ParseError::Invalid)?;
+                    obj.insert(key, value);
+                    p.skip_ws();
+                    match p.peek() {
+                        Some(b'}') => {
+                            p.i += 1;
+                            let Some(Frame::Object(done)) = stack.pop() else {
+                                unreachable!("the frame was just matched as an object")
+                            };
+                            value = Value::Object(done.entries);
+                        }
+                        Some(b',') => {
+                            p.i += 1;
+                            p.skip_ws();
+                            if p.peek() != Some(b'"') {
+                                return Err(ParseError::Invalid);
+                            }
+                            p.i += 1;
+                            obj.key = Some(p.key()?);
+                            continue 'value;
+                        }
+                        _ => return Err(ParseError::Invalid),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok(s: &str) -> Value {
+        parse(s).unwrap_or_else(|e| panic!("{s:?} should parse, got {e:?}"))
+    }
+
+    fn bad(s: &str) {
+        assert_eq!(parse(s).err(), Some(ParseError::Invalid), "{s:?} should be rejected");
+    }
+
+    fn string_of(v: &Value) -> &str {
+        match v {
+            Value::Str(s) => s,
+            other => panic!("not a string: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_scalars() {
+        assert_eq!(ok("null"), Value::Null);
+        assert_eq!(ok("true"), Value::Bool(true));
+        assert_eq!(ok(" false\t\r\n"), Value::Bool(false));
+        assert_eq!(ok("-12"), Value::Int("-12".into()));
+        assert_eq!(ok("\"a\""), Value::Str("a".into()));
+    }
+
+    #[test]
+    fn nan_and_the_infinities_are_values() {
+        assert!(matches!(&ok("NaN"), Value::Float(f) if f.is_nan()));
+        assert_eq!(ok("Infinity"), Value::Float(f64::INFINITY));
+        assert_eq!(ok("-Infinity"), Value::Float(f64::NEG_INFINITY));
+        assert!(matches!(&ok("[NaN,-Infinity,1]"), Value::Array(a) if a.len() == 3));
+        // ...but only spelled exactly.
+        for s in ["nan", "inf", "+Infinity", "Infinit", "-NaN", "-Inf", "NaNa", "infinity"] {
+            bad(s);
+        }
+    }
+
+    #[test]
+    fn what_python_rejects_is_rejected() {
+        for s in [
+            "[1,]", "{\"a\":1,}", "[,1]", "{,}", "[1 2]", "{'a':1}", "['a']", "// c\n1",
+            "/* c */1", "{\"a\" 1}", "{\"a\":}", "{1:2}", "[", "{", "\"abc", "", "  ", "01", "-",
+            "+1", ".5", "1.", "1e", "1e+", "--1", "[01]", "tru", "nul", "[1]]", "1 2", "{\"a\":1}x",
+            "\u{feff}1", "\u{a0}1", "\u{b}1", "\u{c}1",
+        ] {
+            bad(s);
+        }
+    }
+
+    #[test]
+    fn only_four_characters_are_whitespace() {
+        assert_eq!(ok(" \t\n\r1 \t\n\r"), Value::Int("1".into()));
+        bad("\u{b}1");
+        bad("1\u{c}");
+        bad("\u{2028}1");
+    }
+
+    #[test]
+    fn numbers() {
+        assert_eq!(ok("0"), Value::Int("0".into()));
+        assert_eq!(ok("-0"), Value::Int("0".into()));
+        assert_eq!(ok("-0.0"), Value::Float(-0.0));
+        assert_eq!(ok("1E2"), Value::Float(100.0));
+        assert_eq!(ok("1.5e-3"), Value::Float(0.0015));
+        assert_eq!(ok("1e999"), Value::Float(f64::INFINITY));
+        assert_eq!(ok("-1e999"), Value::Float(f64::NEG_INFINITY));
+        assert_eq!(ok("1e-999"), Value::Float(0.0));
+        assert_eq!(
+            ok("123456789012345678901234567890"),
+            Value::Int("123456789012345678901234567890".into())
+        );
+    }
+
+    #[test]
+    fn an_integer_over_4300_digits_is_value_error_not_a_decode_error() {
+        let at_limit = "9".repeat(MAX_INT_DIGITS);
+        assert!(parse(&at_limit).is_ok());
+        assert!(parse(&format!("-{at_limit}")).is_ok());
+        let over = "9".repeat(MAX_INT_DIGITS + 1);
+        assert_eq!(parse(&over).err(), Some(ParseError::IntLimit));
+        assert_eq!(parse(&format!("[1,{over}]")).err(), Some(ParseError::IntLimit));
+        // A float is not limited, however long.
+        assert!(parse(&format!("{over}.5")).is_ok());
+        assert!(parse(&format!("{over}e1")).is_ok());
+        // Order of failure is order of reading: invalid syntax first wins.
+        assert_eq!(parse(&format!("[x,{over}]")).err(), Some(ParseError::Invalid));
+        assert_eq!(parse(&format!("[{over},x]")).err(), Some(ParseError::IntLimit));
+    }
+
+    #[test]
+    fn duplicate_keys_last_value_first_position() {
+        let v = ok(r#"{"a":1,"b":2,"a":3}"#);
+        assert_eq!(
+            v,
+            Value::Object(vec![
+                ("a".into(), Value::Int("3".into())),
+                ("b".into(), Value::Int("2".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_in_a_large_object_keep_first_position() {
+        let mut text = String::from("{");
+        for i in 0..40 {
+            text.push_str(&format!("\"k{i}\":{i},"));
+        }
+        text.push_str("\"k3\":\"last\",\"k39\":\"last\"}");
+        let parsed = ok(&text);
+        let Value::Object(entries) = &parsed else { panic!("object") };
+        assert_eq!(entries.len(), 40);
+        assert_eq!(entries[3].0, "k3");
+        assert_eq!(entries[3].1, Value::Str("last".into()));
+        assert_eq!(entries[39].1, Value::Str("last".into()));
+        assert_eq!(entries[0].0, "k0");
+    }
+
+    #[test]
+    fn escapes() {
+        assert_eq!(string_of(&ok(r#""\"\\\/\b\f\n\r\t""#)), "\"\\/\u{8}\u{c}\n\r\t");
+        assert_eq!(string_of(&ok(r#""Aé€""#)), "A\u{e9}\u{20ac}");
+        assert_eq!(string_of(&ok(r#""é""#)), "\u{e9}");
+        for s in [r#""\x41""#, r#""\u12""#, r#""\u12g4""#, r#""\"#, r#""\a""#, r#""\u""#] {
+            bad(s);
+        }
+    }
+
+    #[test]
+    fn control_characters_in_strings_are_rejected_but_del_is_not() {
+        bad("\"a\u{0}b\"");
+        bad("\"a\nb\"");
+        bad("\"a\tb\"");
+        assert_eq!(string_of(&ok("\"a\u{7f}b\"")), "a\u{7f}b");
+        assert_eq!(string_of(&ok("\"a\u{85}\u{2028}b\"")), "a\u{85}\u{2028}b");
+    }
+
+    #[test]
+    fn a_surrogate_pair_combines() {
+        assert_eq!(string_of(&ok(r#""😀""#)), "\u{1F600}");
+        assert_eq!(string_of(&ok(r#""😀""#)), "\u{1F600}");
+        assert_eq!(string_of(&ok(r#""x𐀀y""#)), "x\u{10000}y");
+        assert_eq!(string_of(&ok(r#""􏿿""#)), "\u{10FFFF}");
+    }
+
+    #[test]
+    fn a_lone_surrogate_is_accepted_and_kept_distinct() {
+        let a = string_of(&ok(r#""\ud800""#)).to_string();
+        let b = string_of(&ok(r#""\udc00""#)).to_string();
+        let c = string_of(&ok(r#""\udfff""#)).to_string();
+        assert_eq!(a.chars().count(), 1);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_eq!(a.chars().next().map(|c| c as u32), Some(0x10F800));
+        assert_eq!(c.chars().next().map(|c| c as u32), Some(0x10FFFF));
+    }
+
+    #[test]
+    fn surrogates_that_do_not_pair_stay_separate() {
+        // high, high-low pair: the first is lone.
+        let s = string_of(&ok(r#""\ud800😀""#)).to_string();
+        let cs: Vec<u32> = s.chars().map(|c| c as u32).collect();
+        assert_eq!(cs, vec![0x10F800, 0x1F600]);
+        // low then high: both lone, in order.
+        let s = string_of(&ok(r#""\udc00\ud800""#)).to_string();
+        assert_eq!(s.chars().map(|c| c as u32).collect::<Vec<_>>(), vec![0x10F800 + 0x400, 0x10F800]);
+        // high followed by an ordinary escape.
+        let s = string_of(&ok(r#""\ud800A""#)).to_string();
+        assert_eq!(s.chars().map(|c| c as u32).collect::<Vec<_>>(), vec![0x10F800, 0x41]);
+        // high followed by another kind of escape, and by plain text.
+        assert_eq!(string_of(&ok(r#""\ud800\n""#)).chars().count(), 2);
+        assert_eq!(string_of(&ok(r#""\ud800abc""#)).chars().count(), 4);
+        // a lone low surrogate after a completed pair.
+        assert_eq!(string_of(&ok(r#""😀\ude00""#)).chars().count(), 2);
+    }
+
+    #[test]
+    fn a_malformed_second_escape_after_a_high_surrogate_is_an_error() {
+        // CPython reads it eagerly, so this is invalid rather than "lone".
+        bad(r#""\ud800\u12""#);
+        bad(r#""\ud800\uzzzz""#);
+        bad(r#""\ud800\u"#);
+    }
+
+    #[test]
+    fn lone_surrogates_are_keys_too() {
+        let v = ok(r#"{"\ud800":1,"\udc00":2,"\ud800":3}"#);
+        let Value::Object(e) = &v else { panic!("object") };
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0].1, Value::Int("3".into()));
+    }
+
+    #[test]
+    fn nested_containers_and_order() {
+        let v = ok(r#" {"z":[1,{"y":null}],"a":{}} "#);
+        assert_eq!(v.canonical(), ok(r#"{"z":[1,{"y":null}],"a":{}}"#).canonical());
+        let Value::Object(e) = &v else { panic!() };
+        assert_eq!(e[0].0, "z");
+        assert_eq!(e[1].0, "a");
+    }
+
+    #[test]
+    fn canonical_distinguishes_what_it_should() {
+        assert_ne!(ok("[1,2]").canonical(), ok("[12]").canonical());
+        assert_ne!(ok("{\"a\":1}").canonical(), ok("{\"b\":1}").canonical());
+        assert_ne!(ok("{\"a\":1,\"b\":2}").canonical(), ok("{\"b\":2,\"a\":1}").canonical());
+        assert_ne!(ok("0.0").canonical(), ok("-0.0").canonical());
+        assert_eq!(ok("NaN").canonical(), ok("[NaN]").canonical().replace(['[', ']'], ""));
+    }
+
+    #[test]
+    fn deep_nesting_neither_overflows_the_stack_nor_panics() {
+        // Tens of thousands deep, then dropped: the iterative drop is what is
+        // being exercised as much as the iterative parse.
+        let n = MAX_DEPTH;
+        let arr = format!("{}{}", "[".repeat(n), "]".repeat(n));
+        assert!(parse(&arr).is_ok());
+        let obj = format!("{}1{}", "{\"a\":".repeat(n), "}".repeat(n));
+        assert!(parse(&obj).is_ok());
+
+        let too_deep = format!("{}{}", "[".repeat(n + 1), "]".repeat(n + 1));
+        assert_eq!(parse(&too_deep).err(), Some(ParseError::Recursion));
+        // Unterminated, but already past the limit: still a recursion error,
+        // as in CPython, which fails on the way down.
+        assert_eq!(parse(&"[".repeat(n + 1)).err(), Some(ParseError::Recursion));
+        assert_eq!(parse(&"{\"a\":".repeat(n + 1)).err(), Some(ParseError::Recursion));
+        // Unterminated within the limit is merely invalid.
+        assert_eq!(parse(&"[".repeat(n)).err(), Some(ParseError::Invalid));
+        // A million, to be sure nothing is proportional to the stack.
+        assert_eq!(parse(&"[".repeat(1_000_000)).err(), Some(ParseError::Recursion));
+    }
+
+    #[test]
+    fn multibyte_text_passes_through() {
+        assert_eq!(string_of(&ok("\"h\u{e9}llo \u{1F600} \u{4e16}\"")), "h\u{e9}llo \u{1F600} \u{4e16}");
+    }
+}

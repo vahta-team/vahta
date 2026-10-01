@@ -8,14 +8,17 @@
 //! **Never carries secret values.** A finding holds a path, a kind, the
 //! *names* of what was found and how many — never what was found.
 //!
-//! Scope, deliberately: the project scan. The `--deep` path — agent transcript
-//! formats for three harnesses, and the home-directory candidate list — is
-//! 395 of `scan_py.py`'s 1202 lines, is a moving target tied to other vendors'
-//! file layouts, and stays in Python for now.
+//! Covers the project scan and the `--deep` scan (home-directory candidates
+//! and agent session transcripts for three harnesses). The transcript path
+//! reads JSON, and Python's `json.loads` is the spec for what that accepts, so
+//! [`json`] is a parser written to agree with it rather than a general one.
+//! `cargo tree -p vahta-scan` shows one dependency, `vahta-detect`.
 
 pub mod content;
+pub mod deep;
 pub mod filenames;
 pub mod finding;
+pub mod json;
 pub mod report;
 pub mod walk;
 

@@ -181,6 +181,19 @@ pub fn project_files(root: &Path, include_excluded: bool) -> Vec<PathBuf> {
     out
 }
 
+/// `findings.sort(key=lambda f: (f.path, _CONF_ORDER.get(f.confidence, 9)))`.
+///
+/// An unrecognised or empty confidence ranks 9, i.e. after `possible`, and does
+/// not raise. Python's sort is stable and so is `sort_by`. Shared by the
+/// project scan and the deep scan, which end the same way.
+pub fn sort_findings(findings: &mut [Finding]) {
+    findings.sort_by(|a, b| {
+        let ka = (&a.path, a.confidence_tier().map_or(9u8, |c| c.rank()));
+        let kb = (&b.path, b.confidence_tier().map_or(9u8, |c| c.rank()));
+        ka.cmp(&kb)
+    });
+}
+
 /// `scan_project`. Deduplicates by resolved path, drops empty-dotenv
 /// findings, and sorts by `(path, confidence rank)`.
 ///
@@ -250,14 +263,7 @@ pub fn scan_project(root: &Path, include_excluded: bool) -> Vec<Finding> {
         }
     }
 
-    // `findings.sort(key=lambda f: (f.path, _CONF_ORDER.get(f.confidence, 9)))`.
-    // An unrecognised or empty confidence ranks 9, i.e. after `possible`, and
-    // does not raise. Python's sort is stable and so is `sort_by`.
-    findings.sort_by(|a, b| {
-        let ka = (&a.path, a.confidence_tier().map_or(9u8, |c| c.rank()));
-        let kb = (&b.path, b.confidence_tier().map_or(9u8, |c| c.rank()));
-        ka.cmp(&kb)
-    });
+    sort_findings(&mut findings);
     findings
 }
 
