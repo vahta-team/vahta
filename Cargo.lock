@@ -137,6 +137,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vahta-pyext-scan"
+version = "0.0.0"
+dependencies = [
+ "pyo3",
+ "vahta-scan",
+]
+
+[[package]]
 name = "vahta-scan"
 version = "0.0.0"
 dependencies = [

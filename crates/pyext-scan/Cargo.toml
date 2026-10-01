@@ -1,0 +1,18 @@
+[package]
+name = "vahta-pyext-scan"
+version = "0.0.0"
+description = "Python bindings for the Vahta scanner, so the existing suite can run against it"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "_scan_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+vahta-scan = { path = "../scan" }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }

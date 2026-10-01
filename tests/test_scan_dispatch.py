@@ -21,8 +21,20 @@ def test_the_scanner_has_its_own_variable() -> None:
     assert scan_mod.IMPL_ENV_VAR != "KEY_AMNESIA_DETECT_IMPL"
 
 
-def test_reads_reach_the_implementation() -> None:
+PYTHON_ONLY = pytest.mark.skipif(
+    scan_mod.active_impl != scan_mod.IMPL_PYTHON,
+    reason="asserts identity with the Python implementation",
+)
+
+
+def test_names_the_extension_lacks_come_from_python() -> None:
     assert scan_mod.STRICT_HIGH is scan_py.STRICT_HIGH
+    assert scan_mod.scan_deep is scan_py.scan_deep
+    assert scan_mod.Finding is scan_py.Finding
+
+
+@PYTHON_ONLY
+def test_reads_reach_the_implementation() -> None:
     assert scan_mod.scan_project is scan_py.scan_project
 
 
