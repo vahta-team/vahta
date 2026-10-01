@@ -485,9 +485,11 @@ pub fn plan(m: &Manifest, env: &Env, action: Action) -> Result<Plan, Refusal> {
     Ok(Plan { path, before, after })
 }
 
-/// Write a plan: back the old file up to `<file>.vahta-backup` (only if it
-/// existed), write a temp file beside it, copy the permissions, rename. Returns
-/// the backup's path when one was made.
+/// Write a plan: back the old file up to `<file>.vahta-backup`, write a temp
+/// file beside it, copy the permissions, rename. The backup is made once, from
+/// the file as it was before vahta first wrote it, and never overwritten: a
+/// later run would otherwise replace the person's original with our own
+/// intermediate version. Returns the backup's path when one was made now.
 pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
     let Some(after) = &plan.after else { return Ok(None) };
     let name = plan.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -495,8 +497,8 @@ pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
         fs::create_dir_all(dir)?;
     }
     let mut backup = None;
-    if plan.before.is_some() {
-        let b = plan.path.with_file_name(format!("{name}.vahta-backup"));
+    let b = plan.path.with_file_name(format!("{name}.vahta-backup"));
+    if plan.before.is_some() && fs::symlink_metadata(&b).is_err() {
         fs::copy(&plan.path, &b)?;
         backup = Some(b);
     }

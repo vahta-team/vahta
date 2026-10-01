@@ -283,10 +283,10 @@ fn commit_backs_up_once_and_keeps_permissions() {
     let again = plan(&m("claude"), &t.env(), Action::Install).unwrap();
     assert!(again.after.is_none());
 
-    // Uninstall backs up the installed file.
+    // Later writes keep the first backup: it is the file from before vahta.
     let u = plan(&m("claude"), &t.env(), Action::Uninstall).unwrap();
-    commit(&u).unwrap();
-    assert!(fs::read_to_string(&backup).unwrap().contains("vahta-hook"));
+    assert!(commit(&u).unwrap().is_none(), "no second backup");
+    assert_eq!(fs::read_to_string(&backup).unwrap(), before);
     assert_eq!(json(&fs::read_to_string(&path).unwrap()), json(&before));
 }
 

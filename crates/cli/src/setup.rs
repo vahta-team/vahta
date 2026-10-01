@@ -44,7 +44,8 @@ options:
 
 Setup adds one hook entry per event to the harness's user-level config, after
 the entries already there, and never touches an entry that is not ours. A file
-that is not valid JSON is refused. The old file is kept as <file>.vahta-backup.
+that is not valid JSON is refused. The file as it was before vahta first
+changed it is kept as <file>.vahta-backup; later runs leave that copy alone.
 ";
 
 struct Args {
