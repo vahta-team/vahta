@@ -1,0 +1,117 @@
+# Claude Code. Docs: https://code.claude.com/docs/en/hooks (read 2026-10-01).
+# Hook command receives one JSON object on stdin; we answer on stdout, exit 0.
+
+name = "claude"
+
+# When a payload names no tool at all, scan it like a write: the old Python
+# hook did, and "over-cover rather than miss" is the rule for a guard.
+unnamed_tool_group = "write"
+
+[config]
+format = "json"
+
+# User scope only in v1. Hooks live under the "hooks" key of settings.json.
+[config.path]
+linux = ["~/.claude/settings.json"]
+macos = ["~/.claude/settings.json"]
+windows = ["~/.claude/settings.json"]
+
+# --- events -----------------------------------------------------------------
+# `name` is Claude's own event name (written into settings.json by setup).
+# Field paths are dotted; a list means "first one present wins".
+
+[[events]]
+name = "PreToolUse"
+kind = "before_tool"
+# Shell and write tools, plus every MCP tool (named mcp__<server>__<tool>).
+# MCP is in the matcher because a credential can ride in any MCP argument.
+matcher = "Bash|Write|Edit|MultiEdit|mcp__.*"
+tool_name = "tool_name"
+tool_input = "tool_input"
+cwd = "cwd"
+
+# Same Claude event, different job: reading a file. Claude has no dedicated
+# read event, so reads arrive as PreToolUse on the Read/Grep/Glob tools.
+[[events]]
+name = "PreToolUse"
+kind = "before_read"
+matcher = "Read|Grep|Glob"
+tool_name = "tool_name"
+file_path = ["tool_input.file_path", "tool_input.path"]
+cwd = "cwd"
+
+[[events]]
+name = "UserPromptSubmit"
+kind = "prompt"
+# The docs do not pin the field down in the text we could read. `prompt` is
+# what Claude sends; `user_prompt` is accepted in case a version spells it so.
+prompt = ["prompt", "user_prompt"]
+cwd = "cwd"
+
+[[events]]
+name = "PostToolUse"
+kind = "after_tool"
+# Claude sends the result as `tool_response` (a string or a structured object
+# such as {stdout, stderr}); `tool_output` is accepted too. All strings in it
+# are scanned.
+matcher = "Bash|Read|Grep|Glob|mcp__.*"
+tool_name = "tool_name"
+tool_output = ["tool_response", "tool_output"]
+cwd = "cwd"
+
+# --- tool groups ------------------------------------------------------------
+# Group order matters: first match wins, MCP first so a server that names a
+# tool "bash" is still treated as MCP.
+
+[[tool_groups]]
+group = "mcp"
+prefixes = ["mcp__"]
+# No text_fields: MCP argument names belong to the server. A key called
+# `command` must not hide a credential in a sibling argument.
+
+# The text keys below are tried in this order and the first non-empty one is
+# scanned alone. Both shell and write share one list: Codex's apply_patch
+# carries a patch under `command`, Write carries `content`, and an unknown
+# tool shape falls back to scanning every string.
+[[tool_groups]]
+group = "shell"
+tools = ["bash", "shell", "powershell"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+[[tool_groups]]
+group = "write"
+tools = ["write", "edit", "multiedit", "apply_patch"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+[[tool_groups]]
+group = "read"
+tools = ["read", "grep", "glob"]
+
+# --- replies ----------------------------------------------------------------
+# Silence with exit 0 is allow. Placeholders: {reason} (= {agent_message}),
+# {user_message}, {agent_message}.
+
+[replies.before_tool.deny]
+style = "json"
+# permissionDecision "deny" blocks the call; the reason goes to the model.
+# systemMessage is shown to the person.
+body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "deny", permissionDecisionReason = "{agent_message}" }, systemMessage = "{user_message}" }
+
+[replies.prompt.deny]
+style = "json"
+# decision "block" stops the prompt from reaching the model and erases it from
+# context; `reason` is shown to the person only.
+body = { decision = "block", reason = "{user_message}" }
+
+[replies.after_tool.notice]
+style = "json"
+# additionalContext is appended to what the model sees; systemMessage is shown
+# to the person. We do not use decision "block": that would hide the result.
+body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
+
+# The exit-code alternative, for harnesses that cannot read JSON (not used by
+# Claude today):
+#   [replies.before_tool.deny]
+#   style = "exit_code"
+#   exit_code = 2
+#   stderr = "{reason}"

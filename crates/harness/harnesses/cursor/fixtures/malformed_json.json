@@ -1,0 +1,7 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin_raw": "not json{{{",
+  "stdout": null,
+  "exit": 0
+}

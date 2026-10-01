@@ -1,0 +1,87 @@
+# Codex. Docs: https://learn.chatgpt.com/docs/hooks (read 2026-10-01).
+# Codex shares Claude's PreToolUse / UserPromptSubmit shapes closely.
+
+name = "codex"
+unnamed_tool_group = "write"
+
+[config]
+format = "json"
+
+# $CODEX_HOME wins when set; otherwise the default ~/.codex. (Codex can also
+# read hooks from config.toml; setup uses hooks.json.)
+[config.path]
+linux = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+macos = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+windows = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
+
+[[events]]
+name = "PreToolUse"
+kind = "before_tool"
+# Codex's shell tool is canonically "Bash"; file edits go through apply_patch.
+matcher = "Bash|apply_patch|mcp__.*"
+tool_name = "tool_name"
+tool_input = "tool_input"
+cwd = "cwd"
+
+[[events]]
+name = "PreToolUse"
+kind = "before_read"
+# Codex reads files through shell commands and MCP file tools; there is no
+# dedicated Read tool name in the docs, so reads are handled in the shell
+# check. Kept for the day a read tool appears.
+matcher = "Read"
+tool_name = "tool_name"
+file_path = ["tool_input.file_path", "tool_input.path"]
+cwd = "cwd"
+
+[[events]]
+name = "UserPromptSubmit"
+kind = "prompt"
+# Documented as `prompt`; `user_prompt` accepted as a precaution.
+prompt = ["prompt", "user_prompt"]
+cwd = "cwd"
+
+[[events]]
+name = "PostToolUse"
+kind = "after_tool"
+matcher = "Bash|apply_patch|mcp__.*"
+tool_name = "tool_name"
+# Documented as `tool_response`; `tool_output` accepted as a precaution.
+tool_output = ["tool_response", "tool_output"]
+cwd = "cwd"
+
+[[tool_groups]]
+group = "mcp"
+prefixes = ["mcp__"]
+
+[[tool_groups]]
+group = "shell"
+tools = ["bash", "shell", "powershell"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+# apply_patch keeps the whole patch text under `command`.
+[[tool_groups]]
+group = "write"
+tools = ["write", "edit", "multiedit", "apply_patch"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+[[tool_groups]]
+group = "read"
+tools = ["read"]
+
+[replies.before_tool.deny]
+style = "json"
+# Same deny contract as Claude.
+body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "deny", permissionDecisionReason = "{agent_message}" }, systemMessage = "{user_message}" }
+
+[replies.prompt.deny]
+style = "json"
+body = { decision = "block", reason = "{user_message}" }
+
+[replies.after_tool.notice]
+style = "json"
+# The docs only show decision:"block" for PostToolUse, which replaces the
+# result with the reason; we do not want that. additionalContext and
+# systemMessage follow the shared Claude/Codex output contract. UNVERIFIED
+# against a live Codex: if ignored, the signal is silently lost (fail open).
+body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }

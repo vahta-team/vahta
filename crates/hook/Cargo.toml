@@ -1,0 +1,25 @@
+[package]
+name = "vahta-hook"
+version = "0.0.0"
+description = "The agent hook: reads a harness event on stdin, answers allow or deny"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "vahta-hook"
+path = "src/main.rs"
+
+[dependencies]
+vahta-harness = { path = "../harness" }
+vahta-detect = { path = "../detect" }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+vahta-harness = { path = "../harness" }

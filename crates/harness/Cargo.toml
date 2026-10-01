@@ -1,0 +1,19 @@
+[package]
+name = "vahta-harness"
+version = "0.0.0"
+description = "Per-harness manifests: how each coding agent names its hook events, what it sends and how it wants to be answered"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+vahta-detect = { path = "../detect" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "0.8", features = ["preserve_order"] }

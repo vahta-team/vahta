@@ -1,0 +1,99 @@
+# Cursor. Docs: https://cursor.com/docs/agent/hooks (read 2026-10-01).
+# Cursor's payloads are flat and its replies use snake_case.
+
+name = "cursor"
+unnamed_tool_group = "write"
+
+[config]
+format = "json"
+
+# hooks.json must carry `"version": 1`, or Cursor ignores the file.
+[config.require]
+key = "version"
+value = 1
+
+[config.path]
+linux = ["~/.cursor/hooks.json"]
+macos = ["~/.cursor/hooks.json"]
+windows = ["~/.cursor/hooks.json"]
+
+[[events]]
+name = "preToolUse"
+kind = "before_tool"
+# Shell and file writes. MCP is covered by beforeMCPExecution below.
+matcher = "Shell|Write"
+tool_name = "tool_name"
+tool_input = "tool_input"
+cwd = "cwd"
+
+# MCP calls bypass preToolUse in Cursor, so they need their own event. Same
+# payload keys; tool_name is the bare tool, and `mcp_server_name` marks it.
+[[events]]
+name = "beforeMCPExecution"
+kind = "before_tool"
+tool_name = "tool_name"
+tool_input = "tool_input"
+cwd = "cwd"
+
+# A dedicated read event whose payload carries the file's content, so the
+# hook can judge it without opening the file.
+[[events]]
+name = "beforeReadFile"
+kind = "before_read"
+file_path = "file_path"
+content = "content"
+cwd = "cwd"
+
+[[events]]
+name = "beforeSubmitPrompt"
+kind = "prompt"
+prompt = "prompt"
+cwd = "cwd"
+
+[[events]]
+name = "postToolUse"
+kind = "after_tool"
+tool_name = "tool_name"
+# The docs say the result arrives JSON-stringified in `tool_output`.
+# `tool_response` is accepted as a precaution.
+tool_output = ["tool_output", "tool_response"]
+cwd = "cwd"
+
+[[tool_groups]]
+group = "mcp"
+# Cursor names MCP tools "MCP:<tool>" on preToolUse; beforeMCPExecution sends
+# the bare tool name but always carries mcp_server_name.
+prefixes = ["mcp:", "mcp__"]
+marker_fields = ["mcp_server_name"]
+
+[[tool_groups]]
+group = "shell"
+tools = ["shell", "bash", "powershell"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+[[tool_groups]]
+group = "write"
+# Cursor's Write sends the text as `contents`.
+tools = ["write", "edit", "multiedit", "apply_patch"]
+text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "content"]
+
+[[tool_groups]]
+group = "read"
+tools = ["read"]
+
+[replies.before_tool.deny]
+style = "json"
+# `permission` is allow | deny | ask. agent_message goes to the model,
+# user_message to the person.
+body = { permission = "deny", user_message = "{user_message}", agent_message = "{agent_message}" }
+
+[replies.prompt.deny]
+style = "json"
+# continue:false stops the prompt; user_message is shown to the person.
+body = { continue = false, user_message = "{user_message}" }
+
+[replies.after_tool.notice]
+style = "json"
+# The docs list `additional_context` for postToolUse. (`updated_mcp_tool_output`
+# would rewrite an MCP result; we do not redact in v1.)
+body = { additional_context = "{agent_message}" }

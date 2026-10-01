@@ -1,0 +1,15 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "postToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "ls"
+    },
+    "tool_output": "{\"stdout\": \"hello\"}",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}
