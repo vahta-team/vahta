@@ -138,7 +138,8 @@ fn install_dry_run_status_and_uninstall() {
 
     let out = s.vahta(&["setup", "--claude"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let hook = s.hook().display().to_string();
+    // As it appears inside the JSON string: Windows backslashes are escaped.
+    let hook = s.hook().display().to_string().replace('\\', "\\\\");
     assert!(s.read(CLAUDE).contains(&format!(
         "{hook} --harness claude --event before_tool --setup 1"
     )));
