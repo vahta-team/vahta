@@ -961,9 +961,11 @@ name = "vahta-cli"
 version = "0.0.0"
 dependencies = [
  "dunce",
+ "serde_json",
  "vahta-harness",
  "vahta-scan",
  "vahta-setup",
+ "vahta-vault",
 ]
 
 [[package]]

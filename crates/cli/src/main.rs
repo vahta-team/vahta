@@ -1,7 +1,8 @@
 //! `vahta` — the command line.
 //!
-//! Two subcommands. `vahta setup` registers the hook with the coding agents
-//! (see `setup.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
+//! Four subcommands. `vahta setup` registers the hook with the coding agents
+//! (see `setup.rs`). `vahta list` and `vahta check` read the project's vault
+//! without a password (see `vault_cmds.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
 //! with `--deep` the home dotfiles, MCP configs and agent session transcripts
 //! as well. The scan's flags, output and exit codes match the
 //! Python command's, and `src/key_amnesia/scan_py.py` remains the
@@ -24,6 +25,7 @@
 //! hold one.
 
 mod setup;
+mod vault_cmds;
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -72,8 +74,10 @@ usage: vahta <command> [options]
 commands:
   scan    find plaintext secrets an agent can read in a project
   setup   register vahta-hook with Claude Code, Codex and Cursor
+  list    list the secrets in this project's vault (names only)
+  check   compare vahta.toml with the vault; for CI
 
-Run `vahta scan --help` or `vahta setup --help` for the options.
+Run `vahta <command> --help` for the options.
 ";
 
 struct ScanArgs {
@@ -174,6 +178,10 @@ pub struct Env {
     pub stderr_is_tty: bool,
     /// What `vahta setup` needs; `None` without a home directory.
     pub setup: Option<vahta_setup::Env>,
+    /// Where Vahta keeps what this machine remembers about each vault.
+    /// `VAHTA_DATA_DIR` if set (tests and unusual setups), else the platform
+    /// data directory plus `vahta`. `None` where there is neither.
+    pub data_dir: Option<PathBuf>,
 }
 
 /// `_scan_progress_printer`: stage and counts on stderr, never contents.
@@ -342,14 +350,16 @@ fn run_scan(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn
 /// The whole program, parameterised so it can be driven without a process.
 pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // Say on stderr, never stdout, when a setup we made has gone stale.
-    if args.first().map(String::as_str) != Some("setup") {
-        if let Some(setup_env) = &env.setup {
-            setup::stale_notice(setup_env, stderr);
-        }
+    if args.first().map(String::as_str) != Some("setup")
+        && let Some(setup_env) = &env.setup
+    {
+        setup::stale_notice(setup_env, stderr);
     }
     match args.first().map(String::as_str) {
         Some("setup") => setup::run(&args[1..], env.setup.as_ref(), stdout, stderr),
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
+        Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
+        Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
             EXIT_CLEAN
@@ -410,6 +420,14 @@ fn setup_env(home: Option<PathBuf>) -> Option<vahta_setup::Env> {
     })
 }
 
+/// `VAHTA_DATA_DIR`, else `<platform data dir>/vahta`.
+fn data_dir() -> Option<PathBuf> {
+    match std::env::var_os("VAHTA_DATA_DIR") {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => vahta_vault::store::LocalStore::platform_default().map(|s| s.root().to_path_buf()),
+    }
+}
+
 fn main() {
     // Non-UTF-8 arguments are lossily converted rather than panicking.
     let args: Vec<String> = std::env::args_os()
@@ -432,6 +450,7 @@ fn main() {
         home,
         appdata: std::env::var_os("APPDATA"),
         stderr_is_tty: stderr.is_terminal(),
+        data_dir: data_dir(),
     };
     let code = run(&args, &env, &mut stdout.lock(), &mut stderr.lock());
     std::process::exit(code);
