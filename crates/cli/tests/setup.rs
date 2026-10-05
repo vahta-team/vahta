@@ -127,7 +127,10 @@ fn install_dry_run_status_and_uninstall() {
     assert_eq!(out.status.code(), Some(0));
     let o = text(&out.stdout);
     assert!(
-        o.contains("--- /") && o.contains("+++ /") && o.contains("+            \"command\""),
+        o.contains("--- ")
+            && o.contains("+++ ")
+            && o.contains("settings.json")
+            && o.contains("+            \"command\""),
         "{o}"
     );
     assert_eq!(s.read(CLAUDE), before, "dry run writes nothing");

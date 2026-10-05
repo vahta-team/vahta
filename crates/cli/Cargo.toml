@@ -20,3 +20,4 @@ path = "src/main.rs"
 vahta-scan = { path = "../scan" }
 vahta-harness = { path = "../harness" }
 vahta-setup = { path = "../setup" }
+dunce = "1"

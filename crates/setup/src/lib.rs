@@ -504,7 +504,7 @@ fn read_config(path: &Path) -> Result<Option<String>, Refusal> {
 
 pub fn plan(m: &Manifest, env: &Env, action: Action) -> Result<Plan, Refusal> {
     let path = config_path(m, env).ok_or(Refusal::NoConfigPath)?;
-    let path = fs::canonicalize(&path).unwrap_or(path);
+    let path = dunce::canonicalize(&path).unwrap_or(path);
     let before = read_config(&path)?;
     let after = match action {
         Action::Install => {

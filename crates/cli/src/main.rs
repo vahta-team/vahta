@@ -275,7 +275,7 @@ fn run_scan(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn
         Some(p) => cwd.join(p),
         None => cwd.to_path_buf(),
     };
-    let root = match std::fs::canonicalize(&target) {
+    let root = match dunce::canonicalize(&target) {
         Ok(r) if r.is_dir() => r,
         Ok(_) => {
             let _ = writeln!(
@@ -308,9 +308,9 @@ fn run_scan(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn
             Err(code) => return code,
         };
         // Compared as resolved paths: the project's are under the
-        // canonicalized root (a `\\?\` path on Windows), the deep ones under
-        // the home directory as given, so the strings differ for one file.
-        let key = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+        // canonicalized root, the deep ones under the home directory as given,
+        // so the strings can differ for one file.
+        let key = |p: &str| dunce::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
         let mut seen: std::collections::HashSet<PathBuf> =
             findings.iter().map(|f| key(&f.path)).collect();
         for f in deep {
