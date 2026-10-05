@@ -133,11 +133,13 @@ fn default_exclusions_apply_and_wide_lifts_them() {
     assert_eq!(vahta(t.path(), &["scan", "--wide"]).status.code(), Some(1));
 }
 
-/// `vahta` with a fake `$HOME`, so `--deep` never looks at the real one.
+/// `vahta` with a fake home, so `--deep` never looks at the real one. Windows
+/// takes the home from `USERPROFILE`, as Python's `Path.home()` does.
 fn vahta_home(cwd: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_vahta"))
         .current_dir(cwd)
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env_remove("APPDATA")
         .args(args)
         .output()
