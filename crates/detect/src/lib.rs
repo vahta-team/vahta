@@ -17,6 +17,7 @@ pub mod classify;
 pub mod hits;
 pub mod matchers;
 pub mod primitives;
+#[rustfmt::skip]
 mod pyunicode;
 
 pub use classify::{
