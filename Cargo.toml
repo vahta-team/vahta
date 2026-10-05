@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/detect", "crates/scan", "crates/json", "crates/pyext", "crates/pyext-scan", "crates/cli", "crates/harness", "crates/hook", "crates/setup"]
+members = ["crates/detect", "crates/scan", "crates/json", "crates/pyext", "crates/pyext-scan", "crates/cli", "crates/harness", "crates/hook", "crates/setup", "crates/vault"]
 
 [workspace.package]
 edition = "2024"
@@ -18,3 +18,31 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# The vault's tests run the real 1 GiB KDF (the ka fixtures, one ignored
+# round trip) and verify hundreds of signatures; at the dev profile's opt-level
+# 0 that takes minutes. Optimising only the crypto crates keeps everything
+# else's debug build quick and debuggable.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.poly1305]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

@@ -1,0 +1,43 @@
+[package]
+name = "vahta-vault"
+version = "0.0.0"
+description = "The Vahta vault: vault.vht v1, its crypto, the local store and the ka import"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# A cheap KDF so tests do not spend a second and a gigabyte per unlock. Never
+# enabled by any shipped crate; CI fails if `vahta-cli` ever sees it.
+test-kdf = []
+
+[dependencies]
+argon2 = { version = "0.5", features = ["zeroize"] }
+blake2 = "0.10"
+chacha20poly1305 = "0.10"
+crypto_box = { version = "0.9", features = ["seal"] }
+crypto_secretbox = "0.1"
+dirs = "6"
+ed25519-dalek = { version = "2", features = ["zeroize"] }
+hkdf = "0.12"
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+rand_core = { version = "0.9", features = ["os_rng"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+subtle = "2"
+toml = "0.8"
+vahta-json = { path = "../json" }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+# The integration tests need the cheap KDF; a dev-dependency on ourselves is
+# how a feature is switched on for them only.
+vahta-vault = { path = ".", features = ["test-kdf"] }

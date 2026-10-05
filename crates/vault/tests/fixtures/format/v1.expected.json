@@ -1,0 +1,8 @@
+{
+  "phrase": "correct horse",
+  "secrets": [
+    {"name": "ALPHA", "value": "fake-one", "kind": "env", "tier": "session"},
+    {"name": "BETA", "value": "fake two lines\nx", "kind": "file:beta.txt", "tier": "each_use"},
+    {"name": "GAMMA", "value": "", "kind": "env", "tier": "session"}
+  ]
+}
