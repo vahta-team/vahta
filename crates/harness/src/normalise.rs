@@ -117,10 +117,10 @@ fn call_text(tool_input: Option<&Value>, text_fields: &[String]) -> String {
     match tool_input {
         Some(v @ Value::Object(_)) => {
             for key in text_fields {
-                if let Some(Value::Str(s)) = get(v, key) {
-                    if !strip(s).is_empty() {
-                        return s.clone();
-                    }
+                if let Some(Value::Str(s)) = get(v, key)
+                    && !strip(s).is_empty()
+                {
+                    return s.clone();
                 }
             }
             joined_strings(v)

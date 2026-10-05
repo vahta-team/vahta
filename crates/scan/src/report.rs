@@ -220,11 +220,11 @@ pub fn format_count_summary(findings: &[Finding]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for reason in REASON_LABEL_ORDER {
-        if let Some((_, n)) = buckets.iter().find(|(k, _)| k == reason) {
-            if *n > 0 {
-                parts.push(format!("{} {}", n, reason_label(reason)));
-                seen.push(reason);
-            }
+        if let Some((_, n)) = buckets.iter().find(|(k, _)| k == reason)
+            && *n > 0
+        {
+            parts.push(format!("{} {}", n, reason_label(reason)));
+            seen.push(reason);
         }
     }
     // Python sorts `buckets.items()`, i.e. by key then value; keys are unique

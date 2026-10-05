@@ -4,7 +4,7 @@ members = ["crates/detect", "crates/scan", "crates/json", "crates/pyext", "crate
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 authors = ["Vahta contributors"]
 repository = "https://github.com/vahta-team/vahta"

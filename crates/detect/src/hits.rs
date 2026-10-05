@@ -289,10 +289,10 @@ impl HitSet {
             }
             possible.push((key, pair));
         }
-        if self.prefix.is_none() {
-            if let Some(p) = extra.prefix {
-                self.prefix = Some(p);
-            }
+        if self.prefix.is_none()
+            && let Some(p) = extra.prefix
+        {
+            self.prefix = Some(p);
         }
         self.bearer_likely |= extra.bearer_likely;
         self.bearer_possible |= extra.bearer_possible;
