@@ -1038,7 +1038,6 @@ name = "vahta-vault"
 version = "0.0.0"
 dependencies = [
  "argon2",
- "blake2",
  "chacha20poly1305",
  "crypto_box",
  "crypto_secretbox",

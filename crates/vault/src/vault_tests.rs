@@ -308,3 +308,20 @@ fn an_old_format_cannot_be_downgraded_to() {
     let bytes = current::encode(&model(&v), &key).unwrap();
     assert_eq!(format::read_version(&bytes).unwrap(), CURRENT);
 }
+
+#[test]
+fn secrets_out_of_index_order_are_refused() {
+    // Editing finds a secret by its index position, so a file whose secrets
+    // list is not in index order must never load: `set` would re-seal the
+    // wrong secret under the right name.
+    let t = t();
+    let (v, _) = built(&t);
+    let mut m = model(&v);
+    m.secrets.swap(0, 1);
+    let key = owner_key(&v);
+    let bytes = encode_as(current::FORMAT, &m, &key, Actor::Owner, &key).unwrap();
+    assert!(matches!(
+        format::decode(&bytes),
+        Err(Error::Corrupt("index and secrets disagree"))
+    ));
+}

@@ -244,6 +244,8 @@ pub struct SigSection {
 }
 
 /// The body with the recipient list parsed: what the rest of the crate edits.
+/// `secrets[i]` is the secret of `index[i]`; the reader enforces it and every
+/// edit keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model {
     pub header: Header,
@@ -472,9 +474,12 @@ fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
         {
             return Err(Error::Corrupt("duplicate name"));
         }
-        let Some(s) = body.secrets.iter().find(|s| s.secret_id == e.secret_id) else {
+        // The secrets list is in index order, so an entry's secret is found by
+        // position. Writers keep this; a file that breaks it is refused.
+        let s = &body.secrets[i];
+        if s.secret_id != e.secret_id {
             return Err(Error::Corrupt("index and secrets disagree"));
-        };
+        }
         let body_len = s.ct.len().saturating_sub(TAG_LEN);
         if s.ct.len() < TAG_LEN
             || !body_len.is_power_of_two()
