@@ -1584,6 +1584,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_directory_is_not_descended_into_by_the_recursive_glob() {
         let t = Tree::new("symdir");
         let outside = Tree::new("outside");
@@ -1595,6 +1596,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_session_directory_is_followed_by_the_copilot_glob() {
         let t = Tree::new("copilot-link");
         let outside = Tree::new("copilot-out");
@@ -1619,6 +1621,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn two_names_for_one_file_yield_the_first_found() {
         let t = Tree::new("alias");
         let real = t.text(".claude/projects/a/real.jsonl", "{}");
@@ -1628,6 +1631,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_broken_symlink_is_not_a_transcript() {
         let t = Tree::new("broken");
         std::fs::create_dir_all(t.root.join(".claude/projects")).expect("mkdir");
@@ -1666,6 +1670,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn resolve_non_strict_handles_links_dots_and_missing_tails() {
         let t = Tree::new("resolve");
         t.text("real/f", "x");
@@ -1725,6 +1730,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scan_deep_drops_an_empty_dotenv_and_dedups_a_candidate_symlink() {
         let t = Tree::new("scan-deep-dedup");
         t.text(".env", "# nothing\n");
@@ -1736,6 +1742,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scan_deep_ticks_per_transcript_before_deduplicating() {
         let t = Tree::new("scan-deep-progress");
         let real = t.text(".claude/projects/a/real.jsonl", "{}\n");
