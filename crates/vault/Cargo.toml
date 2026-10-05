@@ -25,6 +25,7 @@ crypto_secretbox = "0.1"
 dirs = "6"
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 hkdf = "0.12"
+hmac = "0.12"
 hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 rand_core = { version = "0.9", features = ["os_rng"] }

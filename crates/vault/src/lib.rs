@@ -104,8 +104,19 @@ pub enum Error {
     Ka(&'static str),
     /// `vahta.toml` is malformed.
     Manifest(String),
-    /// An upgrade step needs the password and the vault was opened without.
-    UpgradeNeedsPassword,
+    /// An upgrade step rewrites the recovery slot and the paper key has not
+    /// been given: the vault reads, but cannot be saved until
+    /// `Vault::provide_recovery_key`.
+    UpgradeNeedsRecoveryKey,
+    /// A membership certificate is valid but its issuer may not have issued it
+    /// (an admin adding an admin, an admin added by an admin adding anyone).
+    MembershipNotAllowed,
+    /// The opener's role does not allow this (a runner writing, an editor
+    /// changing membership).
+    NotPermitted,
+    /// The local store's state file does not pass its MAC: edited, or not
+    /// written by this opener. Never reset silently.
+    StoreTampered,
 }
 
 impl Error {
@@ -161,9 +172,16 @@ impl fmt::Display for Error {
             Error::ImportCollision(name) => write!(f, "the vault already has a secret named {name}"),
             Error::Ka(what) => write!(f, "cannot read the ka vault ({what})"),
             Error::Manifest(msg) => f.write_str(msg),
-            Error::UpgradeNeedsPassword => {
-                f.write_str("upgrading this vault needs its password, not only the recovery key")
+            Error::UpgradeNeedsRecoveryKey => f.write_str(
+                "this vault's upgrade needs the recovery key; give it before saving",
+            ),
+            Error::MembershipNotAllowed => {
+                f.write_str("a member was added by someone who may not add that member")
             }
+            Error::NotPermitted => f.write_str("this recipient's role does not allow that"),
+            Error::StoreTampered => f.write_str(
+                "this machine's record of the vault failed its integrity check; refusing to reset it",
+            ),
         }
     }
 }

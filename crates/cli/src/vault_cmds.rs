@@ -99,7 +99,7 @@ fn peek_verified(vault: &Path, store: &LocalStore) -> Result<(Peek, Verification
     let peek = Vault::peek(vault).map_err(|e| e.to_string())?;
     // A swapped owner and a rolled-back file are different events and the
     // library's messages say which; they are hard errors, not warnings.
-    let verified = peek.verified(store).map_err(|e| e.to_string())?;
+    let verified = peek.verified(store).map_err(|e| e.to_string())?.status;
     Ok((peek, verified))
 }
 

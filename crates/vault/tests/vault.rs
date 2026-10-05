@@ -281,10 +281,11 @@ fn rollback_to_an_older_generation_is_refused() {
 
     let err = Vault::unlock_password(&e.path, PW, &e.store).unwrap_err();
     assert!(matches!(err, Error::RolledBack { found: 3, seen: 5 }));
-    // The refusal is cheap: it does not need the right password.
+    // The generation is checked against an authenticated state, so only
+    // after the unlock: a wrong password is just a wrong password.
     assert!(matches!(
         Vault::unlock_password(&e.path, b"incorrect horse", &e.store),
-        Err(Error::RolledBack { .. })
+        Err(Error::Unlock)
     ));
     let peek = Vault::peek(&e.path).unwrap();
     assert!(matches!(
@@ -307,11 +308,16 @@ fn peek_is_unpinned_until_this_machine_unlocks() {
     assert!(!peek.upgrade_pending);
 
     // The creator saved, which pinned it; a different machine's store is empty.
-    assert_eq!(peek.verified(&e.store).unwrap(), Verification::Pinned);
+    assert_eq!(
+        peek.verified(&e.store).unwrap().status,
+        Verification::Pinned
+    );
     let other = LocalStore::new(e._dir.path().join("other-machine"));
-    assert_eq!(peek.verified(&other).unwrap(), Verification::Unpinned);
+    let v = peek.verified(&other).unwrap();
+    assert_eq!(v.status, Verification::Unpinned);
+    assert!(!v.mac_checked);
     Vault::unlock_password(&e.path, PW, &other).unwrap();
-    assert_eq!(peek.verified(&other).unwrap(), Verification::Pinned);
+    assert_eq!(peek.verified(&other).unwrap().status, Verification::Pinned);
 }
 
 #[test]
@@ -341,17 +347,22 @@ fn a_recipient_sees_only_what_it_was_granted() {
     assert!(matches!(r.get("NOPE"), Err(Error::NotFound(_))));
     // The names are in the signed index for anyone to see.
     assert_eq!(r.entries().len(), 2);
-    // A recipient cannot write: it holds no vault key.
+    // A runner cannot write.
     assert!(matches!(
         r.set("X", b"x", Kind::Env, Tier::Session),
+        Err(Error::NotPermitted)
+    ));
+    assert!(matches!(r.save(&e.path, &other), Err(Error::NotPermitted)));
+    assert!(matches!(
+        r.change_password(b"x", KdfParams::TEST),
         Err(Error::NotOwner)
     ));
-    assert!(matches!(r.save(&e.path, &other), Err(Error::NotOwner)));
 
     // Someone else's keys do not open it.
     let stranger = RecipientSecret::generate().unwrap();
+    let fresh = LocalStore::new(e._dir.path().join("stranger-machine"));
     assert!(matches!(
-        Vault::open_as_recipient(&e.path, &id, &stranger, &other),
+        Vault::open_as_recipient(&e.path, &id, &stranger, &fresh),
         Err(Error::Unlock)
     ));
 }
@@ -569,4 +580,360 @@ fn real_kdf_round_trip_and_timing() {
     let v = Vault::unlock_password(&e.path, PW, &e.store).unwrap();
     eprintln!("real-KDF unlock took {:?}", start.elapsed());
     assert_eq!(v.get("A").unwrap().expose(), b"fake-one");
+}
+
+// --- Admins and editors write ------------------------------------------------
+
+fn state_path(e: &Env, id: &[u8; 16], file: &str) -> PathBuf {
+    e.store
+        .root()
+        .join("vaults")
+        .join(vahta_vault::hex_encode(id))
+        .join(file)
+}
+
+struct Member {
+    id: [u8; 16],
+    keys: RecipientSecret,
+    store: LocalStore,
+}
+
+impl Member {
+    fn open(&self, e: &Env) -> Vault {
+        Vault::open_as_recipient(&e.path, &self.id, &self.keys, &self.store).unwrap()
+    }
+}
+
+fn add(v: &mut Vault, e: &Env, name: &str, role: Role) -> Member {
+    let keys = RecipientSecret::generate().unwrap();
+    let id = v
+        .add_recipient(name, RecipientKind::Person, role, &keys.public().unwrap())
+        .unwrap();
+    Member {
+        id,
+        keys,
+        store: LocalStore::new(e._dir.path().join(format!("store-{name}"))),
+    }
+}
+
+#[test]
+fn an_editor_adds_a_secret_and_the_owner_reads_it() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let editor = add(&mut v, &e, "ed", Role::Editor);
+    v.set("OWN", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.save(&e.path, &e.store).unwrap();
+
+    let mut ed = editor.open(&e);
+    ed.set("FROM_EDITOR", b"fake-two", Kind::Env, Tier::EachUse)
+        .unwrap();
+    ed.save(&e.path, &editor.store).unwrap();
+    let peek = Vault::peek(&e.path).unwrap();
+    assert_eq!(peek.signer, vahta_vault::Actor::Recipient(editor.id));
+    assert_eq!(peek.generation, 3);
+
+    let owner = reopen(&e);
+    assert_eq!(owner.get("FROM_EDITOR").unwrap().expose(), b"fake-two");
+    let entry = owner
+        .entries()
+        .iter()
+        .find(|x| x.name == "FROM_EDITOR")
+        .unwrap();
+    assert_eq!(entry.changed_by, vahta_vault::Actor::Recipient(editor.id));
+    assert_eq!(entry.tier, Tier::EachUse);
+    // The editor holds what it wrote, and the owner can keep editing.
+    assert_eq!(
+        editor.open(&e).get("FROM_EDITOR").unwrap().expose(),
+        b"fake-two"
+    );
+    let mut owner = owner;
+    owner
+        .set("OWN", b"fake-three", Kind::Env, Tier::Session)
+        .unwrap();
+    owner.save(&e.path, &e.store).unwrap();
+}
+
+#[test]
+fn an_editor_cannot_read_or_replace_what_it_was_not_granted() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let editor = add(&mut v, &e, "ed", Role::Editor);
+    let runner = add(&mut v, &e, "run", Role::Runner);
+    v.set("MINE", b"fake-one", Kind::Env, Tier::Session)
+        .unwrap();
+    v.set("OTHERS", b"fake-two", Kind::Env, Tier::Session)
+        .unwrap();
+    v.grant("MINE", &editor.id).unwrap();
+    v.grant("OTHERS", &runner.id).unwrap();
+    v.save(&e.path, &e.store).unwrap();
+
+    let mut ed = editor.open(&e);
+    assert!(matches!(ed.get("OTHERS"), Err(Error::NoAccess)));
+    assert!(matches!(
+        ed.set("OTHERS", b"x", Kind::Env, Tier::Session),
+        Err(Error::NoAccess)
+    ));
+    assert!(matches!(
+        ed.grant("OTHERS", &editor.id),
+        Err(Error::NoAccess)
+    ));
+    assert!(matches!(
+        ed.revoke("OTHERS", &runner.id),
+        Err(Error::NoAccess)
+    ));
+    ed.set("MINE", b"fake-new", Kind::Env, Tier::Session)
+        .unwrap();
+    ed.set_tier("MINE", Tier::EachUse).unwrap();
+    ed.save(&e.path, &editor.store).unwrap();
+
+    // The secret it could not read is untouched: its holders still read it.
+    assert_eq!(runner.open(&e).get("OTHERS").unwrap().expose(), b"fake-two");
+    assert_eq!(reopen(&e).get("OTHERS").unwrap().expose(), b"fake-two");
+    assert_eq!(reopen(&e).get("MINE").unwrap().expose(), b"fake-new");
+}
+
+#[test]
+fn an_editor_grants_and_revokes_what_it_can_read() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let editor = add(&mut v, &e, "ed", Role::Editor);
+    let runner = add(&mut v, &e, "run", Role::Runner);
+    v.set("MINE", b"fake-one", Kind::Env, Tier::Session)
+        .unwrap();
+    v.grant("MINE", &editor.id).unwrap();
+    v.save(&e.path, &e.store).unwrap();
+
+    let mut ed = editor.open(&e);
+    ed.grant("MINE", &runner.id).unwrap();
+    ed.save(&e.path, &editor.store).unwrap();
+    assert_eq!(runner.open(&e).get("MINE").unwrap().expose(), b"fake-one");
+
+    let mut ed = editor.open(&e);
+    ed.revoke("MINE", &runner.id).unwrap();
+    ed.remove("MINE").unwrap();
+    ed.save(&e.path, &editor.store).unwrap();
+    assert!(reopen(&e).get("MINE").is_err());
+}
+
+#[test]
+fn a_runner_cannot_save_and_an_editor_cannot_change_membership() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let runner = add(&mut v, &e, "run", Role::Runner);
+    let editor = add(&mut v, &e, "ed", Role::Editor);
+    v.save(&e.path, &e.store).unwrap();
+    let public = RecipientSecret::generate().unwrap().public().unwrap();
+
+    let mut r = runner.open(&e);
+    assert!(matches!(
+        r.set("X", b"x", Kind::Env, Tier::Session),
+        Err(Error::NotPermitted)
+    ));
+    assert!(matches!(
+        r.save(&e.path, &runner.store),
+        Err(Error::NotPermitted)
+    ));
+
+    let mut ed = editor.open(&e);
+    assert!(matches!(
+        ed.add_recipient("new", RecipientKind::Person, Role::Runner, &public),
+        Err(Error::NotPermitted)
+    ));
+    assert!(matches!(
+        ed.remove_recipient(&runner.id),
+        Err(Error::NotPermitted)
+    ));
+}
+
+#[test]
+fn an_admin_adds_a_runner_who_reads_a_granted_secret() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let admin = add(&mut v, &e, "adm", Role::Admin);
+    v.set("SHARED", b"fake-one", Kind::Env, Tier::Session)
+        .unwrap();
+    v.grant("SHARED", &admin.id).unwrap();
+    v.save(&e.path, &e.store).unwrap();
+
+    let mut ad = admin.open(&e);
+    let runner = add(&mut ad, &e, "run", Role::Runner);
+    ad.grant("SHARED", &runner.id).unwrap();
+    ad.save(&e.path, &admin.store).unwrap();
+
+    assert_eq!(runner.open(&e).get("SHARED").unwrap().expose(), b"fake-one");
+    // The file the admin signed verifies, and the owner still opens it.
+    let owner = reopen(&e);
+    let r = owner
+        .recipients()
+        .iter()
+        .find(|r| r.id == runner.id)
+        .unwrap();
+    assert_eq!(r.added_by, vahta_vault::Actor::Recipient(admin.id));
+
+    // The admin removes the runner again: the entry just disappears.
+    let mut ad = admin.open(&e);
+    let rotate = ad.remove_recipient(&runner.id).unwrap();
+    assert_eq!(rotate, vec!["SHARED".to_string()]);
+    ad.save(&e.path, &admin.store).unwrap();
+    assert!(matches!(
+        Vault::open_as_recipient(&e.path, &runner.id, &runner.keys, &runner.store),
+        Err(Error::Unlock)
+    ));
+    assert_eq!(reopen(&e).get("SHARED").unwrap().expose(), b"fake-one");
+}
+
+#[test]
+fn an_admin_cannot_add_or_remove_an_admin_only_the_owner_does() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let admin = add(&mut v, &e, "adm", Role::Admin);
+    let other = add(&mut v, &e, "adm2", Role::Admin);
+    v.save(&e.path, &e.store).unwrap();
+    let public = RecipientSecret::generate().unwrap().public().unwrap();
+
+    let mut ad = admin.open(&e);
+    assert!(matches!(
+        ad.add_recipient("third", RecipientKind::Person, Role::Admin, &public),
+        Err(Error::NotPermitted)
+    ));
+    assert!(matches!(
+        ad.remove_recipient(&other.id),
+        Err(Error::NotPermitted)
+    ));
+
+    // The owner removes an admin; the members it added are re-certified and
+    // the file still verifies.
+    let mut ad = admin.open(&e);
+    let runner = add(&mut ad, &e, "run", Role::Runner);
+    ad.save(&e.path, &admin.store).unwrap();
+    let mut owner = reopen(&e);
+    owner.remove_recipient(&admin.id).unwrap();
+    owner.save(&e.path, &e.store).unwrap();
+    let owner = reopen(&e);
+    let r = owner
+        .recipients()
+        .iter()
+        .find(|r| r.id == runner.id)
+        .unwrap();
+    assert_eq!(r.added_by, vahta_vault::Actor::Owner);
+    assert!(Vault::peek(&e.path).is_ok());
+}
+
+#[test]
+fn a_stale_recipient_save_is_a_conflict_too() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let editor = add(&mut v, &e, "ed", Role::Editor);
+    v.save(&e.path, &e.store).unwrap();
+    let mut ed = editor.open(&e);
+    ed.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    let mut owner = reopen(&e);
+    owner
+        .set("B", b"fake-two", Kind::Env, Tier::Session)
+        .unwrap();
+    owner.save(&e.path, &e.store).unwrap();
+    assert!(matches!(
+        ed.save(&e.path, &editor.store),
+        Err(Error::Conflict)
+    ));
+}
+
+// --- The authenticated local store ---------------------------------------------
+
+#[test]
+fn an_edited_state_file_is_refused_on_unlock() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.save(&e.path, &e.store).unwrap();
+    let id = v.vault_id();
+    let state = state_path(&e, &id, "state");
+    let good = std::fs::read_to_string(&state).unwrap();
+    assert!(good.contains("max_generation = 2"));
+
+    // Raised, as for a denial of service; lowered, as before a rollback.
+    for edited in ["max_generation = 9", "max_generation = 1"] {
+        std::fs::write(&state, good.replace("max_generation = 2", edited)).unwrap();
+        assert!(matches!(
+            Vault::unlock_password(&e.path, PW, &e.store),
+            Err(Error::StoreTampered)
+        ));
+    }
+    // A save refuses to build on a tampered state too.
+    std::fs::write(&state, &good).unwrap();
+    let mut ok = reopen(&e);
+    std::fs::write(
+        &state,
+        good.replace("max_generation = 2", "max_generation = 0"),
+    )
+    .unwrap();
+    ok.set("B", b"fake-two", Kind::Env, Tier::Session).unwrap();
+    assert!(matches!(
+        ok.save(&e.path, &e.store),
+        Err(Error::StoreTampered)
+    ));
+}
+
+#[test]
+fn a_missing_state_is_a_first_open_not_an_error() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    assert!(v.first_open_on_this_machine());
+    v.save(&e.path, &e.store).unwrap();
+    assert!(!reopen(&e).first_open_on_this_machine());
+
+    std::fs::remove_file(state_path(&e, &v.vault_id(), "state")).unwrap();
+    let again = reopen(&e);
+    assert!(again.first_open_on_this_machine());
+    // The open wrote the state back: the next one is ordinary.
+    assert!(!reopen(&e).first_open_on_this_machine());
+}
+
+#[test]
+fn a_recipient_keeps_its_own_state_file() {
+    let e = env();
+    let (mut v, _) = new_vault(&e);
+    let editor = add(&mut v, &e, "ed", Role::Editor);
+    v.save(&e.path, &e.store).unwrap();
+    let id = v.vault_id();
+
+    let mut ed = editor.open(&e);
+    assert!(ed.first_open_on_this_machine());
+    ed.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    ed.save(&e.path, &editor.store).unwrap();
+    let again = editor.open(&e);
+    assert!(!again.first_open_on_this_machine());
+    let own = editor
+        .store
+        .root()
+        .join("vaults")
+        .join(vahta_vault::hex_encode(&id))
+        .join(format!("state-{}", vahta_vault::hex_encode(&editor.id)));
+    assert!(own.is_file());
+    assert!(!own.with_file_name("state").exists());
+
+    // Its state is MAC'd under its own key: edited, it is refused.
+    let text = std::fs::read_to_string(&own).unwrap();
+    let edited: String = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("max_generation") {
+                "max_generation = 99"
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&own, edited).unwrap();
+    assert!(matches!(
+        Vault::open_as_recipient(&e.path, &editor.id, &editor.keys, &editor.store),
+        Err(Error::StoreTampered)
+    ));
+    // The owner's state is a different file and unaffected.
+    assert!(!reopen(&e).first_open_on_this_machine());
+    // A recipient's save never pins a new owner: the pin is the file's own.
+    let peek = Vault::peek(&e.path).unwrap();
+    let state = std::fs::read_to_string(state_path(&e, &id, "state")).unwrap();
+    assert!(state.contains(&vahta_vault::hex_encode(&peek.owner_sign_pk)));
 }

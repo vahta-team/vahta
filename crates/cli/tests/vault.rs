@@ -217,7 +217,14 @@ fn a_swapped_owner_is_a_hard_error() {
     // would after the file was replaced by one signed by someone else.
     let id = Vault::peek(&s.vault_path()).unwrap().vault_id;
     fs::remove_dir_all(s.data()).unwrap();
-    s.store().record(&id, &[9; 32], 1).unwrap();
+    s.store()
+        .record(
+            &id,
+            &vahta_vault::store::StateKey::owner(&[1; 32]),
+            &[9; 32],
+            1,
+        )
+        .unwrap();
     let out = s.run(&["list"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).is_empty());

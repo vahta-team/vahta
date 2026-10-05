@@ -30,7 +30,7 @@ fn t() -> T {
 fn unlocked(v: &Vault) -> &current::Unlocked {
     match &v.access {
         Access::Owner(u) => u,
-        Access::Recipient(_) => unreachable!("tests build owner vaults"),
+        _ => unreachable!("tests build owner vaults"),
     }
 }
 
@@ -66,7 +66,7 @@ fn built(t: &T) -> (Vault, [(Role, [u8; 16], RecipientSecret); 3]) {
 }
 
 fn signed_by(v: &Vault, signer: Actor, key: &SigningKey) -> Vec<u8> {
-    encode_as(current::FORMAT, &model(v), &owner_key(v), signer, key).unwrap()
+    encode_as(current::FORMAT, &model(v), signer, key).unwrap()
 }
 
 #[test]
@@ -124,14 +124,7 @@ fn another_owners_key_in_the_same_vault_is_owner_changed() {
     let mut m = model(&other);
     m.header.vault_id = v.vault_id();
     m.header.generation = 99;
-    let bytes = encode_as(
-        current::FORMAT,
-        &m,
-        &owner_key(&other),
-        Actor::Owner,
-        &owner_key(&other),
-    )
-    .unwrap();
+    let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &owner_key(&other)).unwrap();
     std::fs::write(&t.path, &bytes).unwrap();
     assert!(matches!(
         Vault::unlock_password(&t.path, b"other horse", &t.store),
@@ -156,7 +149,7 @@ fn a_kdf_below_the_floor_in_the_file_is_refused_before_it_runs() {
         *m_kib = 4; // under the (test) floor of 8
     }
     let key = owner_key(&v);
-    let bytes = encode_as(current::FORMAT, &m, &key, Actor::Owner, &key).unwrap();
+    let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
     std::fs::write(&t.path, bytes).unwrap();
     assert!(matches!(
         Vault::unlock_password(&t.path, PW, &t.store),
@@ -171,7 +164,7 @@ fn a_kdf_below_the_floor_in_the_file_is_refused_before_it_runs() {
     {
         *m_kib = u32::MAX;
     }
-    let bytes = encode_as(current::FORMAT, &m, &key, Actor::Owner, &key).unwrap();
+    let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
     assert!(matches!(Vault::peek_bytes(&bytes), Err(Error::Corrupt(_))));
 }
 
@@ -180,7 +173,7 @@ fn the_aead_catches_what_a_resigned_file_hides_from_the_signature() {
     let t = t();
     let (v, _) = built(&t);
     let key = owner_key(&v);
-    let resign = |m: &Model| encode_as(current::FORMAT, m, &key, Actor::Owner, &key).unwrap();
+    let resign = |m: &Model| encode_as(current::FORMAT, m, Actor::Owner, &key).unwrap();
 
     // A changed ciphertext byte, under a valid signature.
     let mut m = model(&v);
@@ -230,7 +223,7 @@ fn an_old_wrap_cannot_open_the_new_ciphertext_after_a_revoke() {
     assert!(m.secrets[0].wraps.is_empty());
     m.secrets[0].wraps.push(old_wrap);
     let key = owner_key(&v);
-    let bytes = encode_as(current::FORMAT, &m, &key, Actor::Owner, &key).unwrap();
+    let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
     std::fs::write(&t.path, bytes).unwrap();
     let ci = LocalStore::new(t._dir.path().join("ci"));
     assert!(matches!(
@@ -319,9 +312,285 @@ fn secrets_out_of_index_order_are_refused() {
     let mut m = model(&v);
     m.secrets.swap(0, 1);
     let key = owner_key(&v);
-    let bytes = encode_as(current::FORMAT, &m, &key, Actor::Owner, &key).unwrap();
+    let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
     assert!(matches!(
         format::decode(&bytes),
         Err(Error::Corrupt("index and secrets disagree"))
     ));
+}
+
+// --- Membership certificates and writers ------------------------------------
+
+fn resigned(v: &Vault, m: &Model) -> Vec<u8> {
+    encode_as(current::FORMAT, m, Actor::Owner, &owner_key(v)).unwrap()
+}
+
+fn entry(
+    v: &Vault,
+    name: &str,
+    role: Role,
+    added_by: Actor,
+    issuer: &SigningKey,
+) -> current::Recipient {
+    let keys = RecipientSecret::generate().unwrap().public().unwrap();
+    let mut r = current::Recipient {
+        id: crypto::random::<16>().unwrap(),
+        name: name.to_string(),
+        kind: RecipientKind::Person,
+        role,
+        enc_pk: keys.enc_pk,
+        sign_pk: keys.sign_pk,
+        added: 1,
+        added_by,
+        cert: current::Sig([0; 64]),
+    };
+    r.certify(&v.vault_id(), issuer);
+    r
+}
+
+#[test]
+fn an_admin_added_admin_and_other_misissued_certificates_are_refused() {
+    let t = t();
+    let (v, [(_, adm, adm_k), (_, edit, edit_k), _]) = built(&t);
+    let sk = |k: &RecipientSecret| crypto::signing_key(k.sign_sk());
+
+    // An admin certifying an admin.
+    let mut m = model(&v);
+    m.recipients.push(entry(
+        &v,
+        "bad",
+        Role::Admin,
+        Actor::Recipient(adm),
+        &sk(&adm_k),
+    ));
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::MembershipNotAllowed)
+    ));
+
+    // An editor certifying anyone.
+    let mut m = model(&v);
+    m.recipients.push(entry(
+        &v,
+        "bad",
+        Role::Runner,
+        Actor::Recipient(edit),
+        &sk(&edit_k),
+    ));
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::MembershipNotAllowed)
+    ));
+
+    // An issuer that is not in the file at all.
+    let mut m = model(&v);
+    m.recipients.push(entry(
+        &v,
+        "bad",
+        Role::Runner,
+        Actor::Recipient([9; 16]),
+        &sk(&adm_k),
+    ));
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::MembershipNotAllowed)
+    ));
+
+    // An admin that an admin added cannot certify an editor: delegation is one
+    // level deep. (Its own entry is already refused; this is the second line.)
+    let mut m = model(&v);
+    let deep = entry(&v, "deep", Role::Admin, Actor::Recipient(adm), &sk(&adm_k));
+    let deep_key = RecipientSecret::generate().unwrap();
+    let mut deep = deep;
+    deep.sign_pk = deep_key.public().unwrap().sign_pk;
+    deep.certify(&v.vault_id(), &sk(&adm_k));
+    let deep_id = deep.id;
+    m.recipients.push(deep);
+    m.recipients.push(entry(
+        &v,
+        "under",
+        Role::Editor,
+        Actor::Recipient(deep_id),
+        &sk(&deep_key),
+    ));
+    assert!(Vault::peek_bytes(&resigned(&v, &m)).is_err());
+}
+
+#[test]
+fn a_forged_certificate_is_refused() {
+    let t = t();
+    let (v, [_, _, (_, _run, run_k)]) = built(&t);
+
+    // A flipped byte in a certificate.
+    let mut m = model(&v);
+    m.recipients[0].cert.0[0] ^= 1;
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::BadSignature)
+    ));
+
+    // An entry claiming the owner added it, signed by someone else.
+    let mut m = model(&v);
+    m.recipients.push(entry(
+        &v,
+        "forged",
+        Role::Runner,
+        Actor::Owner,
+        &crypto::signing_key(run_k.sign_sk()),
+    ));
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::BadSignature)
+    ));
+
+    // A changed field breaks the certificate over it.
+    let mut m = model(&v);
+    m.recipients[2].role = Role::Admin;
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::BadSignature)
+    ));
+    // An entry certified for another vault is not valid here.
+    let mut m = model(&v);
+    let other = entry(&v, "moved", Role::Runner, Actor::Owner, &owner_key(&v));
+    m.recipients
+        .push(entry(&v, "x", Role::Runner, Actor::Owner, &owner_key(&v)));
+    let last = m.recipients.len() - 1;
+    m.recipients[last].cert = other.cert;
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v, &m)),
+        Err(Error::BadSignature)
+    ));
+}
+
+fn sealed_of(path: &Path, name: &str) -> current::Sealed {
+    let bytes = std::fs::read(path).unwrap();
+    let loaded = format::decode(&bytes).unwrap();
+    let m = loaded.model();
+    let i = m.index.iter().position(|e| e.name == name).unwrap();
+    m.secrets[i].clone()
+}
+
+#[test]
+fn an_editors_edits_leave_other_secrets_byte_identical() {
+    let t = t();
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    let keys = RecipientSecret::generate().unwrap();
+    let id = v
+        .add_recipient(
+            "ed",
+            RecipientKind::Person,
+            Role::Editor,
+            &keys.public().unwrap(),
+        )
+        .unwrap();
+    v.set("MINE", b"fake-one", Kind::Env, Tier::Session)
+        .unwrap();
+    v.set("OTHERS", b"fake-two", Kind::Env, Tier::Session)
+        .unwrap();
+    v.grant("MINE", &id).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    let before = sealed_of(&t.path, "OTHERS");
+
+    let ed_store = LocalStore::new(t._dir.path().join("ed"));
+    let mut ed = Vault::open_as_recipient(&t.path, &id, &keys, &ed_store).unwrap();
+    ed.set("MINE", b"fake-new", Kind::Env, Tier::Session)
+        .unwrap();
+    ed.set("ADDED", b"fake-three", Kind::Env, Tier::Session)
+        .unwrap();
+    ed.save(&t.path, &ed_store).unwrap();
+
+    assert_eq!(sealed_of(&t.path, "OTHERS"), before);
+    assert_ne!(
+        sealed_of(&t.path, "MINE").ct,
+        sealed_of(&t.path, "OTHERS").ct
+    );
+    // A new secret from an editor is wrapped for the owner and the editor only.
+    let added = sealed_of(&t.path, "ADDED");
+    assert_eq!(added.wraps.len(), 1);
+    assert_eq!(added.wraps[0].recipient_id, id);
+}
+
+// --- Slots and the recovery key across an upgrade ------------------------------
+
+fn slots_of(path: &Path) -> Vec<current::Slot> {
+    format::decode(&std::fs::read(path).unwrap())
+        .unwrap()
+        .model()
+        .slots
+        .clone()
+}
+
+#[test]
+fn slots_are_copied_verbatim_across_an_upgrade_and_need_no_key() {
+    let t = t();
+    let key = Vault::write_v0_for_test(&t.path, PW, &V0_ITEMS).unwrap();
+    let before = slots_of(&t.path);
+    assert_eq!(before.len(), 2);
+
+    let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert!(v.upgrade_pending() && !v.blocked_on_recovery_key());
+    v.save(&t.path, &t.store).unwrap();
+
+    // Format 1 now, the same two slots byte for byte, and the old recovery
+    // slot still opens the vault.
+    assert_eq!(Vault::peek(&t.path).unwrap().format, CURRENT);
+    assert_eq!(slots_of(&t.path), before);
+    let by_key = Vault::unlock_recovery(&t.path, &key, &t.store).unwrap();
+    assert_eq!(by_key.get("ALPHA").unwrap().expose(), b"fake-one");
+}
+
+#[test]
+fn a_step_that_rewrites_the_recovery_slot_needs_the_paper_key() {
+    let _rewrite = format::testing::rewrite_recovery_slot();
+    let t = t();
+    let key = Vault::write_v0_for_test(&t.path, PW, &V0_ITEMS).unwrap();
+    let original = std::fs::read(&t.path).unwrap();
+    let before = slots_of(&t.path);
+
+    // Opened with the password: open and readable, but blocked.
+    let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert!(v.upgrade_pending() && v.blocked_on_recovery_key());
+    assert_eq!(v.get("BETA").unwrap().expose(), b"fake two lines\nx");
+    assert_eq!(v.entries().len(), 2);
+    assert!(matches!(
+        v.set("NEW", b"x", Kind::Env, Tier::Session),
+        Err(Error::UpgradeNeedsRecoveryKey)
+    ));
+    assert!(matches!(
+        v.save(&t.path, &t.store),
+        Err(Error::UpgradeNeedsRecoveryKey)
+    ));
+    assert!(matches!(
+        v.change_password(b"x", KdfParams::TEST),
+        Err(Error::UpgradeNeedsRecoveryKey)
+    ));
+    // Nothing was written.
+    assert_eq!(std::fs::read(&t.path).unwrap(), original);
+
+    // A key that does not open the recovery slot cannot replace it.
+    let (_, wrong) = Vault::create(PW, KdfParams::TEST).unwrap();
+    assert!(matches!(v.provide_recovery_key(&wrong), Err(Error::Unlock)));
+    assert!(v.blocked_on_recovery_key());
+
+    v.provide_recovery_key(&key).unwrap();
+    assert!(!v.blocked_on_recovery_key() && v.upgrade_pending());
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(Vault::peek(&t.path).unwrap().format, CURRENT);
+    assert_ne!(slots_of(&t.path), before);
+    assert_eq!(std::fs::read(backup_path(&t.path, 0)).unwrap(), original);
+    // The rewritten recovery slot still opens with the same paper key.
+    let again = Vault::unlock_recovery(&t.path, &key, &t.store).unwrap();
+    assert_eq!(again.get("ALPHA").unwrap().expose(), b"fake-one");
+}
+
+#[test]
+fn unlocking_with_the_recovery_key_is_never_blocked() {
+    let _rewrite = format::testing::rewrite_recovery_slot();
+    let t = t();
+    let key = Vault::write_v0_for_test(&t.path, PW, &V0_ITEMS).unwrap();
+    let mut v = Vault::unlock_recovery(&t.path, &key, &t.store).unwrap();
+    assert!(v.upgrade_pending() && !v.blocked_on_recovery_key());
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(Vault::peek(&t.path).unwrap().format, CURRENT);
 }

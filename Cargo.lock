@@ -1044,6 +1044,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "hkdf",
+ "hmac",
  "hpke",
  "postcard",
  "rand_core 0.9.5",

@@ -1,29 +1,38 @@
 //! The operations on a vault: create, peek, unlock, edit, save.
 //!
-//! A [`Vault`] is either opened by its owner (password or recovery key), who
-//! holds the vault key and can do everything, or by a recipient, who gets a
-//! read-only view of the secrets it holds a wrap for. In v1 only the owner
-//! writes: a new secret needs a wrap under a key derived from the vault key,
-//! which a recipient does not have. The signature rules still accept an admin
-//! or editor signer, because the format has to be able to carry them once a
-//! cloud peer writes; here nothing produces one.
+//! A [`Vault`] is opened by its owner (password or recovery key), who holds the
+//! vault key and can do everything, or by a recipient. A recipient with the
+//! role Admin or Editor can write: a new secret is sealed for the owner from
+//! the public key in the file, and for the writer itself; the file is signed by
+//! that recipient. A Runner only reads. Membership has one more rule: an Admin
+//! added by the owner may add and remove Editors and Runners; only the owner
+//! adds or removes Admins. A recipient sees and edits only the secrets it holds
+//! a wrap for, and leaves every other secret's bytes exactly as they were.
 //!
 //! `save` is the only way a vault reaches disk. It checks that the file is
 //! still the one that was loaded, makes the one-time backup if this save is an
 //! upgrade, bumps the generation, signs, writes atomically and tells the local
 //! store. Hold a [`VaultLock`] around load, modify and save when more than one
 //! process may write; `save_locked` takes the lock you already hold.
+//!
+//! An owner unlock of an older format upgrades the vault in memory. If the
+//! upgrade needs the paper key (a step rewrites the recovery slot) and the
+//! vault was opened with the password, the vault is open and readable but
+//! *blocked*: every write, including `save`, refuses with
+//! [`Error::UpgradeNeedsRecoveryKey`] until [`Vault::provide_recovery_key`].
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use ed25519_dalek::SigningKey;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, KdfParams};
 use crate::format::current::{self, Actor, Entry, Kind, Recipient, RecipientKind, Role, Tier};
-use crate::format::{self, CURRENT, Loaded, OwnerAccess};
-use crate::store::LocalStore;
+use crate::format::upgrade::{self, AnyUnlocked};
+use crate::format::{self, CURRENT, Loaded, OwnerAccess, OwnerState};
+use crate::store::{LocalStore, StateFile, StateKey};
 use crate::write::{VaultLock, write_atomic};
 use crate::{Error, RecoveryKey, SecretValue, now, valid_name};
 
@@ -81,15 +90,24 @@ impl std::fmt::Debug for RecipientSecret {
     }
 }
 
-/// What a signature check against this machine's store says.
+/// What a comparison with this machine's store says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verification {
     /// The owner key matches the one pinned here and the generation is not
     /// lower than any seen.
     Pinned,
-    /// This machine has not unlocked the vault yet, so there is nothing to
+    /// This machine has not opened the vault yet, so there is nothing to
     /// compare the owner key with. The file is self-consistent, nothing more.
     Unpinned,
+}
+
+/// [`Verification`] plus how far it can be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verified {
+    pub status: Verification,
+    /// Always false for a peek: the state's MAC needs a key, and a peek has
+    /// none. An opener checks it.
+    pub mac_checked: bool,
 }
 
 /// What a vault file shows without a password. The file has been parsed and
@@ -110,15 +128,43 @@ pub struct Peek {
 
 impl Peek {
     /// Compare with this machine's store: the pinned owner key and the highest
-    /// generation seen.
-    pub fn verified(&self, store: &LocalStore) -> Result<Verification, Error> {
-        store.check(&self.vault_id, &self.owner_sign_pk, self.generation)
+    /// generation seen. The state's MAC is not checked (a peek holds no key).
+    pub fn verified(&self, store: &LocalStore) -> Result<Verified, Error> {
+        let status = match store.check_unauthenticated(
+            &self.vault_id,
+            &self.owner_sign_pk,
+            self.generation,
+        )? {
+            Some(()) => Verification::Pinned,
+            None => Verification::Unpinned,
+        };
+        Ok(Verified {
+            status,
+            mac_checked: false,
+        })
     }
 }
 
+/// A recipient's opening: the file's model and the keys to read and sign with.
+struct RecipientAccess {
+    fmt: u16,
+    model: current::Model,
+    me: Recipient,
+    enc_sk: Zeroizing<[u8; KEY_LEN]>,
+    sign_sk: Zeroizing<[u8; KEY_LEN]>,
+}
+
+// One per open vault, never in a collection: the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum Access {
     Owner(current::Unlocked),
-    Recipient(current::RecipientView),
+    /// Opened by the owner, but the upgrade to the current format is waiting
+    /// for the paper key. Readable; nothing can be written.
+    Blocked {
+        old: AnyUnlocked,
+        typed: Option<Zeroizing<Vec<u8>>>,
+    },
+    Recipient(RecipientAccess),
 }
 
 /// An opened vault.
@@ -128,17 +174,21 @@ pub struct Vault {
     base_generation: u64,
     /// The format the file had before an upgrade; the first save backs it up.
     upgraded_from: Option<u16>,
+    /// Which state file in the local store is this opener's, and its key.
+    state_key: StateKey,
+    first_open: bool,
 }
 
 impl std::fmt::Debug for Vault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (role, count) = match &self.access {
-            Access::Owner(u) => ("owner", u.model.index.len()),
-            Access::Recipient(v) => ("recipient", v.values.len()),
+        let role = match &self.access {
+            Access::Owner(_) => "owner",
+            Access::Blocked { .. } => "owner (upgrade blocked)",
+            Access::Recipient(_) => "recipient",
         };
         f.debug_struct("Vault")
             .field("role", &role)
-            .field("entries", &count)
+            .field("entries", &self.model().index.len())
             .field("generation", &self.base_generation)
             .finish_non_exhaustive()
     }
@@ -178,6 +228,81 @@ fn peek_of(loaded: &Loaded) -> Peek {
     }
 }
 
+/// What an edit needs: the model to change, who is changing it and with which
+/// keys. Built by [`Vault::writer`], which is where permission is decided.
+struct Writer<'a> {
+    model: &'a mut current::Model,
+    fmt: u16,
+    actor: Actor,
+    /// `None` for the owner, who may do everything; else the writer's role.
+    role: Option<Role>,
+    /// Whether the writer was itself added by the owner (a delegated admin
+    /// must have been, or its certificates would not verify).
+    added_by_owner: bool,
+    signer: SigningKey,
+    /// The writer's private encryption key, to open the DEKs it holds.
+    enc_sk: Zeroizing<[u8; KEY_LEN]>,
+}
+
+impl Writer<'_> {
+    fn vault_id(&self) -> [u8; 16] {
+        self.model.header.vault_id
+    }
+
+    /// The DEK of secret `i`, if this writer can open it. The owner always can.
+    fn dek(&self, i: usize) -> Result<Option<Zeroizing<[u8; KEY_LEN]>>, Error> {
+        let sealed = &self.model.secrets[i];
+        match self.actor {
+            Actor::Owner => {
+                current::open_dek(self.fmt, &self.vault_id(), &self.enc_sk, sealed).map(Some)
+            }
+            Actor::Recipient(id) => current::open_dek_as_recipient(
+                self.fmt,
+                &self.vault_id(),
+                &self.enc_sk,
+                &id,
+                sealed,
+            ),
+        }
+    }
+
+    fn holders(&self, i: usize) -> Vec<[u8; 16]> {
+        self.model.secrets[i]
+            .wraps
+            .iter()
+            .map(|w| w.recipient_id)
+            .collect()
+    }
+
+    /// Seal `value` again under a fresh DEK for the owner and for the
+    /// recipients in `holders` that still exist, replacing secret `i`.
+    fn reseal(&mut self, i: usize, value: &[u8], holders: &[[u8; 16]]) -> Result<(), Error> {
+        let recipients: Vec<&Recipient> = holders
+            .iter()
+            .filter_map(|h| self.model.recipients.iter().find(|r| &r.id == h))
+            .collect();
+        let sid = self.model.secrets[i].secret_id;
+        let sealed = current::seal_secret(
+            self.fmt,
+            &self.vault_id(),
+            sid,
+            &self.model.owner.enc_pk,
+            value,
+            &recipients,
+        )?;
+        self.model.secrets[i] = sealed;
+        Ok(())
+    }
+
+    fn index_of(&self, name: &str) -> Result<usize, Error> {
+        self.model
+            .index
+            .iter()
+            .position(|e| e.name == name)
+            .ok_or_else(|| Error::not_found(name))
+    }
+}
+
 impl Vault {
     // --- Reading without a password -------------------------------------------
 
@@ -197,27 +322,37 @@ impl Vault {
     /// key is returned once and never stored. Nothing is written until `save`.
     pub fn create(pw: &[u8], kdf: KdfParams) -> Result<(Vault, RecoveryKey), Error> {
         let (unlocked, recovery) = current::create(CURRENT, pw, kdf, true)?;
+        let state_key = StateKey::owner(&unlocked.vk);
         let vault = Vault {
             access: Access::Owner(unlocked),
             base_generation: 0,
             upgraded_from: None,
+            state_key,
+            first_open: true,
         };
         Ok((vault, recovery.ok_or(Error::Rng)?))
     }
 
     /// A vault in the pseudo-format 0, written to `path`, for upgrade tests.
+    /// Returns its paper key.
     #[cfg(test)]
     pub(crate) fn write_v0_for_test(
         path: &Path,
         pw: &[u8],
         items: &[(&str, &[u8])],
-    ) -> Result<(), Error> {
-        let mut u = format::testing::create_v0(pw)?;
+    ) -> Result<RecoveryKey, Error> {
+        let (mut u, key) = format::testing::create_v0(pw)?;
         for (n, (name, value)) in items.iter().enumerate() {
             let mut sid = crypto::random::<16>()?;
             sid[0] = n as u8;
-            let sealed =
-                current::seal_secret(u.fmt, &u.model.header.vault_id, sid, &u.vk, value, &[])?;
+            let sealed = current::seal_secret(
+                u.fmt,
+                &u.model.header.vault_id,
+                sid,
+                &u.model.owner.enc_pk,
+                value,
+                &[],
+            )?;
             u.model.secrets.push(sealed);
             u.model.index.push(Entry {
                 secret_id: sid,
@@ -229,42 +364,67 @@ impl Vault {
             });
         }
         u.model.header.generation = 1;
-        let key = current::owner_keys(&u.vk).sign;
+        let signer = current::owner_keys(&u.vk).sign;
         write_atomic(
             path,
-            &current::encode_as(0, &u.model, &key, Actor::Owner, &key)?,
-        )
+            &current::encode_as(0, &u.model, Actor::Owner, &signer)?,
+        )?;
+        Ok(key)
     }
 
     // --- Opening ---------------------------------------------------------------------
-
-    fn load(path: &Path, store: &LocalStore) -> Result<Loaded, Error> {
-        let loaded = format::decode(&read_file(path)?)?;
-        // Cheap checks first: a different owner or an older file is refused
-        // before the KDF runs.
-        let m = loaded.model();
-        store.check(&m.header.vault_id, &m.owner.sign_pk, m.header.generation)?;
-        Ok(loaded)
-    }
 
     fn open_owner(
         path: &Path,
         access: OwnerAccess<'_>,
         store: &LocalStore,
     ) -> Result<Vault, Error> {
-        let loaded = Vault::load(path, store)?;
-        let (unlocked, from) = format::unlock_owner(&loaded, access)?;
+        let loaded = format::decode(&read_file(path)?)?;
+        let typed = match &access {
+            OwnerAccess::Password(pw) => Some(Zeroizing::new(pw.to_vec())),
+            OwnerAccess::Recovery(_) => None,
+        };
+        // A swapped owner is refused before the KDF runs.
+        store.check_owner_pin(
+            &loaded.model().header.vault_id,
+            StateFile::Owner,
+            &loaded.model().owner.sign_pk,
+        )?;
+        let open = format::unlock_owner(&loaded, access)?;
+        let (access, vk) = match open.state {
+            OwnerState::Current(u) => {
+                let vk = u.vk.clone();
+                (Access::Owner(u), vk)
+            }
+            OwnerState::Blocked(old) => {
+                let vk = old.as_v1().vk.clone();
+                (Access::Blocked { old, typed }, vk)
+            }
+        };
+        let model = loaded.model();
+        // The state is authenticated with a key only an unlock yields, so this
+        // runs after the unlock: a tampered state is refused as tampered, not
+        // mistaken for a rollback it may have been edited to cause.
+        let state_key = StateKey::owner(&vk);
+        let checked = store.check(
+            &model.header.vault_id,
+            &state_key,
+            &model.owner.sign_pk,
+            model.header.generation,
+        )?;
         // The unlock proved the vault key derives this owner key: pin it.
         store.record(
-            &unlocked.model.header.vault_id,
-            &unlocked.model.owner.sign_pk,
-            unlocked.model.header.generation,
+            &model.header.vault_id,
+            &state_key,
+            &model.owner.sign_pk,
+            model.header.generation,
         )?;
-        let base_generation = unlocked.model.header.generation;
         Ok(Vault {
-            access: Access::Owner(unlocked),
-            base_generation,
-            upgraded_from: from,
+            access,
+            base_generation: model.header.generation,
+            upgraded_from: open.from,
+            state_key,
+            first_open: checked.first_open,
         })
     }
 
@@ -282,44 +442,65 @@ impl Vault {
         Vault::open_owner(path, OwnerAccess::Recovery(key), store)
     }
 
-    /// Open as a recipient: a read-only view of the secrets it holds a wrap
-    /// for. The owner key is pinned on first open (trust on first use: a
-    /// recipient cannot prove the owner's key the way an unlock does).
+    /// Open as a recipient. An Admin or Editor of a current-format vault can
+    /// write; a Runner, or any recipient of an older format, only reads. The
+    /// owner key is pinned on first open (trust on first use: a recipient
+    /// cannot prove the owner's key the way an unlock does), in this
+    /// recipient's own state file.
     pub fn open_as_recipient(
         path: &Path,
         recipient_id: &[u8; 16],
         keys: &RecipientSecret,
         store: &LocalStore,
     ) -> Result<Vault, Error> {
-        let loaded = Vault::load(path, store)?;
-        let view = format::unlock_recipient(&loaded, recipient_id, keys.enc_sk())?;
-        store.record(
-            &view.header.vault_id,
-            &view.owner.sign_pk,
-            view.header.generation,
+        let loaded = format::decode(&read_file(path)?)?;
+        let m = loaded.model();
+        let state_key = StateKey::recipient(*recipient_id, keys.sign_sk());
+        let checked = store.check(
+            &m.header.vault_id,
+            &state_key,
+            &m.owner.sign_pk,
+            m.header.generation,
         )?;
-        let base_generation = view.header.generation;
+        let open = format::unlock_recipient(&loaded, recipient_id, keys.enc_sk())?;
+        store.record(
+            &open.model.header.vault_id,
+            &state_key,
+            &open.model.owner.sign_pk,
+            open.model.header.generation,
+        )?;
+        let base_generation = open.model.header.generation;
         Ok(Vault {
-            access: Access::Recipient(view),
+            access: Access::Recipient(RecipientAccess {
+                fmt: open.fmt,
+                model: open.model,
+                me: open.recipient,
+                enc_sk: Zeroizing::new(*keys.enc_sk()),
+                sign_sk: Zeroizing::new(*keys.sign_sk()),
+            }),
             base_generation,
             upgraded_from: None,
+            state_key,
+            first_open: checked.first_open,
         })
     }
 
     // --- Reading ------------------------------------------------------------------------
 
-    pub fn vault_id(&self) -> [u8; 16] {
+    fn model(&self) -> &current::Model {
         match &self.access {
-            Access::Owner(u) => u.model.header.vault_id,
-            Access::Recipient(v) => v.header.vault_id,
+            Access::Owner(u) => &u.model,
+            Access::Blocked { old, .. } => &old.as_v1().model,
+            Access::Recipient(r) => &r.model,
         }
     }
 
+    pub fn vault_id(&self) -> [u8; 16] {
+        self.model().header.vault_id
+    }
+
     pub fn generation(&self) -> u64 {
-        match &self.access {
-            Access::Owner(u) => u.model.header.generation,
-            Access::Recipient(v) => v.header.generation,
-        }
+        self.model().header.generation
     }
 
     /// Whether this was read from an older format and the next save will
@@ -328,51 +509,102 @@ impl Vault {
         self.upgraded_from.is_some()
     }
 
-    /// The index: every name, kind and tier, for either kind of opening.
+    /// Whether the pending upgrade is waiting for the paper key. While true,
+    /// reads work and every write refuses with
+    /// [`Error::UpgradeNeedsRecoveryKey`].
+    pub fn blocked_on_recovery_key(&self) -> bool {
+        matches!(self.access, Access::Blocked { .. })
+    }
+
+    /// Whether this machine had no record of this vault for this opener until
+    /// now. For the caller to say so; nothing here prompts.
+    pub fn first_open_on_this_machine(&self) -> bool {
+        self.first_open
+    }
+
+    /// The index: every name, kind and tier, for any kind of opening.
     pub fn entries(&self) -> &[Entry] {
-        match &self.access {
-            Access::Owner(u) => &u.model.index,
-            Access::Recipient(v) => &v.entries,
-        }
+        &self.model().index
     }
 
     pub fn recipients(&self) -> &[Recipient] {
-        match &self.access {
-            Access::Owner(u) => &u.model.recipients,
-            Access::Recipient(_) => &[],
-        }
+        &self.model().recipients
     }
 
     /// The value of `name`. A recipient gets only what it holds a wrap for.
     pub fn get(&self, name: &str) -> Result<SecretValue, Error> {
+        let m = self.model();
+        let i = m
+            .index
+            .iter()
+            .position(|e| e.name == name)
+            .ok_or_else(|| Error::not_found(name))?;
+        let sealed = &m.secrets[i];
         match &self.access {
             Access::Owner(u) => {
-                let (_, sealed) = find(&u.model, name)?;
-                current::open_value(u.fmt, &u.model.header.vault_id, &u.vk, sealed)
+                let keys = current::owner_keys(&u.vk);
+                current::open_value(u.fmt, &m.header.vault_id, &keys.enc_sk, sealed)
             }
-            Access::Recipient(v) => {
-                if let Some((_, value)) = v.values.iter().find(|(n, _)| n == name) {
-                    Ok(value.clone())
-                } else if v.entries.iter().any(|e| e.name == name) {
-                    Err(Error::NoAccess)
-                } else {
-                    Err(Error::not_found(name))
-                }
+            Access::Blocked { old, .. } => {
+                let u = old.as_v1();
+                let keys = current::owner_keys(&u.vk);
+                current::open_value(u.fmt, &m.header.vault_id, &keys.enc_sk, sealed)
+            }
+            Access::Recipient(r) => {
+                let dek = current::open_dek_as_recipient(
+                    r.fmt,
+                    &m.header.vault_id,
+                    &r.enc_sk,
+                    &r.me.id,
+                    sealed,
+                )?
+                .ok_or(Error::NoAccess)?;
+                current::value_with_dek(r.fmt, &m.header.vault_id, &dek, sealed)
             }
         }
     }
 
-    // --- Editing secrets (owner) --------------------------------------------------------------
+    // --- Writing: who may ---------------------------------------------------------------
 
-    fn owner(&mut self) -> Result<&mut current::Unlocked, Error> {
+    /// The editing context for this opening, or the reason there is none.
+    fn writer(&mut self) -> Result<Writer<'_>, Error> {
         match &mut self.access {
-            Access::Owner(u) => Ok(u),
-            Access::Recipient(_) => Err(Error::NotOwner),
+            Access::Owner(u) => {
+                let keys = current::owner_keys(&u.vk);
+                Ok(Writer {
+                    fmt: u.fmt,
+                    model: &mut u.model,
+                    actor: Actor::Owner,
+                    role: None,
+                    added_by_owner: true,
+                    signer: keys.sign,
+                    enc_sk: keys.enc_sk,
+                })
+            }
+            Access::Blocked { .. } => Err(Error::UpgradeNeedsRecoveryKey),
+            Access::Recipient(r) => {
+                if r.me.role == Role::Runner || r.fmt != CURRENT {
+                    return Err(Error::NotPermitted);
+                }
+                Ok(Writer {
+                    fmt: r.fmt,
+                    actor: Actor::Recipient(r.me.id),
+                    role: Some(r.me.role),
+                    added_by_owner: r.me.added_by == Actor::Owner,
+                    signer: crypto::signing_key(&r.sign_sk),
+                    enc_sk: r.enc_sk.clone(),
+                    model: &mut r.model,
+                })
+            }
         }
     }
 
-    /// Add or replace a secret. Every change seals under a new DEK; existing
-    /// grants of a replaced secret carry over.
+    // --- Editing secrets ------------------------------------------------------------------
+
+    /// Add or replace a secret. Every change seals under a new DEK. A new
+    /// secret is sealed for the owner and for the writer if it is a recipient;
+    /// replacing one keeps its holders, and a recipient can only replace a
+    /// secret it can read.
     pub fn set(&mut self, name: &str, value: &[u8], kind: Kind, tier: Tier) -> Result<(), Error> {
         if !valid_name(name) {
             return Err(Error::InvalidName);
@@ -382,29 +614,46 @@ impl Vault {
         {
             return Err(Error::InvalidFileName);
         }
-        let u = self.owner()?;
-        let vault_id = u.model.header.vault_id;
-        match u.model.index.iter().position(|e| e.name == name) {
+        let mut w = self.writer()?;
+        match w.model.index.iter().position(|e| e.name == name) {
             Some(i) => {
-                let holders = holder_ids(&u.model.secrets[i]);
-                reseal(u, i, value, &holders)?;
-                let e = &mut u.model.index[i];
+                if w.dek(i)?.is_none() {
+                    return Err(Error::NoAccess);
+                }
+                let holders = w.holders(i);
+                w.reseal(i, value, &holders)?;
+                let actor = w.actor;
+                let e = &mut w.model.index[i];
                 e.kind = kind;
                 e.tier = tier;
                 e.updated = now();
-                e.changed_by = Actor::Owner;
+                e.changed_by = actor;
             }
             None => {
                 let sid = crypto::random::<16>()?;
-                let sealed = current::seal_secret(u.fmt, &vault_id, sid, &u.vk, value, &[])?;
-                u.model.secrets.push(sealed);
-                u.model.index.push(Entry {
+                let actor = w.actor;
+                let mine: Vec<&Recipient> = match actor {
+                    Actor::Owner => Vec::new(),
+                    Actor::Recipient(id) => {
+                        w.model.recipients.iter().filter(|r| r.id == id).collect()
+                    }
+                };
+                let sealed = current::seal_secret(
+                    w.fmt,
+                    &w.vault_id(),
+                    sid,
+                    &w.model.owner.enc_pk,
+                    value,
+                    &mine,
+                )?;
+                w.model.secrets.push(sealed);
+                w.model.index.push(Entry {
                     secret_id: sid,
                     name: name.to_string(),
                     kind,
                     tier,
                     updated: now(),
-                    changed_by: Actor::Owner,
+                    changed_by: actor,
                 });
             }
         }
@@ -412,21 +661,21 @@ impl Vault {
     }
 
     pub fn remove(&mut self, name: &str) -> Result<(), Error> {
-        let u = self.owner()?;
-        let i = index_of(&u.model, name)?;
-        let sid = u.model.index[i].secret_id;
-        u.model.index.remove(i);
-        u.model.secrets.retain(|s| s.secret_id != sid);
+        let w = self.writer()?;
+        let i = w.index_of(name)?;
+        w.model.index.remove(i);
+        w.model.secrets.remove(i);
         Ok(())
     }
 
     pub fn set_tier(&mut self, name: &str, tier: Tier) -> Result<(), Error> {
-        let u = self.owner()?;
-        let i = index_of(&u.model, name)?;
-        let e = &mut u.model.index[i];
+        let w = self.writer()?;
+        let i = w.index_of(name)?;
+        let actor = w.actor;
+        let e = &mut w.model.index[i];
         e.tier = tier;
         e.updated = now();
-        e.changed_by = Actor::Owner;
+        e.changed_by = actor;
         Ok(())
     }
 
@@ -434,12 +683,12 @@ impl Vault {
     /// already taken or invalid. Used by the ka import.
     pub fn import(&mut self, items: Vec<(String, SecretValue)>) -> Result<(), Error> {
         {
-            let u = self.owner()?;
+            let w = self.writer()?;
             for (i, (name, _)) in items.iter().enumerate() {
                 if !valid_name(name) {
                     return Err(Error::InvalidName);
                 }
-                if u.model.index.iter().any(|e| &e.name == name)
+                if w.model.index.iter().any(|e| &e.name == name)
                     || items[..i].iter().any(|(n, _)| n == name)
                 {
                     return Err(Error::ImportCollision(crate::shown_name(name)));
@@ -452,9 +701,10 @@ impl Vault {
         Ok(())
     }
 
-    // --- Editing membership (owner) ---------------------------------------------------------------
+    // --- Editing membership ---------------------------------------------------------------------
 
-    /// Add a recipient and return its id.
+    /// Add a recipient and return its id. The owner may add anyone; an Admin
+    /// the owner added may add Editors and Runners; no one else adds.
     pub fn add_recipient(
         &mut self,
         name: &str,
@@ -462,16 +712,21 @@ impl Vault {
         role: Role,
         public: &RecipientPublic,
     ) -> Result<[u8; 16], Error> {
-        let u = self.owner()?;
+        let w = self.writer()?;
+        match w.role {
+            None => {}
+            Some(Role::Admin) if w.added_by_owner && role != Role::Admin => {}
+            Some(_) => return Err(Error::NotPermitted),
+        }
         if name.is_empty()
             || name.len() > 128
             || name.chars().any(char::is_control)
-            || u.model.recipients.iter().any(|r| r.name == name)
+            || w.model.recipients.iter().any(|r| r.name == name)
         {
             return Err(Error::Corrupt("recipient name"));
         }
         let id = crypto::random::<16>()?;
-        u.model.recipients.push(Recipient {
+        let mut entry = Recipient {
             id,
             name: name.to_string(),
             kind,
@@ -479,79 +734,122 @@ impl Vault {
             enc_pk: public.enc_pk,
             sign_pk: public.sign_pk,
             added: now(),
-        });
+            added_by: w.actor,
+            cert: current::Sig([0; 64]),
+        };
+        entry.certify(&w.vault_id(), &w.signer);
+        w.model.recipients.push(entry);
         Ok(id)
     }
 
     /// Remove a recipient and re-key every secret it held under a new DEK.
     /// Returns the names whose real values the recipient has seen and whose
     /// source (the API key, the password) should be rotated: re-keying cannot
-    /// take back what was already read.
+    /// take back what was already read. A secret the writer cannot itself read
+    /// (an Admin removing a member of a secret it does not hold) cannot be
+    /// re-keyed: the recipient's wrap is dropped and the name is returned too.
+    ///
+    /// The owner may remove anyone; an Admin may remove Editors and Runners.
+    /// When the owner removes an Admin, the members that Admin added are
+    /// re-certified by the owner so they stay valid.
     pub fn remove_recipient(&mut self, id: &[u8; 16]) -> Result<Vec<String>, Error> {
-        let u = self.owner()?;
-        if !u.model.recipients.iter().any(|r| &r.id == id) {
-            return Err(Error::UnknownRecipient);
+        let mut w = self.writer()?;
+        let target = w
+            .model
+            .recipients
+            .iter()
+            .find(|r| &r.id == id)
+            .cloned()
+            .ok_or(Error::UnknownRecipient)?;
+        match w.role {
+            None => {}
+            Some(Role::Admin) if target.role != Role::Admin => {}
+            Some(_) => return Err(Error::NotPermitted),
         }
         let mut rotate = Vec::new();
-        for i in 0..u.model.secrets.len() {
-            let holders = holder_ids(&u.model.secrets[i]);
+        for i in 0..w.model.secrets.len() {
+            let holders = w.holders(i);
             if !holders.contains(id) {
                 continue;
             }
             let kept: Vec<[u8; 16]> = holders.into_iter().filter(|h| h != id).collect();
-            let value =
-                current::open_value(u.fmt, &u.model.header.vault_id, &u.vk, &u.model.secrets[i])?;
-            reseal(u, i, value.expose(), &kept)?;
-            let sid = u.model.secrets[i].secret_id;
-            if let Some(e) = u.model.index.iter().find(|e| e.secret_id == sid) {
-                rotate.push(e.name.clone());
+            match w.dek(i)? {
+                Some(dek) => {
+                    let value =
+                        current::value_with_dek(w.fmt, &w.vault_id(), &dek, &w.model.secrets[i])?;
+                    w.reseal(i, value.expose(), &kept)?;
+                }
+                None => w.model.secrets[i].wraps.retain(|x| &x.recipient_id != id),
+            }
+            rotate.push(w.model.index[i].name.clone());
+        }
+        w.model.recipients.retain(|r| &r.id != id);
+        if target.role == Role::Admin {
+            let vault_id = w.vault_id();
+            for r in w.model.recipients.iter_mut() {
+                if r.added_by == Actor::Recipient(*id) {
+                    r.added_by = Actor::Owner;
+                    r.certify(&vault_id, &w.signer);
+                }
             }
         }
-        u.model.recipients.retain(|r| &r.id != id);
         Ok(rotate)
     }
 
-    /// Let `recipient` read `name`.
+    /// Let `recipient` read `name`. The writer must be able to read it.
     pub fn grant(&mut self, name: &str, recipient: &[u8; 16]) -> Result<(), Error> {
-        let u = self.owner()?;
-        let i = index_of(&u.model, name)?;
-        let r = u
+        let w = self.writer()?;
+        let i = w.index_of(name)?;
+        let target = w
             .model
             .recipients
             .iter()
             .find(|r| &r.id == recipient)
             .cloned()
             .ok_or(Error::UnknownRecipient)?;
-        let sealed = &u.model.secrets[i];
-        if sealed.wraps.iter().any(|w| &w.recipient_id == recipient) {
+        if w.model.secrets[i]
+            .wraps
+            .iter()
+            .any(|x| &x.recipient_id == recipient)
+        {
             return Ok(());
         }
-        let dek = current::open_dek(u.fmt, &u.model.header.vault_id, &u.vk, sealed)?;
-        let wrap = current::wrap_for(u.fmt, &u.model.header.vault_id, &sealed.secret_id, &dek, &r)?;
-        u.model.secrets[i].wraps.push(wrap);
+        let dek = w.dek(i)?.ok_or(Error::NoAccess)?;
+        let wrap = current::wrap_for(
+            w.fmt,
+            &w.vault_id(),
+            &w.model.secrets[i].secret_id,
+            &dek,
+            &target,
+        )?;
+        w.model.secrets[i].wraps.push(wrap);
         Ok(())
     }
 
     /// Stop `recipient` reading `name` from now on, and re-key the secret so
-    /// the wrap it was given opens nothing in the new file.
+    /// the wrap it was given opens nothing in the new file. The writer must be
+    /// able to read it.
     pub fn revoke(&mut self, name: &str, recipient: &[u8; 16]) -> Result<(), Error> {
-        let u = self.owner()?;
-        let i = index_of(&u.model, name)?;
-        let holders = holder_ids(&u.model.secrets[i]);
+        let mut w = self.writer()?;
+        let i = w.index_of(name)?;
+        let holders = w.holders(i);
+        let dek = w.dek(i)?.ok_or(Error::NoAccess)?;
         if !holders.contains(recipient) {
             return Ok(());
         }
         let kept: Vec<[u8; 16]> = holders.into_iter().filter(|h| h != recipient).collect();
-        let value =
-            current::open_value(u.fmt, &u.model.header.vault_id, &u.vk, &u.model.secrets[i])?;
-        reseal(u, i, value.expose(), &kept)
+        let value = current::value_with_dek(w.fmt, &w.vault_id(), &dek, &w.model.secrets[i])?;
+        w.reseal(i, value.expose(), &kept)
     }
 
-    /// Replace the password slot. The recovery slot is untouched.
+    /// Replace the password slot. The recovery slot is untouched. Owner only.
     pub fn change_password(&mut self, new_password: &[u8], kdf: KdfParams) -> Result<(), Error> {
-        let u = self.owner()?;
-        let slot =
-            current::password_slot(u.fmt, &u.model.header.vault_id, &u.vk, new_password, kdf)?;
+        let u = match &mut self.access {
+            Access::Owner(u) => u,
+            Access::Blocked { .. } => return Err(Error::UpgradeNeedsRecoveryKey),
+            Access::Recipient(_) => return Err(Error::NotOwner),
+        };
+        let slot = current::password_slot(&u.model.header.vault_id, &u.vk, new_password, kdf)?;
         match u
             .model
             .slots
@@ -561,6 +859,21 @@ impl Vault {
             Some(existing) => *existing = slot,
             None => u.model.slots.insert(0, slot),
         }
+        Ok(())
+    }
+
+    /// Finish an upgrade that was waiting for the paper key. The key must be
+    /// the one that opens the vault's recovery slot, so a wrong one cannot
+    /// replace it. Does nothing if the vault is not blocked.
+    pub fn provide_recovery_key(&mut self, key: &RecoveryKey) -> Result<(), Error> {
+        let Access::Blocked { old, typed } = &self.access else {
+            return Ok(());
+        };
+        if !current::recovery_key_matches(&old.as_v1().model, key) {
+            return Err(Error::Unlock);
+        }
+        let upgraded = upgrade::to_current(old, typed.as_ref().map(|t| t.as_slice()), Some(key))?;
+        self.access = Access::Owner(upgraded);
         Ok(())
     }
 
@@ -574,7 +887,9 @@ impl Vault {
 
     /// Save while the caller holds `_lock` (taken with `VaultLock::acquire`
     /// on the same path). Refuses with [`Error::Conflict`] if the file is no
-    /// longer the one this was loaded from.
+    /// longer the one this was loaded from. Signed by the owner, or by the
+    /// recipient that opened it (never a Runner). A recipient's save records the
+    /// generation in its own state and never pins a different owner.
     pub fn save_locked(
         &mut self,
         path: &Path,
@@ -583,7 +898,9 @@ impl Vault {
     ) -> Result<(), Error> {
         let base = self.base_generation;
         let from = self.upgraded_from;
-        let u = self.owner()?;
+        let w = self.writer()?;
+        let (fmt, actor, signer) = (w.fmt, w.actor, w.signer.clone());
+        let model = w.model;
 
         let existing = match fs::read(path) {
             Ok(b) => Some(b),
@@ -599,7 +916,7 @@ impl Vault {
         let on_disk = match &existing {
             Some(bytes) => {
                 let loaded = format::decode(bytes)?;
-                if loaded.model().header.vault_id != u.model.header.vault_id {
+                if loaded.model().header.vault_id != model.header.vault_id {
                     return Err(Error::Conflict);
                 }
                 loaded.model().header.generation
@@ -616,20 +933,20 @@ impl Vault {
         }
 
         let generation = base + 1;
-        let (old_generation, old_updated) = (u.model.header.generation, u.model.header.updated);
-        u.model.header.generation = generation;
-        u.model.header.updated = now();
-        let key = current::owner_keys(&u.vk).sign;
-        let result = current::encode(&u.model, &key).and_then(|bytes| write_atomic(path, &bytes));
+        let (old_generation, old_updated) = (model.header.generation, model.header.updated);
+        model.header.generation = generation;
+        model.header.updated = now();
+        let result = current::encode_as(fmt, model, actor, &signer)
+            .and_then(|bytes| write_atomic(path, &bytes));
         if let Err(e) = result {
-            u.model.header.generation = old_generation;
-            u.model.header.updated = old_updated;
+            model.header.generation = old_generation;
+            model.header.updated = old_updated;
             return Err(e);
         }
-        let (id, pk) = (u.model.header.vault_id, u.model.owner.sign_pk);
+        let (id, pk) = (model.header.vault_id, model.owner.sign_pk);
         self.base_generation = generation;
         self.upgraded_from = None;
-        store.record(&id, &pk, generation)
+        store.record(&id, &self.state_key, &pk, generation)
     }
 }
 
@@ -667,52 +984,6 @@ fn write_backup(path: &Path, from: u16, bytes: &[u8]) -> Result<(), Error> {
             source,
         }),
     }
-}
-
-fn index_of(m: &current::Model, name: &str) -> Result<usize, Error> {
-    m.index
-        .iter()
-        .position(|e| e.name == name)
-        .ok_or_else(|| Error::not_found(name))
-}
-
-fn find<'a>(m: &'a current::Model, name: &str) -> Result<(&'a Entry, &'a current::Sealed), Error> {
-    let entry = &m.index[index_of(m, name)?];
-    let sealed = m
-        .secrets
-        .iter()
-        .find(|s| s.secret_id == entry.secret_id)
-        .ok_or(Error::Corrupt("index and secrets disagree"))?;
-    Ok((entry, sealed))
-}
-
-fn holder_ids(sealed: &current::Sealed) -> Vec<[u8; 16]> {
-    sealed.wraps.iter().map(|w| w.recipient_id).collect()
-}
-
-/// Seal `value` again under a fresh DEK, wrapped for the owner and for the
-/// recipients in `holders` that still exist, replacing secret `i`.
-fn reseal(
-    u: &mut current::Unlocked,
-    i: usize,
-    value: &[u8],
-    holders: &[[u8; 16]],
-) -> Result<(), Error> {
-    let recipients: Vec<&Recipient> = holders
-        .iter()
-        .filter_map(|h| u.model.recipients.iter().find(|r| &r.id == h))
-        .collect();
-    let sid = u.model.secrets[i].secret_id;
-    let sealed = current::seal_secret(
-        u.fmt,
-        &u.model.header.vault_id,
-        sid,
-        &u.vk,
-        value,
-        &recipients,
-    )?;
-    u.model.secrets[i] = sealed;
-    Ok(())
 }
 
 #[cfg(test)]

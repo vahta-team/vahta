@@ -10,8 +10,8 @@
 //! `body_len`, `body`, signature section):
 //!
 //! * `body` is a postcard-encoded [`Body`]: header, key slots, owner keys, the
-//!   owner-signed recipient list, the plaintext name index, the sealed
-//!   secrets. Integers inside it are postcard varints.
+//!   recipient list (each entry carries its own certificate), the plaintext
+//!   name index, the sealed secrets. Integers inside it are postcard varints.
 //! * The signature section is a postcard-encoded [`SigSection`]. The signature
 //!   covers the stored bytes from the magic through the end of the body, so
 //!   nothing is re-encoded to verify it.
@@ -19,10 +19,16 @@
 //! A value is sealed in three layers: padded (`u32 length ‖ value ‖ zeros`, to
 //! the next power of two, at least 64 bytes), encrypted under a random
 //! per-secret key (the DEK) with XChaCha20-Poly1305, and the DEK is wrapped
-//! once for the owner (under a key derived from the vault key) and once for
-//! each granted recipient (HPKE). Every AEAD binds `magic ‖ format ‖ vault_id`
-//! and then the slot kind or the secret id, so nothing can be moved to another
-//! vault, another format or another secret.
+//! once for the owner and once for each granted recipient, both by HPKE (the
+//! owner's public key is in the file, so any writer can seal a new secret for
+//! the owner). Secret and wrap AEADs bind `magic ‖ format ‖ vault_id ‖
+//! secret_id`. Slots bind `"vahta/slot" ‖ slot_version ‖ vault_id ‖ kind`
+//! instead and so do not depend on the file format.
+//!
+//! Membership is certified per member: each recipient entry carries `added_by`
+//! and a signature of that actor over the entry. The owner may certify anyone;
+//! an Admin that the owner added may certify Editors and Runners; delegation
+//! goes no deeper.
 
 use std::fmt;
 
@@ -40,10 +46,14 @@ pub const FORMAT: u16 = 1;
 
 const INFO_OWNER_SIGN: &[u8] = b"vahta/v1/owner-sign";
 const INFO_OWNER_ENC: &[u8] = b"vahta/v1/owner-enc";
-const INFO_DEK_WRAP: &[u8] = b"vahta/v1/dek-wrap";
 const INFO_DEK_HPKE: &[u8] = b"vahta/v1/dek";
 const INFO_RECOVERY: &[u8] = b"vahta/v1/recovery-kek";
-const DOMAIN_RECIPIENTS: &[u8] = b"vahta/v1/recipients";
+const DOMAIN_MEMBER: &[u8] = b"vahta/v1/member";
+const DOMAIN_SLOT: &[u8] = b"vahta/slot";
+
+/// The version of the slot crypto written today. It changes only when a slot
+/// kind's own crypto does, not with the file format.
+pub const SLOT_VERSION: u16 = 1;
 
 const SLOT_PASSWORD: u8 = 0;
 const SLOT_RECOVERY: u8 = 1;
@@ -104,11 +114,14 @@ pub struct Header {
     pub updated: u64,
 }
 
-/// A way to recover the vault key. Each wraps the 32-byte vault key.
+/// A way to recover the vault key. Each wraps the 32-byte vault key and
+/// carries its own version, because a slot's crypto changes on its own
+/// schedule, not the file format's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Slot {
     /// The key-encryption key is Argon2id of the password.
     Password {
+        slot_version: u16,
         salt: [u8; 16],
         m_kib: u32,
         t: u32,
@@ -118,7 +131,11 @@ pub enum Slot {
     },
     /// The key-encryption key is HKDF of a 32-byte random paper key. No
     /// Argon2: the key has full entropy.
-    Recovery { nonce: [u8; 24], ct: Vec<u8> },
+    Recovery {
+        slot_version: u16,
+        nonce: [u8; 24],
+        ct: Vec<u8>,
+    },
 }
 
 impl Slot {
@@ -126,6 +143,14 @@ impl Slot {
         match self {
             Slot::Password { .. } => SLOT_PASSWORD,
             Slot::Recovery { .. } => SLOT_RECOVERY,
+        }
+    }
+
+    pub fn version(&self) -> u16 {
+        match self {
+            Slot::Password { slot_version, .. } | Slot::Recovery { slot_version, .. } => {
+                *slot_version
+            }
         }
     }
 }
@@ -153,6 +178,8 @@ pub enum Role {
     Runner,
 }
 
+/// A member of the vault. `cert` is `added_by`'s signature over the entry
+/// without it, so a membership change needs no one's signature but the issuer's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recipient {
     pub id: [u8; 16],
@@ -162,14 +189,47 @@ pub struct Recipient {
     pub enc_pk: [u8; 32],
     pub sign_pk: [u8; 32],
     pub added: u64,
+    pub added_by: Actor,
+    pub cert: Sig,
 }
 
-/// The recipient list as stored: its postcard bytes, kept verbatim so the
-/// owner's signature is checked against exactly what was signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecipientBlock {
-    pub list: Vec<u8>,
-    pub sig: Sig,
+/// What a certificate signs: the entry without `cert`.
+#[derive(Serialize)]
+struct RecipientCore<'a> {
+    id: &'a [u8; 16],
+    name: &'a str,
+    kind: RecipientKind,
+    role: Role,
+    enc_pk: &'a [u8; 32],
+    sign_pk: &'a [u8; 32],
+    added: u64,
+    added_by: Actor,
+}
+
+impl Recipient {
+    /// `"vahta/v1/member" ‖ vault_id ‖ postcard(entry without cert)`.
+    pub fn cert_message(&self, vault_id: &[u8; 16]) -> Vec<u8> {
+        let core = RecipientCore {
+            id: &self.id,
+            name: &self.name,
+            kind: self.kind,
+            role: self.role,
+            enc_pk: &self.enc_pk,
+            sign_pk: &self.sign_pk,
+            added: self.added,
+            added_by: self.added_by,
+        };
+        let mut m = DOMAIN_MEMBER.to_vec();
+        m.extend_from_slice(vault_id);
+        // Serialising plain fixed-size data cannot fail.
+        m.extend_from_slice(&postcard::to_allocvec(&core).unwrap_or_default());
+        m
+    }
+
+    /// Sign this entry as `added_by` with `issuer_key`, filling in `cert`.
+    pub fn certify(&mut self, vault_id: &[u8; 16], issuer_key: &SigningKey) {
+        self.cert = Sig(crypto::sign(issuer_key, &self.cert_message(vault_id)));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,8 +265,8 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WrapBlob {
-    pub nonce: [u8; 24],
+pub struct OwnerWrap {
+    pub enc: [u8; 32],
     pub ct: Vec<u8>,
 }
 
@@ -222,7 +282,7 @@ pub struct Sealed {
     pub secret_id: [u8; 16],
     pub nonce: [u8; 24],
     pub ct: Vec<u8>,
-    pub owner_wrap: WrapBlob,
+    pub owner_wrap: OwnerWrap,
     pub wraps: Vec<RecipientWrap>,
 }
 
@@ -232,7 +292,7 @@ pub struct Body {
     pub header: Header,
     pub slots: Vec<Slot>,
     pub owner: Owner,
-    pub recipients: RecipientBlock,
+    pub recipients: Vec<Recipient>,
     pub index: Vec<Entry>,
     pub secrets: Vec<Sealed>,
 }
@@ -266,6 +326,7 @@ pub struct Decoded {
 }
 
 /// A file opened with the vault key.
+#[derive(Clone)]
 pub struct Unlocked {
     pub fmt: u16,
     pub vk: Zeroizing<[u8; KEY_LEN]>,
@@ -282,16 +343,6 @@ impl fmt::Debug for Unlocked {
     }
 }
 
-/// A recipient's read-only view: the index and the values it holds wraps for.
-pub struct RecipientView {
-    pub fmt: u16,
-    pub header: Header,
-    pub owner: Owner,
-    pub recipient: Recipient,
-    pub entries: Vec<Entry>,
-    pub values: Vec<(String, SecretValue)>,
-}
-
 // --- AAD ---------------------------------------------------------------------
 
 fn aad_prefix(fmt: u16, vault_id: &[u8; 16]) -> Vec<u8> {
@@ -302,8 +353,12 @@ fn aad_prefix(fmt: u16, vault_id: &[u8; 16]) -> Vec<u8> {
     v
 }
 
-fn slot_aad(fmt: u16, vault_id: &[u8; 16], kind: u8) -> Vec<u8> {
-    let mut v = aad_prefix(fmt, vault_id);
+/// A slot's AAD: independent of the file format, so a format change can copy
+/// slots verbatim.
+fn slot_aad(slot_version: u16, vault_id: &[u8; 16], kind: u8) -> Vec<u8> {
+    let mut v = DOMAIN_SLOT.to_vec();
+    v.extend_from_slice(&slot_version.to_le_bytes());
+    v.extend_from_slice(vault_id);
     v.push(kind);
     v
 }
@@ -312,13 +367,6 @@ fn secret_aad(fmt: u16, vault_id: &[u8; 16], secret_id: &[u8; 16]) -> Vec<u8> {
     let mut v = aad_prefix(fmt, vault_id);
     v.extend_from_slice(secret_id);
     v
-}
-
-fn recipients_message(vault_id: &[u8; 16], list: &[u8]) -> Vec<u8> {
-    let mut m = DOMAIN_RECIPIENTS.to_vec();
-    m.extend_from_slice(vault_id);
-    m.extend_from_slice(list);
-    m
 }
 
 // --- Validation helpers --------------------------------------------------------
@@ -349,8 +397,8 @@ fn exact<'a, T: Deserialize<'a>>(bytes: &'a [u8], what: &'static str) -> Result<
 
 // --- Decode and verify -----------------------------------------------------------
 
-/// Parse and check a frame as format 1: structure, owner-signed recipient
-/// list, signer permission and the file signature. No password needed.
+/// Parse and check a frame as format 1: structure, membership certificates,
+/// signer permission and the file signature. No password needed.
 pub fn decode(frame: &Frame<'_>) -> Result<Decoded, Error> {
     decode_as(frame, FORMAT)
 }
@@ -365,20 +413,14 @@ pub(crate) fn decode_as(frame: &Frame<'_>, fmt: u16) -> Result<Decoded, Error> {
     if body.index.len() > MAX_ENTRIES || body.secrets.len() != body.index.len() {
         return Err(Error::Corrupt("index"));
     }
-
-    let vault_id = body.header.vault_id;
-    let list_msg = recipients_message(&vault_id, &body.recipients.list);
-    if !crypto::verify(&body.owner.sign_pk, &list_msg, &body.recipients.sig.0) {
-        return Err(Error::BadSignature);
-    }
-    let recipients: Vec<Recipient> = exact(&body.recipients.list, "recipient list")?;
-    check_recipients(&recipients)?;
-    check_index(&body, &recipients)?;
+    check_recipients(&body.header.vault_id, &body.owner, &body.recipients)?;
+    check_index(&body, &body.recipients)?;
 
     let signer_pk = match sig_section.signer {
         Actor::Owner => body.owner.sign_pk,
         Actor::Recipient(id) => {
-            let r = recipients
+            let r = body
+                .recipients
                 .iter()
                 .find(|r| r.id == id)
                 .ok_or(Error::SignerNotAllowed)?;
@@ -400,7 +442,7 @@ pub(crate) fn decode_as(frame: &Frame<'_>, fmt: u16) -> Result<Decoded, Error> {
             header: body.header,
             slots: body.slots,
             owner: body.owner,
-            recipients,
+            recipients: body.recipients,
             index: body.index,
             secrets: body.secrets,
         },
@@ -416,6 +458,9 @@ fn check_slots(slots: &[Slot]) -> Result<(), Error> {
         return Err(Error::Corrupt("slots"));
     }
     for slot in slots {
+        if slot.version() != SLOT_VERSION {
+            return Err(Error::Corrupt("slot version"));
+        }
         match slot {
             Slot::Password {
                 m_kib, t, p, ct, ..
@@ -444,7 +489,11 @@ fn check_slots(slots: &[Slot]) -> Result<(), Error> {
     Ok(())
 }
 
-fn check_recipients(list: &[Recipient]) -> Result<(), Error> {
+/// Every member's certificate must verify, and every issuer must be allowed to
+/// have issued it: the owner may certify anyone; an Admin the owner added may
+/// certify Editors and Runners. Delegation is one level deep, so an admin added
+/// by an admin certifies nobody and an admin cannot add an admin.
+fn check_recipients(vault_id: &[u8; 16], owner: &Owner, list: &[Recipient]) -> Result<(), Error> {
     if list.len() > MAX_RECIPIENTS {
         return Err(Error::Corrupt("recipients"));
     }
@@ -453,6 +502,27 @@ fn check_recipients(list: &[Recipient]) -> Result<(), Error> {
             || list[..i].iter().any(|o| o.id == r.id || o.name == r.name)
         {
             return Err(Error::Corrupt("recipients"));
+        }
+    }
+    for r in list {
+        let issuer_pk = match r.added_by {
+            Actor::Owner => owner.sign_pk,
+            Actor::Recipient(iid) => {
+                let issuer = list
+                    .iter()
+                    .find(|o| o.id == iid)
+                    .ok_or(Error::MembershipNotAllowed)?;
+                if issuer.role != Role::Admin
+                    || issuer.added_by != Actor::Owner
+                    || r.role == Role::Admin
+                {
+                    return Err(Error::MembershipNotAllowed);
+                }
+                issuer.sign_pk
+            }
+        };
+        if !crypto::verify(&issuer_pk, &r.cert_message(vault_id), &r.cert.0) {
+            return Err(Error::BadSignature);
         }
     }
     Ok(())
@@ -508,41 +578,42 @@ fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
 pub struct OwnerKeys {
     pub sign: SigningKey,
     pub sign_pk: [u8; 32],
+    pub enc_sk: Zeroizing<[u8; KEY_LEN]>,
     pub enc_pk: [u8; 32],
 }
 
 /// Both owner key pairs, derived from the vault key.
 pub fn owner_keys(vk: &[u8; KEY_LEN]) -> OwnerKeys {
     let sign = crypto::signing_key(&crypto::hkdf(vk, INFO_OWNER_SIGN));
-    let (_, enc_pk) = crypto::enc_keypair_from_seed(&crypto::hkdf(vk, INFO_OWNER_ENC));
+    let (enc_sk, enc_pk) = crypto::enc_keypair_from_seed(&crypto::hkdf(vk, INFO_OWNER_ENC));
     OwnerKeys {
         sign_pk: sign.verifying_key().to_bytes(),
         sign,
+        enc_sk,
         enc_pk,
     }
 }
 
-fn dek_wrap_key(vk: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
-    crypto::hkdf(vk, INFO_DEK_WRAP)
-}
-
 // --- Creating and unlocking ---------------------------------------------------------
 
-/// A password slot wrapping `vk`.
+/// A password slot wrapping `vk`. Slots are independent of the file format:
+/// their AAD carries the slot's own version, so a format change copies them
+/// verbatim.
 pub fn password_slot(
-    fmt: u16,
     vault_id: &[u8; 16],
     vk: &[u8; KEY_LEN],
-    password: &[u8],
+    pw: &[u8],
     kdf: KdfParams,
 ) -> Result<Slot, Error> {
     if !kdf.meets(&crypto::kdf_floor()) {
         return Err(Error::KdfBelowFloor);
     }
     let salt = crypto::random::<16>()?;
-    let kek = crypto::argon2id(password, &salt, kdf.m_kib, kdf.t, kdf.p)?;
-    let (nonce, ct) = crypto::seal(&kek, &slot_aad(fmt, vault_id, SLOT_PASSWORD), vk)?;
+    let kek = crypto::argon2id(pw, &salt, kdf.m_kib, kdf.t, kdf.p)?;
+    let aad = slot_aad(SLOT_VERSION, vault_id, SLOT_PASSWORD);
+    let (nonce, ct) = crypto::seal(&kek, &aad, vk)?;
     Ok(Slot::Password {
+        slot_version: SLOT_VERSION,
         salt,
         m_kib: kdf.m_kib,
         t: kdf.t,
@@ -552,31 +623,36 @@ pub fn password_slot(
     })
 }
 
-fn recovery_slot(
-    fmt: u16,
+/// A recovery slot wrapping `vk` under the paper key.
+pub fn recovery_slot(
     vault_id: &[u8; 16],
     vk: &[u8; KEY_LEN],
-    key: &[u8; 32],
+    key: &RecoveryKey,
 ) -> Result<Slot, Error> {
-    let kek = crypto::hkdf(key, INFO_RECOVERY);
-    let (nonce, ct) = crypto::seal(&kek, &slot_aad(fmt, vault_id, SLOT_RECOVERY), vk)?;
-    Ok(Slot::Recovery { nonce, ct })
+    let kek = crypto::hkdf(key.bytes(), INFO_RECOVERY);
+    let aad = slot_aad(SLOT_VERSION, vault_id, SLOT_RECOVERY);
+    let (nonce, ct) = crypto::seal(&kek, &aad, vk)?;
+    Ok(Slot::Recovery {
+        slot_version: SLOT_VERSION,
+        nonce,
+        ct,
+    })
 }
 
 /// A new, empty vault in `fmt`, with a password slot and, unless
 /// `with_recovery` is false, a recovery slot and its paper key.
 pub fn create(
     fmt: u16,
-    password: &[u8],
+    pw: &[u8],
     kdf: KdfParams,
     with_recovery: bool,
 ) -> Result<(Unlocked, Option<RecoveryKey>), Error> {
     let vk = Zeroizing::new(crypto::random::<KEY_LEN>()?);
     let vault_id = crypto::random::<16>()?;
-    let mut slots = vec![password_slot(fmt, &vault_id, &vk, password, kdf)?];
+    let mut slots = vec![password_slot(&vault_id, &vk, pw, kdf)?];
     let recovery = if with_recovery {
         let key = RecoveryKey::new(crypto::random::<32>()?);
-        slots.push(recovery_slot(fmt, &vault_id, &vk, key.bytes())?);
+        slots.push(recovery_slot(&vault_id, &vk, &key)?);
         Some(key)
     } else {
         None
@@ -613,7 +689,8 @@ fn finish_unlock(d: &Decoded, vk: Zeroizing<Vec<u8>>) -> Result<Unlocked, Error>
     let vk = Zeroizing::new(vk);
     // The vault key must derive the owner key the file claims; otherwise the
     // file's owner is not who unlocked it.
-    if owner_keys(&vk).sign_pk != d.model.owner.sign_pk {
+    let keys = owner_keys(&vk);
+    if keys.sign_pk != d.model.owner.sign_pk || keys.enc_pk != d.model.owner.enc_pk {
         return Err(Error::Corrupt("owner key"));
     }
     Ok(Unlocked {
@@ -624,8 +701,9 @@ fn finish_unlock(d: &Decoded, vk: Zeroizing<Vec<u8>>) -> Result<Unlocked, Error>
 }
 
 /// Unlock with the password. The KDF floor is checked before any work.
-pub fn unlock_password(d: &Decoded, password: &[u8]) -> Result<Unlocked, Error> {
+pub fn unlock_password(d: &Decoded, pw: &[u8]) -> Result<Unlocked, Error> {
     let Some(Slot::Password {
+        slot_version,
         salt,
         m_kib,
         t,
@@ -648,14 +726,33 @@ pub fn unlock_password(d: &Decoded, password: &[u8]) -> Result<Unlocked, Error> 
     if !cost.meets(&crypto::kdf_floor()) {
         return Err(Error::KdfBelowFloor);
     }
-    let kek = crypto::argon2id(password, salt, *m_kib, *t, *p)?;
-    let aad = slot_aad(d.fmt, &d.model.header.vault_id, SLOT_PASSWORD);
+    let kek = crypto::argon2id(pw, salt, *m_kib, *t, *p)?;
+    let aad = slot_aad(*slot_version, &d.model.header.vault_id, SLOT_PASSWORD);
     finish_unlock(d, crypto::open(&kek, nonce, &aad, ct)?)
+}
+
+/// Whether `key` opens the recovery slot of `model`.
+pub fn recovery_key_matches(model: &Model, key: &RecoveryKey) -> bool {
+    let Some(Slot::Recovery {
+        slot_version,
+        nonce,
+        ct,
+    }) = model.slots.iter().find(|s| s.kind_byte() == SLOT_RECOVERY)
+    else {
+        return false;
+    };
+    let kek = crypto::hkdf(key.bytes(), INFO_RECOVERY);
+    let aad = slot_aad(*slot_version, &model.header.vault_id, SLOT_RECOVERY);
+    crypto::open(&kek, nonce, &aad, ct).is_ok()
 }
 
 /// Unlock with the paper key.
 pub fn unlock_recovery(d: &Decoded, key: &RecoveryKey) -> Result<Unlocked, Error> {
-    let Some(Slot::Recovery { nonce, ct }) = d
+    let Some(Slot::Recovery {
+        slot_version,
+        nonce,
+        ct,
+    }) = d
         .model
         .slots
         .iter()
@@ -664,17 +761,18 @@ pub fn unlock_recovery(d: &Decoded, key: &RecoveryKey) -> Result<Unlocked, Error
         return Err(Error::Unlock);
     };
     let kek = crypto::hkdf(key.bytes(), INFO_RECOVERY);
-    let aad = slot_aad(d.fmt, &d.model.header.vault_id, SLOT_RECOVERY);
+    let aad = slot_aad(*slot_version, &d.model.header.vault_id, SLOT_RECOVERY);
     finish_unlock(d, crypto::open(&kek, nonce, &aad, ct)?)
 }
 
-/// Open as a recipient: only the secrets it holds a wrap for are decrypted.
-pub fn unlock_recipient(
+/// What a recipient proves to open a vault: its id and the private key that
+/// matches the public key listed for it. Every wrap it holds must open, so a
+/// swapped wrap is caught at open and not at first use.
+pub fn check_recipient(
     d: &Decoded,
     recipient_id: &[u8; 16],
     enc_sk: &[u8; KEY_LEN],
-) -> Result<RecipientView, Error> {
-    let vault_id = &d.model.header.vault_id;
+) -> Result<Recipient, Error> {
     let recipient = d
         .model
         .recipients
@@ -684,84 +782,95 @@ pub fn unlock_recipient(
     if crypto::enc_public_from_secret(enc_sk)? != recipient.enc_pk {
         return Err(Error::Unlock);
     }
-    let mut values = Vec::new();
-    for entry in &d.model.index {
-        let Some(sealed) = d
-            .model
-            .secrets
-            .iter()
-            .find(|s| s.secret_id == entry.secret_id)
-        else {
-            return Err(Error::Corrupt("index and secrets disagree"));
-        };
-        let Some(wrap) = sealed
-            .wraps
-            .iter()
-            .find(|w| &w.recipient_id == recipient_id)
-        else {
-            continue;
-        };
-        let aad = secret_aad(d.fmt, vault_id, &sealed.secret_id);
-        let dek = crypto::hpke_open(enc_sk, &wrap.enc, INFO_DEK_HPKE, &aad, &wrap.ct)?;
-        let dek: [u8; KEY_LEN] = dek.as_slice().try_into().map_err(|_| Error::Unlock)?;
-        let value = open_with_dek(&Zeroizing::new(dek), &aad, sealed)?;
-        values.push((entry.name.clone(), value));
+    let vault_id = &d.model.header.vault_id;
+    for sealed in &d.model.secrets {
+        if let Some(dek) = open_dek_as_recipient(d.fmt, vault_id, enc_sk, recipient_id, sealed)? {
+            value_with_dek(d.fmt, vault_id, &dek, sealed)?;
+        }
     }
-    Ok(RecipientView {
-        fmt: d.fmt,
-        header: d.model.header.clone(),
-        owner: d.model.owner.clone(),
-        recipient: recipient.clone(),
-        entries: d.model.index.clone(),
-        values,
-    })
+    Ok(recipient.clone())
 }
 
 // --- Sealing and opening secrets ------------------------------------------------------
 
-fn open_with_dek(dek: &[u8; KEY_LEN], aad: &[u8], sealed: &Sealed) -> Result<SecretValue, Error> {
-    let plain = crypto::open(dek, &sealed.nonce, aad, &sealed.ct)?;
-    Ok(SecretValue::from_zeroizing(crypto::unpad(&plain)?))
-}
-
-/// The DEK of `sealed`, opened with the vault key.
-pub fn open_dek(
-    fmt: u16,
-    vault_id: &[u8; 16],
-    vk: &[u8; KEY_LEN],
-    sealed: &Sealed,
+fn hpke_open_dek(
+    enc_sk: &[u8; KEY_LEN],
+    enc: &[u8; KEY_LEN],
+    aad: &[u8],
+    ct: &[u8],
 ) -> Result<Zeroizing<[u8; KEY_LEN]>, Error> {
-    let aad = secret_aad(fmt, vault_id, &sealed.secret_id);
-    let dek = crypto::open(
-        &dek_wrap_key(vk),
-        &sealed.owner_wrap.nonce,
-        &aad,
-        &sealed.owner_wrap.ct,
-    )?;
+    let dek = crypto::hpke_open(enc_sk, enc, INFO_DEK_HPKE, aad, ct)?;
     let dek: [u8; KEY_LEN] = dek.as_slice().try_into().map_err(|_| Error::Unlock)?;
     Ok(Zeroizing::new(dek))
 }
 
-/// The value of `sealed`, opened with the vault key.
+/// The value of `sealed` under an already opened DEK.
+pub fn value_with_dek(
+    fmt: u16,
+    vault_id: &[u8; 16],
+    dek: &[u8; KEY_LEN],
+    sealed: &Sealed,
+) -> Result<SecretValue, Error> {
+    let aad = secret_aad(fmt, vault_id, &sealed.secret_id);
+    let plain = crypto::open(dek, &sealed.nonce, &aad, &sealed.ct)?;
+    Ok(SecretValue::from_zeroizing(crypto::unpad(&plain)?))
+}
+
+/// The DEK of `sealed`, opened with the owner's private encryption key.
+pub fn open_dek(
+    fmt: u16,
+    vault_id: &[u8; 16],
+    owner_enc_sk: &[u8; KEY_LEN],
+    sealed: &Sealed,
+) -> Result<Zeroizing<[u8; KEY_LEN]>, Error> {
+    let aad = secret_aad(fmt, vault_id, &sealed.secret_id);
+    hpke_open_dek(
+        owner_enc_sk,
+        &sealed.owner_wrap.enc,
+        &aad,
+        &sealed.owner_wrap.ct,
+    )
+}
+
+/// The DEK of `sealed` as a recipient: `None` when it holds no wrap.
+pub fn open_dek_as_recipient(
+    fmt: u16,
+    vault_id: &[u8; 16],
+    enc_sk: &[u8; KEY_LEN],
+    recipient_id: &[u8; 16],
+    sealed: &Sealed,
+) -> Result<Option<Zeroizing<[u8; KEY_LEN]>>, Error> {
+    let Some(w) = sealed
+        .wraps
+        .iter()
+        .find(|w| &w.recipient_id == recipient_id)
+    else {
+        return Ok(None);
+    };
+    let aad = secret_aad(fmt, vault_id, &sealed.secret_id);
+    hpke_open_dek(enc_sk, &w.enc, &aad, &w.ct).map(Some)
+}
+
+/// The value of `sealed`, opened with the owner's private encryption key.
 pub fn open_value(
     fmt: u16,
     vault_id: &[u8; 16],
-    vk: &[u8; KEY_LEN],
+    owner_enc_sk: &[u8; KEY_LEN],
     sealed: &Sealed,
 ) -> Result<SecretValue, Error> {
-    let dek = open_dek(fmt, vault_id, vk, sealed)?;
-    open_with_dek(&dek, &secret_aad(fmt, vault_id, &sealed.secret_id), sealed)
+    let dek = open_dek(fmt, vault_id, owner_enc_sk, sealed)?;
+    value_with_dek(fmt, vault_id, &dek, sealed)
 }
 
 /// Wrap `dek` for one recipient.
 pub fn wrap_for(
     fmt: u16,
     vault_id: &[u8; 16],
-    secret_id: &[u8; 16],
+    sid: &[u8; 16],
     dek: &[u8; KEY_LEN],
     recipient: &Recipient,
 ) -> Result<RecipientWrap, Error> {
-    let aad = secret_aad(fmt, vault_id, secret_id);
+    let aad = secret_aad(fmt, vault_id, sid);
     let (enc, ct) = crypto::hpke_seal(&recipient.enc_pk, INFO_DEK_HPKE, &aad, dek)?;
     Ok(RecipientWrap {
         recipient_id: recipient.id,
@@ -770,32 +879,30 @@ pub fn wrap_for(
     })
 }
 
-/// Seal `value` under a fresh DEK, wrapped for the owner and for `holders`.
+/// Seal `value` under a fresh DEK, wrapped for the owner (from the public
+/// file alone, so any writer can do it) and for `holders`.
 pub fn seal_secret(
     fmt: u16,
     vault_id: &[u8; 16],
-    secret_id: [u8; 16],
-    vk: &[u8; KEY_LEN],
+    sid: [u8; 16],
+    owner_enc_pk: &[u8; KEY_LEN],
     value: &[u8],
     holders: &[&Recipient],
 ) -> Result<Sealed, Error> {
     let dek = Zeroizing::new(crypto::random::<KEY_LEN>()?);
-    let aad = secret_aad(fmt, vault_id, &secret_id);
+    let aad = secret_aad(fmt, vault_id, &sid);
     let padded = crypto::pad(value)?;
     let (nonce, ct) = crypto::seal(&dek, &aad, &padded)?;
-    let (wnonce, wct) = crypto::seal(&dek_wrap_key(vk), &aad, &*dek)?;
+    let (enc, wct) = crypto::hpke_seal(owner_enc_pk, INFO_DEK_HPKE, &aad, &*dek)?;
     let wraps = holders
         .iter()
-        .map(|r| wrap_for(fmt, vault_id, &secret_id, &dek, r))
+        .map(|r| wrap_for(fmt, vault_id, &sid, &dek, r))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Sealed {
-        secret_id,
+        secret_id: sid,
         nonce,
         ct,
-        owner_wrap: WrapBlob {
-            nonce: wnonce,
-            ct: wct,
-        },
+        owner_wrap: OwnerWrap { enc, ct: wct },
         wraps,
     })
 }
@@ -804,30 +911,23 @@ pub fn seal_secret(
 
 /// Encode `model` as a signed format-1 file, signed by the owner.
 pub fn encode(model: &Model, owner_key: &SigningKey) -> Result<Vec<u8>, Error> {
-    encode_as(FORMAT, model, owner_key, Actor::Owner, owner_key)
+    encode_as(FORMAT, model, Actor::Owner, owner_key)
 }
 
-/// Encode with an explicit format number and signer. The owner key always
-/// signs the recipient list; `signer_key` signs the file. Only the owner signs
-/// in normal use; the rest exists so tests can build files the verifier must
-/// refuse.
+/// Encode with an explicit format number and signer. The owner or an admin or
+/// editor recipient signs in normal use; the rest exists so tests can build
+/// files the verifier must refuse.
 pub fn encode_as(
     fmt: u16,
     model: &Model,
-    owner_key: &SigningKey,
     signer: Actor,
     signer_key: &SigningKey,
 ) -> Result<Vec<u8>, Error> {
-    let list = postcard::to_allocvec(&model.recipients).map_err(|_| Error::Corrupt("encode"))?;
-    let sig = Sig(crypto::sign(
-        owner_key,
-        &recipients_message(&model.header.vault_id, &list),
-    ));
     let body = Body {
         header: model.header.clone(),
         slots: model.slots.clone(),
         owner: model.owner.clone(),
-        recipients: RecipientBlock { list, sig },
+        recipients: model.recipients.clone(),
         index: model.index.clone(),
         secrets: model.secrets.clone(),
     };

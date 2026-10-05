@@ -162,12 +162,27 @@ pub enum OwnerAccess<'a> {
     Recovery(&'a RecoveryKey),
 }
 
-/// Unlock as the owner and carry the result forward to the current format.
-/// Returns what the format was before, if it was older.
-pub fn unlock_owner(
-    loaded: &Loaded,
-    access: OwnerAccess<'_>,
-) -> Result<(current::Unlocked, Option<u16>), Error> {
+/// An owner-unlocked vault: in the current format, or still in an older one
+/// because the upgrade is waiting for the paper key.
+pub enum OwnerState {
+    Current(current::Unlocked),
+    /// Readable through its own format's module, but not savable: the chain
+    /// has a step that rewrites the recovery slot and needs the paper key.
+    Blocked(upgrade::AnyUnlocked),
+}
+
+pub struct OwnerOpen {
+    pub state: OwnerState,
+    /// The format the file had, when it was older than the current one.
+    pub from: Option<u16>,
+}
+
+/// Unlock as the owner and carry the result forward to the current format. If
+/// a step of the chain needs the recovery key and this unlock did not use it,
+/// the result is [`OwnerState::Blocked`] rather than an error: the vault is
+/// open and readable, and `upgrade::to_current` finishes the job once the key
+/// is provided.
+pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpen, Error> {
     let unlocked = match (loaded, &access) {
         (Loaded::V1(d), OwnerAccess::Password(pw)) => {
             upgrade::AnyUnlocked::V1(v1::unlock_password(d, pw)?)
@@ -185,23 +200,42 @@ pub fn unlock_owner(
         }
     };
     let from = (loaded.format() != CURRENT).then(|| loaded.format());
-    let typed = match access {
-        OwnerAccess::Password(pw) => Some(pw),
-        OwnerAccess::Recovery(_) => None,
+    let (typed, recovery) = match access {
+        OwnerAccess::Password(pw) => (Some(pw), None),
+        OwnerAccess::Recovery(k) => (None, Some(k)),
     };
-    Ok((upgrade::to_current(unlocked, typed)?, from))
+    let state = match upgrade::to_current(&unlocked, typed, recovery) {
+        Ok(u) => OwnerState::Current(u),
+        Err(Error::UpgradeNeedsRecoveryKey) => OwnerState::Blocked(unlocked),
+        Err(e) => return Err(e),
+    };
+    Ok(OwnerOpen { state, from })
 }
 
-/// Open as a recipient. An older format is read through its own module and
-/// never upgraded: a recipient cannot write the vault.
+/// A recipient's opening of the file: its entry and the file's model, in
+/// whatever format the file has. A recipient never upgrades a file.
+pub struct RecipientOpen {
+    pub fmt: u16,
+    pub model: v1::Model,
+    pub recipient: v1::Recipient,
+}
+
 pub fn unlock_recipient(
     loaded: &Loaded,
     recipient_id: &[u8; 16],
     enc_sk: &[u8; 32],
-) -> Result<v1::RecipientView, Error> {
-    match loaded {
-        Loaded::V1(d) => v1::unlock_recipient(d, recipient_id, enc_sk),
+) -> Result<RecipientOpen, Error> {
+    // A release build has one format, so this match has one arm.
+    #[allow(clippy::infallible_destructuring_match)]
+    let d = match loaded {
+        Loaded::V1(d) => d,
         #[cfg(test)]
-        Loaded::V0(d) => v1::unlock_recipient(d, recipient_id, enc_sk),
-    }
+        Loaded::V0(d) => d,
+    };
+    let recipient = v1::check_recipient(d, recipient_id, enc_sk)?;
+    Ok(RecipientOpen {
+        fmt: d.fmt,
+        model: d.model.clone(),
+        recipient,
+    })
 }
