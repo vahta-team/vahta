@@ -369,23 +369,23 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
     }
 }
 
-/// Python's `Path.home()` on POSIX: `$HOME` (an empty or all-slash value is the
-/// root), else the passwd entry's directory.
+/// Python's `Path.home()`: on POSIX `$HOME` (an empty or all-slash value is
+/// the root), else the passwd entry's directory; on Windows the profile
+/// directory, as `std::env::home_dir` gives it.
 fn home_dir() -> Option<PathBuf> {
-    match std::env::var_os("HOME") {
-        Some(h) => {
-            use std::os::unix::ffi::OsStrExt;
-            let bytes = h.as_bytes();
-            let end = bytes.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1);
-            if end == 0 {
-                Some(PathBuf::from("/"))
-            } else {
-                Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
-            }
-        }
-        #[allow(deprecated)]
-        None => std::env::home_dir(),
+    #[cfg(unix)]
+    if let Some(h) = std::env::var_os("HOME") {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = h.as_bytes();
+        let end = bytes.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1);
+        return if end == 0 {
+            Some(PathBuf::from("/"))
+        } else {
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
+        };
     }
+    #[allow(deprecated)]
+    std::env::home_dir()
 }
 
 /// The setup environment of this process. The hook is the `vahta-hook` next to

@@ -321,6 +321,7 @@ fn a_file_that_is_not_a_json_object_is_refused_and_left_alone() {
 }
 
 #[test]
+#[cfg(unix)]
 fn commit_backs_up_once_and_keeps_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let t = Tree::new();
@@ -369,6 +370,7 @@ fn a_new_file_gets_no_backup_and_its_directory_is_created() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_symlinked_config_is_written_through() {
     use std::os::unix::fs::symlink;
     let t = Tree::new();
