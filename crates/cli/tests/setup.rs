@@ -9,6 +9,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
+/// `.exe` on Windows: setup looks for `vahta-hook.exe` next to `vahta.exe`.
+const EXE: &str = std::env::consts::EXE_SUFFIX;
 
 struct Sandbox(PathBuf);
 
@@ -23,12 +25,12 @@ impl Sandbox {
         }
         // A hard link when the file systems allow it: copying a binary and
         // running it from another thread's fork can fail with "text file busy".
-        let exe = root.join("bin/vahta");
+        let exe = root.join(format!("bin/vahta{EXE}"));
         if fs::hard_link(env!("CARGO_BIN_EXE_vahta"), &exe).is_err() {
             fs::copy(env!("CARGO_BIN_EXE_vahta"), &exe).unwrap();
         }
         if with_hook {
-            fs::write(root.join("bin/vahta-hook"), "#!/bin/sh\n").unwrap();
+            fs::write(root.join(format!("bin/vahta-hook{EXE}")), "#!/bin/sh\n").unwrap();
         }
         Sandbox(root)
     }
@@ -36,14 +38,14 @@ impl Sandbox {
         self.0.join("home")
     }
     fn hook(&self) -> PathBuf {
-        self.0.join("bin/vahta-hook")
+        self.0.join(format!("bin/vahta-hook{EXE}"))
     }
     /// Make a harness "found" by its config directory.
     fn found(&self, dir: &str) {
         fs::create_dir_all(self.home().join(dir)).unwrap();
     }
     fn vahta(&self, args: &[&str]) -> Output {
-        Command::new(self.0.join("bin/vahta"))
+        Command::new(self.0.join(format!("bin/vahta{EXE}")))
             .current_dir(&self.0)
             .args(args)
             .env_clear()
