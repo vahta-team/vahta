@@ -37,8 +37,11 @@ impl Sandbox {
     fn home(&self) -> PathBuf {
         self.0.join("home")
     }
+    /// The hook path as setup records it: canonical, with the platform's
+    /// separators (a `bin/...` join would leave a `/` in a Windows path).
     fn hook(&self) -> PathBuf {
-        self.0.join(format!("bin/vahta-hook{EXE}"))
+        let p = self.0.join("bin").join(format!("vahta-hook{EXE}"));
+        dunce::canonicalize(&p).unwrap_or(p)
     }
     /// Make a harness "found" by its config directory.
     fn found(&self, dir: &str) {
