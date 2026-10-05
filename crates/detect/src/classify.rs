@@ -10,9 +10,7 @@
 //! which keeps the crate dependency-free — and keeps pattern compilation out
 //! of a cold start that runs on every tool call the agent makes.
 
-use crate::primitives::{
-    char_class, entropy, vowel_bearing_segments, CharClass,
-};
+use crate::primitives::{CharClass, char_class, entropy, vowel_bearing_segments};
 
 /// Length floor, inherited from the 0.4.9 assignment heuristic.
 pub const MIN_VALUE_LEN: usize = 8;
@@ -340,10 +338,7 @@ pub fn classify_value(value: &str) -> (Confidence, Option<&'static str>) {
     if crate::primitives::transition_rate(v) >= LIKELY_TRANSITION_FLOOR {
         return (Confidence::Likely, None);
     }
-    (
-        Confidence::Possible,
-        Some(NAMED_WEAKENING_LOW_TRANSITION),
-    )
+    (Confidence::Possible, Some(NAMED_WEAKENING_LOW_TRANSITION))
 }
 
 /// The 0.4.9 hook meaning: possible or likely, i.e. not none.
@@ -402,7 +397,10 @@ mod tests {
 
         let uuid = "4f8a1c9e-2b7d-4e63-9a15-0c8bd3f7e214";
         assert!(crate::primitives::transition_rate(uuid) > LIKELY_TRANSITION_FLOOR);
-        assert_eq!(classify_value(uuid), (Confidence::Likely, Some(REASON_UUID)));
+        assert_eq!(
+            classify_value(uuid),
+            (Confidence::Likely, Some(REASON_UUID))
+        );
     }
 
     #[test]

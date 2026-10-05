@@ -29,7 +29,7 @@ use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
-use vahta_scan::deep::{scan_deep_with_threads, DeepError};
+use vahta_scan::deep::{DeepError, scan_deep_with_threads};
 use vahta_scan::finding::leak_count;
 use vahta_scan::report::{findings_to_json, format_human_report};
 use vahta_scan::walk::scan_project_with_threads;
@@ -185,7 +185,11 @@ struct Progress<'a> {
 
 impl<'a> Progress<'a> {
     fn new(out: &'a mut dyn Write, tty: bool) -> Self {
-        Progress { out, tty, last_len: 0 }
+        Progress {
+            out,
+            tty,
+            last_len: 0,
+        }
     }
 
     fn tick(&mut self, stage: &str, done: usize, total: usize) {
@@ -222,7 +226,10 @@ fn deep_findings(
     stderr: &mut dyn Write,
 ) -> Result<Vec<vahta_scan::Finding>, i32> {
     let Some(home) = &env.home else {
-        let _ = writeln!(stderr, "vahta scan: error: could not determine the home directory");
+        let _ = writeln!(
+            stderr,
+            "vahta scan: error: could not determine the home directory"
+        );
         return Err(EXIT_LEAKS);
     };
     let appdata = env.appdata.as_deref();
@@ -250,12 +257,7 @@ fn deep_findings(
     }
 }
 
-fn run_scan(
-    args: &[String],
-    env: &Env,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
+fn run_scan(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let cwd = env.cwd.as_path();
     let parsed = match parse_scan(args) {
         Parsed::Help => {
@@ -276,11 +278,19 @@ fn run_scan(
     let root = match std::fs::canonicalize(&target) {
         Ok(r) if r.is_dir() => r,
         Ok(_) => {
-            let _ = writeln!(stderr, "vahta scan: error: not a directory: {}", target.display());
+            let _ = writeln!(
+                stderr,
+                "vahta scan: error: not a directory: {}",
+                target.display()
+            );
             return EXIT_USAGE;
         }
         Err(e) => {
-            let _ = writeln!(stderr, "vahta scan: error: cannot read {}: {e}", target.display());
+            let _ = writeln!(
+                stderr,
+                "vahta scan: error: cannot read {}: {e}",
+                target.display()
+            );
             return EXIT_USAGE;
         }
     };
@@ -327,12 +337,7 @@ fn run_scan(
 }
 
 /// The whole program, parameterised so it can be driven without a process.
-pub fn run(
-    args: &[String],
-    env: &Env,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
+pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // Say on stderr, never stdout, when a setup we made has gone stale.
     if args.first().map(String::as_str) != Some("setup") {
         if let Some(setup_env) = &env.setup {
@@ -351,7 +356,10 @@ pub fn run(
             EXIT_CLEAN
         }
         Some(other) => {
-            let _ = write!(stderr, "vahta: error: unknown command: {other}\n\n{TOP_USAGE}");
+            let _ = write!(
+                stderr,
+                "vahta: error: unknown command: {other}\n\n{TOP_USAGE}"
+            );
             EXIT_USAGE
         }
         None => {

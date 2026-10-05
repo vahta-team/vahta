@@ -111,7 +111,11 @@ pub fn gated_confidences(strict: &str) -> Vec<Confidence> {
     match strict {
         crate::STRICT_CERTAIN => vec![Confidence::Certain],
         crate::STRICT_PARANOID => {
-            vec![Confidence::Certain, Confidence::Likely, Confidence::Possible]
+            vec![
+                Confidence::Certain,
+                Confidence::Likely,
+                Confidence::Possible,
+            ]
         }
         // `high` is the default, and an unknown value falls here exactly as
         // the Python function does rather than raising.

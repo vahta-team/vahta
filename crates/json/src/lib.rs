@@ -119,7 +119,10 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub const NONE: Limits = Limits { depth: usize::MAX, nodes: usize::MAX };
+    pub const NONE: Limits = Limits {
+        depth: usize::MAX,
+        nodes: usize::MAX,
+    };
 }
 
 impl Value {
@@ -245,7 +248,11 @@ const INDEX_AFTER: usize = 16;
 
 impl Object {
     fn new() -> Self {
-        Object { entries: Vec::with_capacity(1), index: None, key: None }
+        Object {
+            entries: Vec::with_capacity(1),
+            index: None,
+            key: None,
+        }
     }
 
     /// `dict[key] = value`: replaces in place, so the first position is kept.
@@ -409,7 +416,11 @@ impl<'a> Parser<'a> {
         }
         // No digit cap: CPython's 4300-digit `ValueError` is not reproduced.
         // The digits are kept as text; they never reach the detector.
-        Ok(Value::Int(if token == "-0" { "0".to_string() } else { token.to_string() }))
+        Ok(Value::Int(if token == "-0" {
+            "0".to_string()
+        } else {
+            token.to_string()
+        }))
     }
 
     /// Does `word` start at `self.i`?
@@ -457,7 +468,13 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
 /// `max_depth` open frames before the parse stops with
 /// [`ParseError::TooDeep`] — the memory a caller is bounding.
 pub fn parse_bounded(text: &str, max_depth: usize) -> Result<Value, ParseError> {
-    parse_limited(text, Limits { depth: max_depth, nodes: usize::MAX })
+    parse_limited(
+        text,
+        Limits {
+            depth: max_depth,
+            nodes: usize::MAX,
+        },
+    )
 }
 
 /// [`parse`] within `limits`: [`ParseError::TooDeep`] past the depth,
@@ -466,7 +483,11 @@ pub fn parse_bounded(text: &str, max_depth: usize) -> Result<Value, ParseError> 
 pub fn parse_limited(text: &str, limits: Limits) -> Result<Value, ParseError> {
     let max_depth = limits.depth;
     let mut nodes = 0usize;
-    let mut p = Parser { text, b: text.as_bytes(), i: 0 };
+    let mut p = Parser {
+        text,
+        b: text.as_bytes(),
+        i: 0,
+    };
     let mut stack: Vec<Frame> = Vec::new();
     p.skip_ws();
 
@@ -531,7 +552,11 @@ pub fn parse_limited(text: &str, limits: Limits) -> Result<Value, ParseError> {
             match stack.last_mut() {
                 None => {
                     p.skip_ws();
-                    return if p.i == p.b.len() { Ok(value) } else { Err(ParseError::Invalid) };
+                    return if p.i == p.b.len() {
+                        Ok(value)
+                    } else {
+                        Err(ParseError::Invalid)
+                    };
                 }
                 Some(Frame::Array(items)) => {
                     items.push(value);
@@ -632,7 +657,11 @@ fn string_token(text: &str, start: usize) -> (String, usize) {
         end += if b[end] == b'\\' { 2 } else { 1 };
     }
     let end = end.min(b.len());
-    let mut p = Parser { text, b, i: start + 1 };
+    let mut p = Parser {
+        text,
+        b,
+        i: start + 1,
+    };
     match p.string() {
         Ok(s) if p.i == end + 1 => (s, end + 1),
         // `end` is a quote or the end of the text, both char boundaries.
@@ -649,7 +678,11 @@ mod tests {
     }
 
     fn bad(s: &str) {
-        assert_eq!(parse(s).err(), Some(ParseError::Invalid), "{s:?} should be rejected");
+        assert_eq!(
+            parse(s).err(),
+            Some(ParseError::Invalid),
+            "{s:?} should be rejected"
+        );
     }
 
     fn string_of(v: &Value) -> &str {
@@ -675,7 +708,16 @@ mod tests {
         assert_eq!(ok("-Infinity"), Value::Float(f64::NEG_INFINITY));
         assert!(matches!(&ok("[NaN,-Infinity,1]"), Value::Array(a) if a.len() == 3));
         // ...but only spelled exactly.
-        for s in ["nan", "inf", "+Infinity", "Infinit", "-NaN", "-Inf", "NaNa", "infinity"] {
+        for s in [
+            "nan",
+            "inf",
+            "+Infinity",
+            "Infinit",
+            "-NaN",
+            "-Inf",
+            "NaNa",
+            "infinity",
+        ] {
             bad(s);
         }
     }
@@ -683,10 +725,41 @@ mod tests {
     #[test]
     fn what_python_rejects_is_rejected() {
         for s in [
-            "[1,]", "{\"a\":1,}", "[,1]", "{,}", "[1 2]", "{'a':1}", "['a']", "// c\n1",
-            "/* c */1", "{\"a\" 1}", "{\"a\":}", "{1:2}", "[", "{", "\"abc", "", "  ", "01", "-",
-            "+1", ".5", "1.", "1e", "1e+", "--1", "[01]", "tru", "nul", "[1]]", "1 2", "{\"a\":1}x",
-            "\u{feff}1", "\u{a0}1", "\u{b}1", "\u{c}1",
+            "[1,]",
+            "{\"a\":1,}",
+            "[,1]",
+            "{,}",
+            "[1 2]",
+            "{'a':1}",
+            "['a']",
+            "// c\n1",
+            "/* c */1",
+            "{\"a\" 1}",
+            "{\"a\":}",
+            "{1:2}",
+            "[",
+            "{",
+            "\"abc",
+            "",
+            "  ",
+            "01",
+            "-",
+            "+1",
+            ".5",
+            "1.",
+            "1e",
+            "1e+",
+            "--1",
+            "[01]",
+            "tru",
+            "nul",
+            "[1]]",
+            "1 2",
+            "{\"a\":1}x",
+            "\u{feff}1",
+            "\u{a0}1",
+            "\u{b}1",
+            "\u{c}1",
         ] {
             bad(s);
         }
@@ -729,8 +802,14 @@ mod tests {
         }
         // Order of failure is order of reading, as ever.
         let big = "9".repeat(5000);
-        assert_eq!(parse(&format!("[x,{big}]")).err(), Some(ParseError::Invalid));
-        assert_eq!(parse(&format!("[{big},x]")).err(), Some(ParseError::Invalid));
+        assert_eq!(
+            parse(&format!("[x,{big}]")).err(),
+            Some(ParseError::Invalid)
+        );
+        assert_eq!(
+            parse(&format!("[{big},x]")).err(),
+            Some(ParseError::Invalid)
+        );
     }
 
     #[test]
@@ -753,7 +832,9 @@ mod tests {
         }
         text.push_str("\"k3\":\"last\",\"k39\":\"last\"}");
         let parsed = ok(&text);
-        let Value::Object(entries) = &parsed else { panic!("object") };
+        let Value::Object(entries) = &parsed else {
+            panic!("object")
+        };
         assert_eq!(entries.len(), 40);
         assert_eq!(entries[3].0, "k3");
         assert_eq!(entries[3].1, Value::Str("last".into()));
@@ -763,10 +844,20 @@ mod tests {
 
     #[test]
     fn escapes() {
-        assert_eq!(string_of(&ok(r#""\"\\\/\b\f\n\r\t""#)), "\"\\/\u{8}\u{c}\n\r\t");
+        assert_eq!(
+            string_of(&ok(r#""\"\\\/\b\f\n\r\t""#)),
+            "\"\\/\u{8}\u{c}\n\r\t"
+        );
         assert_eq!(string_of(&ok(r#""Aé€""#)), "A\u{e9}\u{20ac}");
         assert_eq!(string_of(&ok(r#""é""#)), "\u{e9}");
-        for s in [r#""\x41""#, r#""\u12""#, r#""\u12g4""#, r#""\"#, r#""\a""#, r#""\u""#] {
+        for s in [
+            r#""\x41""#,
+            r#""\u12""#,
+            r#""\u12g4""#,
+            r#""\"#,
+            r#""\a""#,
+            r#""\u""#,
+        ] {
             bad(s);
         }
     }
@@ -808,10 +899,16 @@ mod tests {
         assert_eq!(cs, vec![0x10F800, 0x1F600]);
         // low then high: both lone, in order.
         let s = string_of(&ok(r#""\udc00\ud800""#)).to_string();
-        assert_eq!(s.chars().map(|c| c as u32).collect::<Vec<_>>(), vec![0x10F800 + 0x400, 0x10F800]);
+        assert_eq!(
+            s.chars().map(|c| c as u32).collect::<Vec<_>>(),
+            vec![0x10F800 + 0x400, 0x10F800]
+        );
         // high followed by an ordinary escape.
         let s = string_of(&ok(r#""\ud800A""#)).to_string();
-        assert_eq!(s.chars().map(|c| c as u32).collect::<Vec<_>>(), vec![0x10F800, 0x41]);
+        assert_eq!(
+            s.chars().map(|c| c as u32).collect::<Vec<_>>(),
+            vec![0x10F800, 0x41]
+        );
         // high followed by another kind of escape, and by plain text.
         assert_eq!(string_of(&ok(r#""\ud800\n""#)).chars().count(), 2);
         assert_eq!(string_of(&ok(r#""\ud800abc""#)).chars().count(), 4);
@@ -830,7 +927,9 @@ mod tests {
     #[test]
     fn lone_surrogates_are_keys_too() {
         let v = ok(r#"{"\ud800":1,"\udc00":2,"\ud800":3}"#);
-        let Value::Object(e) = &v else { panic!("object") };
+        let Value::Object(e) = &v else {
+            panic!("object")
+        };
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].1, Value::Int("3".into()));
     }
@@ -838,7 +937,10 @@ mod tests {
     #[test]
     fn nested_containers_and_order() {
         let v = ok(r#" {"z":[1,{"y":null}],"a":{}} "#);
-        assert_eq!(v.canonical(), ok(r#"{"z":[1,{"y":null}],"a":{}}"#).canonical());
+        assert_eq!(
+            v.canonical(),
+            ok(r#"{"z":[1,{"y":null}],"a":{}}"#).canonical()
+        );
         let Value::Object(e) = &v else { panic!() };
         assert_eq!(e[0].0, "z");
         assert_eq!(e[1].0, "a");
@@ -848,9 +950,15 @@ mod tests {
     fn canonical_distinguishes_what_it_should() {
         assert_ne!(ok("[1,2]").canonical(), ok("[12]").canonical());
         assert_ne!(ok("{\"a\":1}").canonical(), ok("{\"b\":1}").canonical());
-        assert_ne!(ok("{\"a\":1,\"b\":2}").canonical(), ok("{\"b\":2,\"a\":1}").canonical());
+        assert_ne!(
+            ok("{\"a\":1,\"b\":2}").canonical(),
+            ok("{\"b\":2,\"a\":1}").canonical()
+        );
         assert_ne!(ok("0.0").canonical(), ok("-0.0").canonical());
-        assert_eq!(ok("NaN").canonical(), ok("[NaN]").canonical().replace(['[', ']'], ""));
+        assert_eq!(
+            ok("NaN").canonical(),
+            ok("[NaN]").canonical().replace(['[', ']'], "")
+        );
     }
 
     #[test]
@@ -860,8 +968,14 @@ mod tests {
         for limit in [1usize, 2, 17, 1000] {
             assert!(parse_bounded(&arrays(limit), limit).is_ok());
             assert!(parse_bounded(&objects(limit), limit).is_ok());
-            assert_eq!(parse_bounded(&arrays(limit + 1), limit), Err(ParseError::TooDeep));
-            assert_eq!(parse_bounded(&objects(limit + 1), limit), Err(ParseError::TooDeep));
+            assert_eq!(
+                parse_bounded(&arrays(limit + 1), limit),
+                Err(ParseError::TooDeep)
+            );
+            assert_eq!(
+                parse_bounded(&objects(limit + 1), limit),
+                Err(ParseError::TooDeep)
+            );
         }
         // An empty container is a level too, and the innermost one is where
         // the count tips over.
@@ -892,43 +1006,77 @@ mod tests {
 
     #[test]
     fn multibyte_text_passes_through() {
-        assert_eq!(string_of(&ok("\"h\u{e9}llo \u{1F600} \u{4e16}\"")), "h\u{e9}llo \u{1F600} \u{4e16}");
+        assert_eq!(
+            string_of(&ok("\"h\u{e9}llo \u{1F600} \u{4e16}\"")),
+            "h\u{e9}llo \u{1F600} \u{4e16}"
+        );
     }
     #[test]
     fn the_node_limit_counts_every_value() {
-        let lim = |nodes| Limits { depth: usize::MAX, nodes };
+        let lim = |nodes| Limits {
+            depth: usize::MAX,
+            nodes,
+        };
         // `[1,2]` is three values: the array and two numbers.
         assert!(parse_limited("[1,2]", lim(3)).is_ok());
-        assert_eq!(parse_limited("[1,2]", lim(2)).err(), Some(ParseError::TooMany));
-        assert_eq!(parse_limited("{\"a\":{}}", lim(1)).err(), Some(ParseError::TooMany));
+        assert_eq!(
+            parse_limited("[1,2]", lim(2)).err(),
+            Some(ParseError::TooMany)
+        );
+        assert_eq!(
+            parse_limited("{\"a\":{}}", lim(1)).err(),
+            Some(ParseError::TooMany)
+        );
         let wide = format!("[{}1]", "1,".repeat(100_000));
-        assert_eq!(parse_limited(&wide, lim(1000)).err(), Some(ParseError::TooMany));
+        assert_eq!(
+            parse_limited(&wide, lim(1000)).err(),
+            Some(ParseError::TooMany)
+        );
         assert!(parse_limited(&wide, Limits::NONE).is_ok());
     }
 
     fn strings_of(text: &str) -> Vec<(Option<String>, String)> {
         let mut out = Vec::new();
-        for_each_string(text, &mut |k, v| out.push((k.map(str::to_string), v.to_string())));
+        for_each_string(text, &mut |k, v| {
+            out.push((k.map(str::to_string), v.to_string()))
+        });
         out
     }
 
     #[test]
     fn the_token_walk_reports_values_with_their_keys() {
         let got = strings_of(r#"{"a": "x", "b": [ "y", {"c" : "z"} ], "d": 1, "e": "w"}"#);
-        let want = [(Some("a"), "x"), (None, "y"), (Some("c"), "z"), (Some("e"), "w")];
-        let want: Vec<_> = want.iter().map(|(k, v)| (k.map(str::to_string), v.to_string())).collect();
+        let want = [
+            (Some("a"), "x"),
+            (None, "y"),
+            (Some("c"), "z"),
+            (Some("e"), "w"),
+        ];
+        let want: Vec<_> = want
+            .iter()
+            .map(|(k, v)| (k.map(str::to_string), v.to_string()))
+            .collect();
         assert_eq!(got, want);
     }
 
     #[test]
     fn the_token_walk_decodes_escapes_and_keeps_malformed_strings_raw() {
-        assert_eq!(strings_of(r#"{"API\u005fKEY": "a\"b"}"#), vec![(Some("API_KEY".into()), "a\"b".into())]);
+        assert_eq!(
+            strings_of(r#"{"API\u005fKEY": "a\"b"}"#),
+            vec![(Some("API_KEY".into()), "a\"b".into())]
+        );
         // A malformed escape and an unterminated string come through raw.
-        assert_eq!(strings_of(r#"["bad \q esc", "open"#), vec![(None, "bad \\q esc".into()), (None, "open".into())]);
+        assert_eq!(
+            strings_of(r#"["bad \q esc", "open"#),
+            vec![(None, "bad \\q esc".into()), (None, "open".into())]
+        );
         // A key whose value is not a string does not leak onto the next string.
         assert_eq!(strings_of(r#"{"k": [1], "x"]"#), vec![(None, "x".into())]);
         // Not JSON at all, and multibyte text after a backslash: no panic.
-        assert_eq!(strings_of("garbage \"\\\u{e9}\" ]]"), vec![(None, "\\\u{e9}".into())]);
+        assert_eq!(
+            strings_of("garbage \"\\\u{e9}\" ]]"),
+            vec![(None, "\\\u{e9}".into())]
+        );
         assert!(strings_of("[[[[").is_empty());
     }
 }

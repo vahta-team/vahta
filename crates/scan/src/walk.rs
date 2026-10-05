@@ -854,13 +854,18 @@ mod tests {
         }
         #[cfg(unix)]
         {
-            let _ = std::os::unix::fs::symlink(t.root.join("d0/e0/f0.env"), t.root.join("d1/link.env"));
+            let _ =
+                std::os::unix::fs::symlink(t.root.join("d0/e0/f0.env"), t.root.join("d1/link.env"));
         }
         let base = scan_project_with_threads(&t.root, false, 1);
         assert!(base.len() > 50);
         for _ in 0..3 {
             for n in [2, 3, 8, 16, 64] {
-                assert_eq!(scan_project_with_threads(&t.root, false, n), base, "threads={n}");
+                assert_eq!(
+                    scan_project_with_threads(&t.root, false, n),
+                    base,
+                    "threads={n}"
+                );
             }
         }
     }

@@ -139,7 +139,11 @@ pub fn safe_read_text(path: &std::path::Path, limit: usize) -> Option<String> {
 fn read_prefix(path: &Path, limit: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut data = Vec::new();
-    std::fs::File::open(path).ok()?.take(limit as u64).read_to_end(&mut data).ok()?;
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit as u64)
+        .read_to_end(&mut data)
+        .ok()?;
     Some(data)
 }
 
@@ -952,12 +956,16 @@ fn findings_from(path: &std::path::Path, scope: Scope, given: Option<&[u8]>) -> 
 
         match kind {
             "credentials.json" => {
-                names = text_of(path, given).map(|t| json_key_names_of(&t)).unwrap_or_default();
+                names = text_of(path, given)
+                    .map(|t| json_key_names_of(&t))
+                    .unwrap_or_default();
                 count = names.len().max(1);
                 reason = format!("credentials.json ({count} top-level key name(s))");
             }
             "mcp_config" => {
-                names = text_of(path, given).map(|t| json_key_names_of(&t)).unwrap_or_default();
+                names = text_of(path, given)
+                    .map(|t| json_key_names_of(&t))
+                    .unwrap_or_default();
                 count = names.len().max(1);
                 let confirmed = names.iter().any(|k| k == "mcpServers" || k == "servers");
                 if confirmed {
@@ -1258,7 +1266,11 @@ mod tests {
         ];
         for (text, want) in object {
             let want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
-            assert_eq!(json_top_level(text), JsonTop::Object(want), "input {text:?}");
+            assert_eq!(
+                json_top_level(text),
+                JsonTop::Object(want),
+                "input {text:?}"
+            );
         }
 
         for text in [
@@ -1364,7 +1376,10 @@ mod tests {
         let arr = d.write("arr.json", b"[1,2,3]");
         assert_eq!(json_key_names(&arr), Vec::<String>::new());
 
-        assert_eq!(json_key_names(&d.0.join("absent.json")), Vec::<String>::new());
+        assert_eq!(
+            json_key_names(&d.0.join("absent.json")),
+            Vec::<String>::new()
+        );
 
         // A NUL in the first 4096 bytes makes the file unreadable, so `[]`
         // even though the JSON around it would have been fine.
@@ -1499,7 +1514,10 @@ mod tests {
             .find(|f| f.confidence == "likely")
             .expect("a likely finding");
         assert!(likely.secret_names.is_empty(), "no named assignment");
-        assert_eq!(likely.reason, "inline credential-shaped token (Bearer token)");
+        assert_eq!(
+            likely.reason,
+            "inline credential-shaped token (Bearer token)"
+        );
         assert_eq!(likely.secret_count, 1);
     }
 
@@ -1674,7 +1692,10 @@ mod tests {
         let out = findings_for_path(&real, Scope::Project);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, "shell_history");
-        assert_eq!(out[0].reason, "shell history with credential-shaped content");
+        assert_eq!(
+            out[0].reason,
+            "shell history with credential-shaped content"
+        );
         assert_eq!(out[0].secret_names, vec!["API_KEY"]);
     }
 

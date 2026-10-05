@@ -5,10 +5,10 @@
 //! dicts, which in CPython preserve insertion order, and the reported name and
 //! reason lists are compared directly by the test suite.
 
-use crate::classify::{classify_value, Confidence};
+use crate::classify::{Confidence, classify_value};
 use crate::matchers::{
-    classify_bearer_capture, find_prefix_kind, iter_assignments, iter_flag_values,
-    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM,
+    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_prefix_kind,
+    iter_assignments, iter_flag_values,
 };
 
 /// Assignment, flag-form, prefix and Bearer hits for one text blob.
@@ -55,10 +55,8 @@ impl HitSet {
     fn rebuild(&mut self, likely: &ByName, possible: &ByName) {
         self.likely_names = likely.iter().map(|(_, (name, _))| name.clone()).collect();
         self.possible_names = possible.iter().map(|(_, (name, _))| name.clone()).collect();
-        self.likely_reasons_by_name =
-            likely.iter().map(|(_, (_, r))| r.clone()).collect();
-        self.possible_reasons_by_name =
-            possible.iter().map(|(_, (_, r))| r.clone()).collect();
+        self.likely_reasons_by_name = likely.iter().map(|(_, (_, r))| r.clone()).collect();
+        self.possible_reasons_by_name = possible.iter().map(|(_, (_, r))| r.clone()).collect();
         self.likely_keys = likely.iter().map(|(k, _)| k.clone()).collect();
         self.possible_keys = possible.iter().map(|(k, _)| k.clone()).collect();
 
@@ -369,7 +367,10 @@ mod tests {
             find_secret_kind("ka run --secret GOOGLE_API_KEY -- ./deploy.sh"),
             None
         );
-        assert_eq!(find_secret_kind("vault login --token-file ./token.txt"), None);
+        assert_eq!(
+            find_secret_kind("vault login --token-file ./token.txt"),
+            None
+        );
         assert_eq!(
             find_secret_kind("mysql --password --host=db.internal.example.com"),
             None

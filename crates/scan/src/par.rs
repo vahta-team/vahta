@@ -21,7 +21,9 @@ pub const MAX_THREADS: usize = 16;
 /// Threads to use by default: the available parallelism, capped at
 /// [`MAX_THREADS`], at least 1.
 pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, MAX_THREADS)
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, MAX_THREADS)
 }
 
 fn lock<R>(s: &(Mutex<State<R>>, Condvar)) -> std::sync::MutexGuard<'_, State<R>> {
@@ -48,10 +50,10 @@ struct PanicGuard<'a, R>(&'a (Mutex<State<R>>, Condvar));
 impl<R> Drop for PanicGuard<'_, R> {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            let mut st = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
             st.panicked = true;
             st.stop = true;
-            self.0 .1.notify_all();
+            self.0.1.notify_all();
         }
     }
 }
@@ -135,9 +137,9 @@ pub fn ordered_map<T, R, W, C>(
         struct StopOnDrop<'a, R>(&'a (Mutex<State<R>>, Condvar));
         impl<R> Drop for StopOnDrop<'_, R> {
             fn drop(&mut self) {
-                let mut st = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+                let mut st = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
                 st.stop = true;
-                self.0 .1.notify_all();
+                self.0.1.notify_all();
             }
         }
         let _stop = StopOnDrop(&shared);

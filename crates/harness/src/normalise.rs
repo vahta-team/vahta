@@ -152,7 +152,10 @@ impl Manifest {
                 } else {
                     classify(self, payload, &ev.tool)
                 };
-                let group = self.tool_groups.iter().find(|g| Some(g.group) == ev.group)?;
+                let group = self
+                    .tool_groups
+                    .iter()
+                    .find(|g| Some(g.group) == ev.group)?;
                 if !matches!(group.group, Group::Shell | Group::Write | Group::Mcp) {
                     return None;
                 }

@@ -9,9 +9,15 @@ use crate::manifest::{Kind, KindReplies, Manifest, Reply, Style};
 pub enum Decision {
     Allow,
     /// Refuse. `agent_message` goes to the model, `user_message` to the person.
-    Deny { user_message: String, agent_message: String },
+    Deny {
+        user_message: String,
+        agent_message: String,
+    },
     /// Let it through, but say something.
-    Notice { user_message: String, agent_message: String },
+    Notice {
+        user_message: String,
+        agent_message: String,
+    },
 }
 
 /// What the hook process emits.
@@ -50,11 +56,19 @@ fn emit(reply: &Reply, user: &str, agent: &str) -> Output {
             };
             let mut stdout = serde_json::to_vec(&fill_value(body, user, agent)).unwrap_or_default();
             stdout.push(b'\n');
-            Output { stdout, stderr: Vec::new(), exit_code: reply.exit_code }
+            Output {
+                stdout,
+                stderr: Vec::new(),
+                exit_code: reply.exit_code,
+            }
         }
         Style::ExitCode => Output {
             stdout: Vec::new(),
-            stderr: reply.stderr.as_deref().map(|s| fill(s, user, agent).into_bytes()).unwrap_or_default(),
+            stderr: reply
+                .stderr
+                .as_deref()
+                .map(|s| fill(s, user, agent).into_bytes())
+                .unwrap_or_default(),
             exit_code: reply.exit_code,
         },
         // Reserved: a plugin harness has no stdin protocol to answer on.
@@ -81,12 +95,22 @@ impl Manifest {
         };
         let (reply, user, agent) = match decision {
             Decision::Allow => (replies.allow.as_ref(), "", ""),
-            Decision::Deny { user_message, agent_message } => {
-                (replies.deny.as_ref(), user_message.as_str(), agent_message.as_str())
-            }
-            Decision::Notice { user_message, agent_message } => {
-                (replies.notice.as_ref(), user_message.as_str(), agent_message.as_str())
-            }
+            Decision::Deny {
+                user_message,
+                agent_message,
+            } => (
+                replies.deny.as_ref(),
+                user_message.as_str(),
+                agent_message.as_str(),
+            ),
+            Decision::Notice {
+                user_message,
+                agent_message,
+            } => (
+                replies.notice.as_ref(),
+                user_message.as_str(),
+                agent_message.as_str(),
+            ),
         };
         reply.map(|r| emit(r, user, agent)).unwrap_or_default()
     }

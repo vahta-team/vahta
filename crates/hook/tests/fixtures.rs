@@ -54,7 +54,8 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
     if let Some(files) = fx["files"].as_object() {
         for (rel, content) in files {
             let target = tmp.0.join(rel);
-            std::fs::create_dir_all(target.parent().ok_or("no parent")?).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(target.parent().ok_or("no parent")?)
+                .map_err(|e| e.to_string())?;
             std::fs::write(&target, content.as_str().unwrap_or("")).map_err(|e| e.to_string())?;
         }
     }
@@ -63,11 +64,16 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         _ => fx["stdin"].to_string(),
     };
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vahta-hook"));
-    cmd.args(["--harness", harness, "--event", fx["event"].as_str().unwrap_or("")])
-        .env_remove("VAHTA_HOOK_DISABLE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "--harness",
+        harness,
+        "--event",
+        fx["event"].as_str().unwrap_or(""),
+    ])
+    .env_remove("VAHTA_HOOK_DISABLE")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     if let Some(extra) = fx["args"].as_array() {
         cmd.args(extra.iter().filter_map(Value::as_str));
     }
@@ -77,7 +83,12 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         }
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    child.stdin.take().ok_or("no stdin")?.write_all(stdin.as_bytes()).map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(stdin.as_bytes())
+        .map_err(|e| e.to_string())?;
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
 
     let want_stdout = match &fx["stdout"] {
@@ -110,12 +121,20 @@ fn every_fixture_matches() {
         for f in files {
             count += 1;
             if let Err(e) = run_fixture(harness, &f) {
-                failures.push(format!("{harness}/{}: {e}", f.file_name().unwrap().to_string_lossy()));
+                failures.push(format!(
+                    "{harness}/{}: {e}",
+                    f.file_name().unwrap().to_string_lossy()
+                ));
             }
         }
     }
     assert!(count >= 65, "only {count} fixtures found");
-    assert!(failures.is_empty(), "{} of {count} failed:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {count} failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -136,7 +155,12 @@ fn run_raw(harness: &str, event: &str, stdin: &str) -> String {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("spawn vahta-hook");
-    child.stdin.take().expect("stdin").write_all(stdin.as_bytes()).expect("write stdin");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
     let out = child.wait_with_output().expect("wait");
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -156,7 +180,10 @@ fn a_secret_nested_past_serde_depth_is_still_denied() {
     for harness in ["claude", "codex"] {
         let out = run_raw(harness, "before_tool", &payload);
         assert!(out.contains("\"deny\""), "{harness}: {out}");
-        assert!(!out.contains(&secret_anthropic()), "{harness}: value echoed");
+        assert!(
+            !out.contains(&secret_anthropic()),
+            "{harness}: value echoed"
+        );
     }
     // The same with the secret spelled through a JSON escape.
     let escaped = secret_anthropic().replacen('k', "\\u006b", 1);

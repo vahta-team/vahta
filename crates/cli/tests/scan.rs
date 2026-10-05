@@ -100,7 +100,10 @@ fn path_argument_is_scanned_instead_of_the_cwd() {
     let t = Tree::new();
     dotenv(&t);
     let elsewhere = Tree::new();
-    let out = vahta(elsewhere.path(), &["scan", t.path().to_str().expect("utf-8 temp path")]);
+    let out = vahta(
+        elsewhere.path(),
+        &["scan", t.path().to_str().expect("utf-8 temp path")],
+    );
     assert_eq!(out.status.code(), Some(1));
 }
 
@@ -109,7 +112,10 @@ fn the_strict_gate_decides_the_exit_code() {
     // A bare identifier-shaped assignment is `possible`: paranoid gates it,
     // high does not.
     let t = Tree::new();
-    t.write("notes.txt", &format!("{} = {}\n", "PASSWORD", "hunter7-correct-horse"));
+    t.write(
+        "notes.txt",
+        &format!("{} = {}\n", "PASSWORD", "hunter7-correct-horse"),
+    );
     let high = vahta(t.path(), &["scan", "--strict", "high"]);
     let paranoid = vahta(t.path(), &["scan", "--strict=paranoid"]);
     assert_eq!(high.status.code(), Some(0));
@@ -119,7 +125,10 @@ fn the_strict_gate_decides_the_exit_code() {
 #[test]
 fn default_exclusions_apply_and_wide_lifts_them() {
     let t = Tree::new();
-    t.write("node_modules/pkg/.env", &format!("{}={}\n", "API_KEY", value()));
+    t.write(
+        "node_modules/pkg/.env",
+        &format!("{}={}\n", "API_KEY", value()),
+    );
     assert_eq!(vahta(t.path(), &["scan"]).status.code(), Some(0));
     assert_eq!(vahta(t.path(), &["scan", "--wide"]).status.code(), Some(1));
 }
@@ -136,7 +145,11 @@ fn vahta_home(cwd: &Path, home: &Path, args: &[&str]) -> Output {
 }
 
 fn assignment_line() -> String {
-    format!("{{\"text\": \"{}={}\"}}\n", ["API", "_KEY"].concat(), value())
+    format!(
+        "{{\"text\": \"{}={}\"}}\n",
+        ["API", "_KEY"].concat(),
+        value()
+    )
 }
 
 #[test]
@@ -145,7 +158,10 @@ fn deep_scans_the_home_directory_and_never_shows_a_value() {
     project.write("README.md", "nothing here\n");
     let home = Tree::new();
     home.write(".npmrc", "registry=https://example.invalid/\n");
-    home.write(".claude/projects/p/s.jsonl", &format!("{{}}\n{}", assignment_line()));
+    home.write(
+        ".claude/projects/p/s.jsonl",
+        &format!("{{}}\n{}", assignment_line()),
+    );
     let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet"]);
     assert_eq!(out.status.code(), Some(1));
     let stdout = text(&out.stdout);
@@ -182,7 +198,11 @@ fn a_finding_already_seen_in_the_project_is_not_repeated_by_deep() {
     // The project *is* the home directory: every path is seen twice.
     let home = Tree::new();
     home.write(".npmrc", "x\n");
-    let out = vahta_home(home.path(), home.path(), &["scan", "--deep", "--quiet", "--json"]);
+    let out = vahta_home(
+        home.path(),
+        home.path(),
+        &["scan", "--deep", "--quiet", "--json"],
+    );
     let stdout = text(&out.stdout);
     assert_eq!(stdout.matches("\"path\"").count(), 1, "{stdout}");
 }
@@ -206,11 +226,21 @@ fn deep_scans_hostile_lines_instead_of_stopping() {
     let big = format!("[{}, {quoted}]", "9".repeat(5000));
     let project = Tree::new();
     let home = Tree::new();
-    home.write(".claude/projects/p/a.jsonl", &format!("{assignment}\n{deep}\n{big}\n"));
+    home.write(
+        ".claude/projects/p/a.jsonl",
+        &format!("{assignment}\n{deep}\n{big}\n"),
+    );
     home.write(".claude/projects/p/b.jsonl", &format!("{deep}\n"));
     home.write(".claude/projects/p/c.jsonl", &format!("{big}\n"));
-    home.write(".claude/projects/p/d.jsonl", &format!("{}\n", "[".repeat(300_000)));
-    let out = vahta_home(project.path(), home.path(), &["scan", "--deep", "--quiet", "--json"]);
+    home.write(
+        ".claude/projects/p/d.jsonl",
+        &format!("{}\n", "[".repeat(300_000)),
+    );
+    let out = vahta_home(
+        project.path(),
+        home.path(),
+        &["scan", "--deep", "--quiet", "--json"],
+    );
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
