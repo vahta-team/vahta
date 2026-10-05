@@ -307,11 +307,14 @@ fn run_scan(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn
             Ok(d) => d,
             Err(code) => return code,
         };
-        let mut seen: std::collections::HashSet<String> =
-            findings.iter().map(|f| f.path.clone()).collect();
+        // Compared as resolved paths: the project's are under the
+        // canonicalized root (a `\\?\` path on Windows), the deep ones under
+        // the home directory as given, so the strings differ for one file.
+        let key = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+        let mut seen: std::collections::HashSet<PathBuf> =
+            findings.iter().map(|f| key(&f.path)).collect();
         for f in deep {
-            if !seen.contains(&f.path) {
-                seen.insert(f.path.clone());
+            if seen.insert(key(&f.path)) {
                 findings.push(f);
             }
         }
