@@ -349,6 +349,7 @@ dependencies = [
 name = "vahta-scan"
 version = "0.0.0"
 dependencies = [
+ "dunce",
  "vahta-detect",
  "vahta-json",
 ]

@@ -1143,7 +1143,10 @@ mod tests {
         b.importable = true;
         assert_eq!(
             format_import_next_line(&[a, b], "/proj"),
-            Some("Next: in your own terminal, ka import .env sub/.env.local".to_string())
+            Some(format!(
+                "Next: in your own terminal, ka import .env {}",
+                std::path::Path::new("sub").join(".env.local").display()
+            ))
         );
     }
 

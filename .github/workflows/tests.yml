@@ -218,4 +218,4 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude vahta-pyext --exclude vahta-pyext-scan -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --exclude vahta-pyext --exclude vahta-pyext-scan
+        run: cargo test --no-fail-fast --workspace --exclude vahta-pyext --exclude vahta-pyext-scan

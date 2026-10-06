@@ -88,7 +88,7 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
             _ => None,
         })
         .collect();
-    let mut resolved = PathBuf::from("/");
+    let mut resolved = anchor(&absolute);
     let mut links = 0usize;
     while let Some(part) = pending.pop_front() {
         if part == ".." {
@@ -107,7 +107,7 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
             Ok(_) if links > 40 => resolved = next,
             Ok(target) => {
                 if target.is_absolute() {
-                    resolved = PathBuf::from("/");
+                    resolved = anchor(&target);
                 }
                 let mut head: Vec<OsString> = target
                     .components()
@@ -125,6 +125,20 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
         }
     }
     resolved
+}
+
+/// The prefix and root of an absolute path: `/` on Unix, `C:\\` or a UNC
+/// share on Windows. Dropping the prefix would land on the current drive.
+fn anchor(path: &Path) -> PathBuf {
+    let anchor: PathBuf = path
+        .components()
+        .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        .collect();
+    if anchor.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        anchor
+    }
 }
 
 /// `_deep_candidate_paths`.
@@ -1002,7 +1016,7 @@ mod tests {
             // The scan resolves `home`; start from the resolved form so
             // expected paths compare equal.
             Tree {
-                root: std::fs::canonicalize(&root).expect("canonicalize"),
+                root: dunce::canonicalize(&root).expect("canonicalize"),
             }
         }
 
@@ -1537,7 +1551,7 @@ mod tests {
     // --- locating transcripts ------------------------------------------------
 
     fn names(home: &Path, found: Vec<PathBuf>) -> Vec<String> {
-        let home = std::fs::canonicalize(home).expect("canonicalize");
+        let home = dunce::canonicalize(home).expect("canonicalize");
         let mut v: Vec<String> = found
             .iter()
             .map(|p| {
