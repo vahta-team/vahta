@@ -880,6 +880,15 @@ fn an_each_use_or_unknown_name_refuses_the_whole_unlock_before_any_window() {
     assert_eq!(out.status.code(), Some(3));
     let err = text(&out.stderr);
     assert!(err.contains("ALPHA") && err.contains("each-use"), "{err}");
+    // Only the causes present are explained.
+    assert!(!err.contains("not in this vault"), "{err}");
+    let out = s.vahta(&["unlock", "--secret", "NOPE"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("not in this vault") && !err.contains("each-use"),
+        "{err}"
+    );
     // A vault with only each-use secrets has nothing to open a session for.
     let only = Sandbox::new();
     only.with_vault(&[("ALPHA", "fake-three", "each-use")]);

@@ -114,18 +114,25 @@ fn resolve_names(peek: &Peek, requested: Option<Vec<String>>) -> Flow<Vec<String
     if issues.is_empty() {
         return Ok(names);
     }
-    let kind = if issues.iter().any(|i| i.why == RefusalKind::EachUse) {
+    let each_use = issues.iter().any(|i| i.why == RefusalKind::EachUse);
+    let unknown = issues.iter().any(|i| i.why == RefusalKind::UnknownName);
+    let kind = if each_use {
         RefusalKind::EachUse
     } else {
         RefusalKind::UnknownName
     };
-    Err(refused_names(
-        kind,
-        "cannot open a session for these names; nothing was opened. An each-use secret needs the \
-         password every time and no session may hold it: leave it out and `vahta run` will ask \
-         for it. An unknown name is not in this vault",
-        issues,
-    ))
+    // Explain only the causes present, so the caller fixes the right thing.
+    let mut message = String::from("cannot open a session for these names; nothing was opened.");
+    if each_use {
+        message.push_str(
+            " An each-use secret needs the password every time and no session may hold it: \
+             leave it out and `vahta run` will ask for it.",
+        );
+    }
+    if unknown {
+        message.push_str(" A name that is not in this vault: check `vahta list`.");
+    }
+    Err(refused_names(kind, &message, issues))
 }
 
 fn describe(d: Option<Duration>) -> String {
