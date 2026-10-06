@@ -43,6 +43,7 @@ use crate::server::Shared;
 /// How much of a command's output goes in one frame, before base64.
 const CHUNK: usize = 16 * 1024;
 /// How long a command that was asked to stop is given before it is killed.
+#[cfg(unix)]
 const KILL_AFTER: Duration = Duration::from_secs(2);
 /// How long after the command exits its output is waited for. A background
 /// process that inherited the pipes can keep them open for ever.

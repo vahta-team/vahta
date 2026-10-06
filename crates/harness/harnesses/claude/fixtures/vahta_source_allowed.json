@@ -1,0 +1,20 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/.vahta/vault.vht": "not a real vault\n",
+    "proj/vahta.toml": "[secrets.A]\n",
+    "proj/.vahta-notes/x.md": "# notes\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "cat src/main.rs > /tmp/out.txt"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}

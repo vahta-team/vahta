@@ -1,8 +1,15 @@
 //! `vahta` — the command line.
 //!
-//! Four subcommands. `vahta setup` registers the hook with the coding agents
-//! (see `setup.rs`). `vahta list` and `vahta check` read the project's vault
-//! without a password (see `vault_cmds.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
+//! `vahta setup` registers the hook with the coding agents (see `setup.rs`).
+//! `vahta list` and `vahta check` read the project's vault without a password
+//! (see `vault_cmds.rs`). Everything that opens a vault, runs a command with its
+//! secrets or holds a session goes through the daemon, which is the vault's only
+//! owner: `vahta daemon` (see `daemon_cmd.rs`), `init`, `set`, `remove`,
+//! `import`, `reveal` and `copy` (`vault_ops.rs`), `unlock`, `lock` and
+//! `sessions` (`session_cmds.rs`), `run` and `delegate` (`run_cmd.rs`), and the
+//! hidden `_surface`, the prompt window the daemon opens (`surface_cmd.rs`).
+//! These commands take no secret and no password as an argument: the person
+//! types them in the window. `vahta scan [PATH]` is the project path of `ka scan`, and
 //! with `--deep` the home dotfiles, MCP configs and agent session transcripts
 //! as well. The scan's flags, output and exit codes match the
 //! Python command's, and `src/key_amnesia/scan_py.py` remains the

@@ -91,6 +91,38 @@ fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
     }
 }
 
+/// Refusing to touch one of Vahta's own files: names the path, never content.
+fn deny_vahta_file(file: &str) -> Decision {
+    let msg = format!(
+        "vahta blocked access to `{file}`: it is part of Vahta's own files (a vault, its lock or \
+         backups, or Vahta's local store and journal). Do not read, change, move or delete it; use \
+         the `vahta` commands, which keep values out of the transcript."
+    );
+    Decision::Deny {
+        user_message: msg.clone(),
+        agent_message: msg,
+    }
+}
+
+/// The first of Vahta's own files a tool call is about, if any: the file a
+/// write tool names, the files a patch touches, or what a shell command reads,
+/// writes, removes, moves or copies.
+fn vahta_file_touched(ev: &Event) -> Option<String> {
+    let cwd = ev.cwd.as_deref();
+    match ev.group {
+        Some(vahta_harness::Group::Write) => {
+            if let Some(path) = ev.path.as_deref()
+                && readguard::is_vahta_path(path, cwd)
+            {
+                return Some(path.to_string());
+            }
+            readguard::vahta_file_in_patch(&ev.text, cwd)
+        }
+        Some(vahta_harness::Group::Shell) => readguard::vahta_file_in_command(&ev.text, cwd),
+        _ => None,
+    }
+}
+
 /// Refusing to read a file: names the file and the kind, never a value.
 fn deny_read(file: &str, kind: &str) -> Decision {
     let msg = format!(
@@ -106,6 +138,11 @@ fn deny_read(file: &str, kind: &str) -> Decision {
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
     match args.kind {
         Kind::BeforeTool => {
+            // Vahta's own files first: they are refused whatever is in the
+            // call, and the answer names the path, not the text.
+            if let Some(file) = vahta_file_touched(ev) {
+                return deny_vahta_file(&file);
+            }
             let by_text = secret_in(&ev.text, "tool", false);
             if by_text != Decision::Allow || ev.group != Some(vahta_harness::Group::Shell) {
                 return by_text;
@@ -119,6 +156,9 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
             let Some(file) = ev.path.as_deref() else {
                 return Decision::Allow;
             };
+            if readguard::is_vahta_path(file, ev.cwd.as_deref()) {
+                return deny_vahta_file(file);
+            }
             match readguard::secret_kind_in(file, ev.cwd.as_deref(), ev.content.as_deref()) {
                 Some(kind) => deny_read(file, &kind),
                 None => Decision::Allow,

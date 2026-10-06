@@ -14,8 +14,8 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use vahta_daemon::protocol::{
-    ClientReply, ClientRequest, DurationSpec, RunInput, RunOutput, RunSignal, b64_decode,
-    b64_encode, read_frame, write_frame,
+    ClientReply, ClientRequest, DurationSpec, RunInput, RunOutput, b64_decode, b64_encode,
+    read_frame, write_frame,
 };
 use vahta_os::ipc::Stream;
 
@@ -152,6 +152,7 @@ fn send_input(writer: &Shared, message: &RunInput) -> bool {
 fn forward_signals(writer: Shared) {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     use signal_hook::iterator::Signals;
+    use vahta_daemon::protocol::RunSignal;
     let Ok(mut signals) = Signals::new([SIGINT, SIGTERM, SIGHUP]) else {
         return;
     };

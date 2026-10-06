@@ -249,6 +249,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
     std::thread::spawn(move || idle_watch(&idle_shared));
     let sweep_shared = shared.clone();
     std::thread::spawn(move || sweep_sessions(&sweep_shared));
+    crate::sleep::start(&shared);
 
     while !shared.stopping() {
         match listener.accept() {

@@ -1128,8 +1128,10 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
 
 // --- run and delegate -----------------------------------------------------------------------
 
+#[cfg(unix)]
 const VAHTA: &str = env!("CARGO_BIN_EXE_vahta");
 
+#[cfg(unix)]
 impl Sandbox {
     fn passwords_asked(&self) -> usize {
         self.window_log()
@@ -1139,6 +1141,8 @@ impl Sandbox {
     }
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn run_with_the_password_injects_the_value_and_scrubs_it_from_the_output() {
     let s = sandbox_with_secrets();
@@ -1176,6 +1180,8 @@ fn run_with_the_password_injects_the_value_and_scrubs_it_from_the_output() {
     assert!(journal.contains("run_end") && !journal.contains("fake-"));
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn names_and_variables_come_from_the_flags_and_vahta_toml() {
     let s = sandbox_with_secrets();
@@ -1263,6 +1269,8 @@ fn names_and_variables_come_from_the_flags_and_vahta_toml() {
     assert_eq!(s.asks(), asks, "a window opened for a refusal");
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn exit_codes_streams_stdin_cwd_and_the_environment_pass_through() {
     let s = sandbox_with_secrets();
@@ -1319,6 +1327,8 @@ fn exit_codes_streams_stdin_cwd_and_the_environment_pass_through() {
     assert_eq!(text(&out.stdout), "hello ***REDACTED(ZETA)*** and fake-on");
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn a_session_serves_runs_with_no_window_and_each_use_secrets_always_ask() {
     let s = sandbox_with_secrets();
@@ -1380,6 +1390,8 @@ fn a_session_serves_runs_with_no_window_and_each_use_secrets_always_ask() {
     assert_eq!(s.sessions().len(), 1);
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn lock_ends_the_session_and_the_next_run_asks_again() {
     let s = sandbox_with_secrets();
@@ -1403,6 +1415,8 @@ fn lock_ends_the_session_and_the_next_run_asks_again() {
     assert_eq!(s.asks(), asks + 1);
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn a_changed_secret_fails_the_session_closed_with_a_message_to_unlock_again() {
     let s = sandbox_with_secrets();
@@ -1428,6 +1442,8 @@ fn a_changed_secret_fails_the_session_closed_with_a_message_to_unlock_again() {
     assert_eq!(s.asks(), asks);
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn a_command_started_by_the_daemon_inherits_the_session() {
     let s = sandbox_with_secrets();
@@ -1457,6 +1473,8 @@ fn a_command_started_by_the_daemon_inherits_the_session() {
     assert_eq!(s.sessions()[0]["uses"], 2);
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn delegation_narrows_the_session_and_refuses_anything_wider_with_no_window() {
     let s = sandbox_with_secrets();
@@ -1641,6 +1659,8 @@ fn ctrl_c_reaches_the_command_and_its_exit_code_comes_back() {
 
 // --- the invariant ------------------------------------------------------------------------
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
 #[test]
 fn nothing_secret_is_in_the_journal_the_daemons_stderr_or_any_clients_output() {
     let s = Sandbox::new();
@@ -1775,4 +1795,46 @@ fn nothing_secret_is_in_the_journal_the_daemons_stderr_or_any_clients_output() {
     // The scrubbed values did come back, as markers.
     assert!(seen.iter().any(|t| t.contains("***REDACTED(ZETA)***")));
     assert!(seen.iter().any(|t| t.contains("***REDACTED(ALPHA)***")));
+}
+
+// --- lock on sleep ---------------------------------------------------------------------------
+
+#[test]
+fn sessions_end_when_the_machine_sleeps_unless_the_config_says_not_to() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.vahta(&["daemon", "stop"]).status.code(), Some(0));
+    let trigger = s.root.join("sleep-now");
+    let start = |s: &Sandbox| {
+        s.script(&[r#"{"secret":"correct horse"}"#]);
+        let out = s
+            .command(&s.project())
+            .env("VAHTA_TEST_SLEEP_TRIGGER", &trigger)
+            .args(["unlock"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    };
+    // On by default: the machine sleeps, the session ends, the journal says why.
+    start(&s);
+    assert_eq!(s.sessions().len(), 1);
+    fs::write(&trigger, "").unwrap();
+    wait_until("the session to end on sleep", 10, || {
+        s.sessions().is_empty()
+    });
+    let journal = s.journal();
+    assert!(journal.contains("\"reason\":\"sleep\"") && journal.contains("sleep_lock"));
+
+    // lock_on_sleep = false in config.toml: the same event ends nothing.
+    assert_eq!(s.vahta(&["daemon", "stop"]).status.code(), Some(0));
+    fs::write(s.root.join("config/config.toml"), "lock_on_sleep = false\n").unwrap();
+    start(&s);
+    fs::write(&trigger, "").unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(s.sessions().len(), 1);
+    assert!(s.journal().contains("disabled"));
+    // A misspelt key is an error, not a silent default.
+    assert_eq!(s.vahta(&["daemon", "stop"]).status.code(), Some(0));
+    fs::write(s.root.join("config/config.toml"), "lock_on_slepe = false\n").unwrap();
+    let out = s.vahta(&["daemon", "restart"]);
+    assert_eq!(out.status.code(), Some(5));
 }

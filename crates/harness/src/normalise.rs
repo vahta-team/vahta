@@ -14,6 +14,7 @@ pub struct Event {
     /// before_tool: the text to scan. prompt: the prompt. after_tool: the output.
     pub text: String,
     /// before_read: the file and, when the harness sends it, its content.
+    /// before_tool: the file a write tool is about, when the harness names it.
     pub path: Option<String>,
     pub content: Option<String>,
     pub cwd: Option<String>,
@@ -159,6 +160,9 @@ impl Manifest {
                 if !matches!(group.group, Group::Shell | Group::Write | Group::Mcp) {
                     return None;
                 }
+                // The file a write tool is about, where the harness names one;
+                // the hook uses it to protect Vahta's own files.
+                ev.path = text_field(payload, &spec.file_path);
                 let input = field(payload, &spec.tool_input);
                 ev.text = if group.group == Group::Mcp {
                     match input {

@@ -24,6 +24,27 @@ pub fn scripted_from_env() -> Option<Box<dyn PromptSurface>> {
     }
 }
 
+/// In a test build, stand in for logind: when the file named by
+/// `VAHTA_TEST_SLEEP_TRIGGER` appears, the machine "went to sleep". The same
+/// path as the real signal, so a test can show the sessions end.
+pub(crate) fn start_sleep_trigger(shared: &std::sync::Arc<crate::server::Shared>) {
+    #[cfg(feature = "test-surface")]
+    if let Some(path) = std::env::var_os("VAHTA_TEST_SLEEP_TRIGGER") {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            while !shared.stopping() {
+                if std::path::Path::new(&path).exists() {
+                    let _ = std::fs::remove_file(&path);
+                    crate::sleep::lock_now(&shared, "test trigger");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+    }
+    #[cfg(not(feature = "test-surface"))]
+    let _ = shared;
+}
+
 /// Apply the test overrides to the daemon's options: the version it reports
 /// (`VAHTA_TEST_DAEMON_VERSION`, to stand in for an old daemon), how long it
 /// idles before it exits (`VAHTA_TEST_IDLE_SECONDS`), how long a copied value

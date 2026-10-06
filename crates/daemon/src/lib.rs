@@ -26,6 +26,7 @@ mod scrub;
 pub mod server;
 mod session;
 mod session_ops;
+mod sleep;
 pub mod surface;
 pub mod terminal;
 pub mod testing;
