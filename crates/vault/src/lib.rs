@@ -18,6 +18,7 @@ pub mod format;
 pub mod ka;
 pub mod manifest;
 pub mod project;
+pub mod session;
 pub mod store;
 mod vault;
 pub mod write;
@@ -30,6 +31,7 @@ use zeroize::Zeroizing;
 
 pub use crypto::KdfParams;
 pub use format::current::{Actor, Entry, Kind, Recipient, RecipientKind, Role, Tier};
+pub use session::SessionKeys;
 pub use vault::{Peek, RecipientSecret, Vault, Verification};
 
 /// Names are env-var-like and short. Checked on every write and every read of
@@ -117,6 +119,10 @@ pub enum Error {
     /// The local store's state file does not pass its MAC: edited, or not
     /// written by this opener. Never reset silently.
     StoreTampered,
+    /// A session's read found the vault changed since the session was opened:
+    /// a secret re-sealed, removed or moved to another tier, or the file
+    /// replaced. The session's keys no longer open it.
+    SessionStale,
 }
 
 impl Error {
@@ -181,6 +187,9 @@ impl fmt::Display for Error {
             Error::NotPermitted => f.write_str("this recipient's role does not allow that"),
             Error::StoreTampered => f.write_str(
                 "this machine's record of the vault failed its integrity check; refusing to reset it",
+            ),
+            Error::SessionStale => f.write_str(
+                "changed since this session was opened; unlock again",
             ),
         }
     }

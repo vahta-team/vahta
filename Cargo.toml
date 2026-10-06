@@ -26,9 +26,6 @@ panic = "abort"
 [profile.dev.package.argon2]
 opt-level = 3
 
-[profile.dev.package.blake2]
-opt-level = 3
-
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 

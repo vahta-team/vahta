@@ -26,7 +26,9 @@
 
 mod daemon_cmd;
 mod setup;
+mod surface_cmd;
 mod vault_cmds;
+mod vault_ops;
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -41,6 +43,9 @@ use vahta_scan::walk::scan_project_with_threads;
 pub const EXIT_CLEAN: i32 = 0;
 pub const EXIT_LEAKS: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
+/// A command that ran and found a failure (`vahta check` with a name missing,
+/// a vault operation that went wrong).
+pub const EXIT_FAILED: i32 = 1;
 /// The daemon commands add: a structured refusal, a prompt window that was
 /// cancelled or timed out, and a daemon that is not available.
 pub const EXIT_REFUSED: i32 = 3;
@@ -82,6 +87,12 @@ commands:
   setup   register vahta-hook with Claude Code, Codex and Cursor
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
+  init    create this project's vault
+  set     store a secret (typed in a window, never on the command line)
+  remove  remove a secret
+  import  add the secrets of a ka vault or a .env file
+  reveal  show a secret in a window
+  copy    put a secret on the clipboard for 30 seconds
   daemon  run, inspect, stop or restart the daemon that owns the vault
 
 Run `vahta <command> --help` for the options.
@@ -368,6 +379,11 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
         Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
         Some("daemon") => daemon_cmd::run(&args[1..], env, stdout, stderr),
+        Some(cmd @ ("init" | "set" | "remove" | "import" | "reveal" | "copy")) => {
+            vault_ops::run(cmd, &args[1..], env, stdout, stderr)
+        }
+        // The prompt window, started by the daemon; not listed in the help.
+        Some("_surface") => surface_cmd::run(&args[1..]),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
             EXIT_CLEAN

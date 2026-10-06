@@ -12,10 +12,10 @@ use serde_json::json;
 use vahta_daemon::client::{ClientError, Connection, Connector};
 use vahta_daemon::config::Config;
 use vahta_daemon::paths::Paths;
-use vahta_daemon::protocol::{ClientReply, ClientRequest, StatusInfo};
+use vahta_daemon::protocol::{ClientReply, ClientRequest, RefusalKind, StatusInfo};
 use vahta_daemon::server::{self, Options, ServerError};
 
-use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_USAGE, Env};
+use crate::{EXIT_CANCELLED, EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_REFUSED, EXIT_USAGE, Env};
 
 pub const DAEMON_USAGE: &str = "\
 usage: vahta daemon run
@@ -260,5 +260,106 @@ fn restart(env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             let _ = writeln!(stderr, "vahta daemon: error: {e}");
             EXIT_DAEMON
         }
+    }
+}
+
+/// Send `request` to the daemon, starting it if need be, and report the reply
+/// the way every daemon-backed command does. Returns the exit code.
+pub fn request(
+    env: &Env,
+    command: &str,
+    request: &ClientRequest,
+    json: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let mut conn = match connect(env, command, stderr) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    match conn.request(request) {
+        Ok(reply) => report(command, &reply, json, stdout, stderr),
+        Err(e) => {
+            let _ = writeln!(stderr, "vahta {command}: error: {e}");
+            EXIT_DAEMON
+        }
+    }
+}
+
+/// Print a reply and give the exit code: 0 done, 3 refused (structured), 4
+/// cancelled or timed out in the window, 1 for anything that went wrong.
+pub fn report(
+    command: &str,
+    reply: &ClientReply,
+    json: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match reply {
+        ClientReply::Done { message } => {
+            if json {
+                let _ = writeln!(stdout, "{}", json!({"ok": true, "message": message}));
+            } else {
+                let _ = writeln!(stdout, "{message}");
+            }
+            EXIT_CLEAN
+        }
+        ClientReply::Ok {} => EXIT_CLEAN,
+        ClientReply::Refused(r) => {
+            if json {
+                let doc = json!({"ok": false, "refused": r});
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string(&doc).unwrap_or_default()
+                );
+            } else {
+                let _ = writeln!(stderr, "vahta {command}: refused: {}", r.message);
+                for n in &r.names {
+                    let _ = writeln!(stderr, "  {}: {}", n.name, refusal_text(n.why));
+                }
+            }
+            EXIT_REFUSED
+        }
+        ClientReply::Cancelled { message } => {
+            if json {
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    json!({"ok": false, "cancelled": true, "message": message})
+                );
+            } else {
+                let _ = writeln!(stderr, "vahta {command}: {message}");
+            }
+            EXIT_CANCELLED
+        }
+        ClientReply::Error { message } => {
+            if json {
+                let _ = writeln!(stdout, "{}", json!({"ok": false, "error": message}));
+            } else {
+                let _ = writeln!(stderr, "vahta {command}: error: {message}");
+            }
+            EXIT_FAILED
+        }
+        ClientReply::Status(_) => {
+            let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
+            EXIT_FAILED
+        }
+    }
+}
+
+fn refusal_text(why: RefusalKind) -> &'static str {
+    match why {
+        RefusalKind::UnknownName => "not in this vault",
+        RefusalKind::EachUse => {
+            "an each-use secret; it needs the password every time and no session may hold it"
+        }
+        RefusalKind::OutOfScope => "not covered by this session",
+        RefusalKind::NotASubset => "not in the parent session",
+        RefusalKind::LaterDeadline => "outlasts the parent session",
+        RefusalKind::NoVault => "no vault",
+        RefusalKind::NothingToDo => "nothing to do",
+        RefusalKind::Exists => "already exists",
+        RefusalKind::NoAnchor => "no process to anchor a session to",
     }
 }

@@ -19,6 +19,7 @@ use std::io::{self, Read, Write};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use vahta_vault::Tier;
 use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
@@ -160,24 +161,120 @@ pub struct HelloReply {
 
 // --- Client messages ------------------------------------------------------------------
 
-/// What a client may ask. No variant has a field for a value or a password.
+/// Which file a project's secrets are imported from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImportSource {
+    /// A ka vault; the window also asks for the ka password.
+    Ka { path: String },
+    /// A `.env` file, read by the daemon.
+    Dotenv { path: String },
+}
+
+/// What a client may ask. No variant has a field for a value or a password:
+/// the person types those in the prompt window, which is not this connection.
+/// `cwd` is where the command was run, from which the daemon finds the
+/// project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
-    /// How the daemon is doing.
     // Struct variants, not unit ones: serde enforces `deny_unknown_fields`
     // for the fields of a struct variant but lets a unit variant of an
     // internally tagged enum ignore extra fields.
+    /// How the daemon is doing.
     Status {},
     /// End the daemon, and with it every session.
     Stop {},
+    /// Create the project's vault in `cwd`.
+    Init {
+        cwd: String,
+    },
+    /// Add or replace a secret; its value is typed in the window.
+    Set {
+        cwd: String,
+        name: String,
+        tier: Tier,
+        /// A file name hint: the secret is a file, not an environment variable.
+        file: Option<String>,
+    },
+    Remove {
+        cwd: String,
+        name: String,
+    },
+    Import {
+        cwd: String,
+        source: ImportSource,
+    },
+    /// Show a value in the window.
+    Reveal {
+        cwd: String,
+        name: String,
+    },
+    /// Put a value on the clipboard for a short time.
+    Copy {
+        cwd: String,
+        name: String,
+    },
+}
+
+/// Why a request was refused outright, before any window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalKind {
+    /// A name that is not in the vault.
+    UnknownName,
+    /// An each-use secret, which no session may hold.
+    EachUse,
+    /// A name the caller's session does not cover.
+    OutOfScope,
+    /// A delegated session asked for more than its parent has.
+    NotASubset,
+    /// A delegated session asked for longer than its parent has.
+    LaterDeadline,
+    /// There is no vault, or no project.
+    NoVault,
+    /// Nothing to act on (no names).
+    NothingToDo,
+    /// Already there (a vault, a name).
+    Exists,
+    /// The caller is not something a session can be anchored to.
+    NoAnchor,
+}
+
+/// One name in a refusal and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NameIssue {
+    pub name: String,
+    pub why: RefusalKind,
+}
+
+/// A structured refusal: enough for the caller, a mistaken agent included, to
+/// rebuild the command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Refusal {
+    pub kind: RefusalKind,
+    pub message: String,
+    pub names: Vec<NameIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientReply {
-    Ok,
+    Ok {},
     Status(StatusInfo),
+    /// The request was carried out; `message` is for the person, and never a
+    /// value.
+    Done {
+        message: String,
+    },
+    /// Refused before any window opened.
+    Refused(Refusal),
+    /// The window was closed, cancelled or timed out.
+    Cancelled {
+        message: String,
+    },
     /// The request could not be carried out; `message` says why, never a value.
     Error {
         message: String,
@@ -193,6 +290,107 @@ pub struct StatusInfo {
     pub connections: usize,
     pub uptime_secs: u64,
     pub runtime_dir: String,
+}
+
+// --- Surface messages --------------------------------------------------------------------
+
+/// A string that is a password, a typed value or a value to show: zeroed when
+/// dropped, redacted in `Debug`, with no `Display`. It appears only in surface
+/// messages, never in a client's.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(Zeroizing<String>);
+
+impl Secret {
+    pub fn new(text: String) -> Secret {
+        Secret(Zeroizing::new(text))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Secret, D::Error> {
+        String::deserialize(d).map(Secret::new)
+    }
+}
+
+/// What a window shows the person above its question: what they are approving,
+/// as Vahta renders it. The lines are Vahta's own (project, vault, names,
+/// duration, anchor); `agent_note` is the one thing an agent wrote, shown as
+/// such.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Panel {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub warning: Option<String>,
+    /// A description from the agent, already sanitised, to be shown marked as
+    /// "from the agent, not verified".
+    pub agent_note: Option<String>,
+}
+
+/// The daemon's questions to the window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "ask", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SurfaceRequest {
+    /// A password, typed hidden. With `confirm` it is asked twice and only a
+    /// matching pair is sent back.
+    Password {
+        panel: Panel,
+        prompt: String,
+        confirm: bool,
+    },
+    /// A value to store, typed hidden, and asked twice with `confirm`.
+    Value {
+        panel: Panel,
+        prompt: String,
+        confirm: bool,
+    },
+    /// Yes or no, no secret. `timeout_secs` is how long to wait.
+    Confirm {
+        panel: Panel,
+        question: String,
+        timeout_secs: Option<u64>,
+    },
+    /// Show something secret until a key is pressed, or `seconds` pass.
+    Show {
+        panel: Panel,
+        what: String,
+        value: Secret,
+        seconds: Option<u32>,
+        /// Ask for an explicit acknowledgement, as for a recovery key.
+        acknowledge: bool,
+    },
+    /// The conversation is over; the window may close after the message.
+    Close { message: Option<String> },
+}
+
+/// The window's answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SurfaceAnswer {
+    Secret {
+        value: Secret,
+    },
+    Yes {},
+    No {},
+    /// A `Show` was seen (acknowledged, or its time ran out).
+    Done {},
+    Cancel {},
 }
 
 #[cfg(test)]
@@ -279,6 +477,39 @@ mod tests {
         let hello = r#"{"protocol":1,"version":"x","kind":{"type":"client"},"password":"p"}"#;
         let r: Result<Option<Hello>, _> = read_frame(&mut Cursor::new(frame(hello.as_bytes())));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn no_vault_request_has_a_place_for_a_value_or_a_password() {
+        let good = r#"{"op":"set","cwd":"/p","name":"A","tier":"Session","file":null}"#;
+        let ok: Result<Option<ClientRequest>, _> =
+            read_frame(&mut Cursor::new(frame(good.as_bytes())));
+        assert!(matches!(ok, Ok(Some(ClientRequest::Set { .. }))));
+        for extra in ["value", "secret", "password", "typed", "plaintext"] {
+            let bad = format!(
+                r#"{{"op":"set","cwd":"/p","name":"A","tier":"Session","file":null,"{extra}":"fake-one"}}"#
+            );
+            let r: Result<Option<ClientRequest>, _> =
+                read_frame(&mut Cursor::new(frame(bad.as_bytes())));
+            assert!(r.is_err(), "{extra} was accepted");
+        }
+        // Nor does any reply: a reply has no field that could carry one.
+        let reply = r#"{"reply":"done","message":"saved","value":"fake-one"}"#;
+        let r: Result<Option<ClientReply>, _> =
+            read_frame(&mut Cursor::new(frame(reply.as_bytes())));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn a_secret_is_redacted_when_printed_and_travels_only_in_surface_messages() {
+        let s = Secret::new("fake-one".to_string());
+        assert_eq!(format!("{s:?}"), "Secret(<redacted>)");
+        let answer = SurfaceAnswer::Secret { value: s };
+        assert!(!format!("{answer:?}").contains("fake-one"));
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &answer).unwrap();
+        let back: Option<SurfaceAnswer> = read_frame(&mut Cursor::new(buf)).unwrap();
+        assert_eq!(back, Some(answer));
     }
 
     #[test]

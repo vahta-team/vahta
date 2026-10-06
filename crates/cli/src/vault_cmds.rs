@@ -20,10 +20,7 @@ use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{Entry, Kind, Peek, Tier, Vault, Verification};
 
-use crate::{EXIT_CLEAN, EXIT_USAGE, Env};
-
-/// Not a usage error: the command ran and what it found is a failure.
-const EXIT_FAILED: i32 = 1;
+use crate::{EXIT_CLEAN, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const LIST_USAGE: &str = "\
 usage: vahta list [--json]

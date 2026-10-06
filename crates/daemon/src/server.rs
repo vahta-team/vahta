@@ -12,19 +12,24 @@
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use vahta_os::ipc::{Address, Listener, Stream};
+use vahta_vault::KdfParams;
+use vahta_vault::store::LocalStore;
 
 use crate::config::Config;
 use crate::journal::{Entry, Journal};
+use crate::ops::{self, Ctx};
 use crate::paths::{PathError, Paths};
 use crate::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, ProtocolError, StatusInfo,
     read_frame, write_frame,
 };
+use crate::surface::{PromptSurface, SurfaceRegistry, TerminalSurface};
 
 #[derive(Debug)]
 pub enum ServerError {
@@ -63,6 +68,15 @@ pub struct Options {
     /// memory). On for the real daemon; a test that runs the server inside its
     /// own process leaves it off.
     pub harden: bool,
+    /// What opens the prompt window. `None` is the real one, a new terminal
+    /// window; a test build supplies a scripted one.
+    pub surface: Option<Box<dyn PromptSurface>>,
+    /// The cost of a new vault's password hash.
+    pub kdf: KdfParams,
+    /// How long a copied value stays on the clipboard.
+    pub clipboard_clear: Duration,
+    /// The executable that runs the prompt window; this one when `None`.
+    pub exe: Option<PathBuf>,
 }
 
 impl Options {
@@ -74,6 +88,10 @@ impl Options {
             version: crate::VERSION.to_string(),
             idle,
             harden: true,
+            surface: None,
+            kdf: KdfParams::PRODUCTION,
+            clipboard_clear: Duration::from_secs(30),
+            exe: None,
         }
     }
 }
@@ -81,8 +99,11 @@ impl Options {
 /// What every connection thread shares.
 pub(crate) struct Shared {
     pub(crate) options: Options,
-    pub(crate) journal: Journal,
+    pub(crate) journal: Arc<Journal>,
     pub(crate) address: Address,
+    pub(crate) surface: Box<dyn PromptSurface>,
+    pub(crate) registry: Arc<SurfaceRegistry>,
+    pub(crate) store: LocalStore,
     started: Instant,
     stop: AtomicBool,
     connections: AtomicUsize,
@@ -119,7 +140,7 @@ impl Shared {
         }
     }
 
-    fn status(&self) -> StatusInfo {
+    pub(crate) fn status(&self) -> StatusInfo {
         StatusInfo {
             version: self.options.version.clone(),
             pid: std::process::id(),
@@ -151,7 +172,7 @@ impl Drop for ConnectionGuard {
 
 /// Run the daemon in this process until it is stopped or idle. Returns when it
 /// has cleaned up.
-pub fn run(options: Options) -> Result<(), ServerError> {
+pub fn run(mut options: Options) -> Result<(), ServerError> {
     options.paths.ensure_runtime_dir()?;
     options.paths.ensure_data_dir()?;
 
@@ -171,7 +192,7 @@ pub fn run(options: Options) -> Result<(), ServerError> {
         }
     }
 
-    let journal = Journal::open(&options.paths.journal_file());
+    let journal = Arc::new(Journal::open(&options.paths.journal_file()));
     if options.harden {
         if let Err(e) = vahta_os::harden_process() {
             journal.record(Entry::new("harden").result("partial", Some(&e.to_string())));
@@ -187,10 +208,31 @@ pub fn run(options: Options) -> Result<(), ServerError> {
         Listener::bind(&address).map_err(|e| ServerError::Io("listen on the socket", e))?;
     journal.record(Entry::new("daemon_start").result("ok", Some(&options.version)));
 
+    let registry = Arc::new(SurfaceRegistry::default());
+    let surface: Box<dyn PromptSurface> = match options.surface.take() {
+        Some(s) => s,
+        None => {
+            let exe = match options.exe.clone() {
+                Some(e) => e,
+                None => std::env::current_exe()
+                    .map_err(|e| ServerError::Io("find its own executable", e))?,
+            };
+            Box::new(TerminalSurface::new(
+                registry.clone(),
+                address.clone(),
+                options.config.terminal.clone(),
+                exe,
+            ))
+        }
+    };
+    let store = LocalStore::new(options.paths.data.clone());
     let shared = Arc::new(Shared {
         options,
         journal,
         address,
+        surface,
+        registry,
+        store,
         started: Instant::now(),
         stop: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
@@ -284,19 +326,30 @@ fn handle_connection(shared: &Arc<Shared>, mut stream: Stream) {
         sessions: shared.live_sessions(),
         error: None,
     };
+    let hello_ok = match &hello.kind {
+        HelloKind::Surface { token } => shared.registry.has(token),
+        HelloKind::Client => true,
+    };
+    if !hello_ok {
+        reject(&mut stream, shared, "no request is waiting for a window");
+        return;
+    }
     if write_frame(&mut stream, &ok).is_err() {
         return;
     }
     match hello.kind {
         HelloKind::Client => client_loop(shared, &mut stream, &peer),
-        HelloKind::Surface { .. } => {
-            reject(&mut stream, shared, "no request is waiting for a window")
+        HelloKind::Surface { token } => {
+            // If the token is spent between the check above and here, there is
+            // no request to hand the window to and the connection just ends.
+            if let Err(stream) = shared.registry.claim(&token, stream) {
+                let _ = stream.shutdown();
+            }
         }
     }
 }
 
 fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer) {
-    let _ = peer;
     loop {
         let request: ClientRequest = match read_frame(stream) {
             Ok(Some(r)) => r,
@@ -313,9 +366,37 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             }
         };
         shared.touch();
+        let ctx = Ctx {
+            shared,
+            exe: vahta_os::exe_name(peer.id.pid),
+            pid: peer.id.pid,
+        };
         let (reply, stop) = match request {
             ClientRequest::Status {} => (ClientReply::Status(shared.status()), false),
-            ClientRequest::Stop {} => (ClientReply::Ok, true),
+            ClientRequest::Stop {} => (ClientReply::Ok {}, true),
+            ClientRequest::Init { cwd } => (ops::init(&ctx, &cwd).unwrap_or_else(|r| r), false),
+            ClientRequest::Set {
+                cwd,
+                name,
+                tier,
+                file,
+            } => (
+                ops::set(&ctx, &cwd, &name, tier, file.as_deref()).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Remove { cwd, name } => {
+                (ops::remove(&ctx, &cwd, &name).unwrap_or_else(|r| r), false)
+            }
+            ClientRequest::Import { cwd, source } => (
+                ops::import(&ctx, &cwd, &source).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Reveal { cwd, name } => {
+                (ops::reveal(&ctx, &cwd, &name).unwrap_or_else(|r| r), false)
+            }
+            ClientRequest::Copy { cwd, name } => {
+                (ops::copy(&ctx, &cwd, &name).unwrap_or_else(|r| r), false)
+            }
         };
         if write_frame(stream, &reply).is_err() {
             return;

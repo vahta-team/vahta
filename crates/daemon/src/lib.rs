@@ -12,11 +12,16 @@
 //! when it has been idle.
 
 pub mod client;
+mod clipboard;
 pub mod config;
+mod dotenv;
 pub mod journal;
+mod ops;
 pub mod paths;
 pub mod protocol;
 pub mod server;
+pub mod surface;
+pub mod terminal;
 pub mod testing;
 
 /// This build's version, compared at the handshake. A client and a daemon of
