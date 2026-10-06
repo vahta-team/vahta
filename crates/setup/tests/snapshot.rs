@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use vahta_harness::HARNESSES;
 
 fn snapshot_path(h: &str) -> PathBuf {
@@ -29,7 +29,9 @@ fn snapshot_path(h: &str) -> PathBuf {
 }
 
 fn current(h: &str) -> Value {
-    let m = vahta_harness::manifest(h).expect("known harness").expect("manifest parses");
+    let m = vahta_harness::manifest(h)
+        .expect("known harness")
+        .expect("manifest parses");
     json!({ "setup_version": m.setup_version, "fragment": vahta_setup::fragment(&m) })
 }
 
@@ -47,7 +49,10 @@ fn the_fragment_matches_its_snapshot() {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
-            failures.push(format!("{h}: no snapshot at {}; regenerate it with VAHTA_UPDATE_SNAPSHOTS=1", path.display()));
+            failures.push(format!(
+                "{h}: no snapshot at {}; regenerate it with VAHTA_UPDATE_SNAPSHOTS=1",
+                path.display()
+            ));
             continue;
         };
         let snap: Value = serde_json::from_str(&text).expect("snapshot is JSON");

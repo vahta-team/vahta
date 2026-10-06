@@ -186,3 +186,36 @@ jobs:
           set -euo pipefail
           PY="${{ steps.py.outputs.python }}"
           "${PY}" -m pytest -q
+
+  # The Rust workspace on every OS, without Python: formatting, lints and
+  # tests. The pyo3 extensions are built and tested by the rust leg above.
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git fetch --depth 1 origin "${{ github.sha }}"
+          git checkout --force FETCH_HEAD
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --exclude vahta-pyext --exclude vahta-pyext-scan -- -D warnings
+
+      - name: Test
+        run: cargo test --no-fail-fast --workspace --exclude vahta-pyext --exclude vahta-pyext-scan

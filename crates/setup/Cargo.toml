@@ -17,3 +17,4 @@ vahta-harness = { path = "../harness" }
 serde_json = { version = "1", features = ["preserve_order"] }
 # Unified diffs for `--dry-run`. Pure text; no I/O, no network.
 similar = "3"
+dunce = "1"

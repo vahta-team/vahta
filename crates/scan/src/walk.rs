@@ -107,7 +107,7 @@ pub fn project_files(root: &Path, include_excluded: bool) -> Vec<PathBuf> {
     // `canonicalize` fails with `NotFound`. That difference cannot change the
     // outcome here: where `canonicalize` fails, Python's `resolve()` succeeds
     // but the following `is_dir()` is then `False`, so both return nothing.
-    let Ok(root) = std::fs::canonicalize(root) else {
+    let Ok(root) = dunce::canonicalize(root) else {
         return Vec::new();
     };
     if !root.is_dir() {
@@ -289,6 +289,7 @@ pub fn scan_project_with_threads(
 #[cfg(test)]
 mod tests {
     use super::*;
+    const SEP: char = std::path::MAIN_SEPARATOR;
 
     /// A real tree in a uniquely named temporary directory, removed on drop so
     /// a failing assertion still cleans up. `tempfile` is not a dependency and
@@ -336,7 +337,7 @@ mod tests {
         /// Paths relative to the root, `/`-separated, as the walker yielded
         /// them — order preserved, because order is what several tests check.
         fn walk(&self, include_excluded: bool) -> Vec<String> {
-            let base = std::fs::canonicalize(&self.root).expect("canonicalize root");
+            let base = dunce::canonicalize(&self.root).expect("canonicalize root");
             project_files(&self.root, include_excluded)
                 .into_iter()
                 .map(|p| {
@@ -704,7 +705,7 @@ mod tests {
         assert!(!s.contains("/./"), "{s}");
         assert!(!s.contains(".."), "{s}");
         assert!(!s.contains("//"), "{s}");
-        assert!(s.ends_with("/f.py"), "{s}");
+        assert!(s.ends_with(&format!("{SEP}f.py")), "{s}");
     }
 
     /// A symlink *as the root* is resolved, because Python resolves the root,
@@ -823,8 +824,8 @@ mod tests {
         let mut sorted = paths.clone();
         sorted.sort_unstable();
         assert_eq!(paths, sorted, "output must be sorted by path");
-        assert!(paths[0].ends_with("/a/.env"), "{paths:?}");
-        assert!(paths[1].ends_with("/b/.env"), "{paths:?}");
+        assert!(paths[0].ends_with(&format!("{SEP}a{SEP}.env")), "{paths:?}");
+        assert!(paths[1].ends_with(&format!("{SEP}b{SEP}.env")), "{paths:?}");
     }
 
     #[test]
@@ -854,13 +855,18 @@ mod tests {
         }
         #[cfg(unix)]
         {
-            let _ = std::os::unix::fs::symlink(t.root.join("d0/e0/f0.env"), t.root.join("d1/link.env"));
+            let _ =
+                std::os::unix::fs::symlink(t.root.join("d0/e0/f0.env"), t.root.join("d1/link.env"));
         }
         let base = scan_project_with_threads(&t.root, false, 1);
         assert!(base.len() > 50);
         for _ in 0..3 {
             for n in [2, 3, 8, 16, 64] {
-                assert_eq!(scan_project_with_threads(&t.root, false, n), base, "threads={n}");
+                assert_eq!(
+                    scan_project_with_threads(&t.root, false, n),
+                    base,
+                    "threads={n}"
+                );
             }
         }
     }

@@ -37,10 +37,39 @@ const HISTORY_BASENAMES: [&str; 6] = [
 /// `Dockerfile` or a shell script without a suffix is exactly where a
 /// credential gets pasted.
 const CONTENT_SCAN_SUFFIXES: [&str; 33] = [
-    "", ".env", ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".json", ".toml",
-    ".yaml", ".yml", ".ini", ".cfg", ".conf", ".config", ".sh", ".bash", ".zsh", ".ps1",
-    ".bat", ".cmd", ".txt", ".md", ".properties", ".xml", ".rb", ".go", ".rs", ".java",
-    ".kt", ".php",
+    "",
+    ".env",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".json",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".config",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".bat",
+    ".cmd",
+    ".txt",
+    ".md",
+    ".properties",
+    ".xml",
+    ".rb",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".php",
 ];
 
 /// The kind a filename alone implies, or `None`.
@@ -66,8 +95,7 @@ pub fn filename_kind(posix_path: &str, name: &str) -> Option<&'static str> {
     if SSH_PRIVATE_NAMES.contains(&name) {
         return Some("ssh_private_key");
     }
-    if MCP_BASENAMES.contains(&name) || name == "mcp.json" || posix_path.ends_with("/mcp.json")
-    {
+    if MCP_BASENAMES.contains(&name) || name == "mcp.json" || posix_path.ends_with("/mcp.json") {
         return Some("mcp_config");
     }
     if HISTORY_BASENAMES.contains(&name) || name.ends_with("_history") {
@@ -142,14 +170,20 @@ mod tests {
     #[test]
     fn kinds_by_name() {
         assert_eq!(filename_kind("/p/.env", ".env"), Some("dotenv"));
-        assert_eq!(filename_kind("/p/id_rsa", "id_rsa"), Some("ssh_private_key"));
+        assert_eq!(
+            filename_kind("/p/id_rsa", "id_rsa"),
+            Some("ssh_private_key")
+        );
         assert_eq!(filename_kind("/p/.npmrc", ".npmrc"), Some(".npmrc"));
         assert_eq!(filename_kind("/p/mcp.json", "mcp.json"), Some("mcp_config"));
         assert_eq!(
             filename_kind("/p/.bash_history", ".bash_history"),
             Some("shell_history")
         );
-        assert_eq!(filename_kind("/p/my_history", "my_history"), Some("shell_history"));
+        assert_eq!(
+            filename_kind("/p/my_history", "my_history"),
+            Some("shell_history")
+        );
         assert_eq!(filename_kind("/p/main.py", "main.py"), None);
     }
 

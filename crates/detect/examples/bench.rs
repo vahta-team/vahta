@@ -11,11 +11,14 @@
 use std::path::Path;
 use std::time::Instant;
 use vahta_detect::{
-    classify_bearer_capture, classify_value, find_prefix_kind, iter_assignments, iter_flag_values, scan_text_hits,
+    classify_bearer_capture, classify_value, find_prefix_kind, iter_assignments, iter_flag_values,
+    scan_text_hits,
 };
 
 fn collect(dir: &Path, out: &mut Vec<String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
     for p in entries {
@@ -49,7 +52,16 @@ impl Rng {
 
 fn generated(bytes: usize) -> String {
     let mut r = Rng(0x9E3779B97F4A7C15);
-    let names = ["api_key", "DB_PASSWORD", "auth-token", "client_secret", "passwd", "PRIVATE_KEY", "host", "name"];
+    let names = [
+        "api_key",
+        "DB_PASSWORD",
+        "auth-token",
+        "client_secret",
+        "passwd",
+        "PRIVATE_KEY",
+        "host",
+        "name",
+    ];
     let heads = ["sk", "ghp", "AKIA", "xoxb", "plain", "Zx", "", "AIza"];
     let alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut s = String::with_capacity(bytes + 200);
@@ -68,8 +80,13 @@ fn generated(bytes: usize) -> String {
             0 => s.push_str(&format!("{name} = \"{v}\"\n")),
             1 => s.push_str(&format!("export {name}={v}\n")),
             2 => s.push_str(&format!("  \"{name}\": \"{v}\",\n")),
-            3 => s.push_str(&format!("run --{} {v} --verbose # héllo\n", name.to_lowercase().replace('_', "-"))),
-            _ => s.push_str(&format!("curl -H 'Authorization: Bearer {v}' https://example.test/{name}\n")),
+            3 => s.push_str(&format!(
+                "run --{} {v} --verbose # héllo\n",
+                name.to_lowercase().replace('_', "-")
+            )),
+            _ => s.push_str(&format!(
+                "curl -H 'Authorization: Bearer {v}' https://example.test/{name}\n"
+            )),
         }
     }
     s
@@ -84,73 +101,125 @@ fn time<F: FnMut()>(rounds: usize, mut f: F) -> f64 {
 }
 
 fn report(label: &str, bytes: usize, secs: f64) {
-    println!("  {label:<22} {:>8.2} ms  {:>7.1} MB/s", secs * 1e3, bytes as f64 / secs / 1e6);
+    println!(
+        "  {label:<22} {:>8.2} ms  {:>7.1} MB/s",
+        secs * 1e3,
+        bytes as f64 / secs / 1e6
+    );
 }
 
 fn run(label: &str, files: &[String], rounds: usize) {
     let bytes: usize = files.iter().map(|f| f.len()).sum();
-    println!("{label}: {} files, {:.2} MB", files.len(), bytes as f64 / 1e6);
+    println!(
+        "{label}: {} files, {:.2} MB",
+        files.len(),
+        bytes as f64 / 1e6
+    );
     let mut sink = 0usize;
-    report("scan_text_hits", bytes, time(rounds, || {
-        for f in files {
-            sink += scan_text_hits(f).likely_names.len();
-        }
-    }));
-    report("  (chars collect)", bytes, time(rounds, || {
-        for f in files {
-            sink += f.chars().collect::<Vec<char>>().len();
-        }
-    }));
-    report("  find_prefix_kind", bytes, time(rounds, || {
-        for f in files {
-            sink += find_prefix_kind(f).is_some() as usize;
-        }
-    }));
-    report("  bearer", bytes, time(rounds, || {
-        for f in files {
-            sink += classify_bearer_capture(f) as usize;
-        }
-    }));
-    report("  iter_assignments", bytes, time(rounds, || {
-        for f in files {
-            sink += iter_assignments(f).len();
-        }
-    }));
+    report(
+        "scan_text_hits",
+        bytes,
+        time(rounds, || {
+            for f in files {
+                sink += scan_text_hits(f).likely_names.len();
+            }
+        }),
+    );
+    report(
+        "  (chars collect)",
+        bytes,
+        time(rounds, || {
+            for f in files {
+                sink += f.chars().collect::<Vec<char>>().len();
+            }
+        }),
+    );
+    report(
+        "  find_prefix_kind",
+        bytes,
+        time(rounds, || {
+            for f in files {
+                sink += find_prefix_kind(f).is_some() as usize;
+            }
+        }),
+    );
+    report(
+        "  bearer",
+        bytes,
+        time(rounds, || {
+            for f in files {
+                sink += classify_bearer_capture(f) as usize;
+            }
+        }),
+    );
+    report(
+        "  iter_assignments",
+        bytes,
+        time(rounds, || {
+            for f in files {
+                sink += iter_assignments(f).len();
+            }
+        }),
+    );
     let pairs: Vec<(String, String)> = files
         .iter()
         .flat_map(|f| iter_assignments(f).into_iter().chain(iter_flag_values(f)))
         .collect();
-    report("  classify_value", bytes, time(rounds, || {
-        for (_, v) in &pairs {
-            sink += classify_value(v).0 as usize;
-        }
-    }));
-    report("    entropy", bytes, time(rounds, || {
-        for (_, v) in &pairs {
-            sink += vahta_detect::entropy(v) as usize;
-        }
-    }));
-    report("    vowel_segments", bytes, time(rounds, || {
-        for (_, v) in &pairs {
-            sink += vahta_detect::vowel_bearing_segments(v);
-        }
-    }));
-    report("    transition_rate", bytes, time(rounds, || {
-        for (_, v) in &pairs {
-            sink += vahta_detect::transition_rate(v) as usize;
-        }
-    }));
-    report("    is_placeholder", bytes, time(rounds, || {
-        for (_, v) in &pairs {
-            sink += vahta_detect::is_placeholder(v) as usize;
-        }
-    }));
+    report(
+        "  classify_value",
+        bytes,
+        time(rounds, || {
+            for (_, v) in &pairs {
+                sink += classify_value(v).0 as usize;
+            }
+        }),
+    );
+    report(
+        "    entropy",
+        bytes,
+        time(rounds, || {
+            for (_, v) in &pairs {
+                sink += vahta_detect::entropy(v) as usize;
+            }
+        }),
+    );
+    report(
+        "    vowel_segments",
+        bytes,
+        time(rounds, || {
+            for (_, v) in &pairs {
+                sink += vahta_detect::vowel_bearing_segments(v);
+            }
+        }),
+    );
+    report(
+        "    transition_rate",
+        bytes,
+        time(rounds, || {
+            for (_, v) in &pairs {
+                sink += vahta_detect::transition_rate(v) as usize;
+            }
+        }),
+    );
+    report(
+        "    is_placeholder",
+        bytes,
+        time(rounds, || {
+            for (_, v) in &pairs {
+                sink += vahta_detect::is_placeholder(v) as usize;
+            }
+        }),
+    );
     println!("    ({} candidate values)", pairs.len());
-    report("  iter_flag_values", bytes, time(rounds, || {
-        for f in files {
-            sink += iter_flag_values(f).len();
-        }
-    }));
+    report(
+        "  iter_flag_values",
+        bytes,
+        time(rounds, || {
+            for f in files {
+                sink += iter_flag_values(f).len();
+            }
+        }),
+    );
     if sink == usize::MAX {
         println!("{sink}");
     }

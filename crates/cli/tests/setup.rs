@@ -9,40 +9,46 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
+/// `.exe` on Windows: setup looks for `vahta-hook.exe` next to `vahta.exe`.
+const EXE: &str = std::env::consts::EXE_SUFFIX;
 
 struct Sandbox(PathBuf);
 
 impl Sandbox {
     fn new(with_hook: bool) -> Sandbox {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vahta-setup-cli-{}-{n}", std::process::id()));
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("vahta-setup-cli-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for d in ["bin", "home", "path"] {
             fs::create_dir_all(root.join(d)).unwrap();
         }
         // A hard link when the file systems allow it: copying a binary and
         // running it from another thread's fork can fail with "text file busy".
-        let exe = root.join("bin/vahta");
+        let exe = root.join(format!("bin/vahta{EXE}"));
         if fs::hard_link(env!("CARGO_BIN_EXE_vahta"), &exe).is_err() {
             fs::copy(env!("CARGO_BIN_EXE_vahta"), &exe).unwrap();
         }
         if with_hook {
-            fs::write(root.join("bin/vahta-hook"), "#!/bin/sh\n").unwrap();
+            fs::write(root.join(format!("bin/vahta-hook{EXE}")), "#!/bin/sh\n").unwrap();
         }
         Sandbox(root)
     }
     fn home(&self) -> PathBuf {
         self.0.join("home")
     }
+    /// The hook path as setup records it: canonical, with the platform's
+    /// separators (a `bin/...` join would leave a `/` in a Windows path).
     fn hook(&self) -> PathBuf {
-        self.0.join("bin/vahta-hook")
+        let p = self.0.join("bin").join(format!("vahta-hook{EXE}"));
+        dunce::canonicalize(&p).unwrap_or(p)
     }
     /// Make a harness "found" by its config directory.
     fn found(&self, dir: &str) {
         fs::create_dir_all(self.home().join(dir)).unwrap();
     }
     fn vahta(&self, args: &[&str]) -> Output {
-        Command::new(self.0.join("bin/vahta"))
+        Command::new(self.0.join(format!("bin/vahta{EXE}")))
             .current_dir(&self.0)
             .args(args)
             .env_clear()
@@ -79,10 +85,16 @@ fn bare_setup_prints_the_table_and_writes_nothing() {
     let out = s.vahta(&["setup"]);
     assert_eq!(out.status.code(), Some(0));
     let o = text(&out.stdout);
-    assert!(o.contains("harness") && o.contains("set up") && o.contains("config"), "{o}");
+    assert!(
+        o.contains("harness") && o.contains("set up") && o.contains("config"),
+        "{o}"
+    );
     assert!(o.contains("Claude Code  yes"), "{o}");
     assert!(o.contains("Codex") && o.contains("not found"), "{o}");
-    assert!(o.contains("vahta setup --all") && o.contains("--claude"), "{o}");
+    assert!(
+        o.contains("vahta setup --all") && o.contains("--claude"),
+        "{o}"
+    );
     assert!(!s.exists(CLAUDE));
     assert!(text(&out.stderr).is_empty());
 }
@@ -92,12 +104,19 @@ fn a_harness_flag_refuses_when_not_found_and_force_overrides() {
     let s = Sandbox::new(true);
     let out = s.vahta(&["setup", "--codex"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("Codex not found"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("Codex not found"),
+        "{}",
+        text(&out.stderr)
+    );
     assert!(!s.exists(".codex"));
 
     let out = s.vahta(&["setup", "--codex", "--force"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(s.read(".codex/hooks.json").contains("--harness codex --event before_tool"));
+    assert!(
+        s.read(".codex/hooks.json")
+            .contains("--harness codex --event before_tool")
+    );
 }
 
 #[test]
@@ -110,14 +129,23 @@ fn install_dry_run_status_and_uninstall() {
     let out = s.vahta(&["setup", "--claude", "--dry-run"]);
     assert_eq!(out.status.code(), Some(0));
     let o = text(&out.stdout);
-    assert!(o.contains("--- /") && o.contains("+++ /") && o.contains("+            \"command\""), "{o}");
+    assert!(
+        o.contains("--- ")
+            && o.contains("+++ ")
+            && o.contains("settings.json")
+            && o.contains("+            \"command\""),
+        "{o}"
+    );
     assert_eq!(s.read(CLAUDE), before, "dry run writes nothing");
     assert!(!s.exists(".claude/settings.json.vahta-backup"));
 
     let out = s.vahta(&["setup", "--claude"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let hook = s.hook().display().to_string();
-    assert!(s.read(CLAUDE).contains(&format!("{hook} --harness claude --event before_tool --setup 1")));
+    // As it appears inside the JSON string: Windows backslashes are escaped.
+    let hook = s.hook().display().to_string().replace('\\', "\\\\");
+    assert!(s.read(CLAUDE).contains(&format!(
+        "{hook} --harness claude --event before_tool --setup 1"
+    )));
     assert_eq!(s.read(".claude/settings.json.vahta-backup"), before);
     let o = text(&s.vahta(&["setup"]).stdout);
     assert!(o.contains("Claude Code  yes    current"), "{o}");
@@ -129,7 +157,11 @@ fn install_dry_run_status_and_uninstall() {
     assert_eq!(s.read(CLAUDE), installed);
 
     let out = s.vahta(&["setup", "--claude", "--uninstall", "--dry-run"]);
-    assert!(text(&out.stdout).contains("-            \"command\""), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("-            \"command\""),
+        "{}",
+        text(&out.stdout)
+    );
     assert_eq!(s.read(CLAUDE), installed);
     let out = s.vahta(&["setup", "--claude", "--uninstall"]);
     assert_eq!(out.status.code(), Some(0));
@@ -148,7 +180,13 @@ mod serde_like {
         for c in s.chars() {
             if in_str {
                 out.push(c);
-                if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
+                if esc {
+                    esc = false
+                } else if c == '\\' {
+                    esc = true
+                } else if c == '"' {
+                    in_str = false
+                }
             } else if !c.is_whitespace() {
                 out.push(c);
                 in_str = c == '"';
@@ -186,10 +224,17 @@ fn a_config_that_is_not_json_is_refused_and_nothing_is_written() {
     fs::write(s.home().join(CLAUDE), "{ not json").unwrap();
     let out = s.vahta(&["setup", "--all"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("not valid JSON"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("not valid JSON"),
+        "{}",
+        text(&out.stderr)
+    );
     assert_eq!(s.read(CLAUDE), "{ not json");
     assert!(!s.exists(".claude/settings.json.vahta-backup"));
-    assert!(!s.exists(".cursor/hooks.json"), "the other harness is not written either");
+    assert!(
+        !s.exists(".cursor/hooks.json"),
+        "the other harness is not written either"
+    );
 }
 
 #[test]
@@ -198,7 +243,11 @@ fn a_missing_hook_binary_is_a_clear_error() {
     s.found(".claude");
     let out = s.vahta(&["setup", "--claude"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("vahta-hook not found"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("vahta-hook not found"),
+        "{}",
+        text(&out.stderr)
+    );
     assert!(!s.exists(CLAUDE));
 }
 
@@ -233,14 +282,23 @@ fn the_stale_notice_goes_to_stderr_only_and_only_when_outdated() {
 
     // Outdated: one line on stderr, none on stdout, which stays JSON.
     let cfg = s.home().join(CLAUDE);
-    fs::write(&cfg, fs::read_to_string(&cfg).unwrap().replace("--setup 1", "--setup 0")).unwrap();
+    fs::write(
+        &cfg,
+        fs::read_to_string(&cfg)
+            .unwrap()
+            .replace("--setup 1", "--setup 0"),
+    )
+    .unwrap();
     let out = scan(&s);
     assert_eq!(
         text(&out.stderr),
         "vahta: setup for Claude Code is outdated; run `vahta setup --claude`\n"
     );
     let o = text(&out.stdout);
-    assert!(o.trim_start().starts_with('{') && !o.contains("outdated"), "{o}");
+    assert!(
+        o.trim_start().starts_with('{') && !o.contains("outdated"),
+        "{o}"
+    );
 
     // `setup` itself does not print it; its table says so.
     let out = s.vahta(&["setup"]);
@@ -267,7 +325,6 @@ fn a_hook_path_that_no_longer_exists_is_flagged_in_the_table() {
         "vahta: the hook set up for Claude Code no longer exists; run `vahta setup --claude`\n"
     );
 }
-
 
 #[test]
 fn codex_setup_says_to_trust_the_hooks_in_codex() {

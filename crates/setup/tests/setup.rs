@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::Value;
-use vahta_harness::{manifest, Manifest, HARNESSES};
+use vahta_harness::{HARNESSES, Manifest, manifest};
 use vahta_setup::{
-    commit, detect, inspect, install_text, is_ours, plan, quote_word, uninstall_text, Action, Env,
-    HookProblem, Os, Refusal, State,
+    Action, Env, HookProblem, Os, Refusal, State, commit, detect, inspect, install_text, is_ours,
+    plan, quote_word, uninstall_text,
 };
 
 const HOOK: &str = "/opt/vahta/bin/vahta-hook";
@@ -118,7 +118,11 @@ fn install_matches_the_expected_fixtures() {
         if update {
             fs::write(&after, &got).unwrap();
         }
-        assert_eq!(got, read_fixture(h, &format!("{case}.after.json")), "{h}/{case}");
+        assert_eq!(
+            got,
+            read_fixture(h, &format!("{case}.after.json")),
+            "{h}/{case}"
+        );
     }
 }
 
@@ -151,7 +155,11 @@ fn two_installs_are_byte_identical() {
 
 #[test]
 fn foreign_entries_keep_their_order_and_ours_come_last() {
-    let out = install("claude", Some(&read_fixture("claude", "foreign.before.json"))).unwrap();
+    let out = install(
+        "claude",
+        Some(&read_fixture("claude", "foreign.before.json")),
+    )
+    .unwrap();
     assert_eq!(
         commands(&out, "PreToolUse"),
         [
@@ -164,10 +172,19 @@ fn foreign_entries_keep_their_order_and_ours_come_last() {
     // Top-level keys keep their order, new ones go after.
     let keys: Vec<_> = json(&out).as_object().unwrap().keys().cloned().collect();
     assert_eq!(keys, ["model", "permissions", "hooks", "env"]);
-    let events: Vec<_> = json(&out)["hooks"].as_object().unwrap().keys().cloned().collect();
+    let events: Vec<_> = json(&out)["hooks"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
     assert_eq!(&events[..3], ["PreToolUse", "PostToolUse", "Notification"]);
 
-    let out = install("cursor", Some(&read_fixture("cursor", "foreign.before.json"))).unwrap();
+    let out = install(
+        "cursor",
+        Some(&read_fixture("cursor", "foreign.before.json")),
+    )
+    .unwrap();
     assert_eq!(
         commands(&out, "preToolUse"),
         [
@@ -185,7 +202,11 @@ fn reinstalling_over_an_outdated_entry_replaces_it() {
         assert!(!out.contains("/old/place"), "{h}");
         assert!(!out.contains("--setup 0"), "{h}");
         let n = m(h).events.len();
-        assert_eq!(out.matches("vahta-hook --harness").count(), n, "{h}: no duplicates");
+        assert_eq!(
+            out.matches("vahta-hook --harness").count(),
+            n,
+            "{h}: no duplicates"
+        );
     }
 }
 
@@ -201,7 +222,11 @@ fn a_mixed_group_loses_only_our_command() {
         let group = &json(&out)["hooks"]["PreToolUse"][0]["hooks"];
         assert_eq!(group.as_array().unwrap().len(), 2, "{h}");
         let gone = uninstall_text(&out, &m(h), Os::Linux).unwrap().unwrap();
-        assert_eq!(json(&gone)["hooks"]["PreToolUse"].as_array().unwrap().len(), 1, "{h}");
+        assert_eq!(
+            json(&gone)["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            1,
+            "{h}"
+        );
     }
 }
 
@@ -210,7 +235,9 @@ fn uninstall_restores_the_foreign_content() {
     for h in HARNESSES {
         let before = read_fixture(h, "foreign.before.json");
         let installed = install(h, Some(&before)).unwrap();
-        let back = uninstall_text(&installed, &m(h), Os::Linux).unwrap().unwrap();
+        let back = uninstall_text(&installed, &m(h), Os::Linux)
+            .unwrap()
+            .unwrap();
         assert_eq!(json(&back), json(&before), "{h}");
         assert!(!back.contains("vahta-hook"), "{h}");
     }
@@ -221,9 +248,13 @@ fn uninstall_restores_the_foreign_content() {
     assert_eq!(json(&back), json("{}"));
     // Containers that were already empty stay.
     let before = r#"{"hooks": {"Stop": []}}"#;
-    let back = uninstall_text(&install("claude", Some(before)).unwrap(), &m("claude"), Os::Linux)
-        .unwrap()
-        .unwrap();
+    let back = uninstall_text(
+        &install("claude", Some(before)).unwrap(),
+        &m("claude"),
+        Os::Linux,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(json(&back), json(before));
 }
 
@@ -231,17 +262,29 @@ fn uninstall_restores_the_foreign_content() {
 fn uninstall_with_nothing_of_ours_does_nothing() {
     for h in HARNESSES {
         let before = read_fixture(h, "foreign.before.json");
-        assert_eq!(uninstall_text(&before, &m(h), Os::Linux).unwrap(), None, "{h}");
+        assert_eq!(
+            uninstall_text(&before, &m(h), Os::Linux).unwrap(),
+            None,
+            "{h}"
+        );
     }
     let t = Tree::new();
-    let path = t.write("home/.claude/settings.json", &read_fixture("claude", "foreign.before.json"));
+    let path = t.write(
+        "home/.claude/settings.json",
+        &read_fixture("claude", "foreign.before.json"),
+    );
     let p = plan(&m("claude"), &t.env(), Action::Uninstall).unwrap();
     assert!(p.after.is_none());
     assert!(commit(&p).unwrap().is_none());
     assert!(!path.with_file_name("settings.json.vahta-backup").exists());
     // And with no file at all.
     let t = Tree::new();
-    assert!(plan(&m("codex"), &t.env(), Action::Uninstall).unwrap().after.is_none());
+    assert!(
+        plan(&m("codex"), &t.env(), Action::Uninstall)
+            .unwrap()
+            .after
+            .is_none()
+    );
 }
 
 #[test]
@@ -250,21 +293,35 @@ fn a_file_that_is_not_a_json_object_is_refused_and_left_alone() {
         let t = Tree::new();
         let path = t.write("home/.claude/settings.json", bad);
         let err = plan(&m("claude"), &t.env(), Action::Install).unwrap_err();
-        assert!(matches!(err, Refusal::InvalidJson(_) | Refusal::NotAnObject), "{bad:?}");
+        assert!(
+            matches!(err, Refusal::InvalidJson(_) | Refusal::NotAnObject),
+            "{bad:?}"
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), bad);
         assert!(!path.with_file_name("settings.json.vahta-backup").exists());
-        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "no temp file left");
+        assert_eq!(
+            fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "no temp file left"
+        );
     }
     // Shapes we cannot merge into are refused too.
-    assert!(matches!(install("claude", Some(r#"{"hooks": []}"#)), Err(Refusal::Shape(_))));
+    assert!(matches!(
+        install("claude", Some(r#"{"hooks": []}"#)),
+        Err(Refusal::Shape(_))
+    ));
     assert!(matches!(
         install("claude", Some(r#"{"hooks": {"PreToolUse": {}}}"#)),
         Err(Refusal::Shape(_))
     ));
-    assert!(matches!(install("cursor", Some(r#"{"version": 2}"#)), Err(Refusal::Version { .. })));
+    assert!(matches!(
+        install("cursor", Some(r#"{"version": 2}"#)),
+        Err(Refusal::Version { .. })
+    ));
 }
 
 #[test]
+#[cfg(unix)]
 fn commit_backs_up_once_and_keeps_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let t = Tree::new();
@@ -276,8 +333,15 @@ fn commit_backs_up_once_and_keeps_permissions() {
     assert_eq!(backup.file_name().unwrap(), "settings.json.vahta-backup");
     assert_eq!(fs::read_to_string(&backup).unwrap(), before);
     assert_eq!(fs::read_to_string(&path).unwrap(), p.after.clone().unwrap());
-    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2, "no temp file left");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::read_dir(path.parent().unwrap()).unwrap().count(),
+        2,
+        "no temp file left"
+    );
 
     // A second install has nothing to change, so nothing is written or backed up again.
     let again = plan(&m("claude"), &t.env(), Action::Install).unwrap();
@@ -297,11 +361,16 @@ fn a_new_file_gets_no_backup_and_its_directory_is_created() {
     assert!(p.before.is_none());
     assert!(commit(&p).unwrap().is_none());
     let path = config_in(&t, "cursor");
-    assert!(fs::read_to_string(&path).unwrap().contains("\"version\": 1"));
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"version\": 1")
+    );
     assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
 }
 
 #[test]
+#[cfg(unix)]
 fn a_symlinked_config_is_written_through() {
     use std::os::unix::fs::symlink;
     let t = Tree::new();
@@ -310,7 +379,12 @@ fn a_symlinked_config_is_written_through() {
     let link = t.0.join("home/.claude/settings.json");
     symlink(&real, &link).unwrap();
     commit(&plan(&m("claude"), &t.env(), Action::Install).unwrap()).unwrap();
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert!(fs::read_to_string(&real).unwrap().contains("vahta-hook"));
 }
 
@@ -322,7 +396,11 @@ fn detection_by_directory_binary_and_variable() {
         assert!(!detect(&m(h), &env).found, "{h}");
     }
     let d = detect(&m("claude"), &env);
-    assert!(d.why.contains("no directory") && d.why.contains("no `claude` on PATH"), "{}", d.why);
+    assert!(
+        d.why.contains("no directory") && d.why.contains("no `claude` on PATH"),
+        "{}",
+        d.why
+    );
 
     fs::create_dir_all(env.home.join(".claude")).unwrap();
     let d = detect(&m("claude"), &env);
@@ -334,7 +412,10 @@ fn detection_by_directory_binary_and_variable() {
 
     // $CODEX_HOME is a candidate, and decides where the config goes.
     let mut env = t.env();
-    env.vars.insert("CODEX_HOME".into(), t.0.join("codex-home").to_string_lossy().into_owned());
+    env.vars.insert(
+        "CODEX_HOME".into(),
+        t.0.join("codex-home").to_string_lossy().into_owned(),
+    );
     assert!(!detect(&m("codex"), &env).found);
     fs::create_dir_all(t.0.join("codex-home")).unwrap();
     assert!(detect(&m("codex"), &env).found);
@@ -359,8 +440,15 @@ fn status_none_current_outdated_and_hook_paths() {
     let mf = m("claude");
     assert_eq!(inspect(&mf, &env).state, State::None);
 
-    t.write("home/.claude/settings.json", &read_fixture("claude", "foreign.before.json"));
-    assert_eq!(inspect(&mf, &env).state, State::None, "foreign entries are not ours");
+    t.write(
+        "home/.claude/settings.json",
+        &read_fixture("claude", "foreign.before.json"),
+    );
+    assert_eq!(
+        inspect(&mf, &env).state,
+        State::None,
+        "foreign entries are not ours"
+    );
 
     commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
     let s = inspect(&mf, &env);
@@ -375,18 +463,37 @@ fn status_none_current_outdated_and_hook_paths() {
     // So is an old --setup number, and a missing entry.
     fs::write(&path, text.replace("--setup 1", "--setup 0")).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
-    let fewer = text.replacen("vahta-hook --harness claude --event prompt", "key-amnesia-hook --x", 1);
-    fs::write(&path, fewer).unwrap();
+    // Edited as JSON: the hook path may be quoted (a temp dir with `~` on Windows).
+    let mut fewer: Value = serde_json::from_str(&text).unwrap();
+    for groups in fewer["hooks"].as_object_mut().unwrap().values_mut() {
+        for g in groups.as_array_mut().unwrap() {
+            g["hooks"].as_array_mut().unwrap().retain(|h| {
+                !h["command"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("--harness claude --event prompt")
+            });
+        }
+    }
+    fs::write(&path, fewer.to_string()).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
 
     // Installed path missing, or not the one next to this binary.
     fs::write(&path, &text).unwrap();
     fs::remove_file(&hook).unwrap();
-    assert!(inspect(&mf, &env).problems.contains(&HookProblem::Missing(hook.to_string_lossy().into())));
+    assert!(
+        inspect(&mf, &env)
+            .problems
+            .contains(&HookProblem::Missing(hook.to_string_lossy().into()))
+    );
     let other = t.write("elsewhere/vahta-hook", "");
     env.hook = other.clone();
     let s = inspect(&mf, &env);
-    assert_eq!(s.state, State::Current, "the path is a problem, not staleness");
+    assert_eq!(
+        s.state,
+        State::Current,
+        "the path is a problem, not staleness"
+    );
     // A path with spaces, quoted, is still the same setup.
     let spaced = t.write("with space/vahta-hook", "");
     env.hook = spaced;
@@ -395,7 +502,10 @@ fn status_none_current_outdated_and_hook_paths() {
     env.hook = other.clone();
     assert_eq!(inspect(&mf, &env).state, State::Current);
     fs::write(&path, &text).unwrap();
-    assert!(s.problems.contains(&HookProblem::Elsewhere(hook.to_string_lossy().into())));
+    assert!(
+        s.problems
+            .contains(&HookProblem::Elsewhere(hook.to_string_lossy().into()))
+    );
 
     // A broken file is reported, not guessed at.
     fs::write(&path, "{ nope").unwrap();
@@ -424,22 +534,40 @@ fn which_commands_are_ours() {
     ] {
         assert!(!is_ours(c, Os::Linux), "{c}");
     }
-    assert!(is_ours("\"C:\\Program Files\\Vahta\\vahta-hook.exe\" --a", Os::Windows));
+    assert!(is_ours(
+        "\"C:\\Program Files\\Vahta\\vahta-hook.exe\" --a",
+        Os::Windows
+    ));
     assert!(is_ours("C:\\Vahta\\vahta-hook.exe --a", Os::Windows));
 }
 
 #[test]
 fn the_hook_path_is_quoted_when_it_needs_it() {
-    assert_eq!(quote_word("/opt/v/vahta-hook", Os::Linux), "/opt/v/vahta-hook");
-    assert_eq!(quote_word("/opt/my dir/vahta-hook", Os::Linux), "'/opt/my dir/vahta-hook'");
-    assert_eq!(quote_word("/o'k/vahta-hook", Os::Linux), "'/o'\\''k/vahta-hook'");
-    assert_eq!(quote_word("C:\\Vahta\\vahta-hook.exe", Os::Windows), "C:\\Vahta\\vahta-hook.exe");
+    assert_eq!(
+        quote_word("/opt/v/vahta-hook", Os::Linux),
+        "/opt/v/vahta-hook"
+    );
+    assert_eq!(
+        quote_word("/opt/my dir/vahta-hook", Os::Linux),
+        "'/opt/my dir/vahta-hook'"
+    );
+    assert_eq!(
+        quote_word("/o'k/vahta-hook", Os::Linux),
+        "'/o'\\''k/vahta-hook'"
+    );
+    assert_eq!(
+        quote_word("C:\\Vahta\\vahta-hook.exe", Os::Windows),
+        "C:\\Vahta\\vahta-hook.exe"
+    );
     assert_eq!(
         quote_word("C:\\Program Files\\v\\vahta-hook.exe", Os::Windows),
         "\"C:\\Program Files\\v\\vahta-hook.exe\""
     );
     // And what we quote, we recognise and a status check can find again.
-    let cmd = format!("{} --harness claude", quote_word("/opt/my dir/vahta-hook", Os::Linux));
+    let cmd = format!(
+        "{} --harness claude",
+        quote_word("/opt/my dir/vahta-hook", Os::Linux)
+    );
     assert!(is_ours(&cmd, Os::Linux));
     let t = Tree::new();
     let mut env = t.env();
@@ -454,8 +582,15 @@ fn the_hook_path_is_quoted_when_it_needs_it() {
 
 #[test]
 fn the_diff_shows_a_change_and_nothing_for_none() {
-    let d = vahta_setup::unified_diff(Path::new("/h/.claude/settings.json"), Some("{}\n"), "{\n  \"a\": 1\n}\n");
-    assert!(d.contains("--- /h/.claude/settings.json") && d.contains("+  \"a\": 1"), "{d}");
+    let d = vahta_setup::unified_diff(
+        Path::new("/h/.claude/settings.json"),
+        Some("{}\n"),
+        "{\n  \"a\": 1\n}\n",
+    );
+    assert!(
+        d.contains("--- /h/.claude/settings.json") && d.contains("+  \"a\": 1"),
+        "{d}"
+    );
     let d = vahta_setup::unified_diff(Path::new("/h/x.json"), None, "{}\n");
     assert!(d.contains("--- /dev/null") && d.contains("+{}"), "{d}");
 }

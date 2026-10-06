@@ -42,8 +42,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use vahta_detect::{
-    classify_value, is_secret_name, looks_like_json_container, scan_text_hits, scan_texts,
-    Confidence, HitSet,
+    Confidence, HitSet, classify_value, is_secret_name, looks_like_json_container, scan_text_hits,
+    scan_texts,
 };
 
 use crate::content::{findings_for_path, path_name, path_str};
@@ -76,7 +76,9 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().map(|c| c.join(path)).unwrap_or_else(|_| path.to_path_buf())
+        std::env::current_dir()
+            .map(|c| c.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     };
     let mut pending: VecDeque<OsString> = absolute
         .components()
@@ -86,7 +88,7 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
             _ => None,
         })
         .collect();
-    let mut resolved = PathBuf::from("/");
+    let mut resolved = anchor(&absolute);
     let mut links = 0usize;
     while let Some(part) = pending.pop_front() {
         if part == ".." {
@@ -105,7 +107,7 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
             Ok(_) if links > 40 => resolved = next,
             Ok(target) => {
                 if target.is_absolute() {
-                    resolved = PathBuf::from("/");
+                    resolved = anchor(&target);
                 }
                 let mut head: Vec<OsString> = target
                     .components()
@@ -123,6 +125,20 @@ pub fn resolve_non_strict(path: &Path) -> PathBuf {
         }
     }
     resolved
+}
+
+/// The prefix and root of an absolute path: `/` on Unix, `C:\\` or a UNC
+/// share on Windows. Dropping the prefix would land on the current drive.
+fn anchor(path: &Path) -> PathBuf {
+    let anchor: PathBuf = path
+        .components()
+        .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        .collect();
+    if anchor.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        anchor
+    }
 }
 
 /// `_deep_candidate_paths`.
@@ -158,8 +174,17 @@ pub fn deep_candidate_paths(home: &Path, appdata: Option<&OsStr>) -> Vec<PathBuf
 
     candidates.push(home.join(".cursor").join("mcp.json"));
     candidates.push(home.join(".claude").join("mcp.json"));
-    candidates.push(home.join(".config").join("claude").join("claude_desktop_config.json"));
-    candidates.push(home.join(".config").join("Cursor").join("User").join("mcp.json"));
+    candidates.push(
+        home.join(".config")
+            .join("claude")
+            .join("claude_desktop_config.json"),
+    );
+    candidates.push(
+        home.join(".config")
+            .join("Cursor")
+            .join("User")
+            .join("mcp.json"),
+    );
 
     if let Some(appdata) = appdata.filter(|a| !a.is_empty()) {
         let appdata = Path::new(appdata);
@@ -180,7 +205,9 @@ pub fn deep_candidate_paths(home: &Path, appdata: Option<&OsStr>) -> Vec<PathBuf
 /// Entries of `dir` whose name satisfies `matches`, in directory order, as
 /// `glob`'s wildcard selector yields them: files, directories, anything.
 fn matching_entries(dir: &Path, matches: &dyn Fn(&str) -> bool, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if matches(&entry.file_name().to_string_lossy()) {
             out.push(entry.path());
@@ -201,7 +228,9 @@ fn rglob(root: &Path, matches: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
     matching_entries(root, matches, &mut out);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             // `entry.is_dir(follow_symlinks=False)`.
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -237,7 +266,9 @@ pub fn iter_agent_transcript_files(home: &Path) -> Vec<PathBuf> {
         if !path.is_file() {
             return;
         }
-        let Ok(key) = std::fs::canonicalize(&path) else { return };
+        let Ok(key) = std::fs::canonicalize(&path) else {
+            return;
+        };
         if seen.insert(key) {
             out.push(path);
         }
@@ -391,8 +422,10 @@ pub const MAX_JSON_DEPTH: usize = 1_000_000;
 pub const MAX_JSON_NODES: usize = 2_000_000;
 
 /// The product's limits for one transcript line.
-pub const TRANSCRIPT_LIMITS: json::Limits =
-    json::Limits { depth: MAX_JSON_DEPTH, nodes: MAX_JSON_NODES };
+pub const TRANSCRIPT_LIMITS: json::Limits = json::Limits {
+    depth: MAX_JSON_DEPTH,
+    nodes: MAX_JSON_NODES,
+};
 
 /// What one document unwrapped out of a string contributes: the hits of its
 /// strings, and its secret-named keys. Computed as soon as the document is
@@ -412,7 +445,10 @@ impl Nested {
             }
         });
         let text = (!batch.is_empty()).then(|| scan_texts(&batch));
-        Nested { text, keys: key_records(doc) }
+        Nested {
+            text,
+            keys: key_records(doc),
+        }
     }
 
     /// The same, from a token walk, for a document too big to parse. Strings
@@ -425,7 +461,8 @@ impl Nested {
                 keys.extend(key_record(key, s));
             }
             if !looks_like_json_container(s) {
-                text.get_or_insert_with(HitSet::default).merge(&scan_text_hits(s));
+                text.get_or_insert_with(HitSet::default)
+                    .merge(&scan_text_hits(s));
             }
         });
         Nested { text, keys }
@@ -501,7 +538,13 @@ pub fn scan_transcript_payload(obj: &Value) -> HitSet {
 /// [`scan_transcript_payload`] with the depth limit for strings that hold JSON
 /// given explicitly (the node limit stays [`MAX_JSON_NODES`]).
 pub fn scan_transcript_payload_bounded(obj: &Value, max_depth: usize) -> HitSet {
-    scan_transcript_payload_limited(obj, json::Limits { depth: max_depth, nodes: MAX_JSON_NODES })
+    scan_transcript_payload_limited(
+        obj,
+        json::Limits {
+            depth: max_depth,
+            nodes: MAX_JSON_NODES,
+        },
+    )
 }
 
 /// [`scan_transcript_payload`] within `limits`. A string holding JSON past
@@ -586,7 +629,10 @@ pub fn findings_for_transcript_with_depth<E>(
     progress: Option<&mut ProgressFn<'_, E>>,
     max_depth: usize,
 ) -> Result<Vec<Finding>, DeepError<E>> {
-    let limits = json::Limits { depth: max_depth, nodes: MAX_JSON_NODES };
+    let limits = json::Limits {
+        depth: max_depth,
+        nodes: MAX_JSON_NODES,
+    };
     findings_for_transcript_with_limits(path, scope, progress, limits)
 }
 
@@ -597,11 +643,15 @@ pub fn findings_for_transcript_with_limits<E>(
     mut progress: Option<&mut ProgressFn<'_, E>>,
     limits: json::Limits,
 ) -> Result<Vec<Finding>, DeepError<E>> {
-    let Ok(meta) = std::fs::metadata(path) else { return Ok(Vec::new()) };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(Vec::new());
+    };
     if meta.len() > MAX_TRANSCRIPT_BYTES {
         return Ok(Vec::new());
     }
-    let Ok(bytes) = std::fs::read(path) else { return Ok(Vec::new()) };
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(Vec::new());
+    };
     let text = String::from_utf8_lossy(&bytes);
     let file_name = path_name(path);
 
@@ -832,7 +882,9 @@ pub fn scan_deep_with_threads<E>(
             continue;
         }
         for finding in findings_for_path(&path, Scope::Deep) {
-            if finding.kind == "dotenv" && finding.secret_count == 0 && finding.secret_names.is_empty()
+            if finding.kind == "dotenv"
+                && finding.secret_count == 0
+                && finding.secret_names.is_empty()
             {
                 continue;
             }
@@ -873,7 +925,11 @@ pub fn scan_deep_with_threads<E>(
                 let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
                 let mut ticks = Vec::new();
                 if cancel.load(Ordering::Relaxed) {
-                    return TranscriptResult { key, ticks, findings: None };
+                    return TranscriptResult {
+                        key,
+                        ticks,
+                        findings: None,
+                    };
                 }
                 let mut record = |_: &str, line: usize, _: usize| -> Result<(), ()> {
                     ticks.push(line);
@@ -886,7 +942,11 @@ pub fn scan_deep_with_threads<E>(
                 let rec: Option<&mut ProgressFn<'_, ()>> =
                     if want_ticks { Some(&mut record) } else { None };
                 let found = findings_for_transcript::<()>(path, Scope::Deep, rec).ok();
-                TranscriptResult { key, ticks, findings: found }
+                TranscriptResult {
+                    key,
+                    ticks,
+                    findings: found,
+                }
             },
             |index, mut result| {
                 let path = &transcripts[index];
@@ -955,7 +1015,9 @@ mod tests {
             std::fs::create_dir_all(&root).expect("create test root");
             // The scan resolves `home`; start from the resolved form so
             // expected paths compare equal.
-            Tree { root: std::fs::canonicalize(&root).expect("canonicalize") }
+            Tree {
+                root: dunce::canonicalize(&root).expect("canonicalize"),
+            }
         }
 
         fn write(&self, rel: &str, data: &[u8]) -> PathBuf {
@@ -1004,13 +1066,19 @@ mod tests {
         assert_eq!(lines("\r\n\r\n"), vec!["", ""]);
         assert_eq!(lines(""), Vec::<&str>::new());
         // Not line breaks to a Python file iterator, unlike `splitlines`.
-        assert_eq!(lines("a\u{b}b\u{c}c\u{1c}d\u{85}e\u{2028}f"), vec!["a\u{b}b\u{c}c\u{1c}d\u{85}e\u{2028}f"]);
+        assert_eq!(
+            lines("a\u{b}b\u{c}c\u{1c}d\u{85}e\u{2028}f"),
+            vec!["a\u{b}b\u{c}c\u{1c}d\u{85}e\u{2028}f"]
+        );
     }
 
     #[test]
     fn a_line_is_found_and_numbered_from_one() {
         let t = Tree::new("lines");
-        let body = format!("\n   \n{{\"text\": \"hello\"}}\nnot json\n{}\n", assignment_line());
+        let body = format!(
+            "\n   \n{{\"text\": \"hello\"}}\nnot json\n{}\n",
+            assignment_line()
+        );
         let p = t.text("s.jsonl", &body);
         let found = scan(&p);
         assert_eq!(found.len(), 1);
@@ -1067,7 +1135,12 @@ mod tests {
     #[test]
     fn a_vendor_prefix_is_certain_and_outranks_a_name_on_its_line() {
         let t = Tree::new("certain");
-        let line = format!("{{\"text\": \"{} and {}={}\"}}", prefixed(), name(), LIKELY_VALUE);
+        let line = format!(
+            "{{\"text\": \"{} and {}={}\"}}",
+            prefixed(),
+            name(),
+            LIKELY_VALUE
+        );
         let p = t.text("s.jsonl", &format!("{line}\n"));
         let found = scan(&p);
         let by_conf: Vec<&str> = found.iter().map(|f| f.confidence.as_str()).collect();
@@ -1083,7 +1156,11 @@ mod tests {
     #[test]
     fn json_inside_a_string_is_unwrapped_once() {
         let t = Tree::new("nested");
-        let inner = format!("{{\\\"{}\\\": \\\"{}\\\"}}", name().to_lowercase(), LIKELY_VALUE);
+        let inner = format!(
+            "{{\\\"{}\\\": \\\"{}\\\"}}",
+            name().to_lowercase(),
+            LIKELY_VALUE
+        );
         let p = t.text("s.jsonl", &format!("{{\"content\": \"{inner}\"}}\n"));
         let found = scan(&p);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -1095,7 +1172,11 @@ mod tests {
         let t = Tree::new("key");
         let p = t.text(
             "s.jsonl",
-            &format!("{{\"args\": [{{\"{}\": \"{}\"}}]}}\n", name().to_lowercase(), LIKELY_VALUE),
+            &format!(
+                "{{\"args\": [{{\"{}\": \"{}\"}}]}}\n",
+                name().to_lowercase(),
+                LIKELY_VALUE
+            ),
         );
         assert_eq!(scan(&p)[0].hit_lines, vec![1]);
     }
@@ -1115,7 +1196,12 @@ mod tests {
         let t = Tree::new("surrogate");
         let p = t.text(
             "s.jsonl",
-            &format!("{{\"{}\": \"{}\\ud800{}\"}}\n", name().to_lowercase(), "aB3xQ9mK2", "pL7vN4wZ8"),
+            &format!(
+                "{{\"{}\": \"{}\\ud800{}\"}}\n",
+                name().to_lowercase(),
+                "aB3xQ9mK2",
+                "pL7vN4wZ8"
+            ),
         );
         assert_eq!(scan(&p)[0].hit_lines, vec![1]);
     }
@@ -1135,7 +1221,10 @@ mod tests {
     #[test]
     fn progress_ticks_every_2000_lines_with_the_file_name_and_zero_total() {
         let t = Tree::new("progress");
-        let p = t.text("session.jsonl", &"{\"t\": \"ok\"}\n".repeat(PROGRESS_LINE_EVERY * 2 + 50));
+        let p = t.text(
+            "session.jsonl",
+            &"{\"t\": \"ok\"}\n".repeat(PROGRESS_LINE_EVERY * 2 + 50),
+        );
         let mut calls: Vec<(String, usize, usize)> = Vec::new();
         let mut cb = |s: &str, a: usize, b: usize| -> Result<(), ()> {
             calls.push((s.to_string(), a, b));
@@ -1144,7 +1233,10 @@ mod tests {
         findings_for_transcript(&p, Scope::Deep, Some(&mut cb)).expect("scan");
         assert_eq!(
             calls,
-            vec![("session.jsonl".to_string(), 2000, 0), ("session.jsonl".to_string(), 4000, 0)]
+            vec![
+                ("session.jsonl".to_string(), 2000, 0),
+                ("session.jsonl".to_string(), 4000, 0)
+            ]
         );
     }
 
@@ -1189,7 +1281,10 @@ mod tests {
     #[test]
     fn a_line_over_the_node_limit_is_read_without_a_tree_and_loses_nothing() {
         let t = Tree::new("wide");
-        let lim = json::Limits { depth: MAX_JSON_DEPTH, nodes: 1000 };
+        let lim = json::Limits {
+            depth: MAX_JSON_DEPTH,
+            nodes: 1000,
+        };
         let filler = "1,".repeat(5000);
         // Wide, not deep: an escaped secret-named key, a planted vendor key, and
         // an assignment inside JSON inside a string, past five thousand values.
@@ -1200,12 +1295,14 @@ mod tests {
             serde_free_quote(&format!("{{\"note\": {}}}", quoted_assignment())),
         );
         let p = t.text("w.jsonl", &format!("{{\"t\": \"ok\"}}\n{wide}\n"));
-        let found = findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, lim).expect("scan");
+        let found =
+            findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, lim).expect("scan");
         let of = |conf: &str| found.iter().find(|f| f.confidence == conf).expect(conf);
         assert_eq!(of("certain").hit_lines, vec![2]);
         assert_eq!(of("certain").secret_names, vec!["Anthropic-style key"]);
-        let roomy = findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, TRANSCRIPT_LIMITS)
-            .expect("scan");
+        let roomy =
+            findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, TRANSCRIPT_LIMITS)
+                .expect("scan");
         // The token walk finds the same names the parse does.
         let names = |f: &[Finding]| {
             let mut n: Vec<String> = f.iter().flat_map(|x| x.secret_names.clone()).collect();
@@ -1234,11 +1331,23 @@ mod tests {
     #[test]
     fn a_string_holding_json_past_the_limits_is_still_read() {
         let t = Tree::new("nested-wide");
-        let lim = json::Limits { depth: MAX_JSON_DEPTH, nodes: 100 };
+        let lim = json::Limits {
+            depth: MAX_JSON_DEPTH,
+            nodes: 100,
+        };
         let inner = format!("[{}{}]", "1,".repeat(500), escaped_key_object());
-        let p = t.text("n.jsonl", &format!("{{\"out\": {}}}\n", serde_free_quote(&inner)));
-        let found = findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, lim).expect("scan");
-        assert!(found.iter().any(|f| f.secret_names.iter().any(|n| n == "API_KEY")), "{found:?}");
+        let p = t.text(
+            "n.jsonl",
+            &format!("{{\"out\": {}}}\n", serde_free_quote(&inner)),
+        );
+        let found =
+            findings_for_transcript_with_limits::<()>(&p, Scope::Deep, None, lim).expect("scan");
+        assert!(
+            found
+                .iter()
+                .any(|f| f.secret_names.iter().any(|n| n == "API_KEY")),
+            "{found:?}"
+        );
     }
 
     #[test]
@@ -1247,14 +1356,30 @@ mod tests {
         let n = 1_000_000;
         // Arrays, objects, and a secret at the bottom of each.
         let arrays = wrapped_in_arrays(n, &quoted_assignment());
-        let objects = format!("{}{}{}", "{\"a\":".repeat(n), quoted_assignment(), "}".repeat(n));
+        let objects = format!(
+            "{}{}{}",
+            "{\"a\":".repeat(n),
+            quoted_assignment(),
+            "}".repeat(n)
+        );
         // A secret-named key whose value is a string, at the bottom.
-        let keyed = format!("{}{{\"{}\":\"{LIKELY_VALUE}\"}}{}", "[".repeat(n), name().to_lowercase(), "]".repeat(n));
+        let keyed = format!(
+            "{}{{\"{}\":\"{LIKELY_VALUE}\"}}{}",
+            "[".repeat(n),
+            name().to_lowercase(),
+            "]".repeat(n)
+        );
         // The same inside a string, which is unwrapped and walked.
-        let inside = format!("{{\"a\": \"{}\"}}", wrapped_in_arrays(n, &quoted_assignment().replace('"', "\\\"")));
+        let inside = format!(
+            "{{\"a\": \"{}\"}}",
+            wrapped_in_arrays(n, &quoted_assignment().replace('"', "\\\""))
+        );
         let p = t.text(
             "s.jsonl",
-            &format!("{}\n{arrays}\n{objects}\n{keyed}\n{inside}\n", assignment_line()),
+            &format!(
+                "{}\n{arrays}\n{objects}\n{keyed}\n{inside}\n",
+                assignment_line()
+            ),
         );
         let found = scan(&p);
         assert_eq!(found.len(), 1);
@@ -1304,7 +1429,10 @@ mod tests {
         // The same four lines with a roomy cap are all parsed: lines 1 and 2
         // both report the key, and 3 and 4 still hit.
         let roomy = scan_capped(&p, cap + 10);
-        let likely = roomy.iter().find(|f| f.confidence == "likely").expect("likely");
+        let likely = roomy
+            .iter()
+            .find(|f| f.confidence == "likely")
+            .expect("likely");
         assert_eq!(likely.hit_lines, vec![1, 2, 4]);
     }
 
@@ -1317,12 +1445,22 @@ mod tests {
         let over = wrapped_in_arrays(cap + 1, &format!("\"x {} y\"", prefixed()));
         let p = t.text(
             "s.jsonl",
-            &format!("{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n", q(&under), q(&over)),
+            &format!(
+                "{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n",
+                q(&under),
+                q(&over)
+            ),
         );
         let found = scan_capped(&p, cap);
-        let certain = found.iter().find(|f| f.confidence == "certain").expect("certain");
+        let certain = found
+            .iter()
+            .find(|f| f.confidence == "certain")
+            .expect("certain");
         assert_eq!(certain.hit_lines, vec![2]);
-        let likely = found.iter().find(|f| f.confidence == "likely").expect("likely");
+        let likely = found
+            .iter()
+            .find(|f| f.confidence == "likely")
+            .expect("likely");
         assert_eq!(likely.hit_lines, vec![1]);
     }
 
@@ -1331,7 +1469,10 @@ mod tests {
         let t = Tree::new("cap-neighbours");
         let cap = 50;
         let hostile = wrapped_in_arrays(cap * 1000, "1");
-        let p = t.text("s.jsonl", &format!("{}\n{hostile}\n{}\n", assignment_line(), assignment_line()));
+        let p = t.text(
+            "s.jsonl",
+            &format!("{}\n{hostile}\n{}\n", assignment_line(), assignment_line()),
+        );
         let found = scan_capped(&p, cap);
         assert_eq!(found[0].hit_lines, vec![1, 3]);
     }
@@ -1342,7 +1483,10 @@ mod tests {
         // a line that would need ten million never allocates them. (RSS for a
         // 100 MB line is measured outside the test, from Python.)
         let line = "[".repeat(10_000_000);
-        assert_eq!(json::parse_bounded(&line, 1000).err(), Some(json::ParseError::TooDeep));
+        assert_eq!(
+            json::parse_bounded(&line, 1000).err(),
+            Some(json::ParseError::TooDeep)
+        );
         assert_eq!(MAX_JSON_DEPTH, 1_000_000);
     }
 
@@ -1350,7 +1494,10 @@ mod tests {
     fn deep_lines_without_secrets_are_clean_and_do_not_stop_the_scan() {
         let t = Tree::new("deep-clean");
         let deep = wrapped_in_arrays(1_000_000, "1");
-        let p = t.text("s.jsonl", &format!("{deep}\n{}\n{deep}\n", assignment_line()));
+        let p = t.text(
+            "s.jsonl",
+            &format!("{deep}\n{}\n{deep}\n", assignment_line()),
+        );
         assert_eq!(scan(&p)[0].hit_lines, vec![2]);
     }
 
@@ -1359,7 +1506,10 @@ mod tests {
         let t = Tree::new("bigint");
         let big = "9".repeat(100_000);
         let top = format!("[{big}, {}]", quoted_assignment());
-        let inner = format!("{{\"a\": \"[{big}, {}]\"}}", quoted_assignment().replace('"', "\\\""));
+        let inner = format!(
+            "{{\"a\": \"[{big}, {}]\"}}",
+            quoted_assignment().replace('"', "\\\"")
+        );
         let before = format!("[x, {big}]"); // invalid first: skipped, as in Python
         let p = t.text(
             "s.jsonl",
@@ -1380,7 +1530,12 @@ mod tests {
         let level3 = format!("{{\"v\": \"{}\"}}", q(&level2));
         let p = t.text(
             "s.jsonl",
-            &format!("{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n", q(&level1), q(&level2), q(&level3)),
+            &format!(
+                "{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n{{\"a\": \"{}\"}}\n",
+                q(&level1),
+                q(&level2),
+                q(&level3)
+            ),
         );
         // One level (line 1) is found; two or more levels (lines 2, 3) are not.
         assert_eq!(scan(&p)[0].hit_lines, vec![1]);
@@ -1396,10 +1551,15 @@ mod tests {
     // --- locating transcripts ------------------------------------------------
 
     fn names(home: &Path, found: Vec<PathBuf>) -> Vec<String> {
-        let home = std::fs::canonicalize(home).expect("canonicalize");
+        let home = dunce::canonicalize(home).expect("canonicalize");
         let mut v: Vec<String> = found
             .iter()
-            .map(|p| p.strip_prefix(&home).unwrap_or(p).to_string_lossy().into_owned())
+            .map(|p| {
+                p.strip_prefix(&home)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
         v.sort();
         v
@@ -1438,22 +1598,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_directory_is_not_descended_into_by_the_recursive_glob() {
         let t = Tree::new("symdir");
         let outside = Tree::new("outside");
         outside.text("ext.jsonl", "{}");
         std::fs::create_dir_all(t.root.join(".claude/projects")).expect("mkdir");
-        std::os::unix::fs::symlink(&outside.root, t.root.join(".claude/projects/linked")).expect("link");
+        std::os::unix::fs::symlink(&outside.root, t.root.join(".claude/projects/linked"))
+            .expect("link");
         assert!(names(&t.root, iter_agent_transcript_files(&t.root)).is_empty());
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_session_directory_is_followed_by_the_copilot_glob() {
         let t = Tree::new("copilot-link");
         let outside = Tree::new("copilot-out");
         outside.text("events.jsonl", "{}");
         std::fs::create_dir_all(t.root.join(".copilot/session-state")).expect("mkdir");
-        std::os::unix::fs::symlink(&outside.root, t.root.join(".copilot/session-state/via")).expect("link");
+        std::os::unix::fs::symlink(&outside.root, t.root.join(".copilot/session-state/via"))
+            .expect("link");
         assert_eq!(
             names(&t.root, iter_agent_transcript_files(&t.root)),
             vec![".copilot/session-state/via/events.jsonl"]
@@ -1471,18 +1635,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn two_names_for_one_file_yield_the_first_found() {
         let t = Tree::new("alias");
         let real = t.text(".claude/projects/a/real.jsonl", "{}");
-        std::os::unix::fs::symlink(&real, t.root.join(".claude/projects/alias.jsonl")).expect("link");
+        std::os::unix::fs::symlink(&real, t.root.join(".claude/projects/alias.jsonl"))
+            .expect("link");
         assert_eq!(iter_agent_transcript_files(&t.root).len(), 1);
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_broken_symlink_is_not_a_transcript() {
         let t = Tree::new("broken");
         std::fs::create_dir_all(t.root.join(".claude/projects")).expect("mkdir");
-        std::os::unix::fs::symlink(t.root.join("nowhere"), t.root.join(".claude/projects/b.jsonl")).expect("link");
+        std::os::unix::fs::symlink(
+            t.root.join("nowhere"),
+            t.root.join(".claude/projects/b.jsonl"),
+        )
+        .expect("link");
         assert!(iter_agent_transcript_files(&t.root).is_empty());
     }
 
@@ -1496,31 +1667,73 @@ mod tests {
 
     #[test]
     fn candidate_paths_follow_python_and_appdata_adds_three() {
-        let home = Path::new("/nonexistent-vahta-home");
+        // Absolute on every platform (a bare `/x` gets the cwd's drive on
+        // Windows), and already resolved (macOS's temp dir is under a link).
+        let home = &resolve_non_strict(&std::env::temp_dir().join("nonexistent-vahta-home"));
         let base = deep_candidate_paths(home, None);
         assert_eq!(base.len(), 11 + 4 + 4);
         assert!(base.contains(&home.join(".env")));
         assert!(base.contains(&home.join(".ssh").join("id_ed25519")));
-        assert!(base.contains(&home.join(".config/claude/claude_desktop_config.json")));
+        assert!(
+            base.contains(
+                &home
+                    .join(".config")
+                    .join("claude")
+                    .join("claude_desktop_config.json")
+            )
+        );
         assert_eq!(deep_candidate_paths(home, Some(OsStr::new(""))), base);
         let with = deep_candidate_paths(home, Some(OsStr::new("/appdata")));
         assert_eq!(with.len(), base.len() + 3);
-        assert!(with.contains(&PathBuf::from("/appdata/Claude/claude_desktop_config.json")));
-        assert!(with.contains(&PathBuf::from("/appdata/Cursor/User/mcp.json")));
-        assert!(with.contains(&PathBuf::from(
-            "/appdata/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"
-        )));
+        assert!(
+            with.contains(
+                &Path::new("/appdata")
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            )
+        );
+        assert!(
+            with.contains(
+                &Path::new("/appdata")
+                    .join("Cursor")
+                    .join("User")
+                    .join("mcp.json")
+            )
+        );
+        assert!(
+            with.contains(
+                &Path::new("/appdata")
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("PowerShell")
+                    .join("PSReadLine")
+                    .join("ConsoleHost_history.txt")
+            )
+        );
     }
 
     #[test]
+    #[cfg(unix)]
     fn resolve_non_strict_handles_links_dots_and_missing_tails() {
         let t = Tree::new("resolve");
         t.text("real/f", "x");
         std::os::unix::fs::symlink(t.root.join("real"), t.root.join("link")).expect("link");
-        assert_eq!(resolve_non_strict(&t.root.join("link/f")), t.root.join("real/f"));
-        assert_eq!(resolve_non_strict(&t.root.join("real/../real/./f")), t.root.join("real/f"));
-        assert_eq!(resolve_non_strict(&t.root.join("link/missing/x")), t.root.join("real/missing/x"));
-        assert_eq!(resolve_non_strict(&t.root.join("absent/../real")), t.root.join("real"));
+        assert_eq!(
+            resolve_non_strict(&t.root.join("link/f")),
+            t.root.join("real/f")
+        );
+        assert_eq!(
+            resolve_non_strict(&t.root.join("real/../real/./f")),
+            t.root.join("real/f")
+        );
+        assert_eq!(
+            resolve_non_strict(&t.root.join("link/missing/x")),
+            t.root.join("real/missing/x")
+        );
+        assert_eq!(
+            resolve_non_strict(&t.root.join("absent/../real")),
+            t.root.join("real")
+        );
         // A symlink loop does not hang.
         std::os::unix::fs::symlink(t.root.join("loop2"), t.root.join("loop1")).expect("link");
         std::os::unix::fs::symlink(t.root.join("loop1"), t.root.join("loop2")).expect("link");
@@ -1532,10 +1745,19 @@ mod tests {
         let t = Tree::new("scan-deep");
         t.text(".env", &format!("{}={}\n", name(), LIKELY_VALUE));
         t.text(".ssh/id_rsa", "PRIVATE\n");
-        t.text(".claude/projects/p/s.jsonl", &format!("{}\n", assignment_line()));
-        t.text(".codex/sessions/rollout-x.jsonl", &format!("{}\n", assignment_line()));
+        t.text(
+            ".claude/projects/p/s.jsonl",
+            &format!("{}\n", assignment_line()),
+        );
+        t.text(
+            ".codex/sessions/rollout-x.jsonl",
+            &format!("{}\n", assignment_line()),
+        );
         let found = scan_deep::<()>(&t.root, None, None).expect("scan");
-        let kinds: Vec<(&str, &str)> = found.iter().map(|f| (f.kind.as_str(), f.confidence.as_str())).collect();
+        let kinds: Vec<(&str, &str)> = found
+            .iter()
+            .map(|f| (f.kind.as_str(), f.confidence.as_str()))
+            .collect();
         assert_eq!(
             kinds,
             vec![
@@ -1551,6 +1773,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scan_deep_drops_an_empty_dotenv_and_dedups_a_candidate_symlink() {
         let t = Tree::new("scan-deep-dedup");
         t.text(".env", "# nothing\n");
@@ -1562,10 +1785,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scan_deep_ticks_per_transcript_before_deduplicating() {
         let t = Tree::new("scan-deep-progress");
         let real = t.text(".claude/projects/a/real.jsonl", "{}\n");
-        std::os::unix::fs::symlink(&real, t.root.join(".claude/projects/alias.jsonl")).expect("link");
+        std::os::unix::fs::symlink(&real, t.root.join(".claude/projects/alias.jsonl"))
+            .expect("link");
         t.text(".claude/projects/b/other.jsonl", "{}\n");
         let mut calls: Vec<(String, usize, usize)> = Vec::new();
         let mut cb = |s: &str, a: usize, b: usize| -> Result<(), ()> {
@@ -1591,12 +1816,16 @@ mod tests {
         let t = Tree::new("scan-deep-error");
         t.text(".claude/projects/a/s.jsonl", "{}\n");
         let mut cb = |_: &str, _: usize, _: usize| -> Result<(), &'static str> { Err("nope") };
-        assert_eq!(scan_deep(&t.root, None, Some(&mut cb)).err(), Some(DeepError::Progress("nope")));
+        assert_eq!(
+            scan_deep(&t.root, None, Some(&mut cb)).err(),
+            Some(DeepError::Progress("nope"))
+        );
     }
 
     #[test]
     fn the_secret_key_walk_sees_a_pair_before_anything_inside_its_value() {
-        let v = json::parse(r#"{"a": {"token": "x"}, "token": "y", "z": [{"password": "w"}]}"#).expect("parse");
+        let v = json::parse(r#"{"a": {"token": "x"}, "token": "y", "z": [{"password": "w"}]}"#)
+            .expect("parse");
         let mut seen: Vec<(String, String)> = Vec::new();
         secret_keyed_strings(&v, &mut |k, s| seen.push((k.to_string(), s.to_string())));
         let expect: Vec<(String, String)> = [("token", "x"), ("token", "y"), ("password", "w")]
@@ -1647,7 +1876,11 @@ mod tests {
     type Calls = Vec<(String, usize, usize)>;
 
     /// Run with `fail_at` (1-based call index that errors, if any).
-    fn run(t: &Tree, threads: usize, fail_at: Option<usize>) -> (Calls, Result<Vec<Finding>, usize>) {
+    fn run(
+        t: &Tree,
+        threads: usize,
+        fail_at: Option<usize>,
+    ) -> (Calls, Result<Vec<Finding>, usize>) {
         let mut calls: Calls = Vec::new();
         let result = {
             let mut cb = |s: &str, a: usize, b: usize| -> Result<(), usize> {

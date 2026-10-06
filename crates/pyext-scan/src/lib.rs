@@ -49,7 +49,11 @@ use vahta_scan::json::{self, ParseError};
 use vahta_scan::{report, walk};
 
 fn scope_from_str(s: &str) -> Scope {
-    if s == "project" { Scope::Project } else { Scope::Deep }
+    if s == "project" {
+        Scope::Project
+    } else {
+        Scope::Deep
+    }
 }
 
 /// Read a Python `Finding` (any object with the same attributes) into Rust.
@@ -227,7 +231,11 @@ fn format_human_report(
     strict: &str,
 ) -> PyResult<String> {
     let root: String = project_root.str()?.extract()?;
-    Ok(report::format_human_report(&all_to_rust(findings)?, &root, strict))
+    Ok(report::format_human_report(
+        &all_to_rust(findings)?,
+        &root,
+        strict,
+    ))
 }
 
 /// Returns the caller's **own** objects, as Python does, not copies.
@@ -236,8 +244,7 @@ fn importable_findings<'py>(
     py: Python<'py>,
     findings: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyList>> {
-    let originals: Vec<Bound<'py, PyAny>> =
-        findings.try_iter()?.collect::<PyResult<_>>()?;
+    let originals: Vec<Bound<'py, PyAny>> = findings.try_iter()?.collect::<PyResult<_>>()?;
     let converted = originals
         .iter()
         .map(to_rust)
@@ -259,7 +266,10 @@ fn format_import_next_line(
     project_root: &Bound<'_, PyAny>,
 ) -> PyResult<Option<String>> {
     let root: String = project_root.str()?.extract()?;
-    Ok(report::format_import_next_line(&all_to_rust(findings)?, &root))
+    Ok(report::format_import_next_line(
+        &all_to_rust(findings)?,
+        &root,
+    ))
 }
 
 /// Rust returns the text; parsing it gives the dict Python's would be.
@@ -274,7 +284,6 @@ fn findings_to_json<'py>(
     let text = report::findings_to_json(&all_to_rust(findings)?, project_root, strict);
     py.import("json")?.call_method1("loads", (text,))
 }
-
 
 // --- the deep scan ----------------------------------------------------------
 
@@ -343,7 +352,9 @@ fn iter_agent_transcript_files<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let home = home_from(py, home)?;
     let paths = py.detach(|| deep::iter_agent_transcript_files(&home));
-    paths_to_python(py, &paths)?.try_iter().map(|i| i.into_any())
+    paths_to_python(py, &paths)?
+        .try_iter()
+        .map(|i| i.into_any())
 }
 
 #[pyfunction]
@@ -386,7 +397,11 @@ fn scan_deep<'py>(
     let found = py
         .detach(move || {
             let mut call = progress_caller(progress);
-            deep::scan_deep(&home, appdata.as_deref().map(std::ffi::OsStr::new), Some(&mut call))
+            deep::scan_deep(
+                &home,
+                appdata.as_deref().map(std::ffi::OsStr::new),
+                Some(&mut call),
+            )
         })
         .map_err(deep_error)?;
     list_to_python(py, &found)
