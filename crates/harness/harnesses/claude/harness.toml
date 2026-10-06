@@ -4,7 +4,8 @@
 name = "claude"
 title = "Claude Code"
 # Bump when what `vahta setup` writes for this harness changes.
-setup_version = 1
+# 2: permissions.deny for the vahta commands that are for the person only.
+setup_version = 2
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -16,6 +17,21 @@ format = "json"
 # hooks.<Event> is an array of matcher groups {matcher?, hooks: [{type, command}]}.
 # `matcher` is optional; setup omits the key for an event without one.
 shape = "grouped"
+
+# Claude Code enforces permissions.deny itself, before any hook runs, and a
+# deny beats any allow. The hook refuses these commands too (and catches
+# spellings a prefix rule cannot: full paths, `bash -c`, `env`); this is the
+# second layer. `vh` is the short name of `vahta`.
+[config.deny]
+key = "permissions.deny"
+rules = [
+  "Bash(vahta reveal:*)",
+  "Bash(vahta copy:*)",
+  "Bash(vahta _surface:*)",
+  "Bash(vh reveal:*)",
+  "Bash(vh copy:*)",
+  "Bash(vh _surface:*)",
+]
 
 # User scope only in v1. Hooks live under the "hooks" key of settings.json.
 [config.path]
@@ -42,6 +58,8 @@ kind = "before_tool"
 matcher = "Bash|Write|Edit|MultiEdit|mcp__.*"
 tool_name = "tool_name"
 tool_input = "tool_input"
+# The file Write and Edit are about; the hook refuses Vahta's own files.
+file_path = ["tool_input.file_path", "tool_input.path"]
 cwd = "cwd"
 
 # Same Claude event, different job: reading a file. Claude has no dedicated

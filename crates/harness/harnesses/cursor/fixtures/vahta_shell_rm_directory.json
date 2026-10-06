@@ -1,0 +1,26 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/.vahta/vault.vht": "not a real vault\n",
+    "proj/vahta.toml": "[secrets.A]\n",
+    "proj/.vahta-notes/x.md": "# notes\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "rm -rf .vahta"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": {
+    "permission": "deny",
+    "user_message": "vahta blocked access to `.vahta`: it is part of Vahta's own files (a vault, its lock or backups, or Vahta's local store and journal). Do not read, change, move or delete it; use the `vahta` commands, which keep values out of the transcript.",
+    "agent_message": "vahta blocked access to `.vahta`: it is part of Vahta's own files (a vault, its lock or backups, or Vahta's local store and journal). Do not read, change, move or delete it; use the `vahta` commands, which keep values out of the transcript."
+  },
+  "exit": 0
+}

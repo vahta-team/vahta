@@ -10,6 +10,7 @@
 //! limits below, `json.loads`-faithful. Replies are rendered with serde_json
 //! from the trusted TOML templates, because that is a writer, not a reader.
 
+mod agentguard;
 mod readguard;
 
 use std::io::{Read, Write};
@@ -91,6 +92,59 @@ fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
     }
 }
 
+/// Refusing to touch one of Vahta's own files: names the path, never content.
+fn deny_vahta_file(file: &str) -> Decision {
+    let msg = format!(
+        "vahta blocked access to `{file}`: it is part of Vahta's own files (a vault, its lock or \
+         backups, or Vahta's local store and journal). Do not read, change, move or delete it; use \
+         the `vahta` commands, which keep values out of the transcript."
+    );
+    Decision::Deny {
+        user_message: msg.clone(),
+        agent_message: msg,
+    }
+}
+
+/// The first of Vahta's own files a tool call is about, if any: the file a
+/// write tool names, the files a patch touches, or what a shell command reads,
+/// writes, removes, moves or copies.
+fn vahta_file_touched(ev: &Event) -> Option<String> {
+    let cwd = ev.cwd.as_deref();
+    match ev.group {
+        Some(vahta_harness::Group::Write) => {
+            if let Some(path) = ev.path.as_deref()
+                && readguard::is_vahta_path(path, cwd)
+            {
+                return Some(path.to_string());
+            }
+            readguard::vahta_file_in_patch(&ev.text, cwd)
+        }
+        Some(vahta_harness::Group::Shell) => readguard::vahta_file_in_command(&ev.text, cwd),
+        _ => None,
+    }
+}
+
+/// Refusing a Vahta command that is for the person only.
+fn deny_vahta_command(invocation: &str) -> Decision {
+    let msg = if invocation.ends_with("_surface") {
+        format!(
+            "vahta blocked `{invocation}`: it is Vahta's prompt window, which only Vahta opens, for \
+             the person. Do not run it."
+        )
+    } else {
+        format!(
+            "vahta blocked `{invocation}`: it shows or copies a secret value, which is for the \
+             person, not an agent (a window can be captured, the clipboard can be read). Ask the \
+             person to run it in their own terminal if they need it; to use a value, run the \
+             command that needs it with `vahta run`."
+        )
+    };
+    Decision::Deny {
+        user_message: msg.clone(),
+        agent_message: msg,
+    }
+}
+
 /// Refusing to read a file: names the file and the kind, never a value.
 fn deny_read(file: &str, kind: &str) -> Decision {
     let msg = format!(
@@ -106,6 +160,17 @@ fn deny_read(file: &str, kind: &str) -> Decision {
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
     match args.kind {
         Kind::BeforeTool => {
+            // Commands for the person only, then Vahta's own files: both are
+            // refused whatever else is in the call, and the answer names the
+            // command or the path, not the text.
+            if ev.group == Some(vahta_harness::Group::Shell)
+                && let Some(invocation) = agentguard::forbidden_command(&ev.text)
+            {
+                return deny_vahta_command(&invocation);
+            }
+            if let Some(file) = vahta_file_touched(ev) {
+                return deny_vahta_file(&file);
+            }
             let by_text = secret_in(&ev.text, "tool", false);
             if by_text != Decision::Allow || ev.group != Some(vahta_harness::Group::Shell) {
                 return by_text;
@@ -119,6 +184,9 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
             let Some(file) = ev.path.as_deref() else {
                 return Decision::Allow;
             };
+            if readguard::is_vahta_path(file, ev.cwd.as_deref()) {
+                return deny_vahta_file(file);
+            }
             match readguard::secret_kind_in(file, ev.cwd.as_deref(), ev.content.as_deref()) {
                 Some(kind) => deny_read(file, &kind),
                 None => Decision::Allow,

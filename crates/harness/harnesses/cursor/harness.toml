@@ -39,6 +39,8 @@ kind = "before_tool"
 matcher = "Shell|Write"
 tool_name = "tool_name"
 tool_input = "tool_input"
+# The file Write is about; the hook refuses Vahta's own files.
+file_path = ["tool_input.file_path", "tool_input.path"]
 cwd = "cwd"
 
 # MCP calls bypass preToolUse in Cursor, so they need their own event. Same

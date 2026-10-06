@@ -144,7 +144,8 @@ fn install_dry_run_status_and_uninstall() {
     // As it appears inside the JSON string: Windows backslashes are escaped.
     let hook = s.hook().display().to_string().replace('\\', "\\\\");
     assert!(s.read(CLAUDE).contains(&format!(
-        "{hook} --harness claude --event before_tool --setup 1"
+        "{hook} --harness claude --event before_tool --setup {}",
+        claude_setup_version()
     )));
     assert_eq!(s.read(".claude/settings.json.vahta-backup"), before);
     let o = text(&s.vahta(&["setup"]).stdout);
@@ -284,9 +285,10 @@ fn the_stale_notice_goes_to_stderr_only_and_only_when_outdated() {
     let cfg = s.home().join(CLAUDE);
     fs::write(
         &cfg,
-        fs::read_to_string(&cfg)
-            .unwrap()
-            .replace("--setup 1", "--setup 0"),
+        fs::read_to_string(&cfg).unwrap().replace(
+            &format!("--setup {}", claude_setup_version()),
+            &format!("--setup {}", claude_setup_version() - 1),
+        ),
     )
     .unwrap();
     let out = scan(&s);
@@ -354,7 +356,7 @@ fn refresh_reinstalls_only_the_harnesses_that_have_ours() {
         &cfg,
         fs::read_to_string(&cfg)
             .unwrap()
-            .replace("--setup 1", "--setup 0"),
+            .replace(&format!("--setup {}", claude_setup_version()), "--setup 0"),
     )
     .unwrap();
     let out = s.vahta(&["setup", "--refresh"]);
@@ -364,7 +366,11 @@ fn refresh_reinstalls_only_the_harnesses_that_have_ours() {
         "{}",
         text(&out.stdout)
     );
-    assert!(s.read(CLAUDE).contains("--setup 1") && !s.read(CLAUDE).contains("--setup 0"));
+    assert!(
+        s.read(CLAUDE)
+            .contains(&format!("--setup {}", claude_setup_version()))
+            && !s.read(CLAUDE).contains("--setup 0")
+    );
     assert!(
         !s.exists(".cursor/hooks.json"),
         "a harness with none of ours is left alone"
@@ -477,7 +483,7 @@ fn refresh_dry_run_writes_nothing() {
         &cfg,
         fs::read_to_string(&cfg)
             .unwrap()
-            .replace("--setup 1", "--setup 0"),
+            .replace(&format!("--setup {}", claude_setup_version()), "--setup 0"),
     )
     .unwrap();
     let before = s.read(CLAUDE);
@@ -497,13 +503,13 @@ fn the_stale_notice_suggests_refresh_when_several_harnesses_are_affected() {
     s.found(".claude");
     s.found(".cursor");
     s.vahta(&["setup", "--all"]);
-    for f in [CLAUDE, ".cursor/hooks.json"] {
+    for (f, harness) in [(CLAUDE, "claude"), (".cursor/hooks.json", "cursor")] {
         let cfg = s.home().join(f);
         fs::write(
             &cfg,
             fs::read_to_string(&cfg)
                 .unwrap()
-                .replace("--setup 1", "--setup 0"),
+                .replace(&format!("--setup {}", setup_version(harness)), "--setup 0"),
         )
         .unwrap();
     }
@@ -524,4 +530,17 @@ fn the_stale_notice_suggests_refresh_when_several_harnesses_are_affected() {
         e.contains("no longer exists; run `vahta setup --refresh`"),
         "{e}"
     );
+}
+
+/// What `vahta setup` writes for Claude Code is at this version now.
+fn claude_setup_version() -> u32 {
+    setup_version("claude")
+}
+
+/// What `vahta setup` writes for a harness is at this version now.
+fn setup_version(harness: &str) -> u32 {
+    vahta_harness::manifest(harness)
+        .and_then(Result::ok)
+        .map(|m| m.setup_version)
+        .unwrap_or(0)
 }

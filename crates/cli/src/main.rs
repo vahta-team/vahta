@@ -1,8 +1,15 @@
 //! `vahta` — the command line.
 //!
-//! Four subcommands. `vahta setup` registers the hook with the coding agents
-//! (see `setup.rs`). `vahta list` and `vahta check` read the project's vault
-//! without a password (see `vault_cmds.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
+//! `vahta setup` registers the hook with the coding agents (see `setup.rs`).
+//! `vahta list` and `vahta check` read the project's vault without a password
+//! (see `vault_cmds.rs`). Everything that opens a vault, runs a command with its
+//! secrets or holds a session goes through the daemon, which is the vault's only
+//! owner: `vahta daemon` (see `daemon_cmd.rs`), `init`, `set`, `remove`,
+//! `import`, `reveal` and `copy` (`vault_ops.rs`), `unlock`, `lock` and
+//! `sessions` (`session_cmds.rs`), `run` and `delegate` (`run_cmd.rs`), and the
+//! hidden `_surface`, the prompt window the daemon opens (`surface_cmd.rs`).
+//! These commands take no secret and no password as an argument: the person
+//! types them in the window. `vahta scan [PATH]` is the project path of `ka scan`, and
 //! with `--deep` the home dotfiles, MCP configs and agent session transcripts
 //! as well. The scan's flags, output and exit codes match the
 //! Python command's, and `src/key_amnesia/scan_py.py` remains the
@@ -24,8 +31,13 @@
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
 
+mod daemon_cmd;
+mod run_cmd;
+mod session_cmds;
 mod setup;
+mod surface_cmd;
 mod vault_cmds;
+mod vault_ops;
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -40,6 +52,14 @@ use vahta_scan::walk::scan_project_with_threads;
 pub const EXIT_CLEAN: i32 = 0;
 pub const EXIT_LEAKS: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
+/// A command that ran and found a failure (`vahta check` with a name missing,
+/// a vault operation that went wrong).
+pub const EXIT_FAILED: i32 = 1;
+/// The daemon commands add: a structured refusal, a prompt window that was
+/// cancelled or timed out, and a daemon that is not available.
+pub const EXIT_REFUSED: i32 = 3;
+pub const EXIT_CANCELLED: i32 = 4;
+pub const EXIT_DAEMON: i32 = 5;
 
 const USAGE: &str = "\
 usage: vahta scan [PATH] [--deep] [--json] [--strict {certain,high,paranoid}]
@@ -76,6 +96,18 @@ commands:
   setup   register vahta-hook with Claude Code, Codex and Cursor
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
+  run     run a command with secrets in its environment, output scrubbed
+  delegate  narrow your session for a sub-agent and run it
+  unlock  open a session: one password, then `vahta run` needs no window
+  lock    end this project's sessions (no password)
+  sessions  list sessions, or `kill ID` one (no password)
+  init    create this project's vault
+  set     store a secret (typed in a window, never on the command line)
+  remove  remove a secret
+  import  add the secrets of a ka vault or a .env file
+  reveal  show a secret in a window
+  copy    put a secret on the clipboard for 30 seconds
+  daemon  run, inspect, stop or restart the daemon that owns the vault
 
 Run `vahta <command> --help` for the options.
 ";
@@ -360,6 +392,17 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
         Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
         Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
+        Some("daemon") => daemon_cmd::run(&args[1..], env, stdout, stderr),
+        Some(cmd @ ("init" | "set" | "remove" | "import" | "reveal" | "copy")) => {
+            vault_ops::run(cmd, &args[1..], env, stdout, stderr)
+        }
+        Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
+        Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),
+        Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),
+        Some("lock") => session_cmds::run_lock(&args[1..], env, stdout, stderr),
+        Some("sessions") => session_cmds::run_sessions(&args[1..], env, stdout, stderr),
+        // The prompt window, started by the daemon; not listed in the help.
+        Some("_surface") => surface_cmd::run(&args[1..]),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
             EXIT_CLEAN

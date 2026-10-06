@@ -428,6 +428,23 @@ def _uuid_or_stripped_hex(value: str) -> bool:
     return len(compact) == _STRIPPED_UUID_LEN and bool(_HEX_LIKELY.fullmatch(compact))
 
 
+# A value that *starts* with a reference names where the credential comes
+# from; it is not the credential. Shapes: a shell variable in braces followed
+# by a URL tail, a CI expression (dollar and two braces), a template (two
+# braces) with a JSON escape after it, a command substitution, a bare shell
+# variable, a Windows %VAR%. Without this, the text after the reference (a
+# URL, an escape) made the value look random. A `$` followed by a digit (a
+# bcrypt hash) is not a reference. Keys with a known prefix are still found by
+# the prefix rule, which does not look at assignments.
+_REFERENCE_START = re.compile(
+    r"\$\{\{|\{\{|\$\{[A-Za-z_]|\$\(|\$[A-Za-z_]|%[A-Za-z_][A-Za-z0-9_]*%"
+)
+
+
+def starts_with_reference(value: str) -> bool:
+    return _REFERENCE_START.match(value) is not None
+
+
 def classify_value(value: str) -> tuple[Confidence, str | None]:
     """Classify a captured assignment/Bearer *value* (never logged).
 
@@ -437,7 +454,7 @@ def classify_value(value: str) -> tuple[Confidence, str | None]:
     v = value.strip("'\"")
     if len(v) < MIN_VALUE_LEN:
         return "none", None
-    if is_placeholder(v) or _is_nil_or_all_zero(v):
+    if is_placeholder(v) or _is_nil_or_all_zero(v) or starts_with_reference(v):
         return "none", None
     if _FUNC_CALL.fullmatch(v):
         return "none", NAMED_WEAKENING_FUNCTION_CALL
