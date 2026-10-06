@@ -90,12 +90,14 @@ impl Sandbox {
         fs::write(path, text).unwrap();
     }
 
-    /// What the window was asked and shown, in order.
+    /// What the window was asked and shown, in order. The daemon may be in the
+    /// middle of writing a line; a line that does not parse yet is left for the
+    /// next look.
     fn window_log(&self) -> Vec<Value> {
         fs::read_to_string(self.root.join("surface.log"))
             .unwrap_or_default()
             .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
+            .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
     }
 
