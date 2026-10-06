@@ -15,12 +15,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use vahta_os::ProcessId;
 use vahta_os::ipc::{Address, Stream};
 
 use crate::protocol::{
@@ -167,17 +168,24 @@ pub fn sanitize_label(raw: &str) -> Option<String> {
 
 // --- The registry of windows waiting for their connection ------------------------
 
+/// A window's connection, with the kernel-verified process that made it.
+pub type Arrival = (Stream, ProcessId);
+
 /// The one-time tokens the daemon has issued, each for one window of one
 /// request. A window's connection presents its token in the hello; the server
 /// hands the connection to whoever is waiting on it, and the token is gone.
+///
+/// A token alone does not prove the window: it travels in the environment,
+/// which other processes of the same user can read. [`TerminalSurface`] also
+/// checks the process that arrived with it.
 #[derive(Default)]
 pub struct SurfaceRegistry {
-    pending: Mutex<HashMap<String, SyncSender<Stream>>>,
+    pending: Mutex<HashMap<String, SyncSender<Arrival>>>,
 }
 
 impl SurfaceRegistry {
     /// A new token and the channel its window's connection will arrive on.
-    pub fn issue(&self) -> Result<(String, Receiver<Stream>), SurfaceError> {
+    pub fn issue(&self) -> Result<(String, Receiver<Arrival>), SurfaceError> {
         let bytes = vahta_vault::crypto::random::<32>()
             .map_err(|_| SurfaceError::Unavailable("the system random generator failed".into()))?;
         let token = vahta_vault::hex_encode(&bytes);
@@ -191,10 +199,10 @@ impl SurfaceRegistry {
 
     /// Hand `stream` to the request waiting on `token`. The token is used up
     /// either way; an unknown or spent one gives the stream back.
-    pub fn claim(&self, token: &str, stream: Stream) -> Result<(), Stream> {
+    pub fn claim(&self, token: &str, stream: Stream, peer: ProcessId) -> Result<(), Stream> {
         let tx = self.pending.lock().ok().and_then(|mut p| p.remove(token));
         match tx {
-            Some(tx) => tx.send(stream).map_err(|e| e.0),
+            Some(tx) => tx.send((stream, peer)).map_err(|e| e.0.0),
             None => Err(stream),
         }
     }
@@ -271,9 +279,50 @@ impl PromptSurface for TerminalSurface {
             &mut |wait| rx.recv_timeout(wait).ok(),
         );
         self.registry.cancel(&token);
-        let (child, stream) = opened.map_err(|e| SurfaceError::Unavailable(e.to_string()))?;
+        let (child, (stream, peer)) =
+            opened.map_err(|e| SurfaceError::Unavailable(e.to_string()))?;
+        if !window_is_ours(child.as_ref(), peer, &self.exe) {
+            // Whoever read the token answered first. The real window then finds
+            // its token spent and says so; nothing is asked of this one.
+            let _ = stream.shutdown();
+            return Err(SurfaceError::Unavailable(
+                "a process other than the window Vahta opened answered it; refused".to_string(),
+            ));
+        }
         Ok(Box::new(TerminalWindow::new(stream, child)))
     }
+}
+
+/// Whether `peer`, which presented a window's token, is that window: a process
+/// started inside the terminal this daemon launched (on Windows, the console
+/// process itself). Without this, a process that read the token from the
+/// environment could answer a yes/no question (extending a session) or choose
+/// the password of a new vault.
+///
+/// macOS opens Terminal.app through `osascript`, so the window is not our
+/// descendant there; it is accepted when it runs this executable under
+/// Terminal. That is weaker, and the hook keeps agents from running
+/// `vahta _surface` themselves.
+fn window_is_ours(child: Option<&Child>, peer: ProcessId, exe: &Path) -> bool {
+    let chain = vahta_os::ancestor_chain(peer.pid, 64);
+    if chain.first() != Some(&peer) {
+        return false;
+    }
+    if let Some(child) = child {
+        let launched = vahta_os::identity_of(child.id()).ok();
+        if chain.iter().any(|p| Some(*p) == launched) {
+            return true;
+        }
+    }
+    if cfg!(target_os = "macos") {
+        let ours = exe.file_name().and_then(|n| n.to_str());
+        return ours.is_some()
+            && vahta_os::exe_name(peer.pid).as_deref() == ours
+            && chain
+                .iter()
+                .any(|p| vahta_os::exe_name(p.pid).as_deref() == Some("Terminal"));
+    }
+    false
 }
 
 /// A window on the far end of a surface connection.
@@ -479,6 +528,36 @@ mod tests {
         assert_eq!(sanitize_label("ok\u{1b}").unwrap(), "ok");
     }
 
+    fn me() -> ProcessId {
+        vahta_os::identity_of(std::process::id()).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_window_must_be_inside_the_terminal_we_launched() {
+        let exe = std::env::current_exe().unwrap();
+        // A process we started stands in for the terminal. A window that is
+        // the launched process itself (as on Windows) is ours.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let child_id = vahta_os::identity_of(child.id()).unwrap();
+        assert!(window_is_ours(Some(&child), child_id, &exe));
+        // This test process is not inside that child.
+        assert!(!window_is_ours(Some(&child), me(), &exe));
+        // No launcher to compare with (a server-mode terminal).
+        assert!(!window_is_ours(None, me(), &exe));
+        // An identity that no longer matches: gone, or a reused pid.
+        let stale = ProcessId {
+            pid: child_id.pid,
+            start_time: child_id.start_time.wrapping_add(1),
+        };
+        assert!(!window_is_ours(Some(&child), stale, &exe));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[test]
     fn a_token_is_single_use() {
         let registry = SurfaceRegistry::default();
@@ -487,14 +566,14 @@ mod tests {
         assert_eq!(registry.pending(), 1);
         // A different token is not this one.
         let (a, _b) = pair();
-        assert!(registry.claim("not-a-token", a).is_err());
+        assert!(registry.claim("not-a-token", a, me()).is_err());
         assert_eq!(registry.pending(), 1);
         let (c, _d) = pair();
-        registry.claim(&token, c).unwrap();
+        registry.claim(&token, c, me()).unwrap();
         assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
         // Used up.
         let (e, _f) = pair();
-        assert!(registry.claim(&token, e).is_err());
+        assert!(registry.claim(&token, e, me()).is_err());
         assert_eq!(registry.pending(), 0);
         // Two tokens differ.
         let (t1, _r1) = registry.issue().unwrap();

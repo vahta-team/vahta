@@ -423,7 +423,7 @@ fn handle_connection(shared: &Arc<Shared>, mut stream: Stream) {
         HelloKind::Surface { token } => {
             // If the token is spent between the check above and here, there is
             // no request to hand the window to and the connection just ends.
-            if let Err(stream) = shared.registry.claim(&token, stream) {
+            if let Err(stream) = shared.registry.claim(&token, stream, peer.id) {
                 let _ = stream.shutdown();
             }
         }
