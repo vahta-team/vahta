@@ -18,7 +18,7 @@
 //! What is *not* hand-waved: Python's `\b`, `\w` and `\s` are Unicode-aware,
 //! and the classes below reproduce that rather than assuming ASCII input.
 
-use crate::classify::{classify_value, Confidence};
+use crate::classify::{Confidence, classify_value};
 
 /// Python's `\w`: alphanumeric or underscore, Unicode-aware.
 #[inline]
@@ -66,7 +66,11 @@ fn collect_string<U: Unit>(units: &[U]) -> String {
 
 /// `\b` at index `at`: exactly one side is a word character.
 fn at_word_boundary<U: Unit>(chars: &[U], at: usize) -> bool {
-    let before = if at == 0 { false } else { is_word(chars[at - 1].ch()) };
+    let before = if at == 0 {
+        false
+    } else {
+        is_word(chars[at - 1].ch())
+    };
     let after = if at >= chars.len() {
         false
     } else {
@@ -452,9 +456,7 @@ pub fn is_secret_name(name: &str) -> bool {
         starts.push(i);
     }
 
-    starts
-        .iter()
-        .any(|&s| keyword_matches_exactly(&chars[s..]))
+    starts.iter().any(|&s| keyword_matches_exactly(&chars[s..]))
 }
 
 /// The keyword alternation, anchored to the end of `rest`.
@@ -496,11 +498,7 @@ fn is_name_char(c: char) -> bool {
 #[inline(always)]
 fn fold_byte(c: char) -> u8 {
     let f = crate::primitives::fold_ci(c);
-    if f.is_ascii() {
-        f as u8
-    } else {
-        0
-    }
+    if f.is_ascii() { f as u8 } else { 0 }
 }
 
 /// Screen tables for [`find_assign_keywords`]: bit 0 = `a` then `p` (api),
@@ -657,7 +655,11 @@ fn match_assign_tail<U: Unit>(chars: &[U], at: usize) -> Option<AssignTail> {
     };
 
     let value_start = i;
-    while i < chars.len() && !is_space(chars[i].ch()) && chars[i].ch() != '\'' && chars[i].ch() != '"' {
+    while i < chars.len()
+        && !is_space(chars[i].ch())
+        && chars[i].ch() != '\''
+        && chars[i].ch() != '"'
+    {
         i += 1;
     }
     if i - value_start < 8 {
@@ -720,16 +722,16 @@ fn assignments_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
         // The legacy `(?P=nq)` only pairs quotes inside the match: a quote
         // immediately before the name is usually JSON wrapping, not a quoted
         // key, so an opener is required only when the tail captured a closer.
-        if let Some(nq2) = tail.nq2 {
-            if i == 0 || chars[i - 1].ch() != nq2 {
-                continue;
-            }
+        if let Some(nq2) = tail.nq2
+            && (i == 0 || chars[i - 1].ch() != nq2)
+        {
+            continue;
         }
         // Value quotes: a closer is required only when an opener was captured.
-        if let Some(q) = tail.q {
-            if tail.q2 != Some(q) {
-                continue;
-            }
+        if let Some(q) = tail.q
+            && tail.q2 != Some(q)
+        {
+            continue;
         }
 
         let name = collect_string(&chars[i..kw_end]);
@@ -846,8 +848,7 @@ fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
         }
         // `(?<![\w./=-])` — the lookbehind, which no Rust regex can express.
         let preceded_ok = i == 0
-            || !(is_word(chars[i - 1].ch())
-                || matches!(chars[i - 1].ch(), '.' | '/' | '=' | '-'));
+            || !(is_word(chars[i - 1].ch()) || matches!(chars[i - 1].ch(), '.' | '/' | '=' | '-'));
         if !preceded_ok {
             i += 1;
             continue;
@@ -864,7 +865,9 @@ fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
         let name_start = j;
         j += 1;
         while j < chars.len()
-            && (chars[j].ch().is_ascii_alphanumeric() || chars[j].ch() == '_' || chars[j].ch() == '-')
+            && (chars[j].ch().is_ascii_alphanumeric()
+                || chars[j].ch() == '_'
+                || chars[j].ch() == '-')
         {
             j += 1;
         }
@@ -975,13 +978,73 @@ mod tests {
     /// non-ASCII characters that case-fold to ASCII, quotes, separators.
     fn fragment_strings(count: usize) -> Vec<String> {
         const FRAGS: &[&str] = &[
-            "sk-", "sk-ant-", "sk_live_", "rk_live_", "AKIA", "AIza", "github_pat_", "ghp_",
-            "gho_", "glpat-", "xoxb-", "xox", "npm_", "sk", "gh", "AK", "AI", "Bearer ", "bearer\t",
-            "BEARER  ", "token", "TOKEN", "api_key", "api-key", "apikey", "private-key", "secret",
-            "password", "passwd", "passw", "\u{17f}ecret", "\u{212a}ey", "\u{130}", "\u{131}", "é", "Я",
-            "٣", "\u{2028}", "\u{1c}", " ", "\t", "\n", "=", ":", "'", "\"", "-", "--", "_", ".", "/",
-            "abcdefgh", "ABCDEFGHIJKLMNOPQRST", "0123456789012345", "Zx9Qw3Er7Ty1Ui5Op2As",
-            "a", "Q", "7", "(", ")", "[", "]", "$", "`", "x", "0", "1",
+            "sk-",
+            "sk-ant-",
+            "sk_live_",
+            "rk_live_",
+            "AKIA",
+            "AIza",
+            "github_pat_",
+            "ghp_",
+            "gho_",
+            "glpat-",
+            "xoxb-",
+            "xox",
+            "npm_",
+            "sk",
+            "gh",
+            "AK",
+            "AI",
+            "Bearer ",
+            "bearer\t",
+            "BEARER  ",
+            "token",
+            "TOKEN",
+            "api_key",
+            "api-key",
+            "apikey",
+            "private-key",
+            "secret",
+            "password",
+            "passwd",
+            "passw",
+            "\u{17f}ecret",
+            "\u{212a}ey",
+            "\u{130}",
+            "\u{131}",
+            "é",
+            "Я",
+            "٣",
+            "\u{2028}",
+            "\u{1c}",
+            " ",
+            "\t",
+            "\n",
+            "=",
+            ":",
+            "'",
+            "\"",
+            "-",
+            "--",
+            "_",
+            ".",
+            "/",
+            "abcdefgh",
+            "ABCDEFGHIJKLMNOPQRST",
+            "0123456789012345",
+            "Zx9Qw3Er7Ty1Ui5Op2As",
+            "a",
+            "Q",
+            "7",
+            "(",
+            ")",
+            "[",
+            "]",
+            "$",
+            "`",
+            "x",
+            "0",
+            "1",
         ];
         let mut x = 0x9E3779B97F4A7C15u64;
         let mut next = move || {
@@ -1019,8 +1082,16 @@ mod tests {
                 continue;
             }
             let chars: Vec<char> = text.chars().collect();
-            assert_eq!(assignments_in(text.as_bytes()), assignments_in(&chars), "{text:?}");
-            assert_eq!(flag_values_in(text.as_bytes()), flag_values_in(&chars), "{text:?}");
+            assert_eq!(
+                assignments_in(text.as_bytes()),
+                assignments_in(&chars),
+                "{text:?}"
+            );
+            assert_eq!(
+                flag_values_in(text.as_bytes()),
+                flag_values_in(&chars),
+                "{text:?}"
+            );
             assert_eq!(
                 find_bearer_value(text.as_bytes()),
                 find_bearer_value(&chars),

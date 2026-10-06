@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use vahta_scan::content::{findings_for_content, findings_for_path};
-use vahta_scan::finding::{leak_count, Scope};
+use vahta_scan::finding::{Scope, leak_count};
 
 const READERS: &[&str] = &[
     "cat", "head", "tail", "less", "more", "bat", "nl", "tac", "grep", "rg", "sed", "awk",
@@ -67,7 +67,11 @@ pub fn secret_kind_in(given: &str, cwd: Option<&str>, content: Option<&str>) -> 
     }
     let path = resolve(given, cwd);
     match content {
-        Some(text) => gated_kind(&findings_for_content(&path, text.as_bytes(), Scope::Project)),
+        Some(text) => gated_kind(&findings_for_content(
+            &path,
+            text.as_bytes(),
+            Scope::Project,
+        )),
         None => {
             if !std::fs::metadata(&path).ok()?.is_file() {
                 return None;
@@ -181,7 +185,8 @@ fn read_candidates(cmd: &str) -> Vec<String> {
     let mut redirect = false;
     let flush = |words: &mut Vec<String>, out: &mut Vec<String>| {
         let mut i = 0;
-        while i < words.len() && (is_assignment(&words[i]) || WRAPPERS.contains(&words[i].as_str())) {
+        while i < words.len() && (is_assignment(&words[i]) || WRAPPERS.contains(&words[i].as_str()))
+        {
             i += 1;
         }
         if let Some(prog) = words.get(i) {

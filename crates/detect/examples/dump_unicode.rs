@@ -4,7 +4,9 @@
 //! the detector answers with Python's semantics rather than Rust's.
 
 use std::io::{BufWriter, Write};
-use vahta_detect::{char_class, fold_ci, is_digit_python, is_python_space, is_word_python, CharClass};
+use vahta_detect::{
+    CharClass, char_class, fold_ci, is_digit_python, is_python_space, is_word_python,
+};
 
 fn main() {
     let out = std::io::stdout();

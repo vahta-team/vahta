@@ -382,7 +382,12 @@ const VOWELS: &str = "aeiouAEIOUyY";
 /// True if the segment carries a vowel. `y` counts, as in Python.
 pub fn has_vowel(seg: &str) -> bool {
     // Membership in `VOWELS`, spelled out so it compiles to a byte test.
-    seg.chars().any(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U' | 'y' | 'Y'))
+    seg.chars().any(|c| {
+        matches!(
+            c,
+            'a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U' | 'y' | 'Y'
+        )
+    })
 }
 
 /// Number of vowel-bearing segments in a value.
@@ -452,9 +457,18 @@ mod tests {
     fn camel_case_splits_the_way_the_regex_does() {
         assert_eq!(word_segments("summerVineyard"), vec!["summer", "Vineyard"]);
         assert_eq!(word_segments("HTTPServer"), vec!["HTTP", "Server"]);
-        assert_eq!(word_segments("XMLHttpRequest"), vec!["XML", "Http", "Request"]);
-        assert_eq!(word_segments("getToken2Cache"), vec!["get", "Token", "2", "Cache"]);
-        assert_eq!(word_segments("correct-horse-battery"), vec!["correct", "horse", "battery"]);
+        assert_eq!(
+            word_segments("XMLHttpRequest"),
+            vec!["XML", "Http", "Request"]
+        );
+        assert_eq!(
+            word_segments("getToken2Cache"),
+            vec!["get", "Token", "2", "Cache"]
+        );
+        assert_eq!(
+            word_segments("correct-horse-battery"),
+            vec!["correct", "horse", "battery"]
+        );
         assert_eq!(word_segments("A1b2"), vec!["A", "1", "b", "2"]);
         assert_eq!(word_segments("ABCdef"), vec!["AB", "Cdef"]);
         assert_eq!(word_segments("abcDEF"), vec!["abc", "DEF"]);
@@ -495,7 +509,10 @@ mod tests {
                 let span = 1 + (len as u64 % 90);
                 s.push((33 + (x % span)) as u8 as char);
             }
-            assert_eq!(entropy_ascii(s.as_bytes()).to_bits(), entropy_general(&s).to_bits());
+            assert_eq!(
+                entropy_ascii(s.as_bytes()).to_bits(),
+                entropy_general(&s).to_bits()
+            );
         }
     }
 

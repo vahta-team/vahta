@@ -21,7 +21,10 @@ const DISABLE_ENV: &str = "VAHTA_HOOK_DISABLE";
 
 /// Past these a payload is not built into a tree; its strings are walked
 /// instead. Generous: a real payload is a few levels and a few hundred nodes.
-const LIMITS: Limits = Limits { depth: 100_000, nodes: 1_000_000 };
+const LIMITS: Limits = Limits {
+    depth: 100_000,
+    nodes: 1_000_000,
+};
 
 struct Args {
     harness: String,
@@ -44,7 +47,11 @@ fn parse_args() -> Option<Args> {
             _ => return None,
         }
     }
-    Some(Args { harness: harness?, kind: kind?, setup })
+    Some(Args {
+        harness: harness?,
+        kind: kind?,
+        setup,
+    })
 }
 
 fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
@@ -69,7 +76,10 @@ fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
                  Keep the secret out of the chat, store it instead, and send the message \
                  again without it."
             );
-            Decision::Deny { user_message: msg.clone(), agent_message: msg }
+            Decision::Deny {
+                user_message: msg.clone(),
+                agent_message: msg,
+            }
         }
         _ => Decision::Notice {
             user_message: format!("vahta: a secret ({secret}) reached the transcript; rotate it."),
@@ -87,7 +97,10 @@ fn deny_read(file: &str, kind: &str) -> Decision {
         "vahta blocked reading `{file}`: it holds credentials ({kind}). Do not read it; run the \
          command that needs it with `vahta run` so the values never reach the transcript."
     );
-    Decision::Deny { user_message: msg.clone(), agent_message: msg }
+    Decision::Deny {
+        user_message: msg.clone(),
+        agent_message: msg,
+    }
 }
 
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
@@ -103,7 +116,9 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
             }
         }
         Kind::BeforeRead => {
-            let Some(file) = ev.path.as_deref() else { return Decision::Allow };
+            let Some(file) = ev.path.as_deref() else {
+                return Decision::Allow;
+            };
             match readguard::secret_kind_in(file, ev.cwd.as_deref(), ev.content.as_deref()) {
                 Some(kind) => deny_read(file, &kind),
                 None => Decision::Allow,
@@ -140,7 +155,10 @@ fn unbuilt_event(m: &Manifest, kind: Kind, raw: &str) -> Option<Event> {
             .collect()
     };
     let (path_keys, content_keys) = (leaf(&spec.file_path), leaf(&spec.content));
-    let mut ev = Event { kind: Some(kind), ..Event::default() };
+    let mut ev = Event {
+        kind: Some(kind),
+        ..Event::default()
+    };
     let mut strings: Vec<String> = Vec::new();
     vahta_json::for_each_string(raw, &mut |key, s| {
         if kind == Kind::BeforeRead {
@@ -174,7 +192,9 @@ fn run() -> Option<vahta_harness::Output> {
         // Not JSON at all: nothing to judge.
         Err(ParseError::Invalid) => return None,
         // Valid so far but past the limits: never fail open on size.
-        Err(ParseError::TooDeep | ParseError::TooMany) => unbuilt_event(&manifest, args.kind, &raw)?,
+        Err(ParseError::TooDeep | ParseError::TooMany) => {
+            unbuilt_event(&manifest, args.kind, &raw)?
+        }
     };
     Some(manifest.render(args.kind, &decide(&manifest, &args, &event)))
 }

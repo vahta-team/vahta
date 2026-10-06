@@ -13,7 +13,7 @@
 
 use std::io::Write;
 
-use vahta_harness::{Manifest, HARNESSES};
+use vahta_harness::{HARNESSES, Manifest};
 use vahta_setup::{Action, Env as SetupEnv, HookProblem, Plan, State, Status};
 
 use crate::{EXIT_CLEAN, EXIT_USAGE};
@@ -70,7 +70,14 @@ enum Parsed {
 }
 
 fn parse(args: &[String]) -> Parsed {
-    let mut out = Args { harnesses: Vec::new(), all: false, force: false, dry_run: false, uninstall: false, refresh: false };
+    let mut out = Args {
+        harnesses: Vec::new(),
+        all: false,
+        force: false,
+        dry_run: false,
+        uninstall: false,
+        refresh: false,
+    };
     for a in args {
         match a.as_str() {
             "-h" | "--help" => return Parsed::Help,
@@ -125,7 +132,10 @@ pub fn stale_notice(env: &SetupEnv, stderr: &mut dyn Write) {
     let mut affected: Vec<(Manifest, bool)> = Vec::new();
     for m in manifests() {
         let i = vahta_setup::inspect(&m, env);
-        let missing = i.problems.iter().any(|p| matches!(p, HookProblem::Missing(_)));
+        let missing = i
+            .problems
+            .iter()
+            .any(|p| matches!(p, HookProblem::Missing(_)));
         if missing || i.state == State::Outdated {
             affected.push((m, missing));
         }
@@ -133,19 +143,34 @@ pub fn stale_notice(env: &SetupEnv, stderr: &mut dyn Write) {
     // One harness: name it. Several: one command fixes them all.
     let many = affected.len() > 1;
     for (m, missing) in &affected {
-        let fix = if many { "vahta setup --refresh".to_string() } else { format!("vahta setup --{}", m.name) };
+        let fix = if many {
+            "vahta setup --refresh".to_string()
+        } else {
+            format!("vahta setup --{}", m.name)
+        };
         if *missing {
             // The harness runs a hook that is gone: no protection, and no error.
-            let _ = writeln!(stderr, "vahta: the hook set up for {} no longer exists; run `{fix}`", m.title);
+            let _ = writeln!(
+                stderr,
+                "vahta: the hook set up for {} no longer exists; run `{fix}`",
+                m.title
+            );
         } else {
-            let _ = writeln!(stderr, "vahta: setup for {} is outdated; run `{fix}`", m.title);
+            let _ = writeln!(
+                stderr,
+                "vahta: setup for {} is outdated; run `{fix}`",
+                m.title
+            );
         }
     }
 }
 
 /// The manifest's after-setup notice for a harness, by name.
 fn notice_of(name: &str) -> Option<String> {
-    manifests().into_iter().find(|m| m.name == name)?.setup_notice
+    manifests()
+        .into_iter()
+        .find(|m| m.name == name)?
+        .setup_notice
 }
 
 fn state_word(s: &State) -> &'static str {
@@ -165,17 +190,34 @@ fn print_table(statuses: &[Status], stdout: &mut dyn Write) {
                 s.title.clone(),
                 if s.detection.found { "yes" } else { "no" }.to_string(),
                 state_word(&s.inspect.state).to_string(),
-                s.inspect.config_path.as_ref().map_or("-".into(), |p| p.display().to_string()),
+                s.inspect
+                    .config_path
+                    .as_ref()
+                    .map_or("-".into(), |p| p.display().to_string()),
             ]
         })
         .collect();
     let head = ["harness", "found", "set up", "config"];
     let mut width = [0; 3];
     for (i, w) in width.iter_mut().enumerate() {
-        *w = rows.iter().map(|r| r[i].chars().count()).chain([head[i].len()]).max().unwrap_or(0);
+        *w = rows
+            .iter()
+            .map(|r| r[i].chars().count())
+            .chain([head[i].len()])
+            .max()
+            .unwrap_or(0);
     }
     let line = |r: &[String; 4]| {
-        format!("{:<w0$}  {:<w1$}  {:<w2$}  {}", r[0], r[1], r[2], r[3], w0 = width[0], w1 = width[1], w2 = width[2])
+        format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {}",
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            w0 = width[0],
+            w1 = width[1],
+            w2 = width[2]
+        )
     };
     let _ = writeln!(stdout, "{}", line(&head.map(String::from)));
     for r in &rows {
@@ -186,19 +228,24 @@ fn print_table(statuses: &[Status], stdout: &mut dyn Write) {
         if !s.detection.found {
             notes.push(format!("{}: not found ({})", s.title, s.detection.why));
         }
-        if matches!(s.inspect.state, State::Current | State::Outdated) {
-            if let Some(n) = notice_of(&s.name) {
-                notes.push(format!("{}: {n}", s.title));
-            }
+        if matches!(s.inspect.state, State::Current | State::Outdated)
+            && let Some(n) = notice_of(&s.name)
+        {
+            notes.push(format!("{}: {n}", s.title));
         }
         if let State::Unreadable(why) = &s.inspect.state {
             notes.push(format!("{}: config {why}", s.title));
         }
         for p in &s.inspect.problems {
             notes.push(match p {
-                HookProblem::Missing(w) => format!("{}: the installed hook {w} does not exist", s.title),
+                HookProblem::Missing(w) => {
+                    format!("{}: the installed hook {w} does not exist", s.title)
+                }
                 HookProblem::Elsewhere(w) => {
-                    format!("{}: the installed hook {w} is not the vahta-hook next to this vahta", s.title)
+                    format!(
+                        "{}: the installed hook {w} is not the vahta-hook next to this vahta",
+                        s.title
+                    )
                 }
             });
         }
@@ -235,7 +282,10 @@ pub fn run(
         Parsed::Run(a) => a,
     };
     let Some(env) = env else {
-        let _ = writeln!(stderr, "vahta setup: error: could not determine the home directory");
+        let _ = writeln!(
+            stderr,
+            "vahta setup: error: could not determine the home directory"
+        );
         return EXIT_FAILED;
     };
     let ms = manifests();
@@ -246,7 +296,11 @@ pub fn run(
         return EXIT_CLEAN;
     }
 
-    let action = if parsed.uninstall { Action::Uninstall } else { Action::Install };
+    let action = if parsed.uninstall {
+        Action::Uninstall
+    } else {
+        Action::Install
+    };
     // A refresh with nothing to repoint has no use for the hook, so it checks later.
     if action == Action::Install && !parsed.refresh && !env.hook.is_file() {
         let _ = writeln!(
@@ -272,7 +326,10 @@ pub fn run(
             }
         }
         if chosen.is_empty() {
-            let _ = writeln!(stdout, "nothing of ours is installed in any harness; nothing to refresh");
+            let _ = writeln!(
+                stdout,
+                "nothing of ours is installed in any harness; nothing to refresh"
+            );
             return EXIT_CLEAN;
         }
         if !env.hook.is_file() {
@@ -290,18 +347,28 @@ pub fn run(
                 vahta_setup::inspect(m, env).state,
                 State::Current | State::Outdated
             );
-            let take = if action == Action::Install { found.found } else { has_ours };
+            let take = if action == Action::Install {
+                found.found
+            } else {
+                has_ours
+            };
             if take {
                 chosen.push(m);
             } else if action == Action::Install {
                 let _ = writeln!(stdout, "{}: skipped, not found ({})", m.title, found.why);
             } else {
-                let _ = writeln!(stdout, "{}: skipped, nothing of ours in its config", m.title);
+                let _ = writeln!(
+                    stdout,
+                    "{}: skipped, nothing of ours in its config",
+                    m.title
+                );
             }
         }
     } else {
         for name in &parsed.harnesses {
-            let Some(m) = ms.iter().find(|m| &m.name == name) else { continue };
+            let Some(m) = ms.iter().find(|m| &m.name == name) else {
+                continue;
+            };
             let found = vahta_setup::detect(m, env);
             if action == Action::Install && !found.found && !parsed.force {
                 let _ = writeln!(
@@ -327,7 +394,11 @@ pub fn run(
             Err(e) => {
                 let file = vahta_setup::config_path(m, env)
                     .map_or(String::new(), |p| format!(" {}", p.display()));
-                let _ = writeln!(stderr, "vahta setup: {}:{file} {e}; nothing was written", m.title);
+                let _ = writeln!(
+                    stderr,
+                    "vahta setup: {}:{file} {e}; nothing was written",
+                    m.title
+                );
                 refused = true;
             }
         }
@@ -341,14 +412,22 @@ pub fn run(
         let path = p.path.display();
         let Some(after) = &p.after else {
             let _ = match action {
-                Action::Install => writeln!(stdout, "{}: already current, nothing to do ({path})", m.title),
+                Action::Install => writeln!(
+                    stdout,
+                    "{}: already current, nothing to do ({path})",
+                    m.title
+                ),
                 Action::Uninstall => writeln!(stdout, "{}: nothing of ours in {path}", m.title),
             };
             continue;
         };
         if parsed.dry_run {
             let _ = writeln!(stdout, "{}: would change {path}", m.title);
-            let _ = write!(stdout, "{}", vahta_setup::unified_diff(&p.path, p.before.as_deref(), after));
+            let _ = write!(
+                stdout,
+                "{}",
+                vahta_setup::unified_diff(&p.path, p.before.as_deref(), after)
+            );
             continue;
         }
         match vahta_setup::commit(p) {
@@ -357,7 +436,9 @@ pub fn run(
                     Action::Install => format!("installed {} hooks into", m.events.len()),
                     Action::Uninstall => "removed our hooks from".to_string(),
                 };
-                let kept = backup.map_or(String::new(), |b| format!(" (old file kept as {})", b.display()));
+                let kept = backup.map_or(String::new(), |b| {
+                    format!(" (old file kept as {})", b.display())
+                });
                 let _ = writeln!(stdout, "{}: {verb} {path}{kept}", m.title);
                 if let (Action::Install, Some(n)) = (action, &m.setup_notice) {
                     let _ = writeln!(stdout, "  {n}");

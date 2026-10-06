@@ -1,7 +1,8 @@
 //! `vahta` — the command line.
 //!
-//! Two subcommands. `vahta setup` registers the hook with the coding agents
-//! (see `setup.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
+//! Four subcommands. `vahta setup` registers the hook with the coding agents
+//! (see `setup.rs`). `vahta list` and `vahta check` read the project's vault
+//! without a password (see `vault_cmds.rs`). `vahta scan [PATH]` is the project path of `ka scan`, and
 //! with `--deep` the home dotfiles, MCP configs and agent session transcripts
 //! as well. The scan's flags, output and exit codes match the
 //! Python command's, and `src/key_amnesia/scan_py.py` remains the
@@ -24,12 +25,13 @@
 //! hold one.
 
 mod setup;
+mod vault_cmds;
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
-use vahta_scan::deep::{scan_deep_with_threads, DeepError};
+use vahta_scan::deep::{DeepError, scan_deep_with_threads};
 use vahta_scan::finding::leak_count;
 use vahta_scan::report::{findings_to_json, format_human_report};
 use vahta_scan::walk::scan_project_with_threads;
@@ -72,8 +74,10 @@ usage: vahta <command> [options]
 commands:
   scan    find plaintext secrets an agent can read in a project
   setup   register vahta-hook with Claude Code, Codex and Cursor
+  list    list the secrets in this project's vault (names only)
+  check   compare vahta.toml with the vault; for CI
 
-Run `vahta scan --help` or `vahta setup --help` for the options.
+Run `vahta <command> --help` for the options.
 ";
 
 struct ScanArgs {
@@ -174,6 +178,10 @@ pub struct Env {
     pub stderr_is_tty: bool,
     /// What `vahta setup` needs; `None` without a home directory.
     pub setup: Option<vahta_setup::Env>,
+    /// Where Vahta keeps what this machine remembers about each vault.
+    /// `VAHTA_DATA_DIR` if set (tests and unusual setups), else the platform
+    /// data directory plus `vahta`. `None` where there is neither.
+    pub data_dir: Option<PathBuf>,
 }
 
 /// `_scan_progress_printer`: stage and counts on stderr, never contents.
@@ -185,7 +193,11 @@ struct Progress<'a> {
 
 impl<'a> Progress<'a> {
     fn new(out: &'a mut dyn Write, tty: bool) -> Self {
-        Progress { out, tty, last_len: 0 }
+        Progress {
+            out,
+            tty,
+            last_len: 0,
+        }
     }
 
     fn tick(&mut self, stage: &str, done: usize, total: usize) {
@@ -222,7 +234,10 @@ fn deep_findings(
     stderr: &mut dyn Write,
 ) -> Result<Vec<vahta_scan::Finding>, i32> {
     let Some(home) = &env.home else {
-        let _ = writeln!(stderr, "vahta scan: error: could not determine the home directory");
+        let _ = writeln!(
+            stderr,
+            "vahta scan: error: could not determine the home directory"
+        );
         return Err(EXIT_LEAKS);
     };
     let appdata = env.appdata.as_deref();
@@ -250,12 +265,7 @@ fn deep_findings(
     }
 }
 
-fn run_scan(
-    args: &[String],
-    env: &Env,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
+fn run_scan(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let cwd = env.cwd.as_path();
     let parsed = match parse_scan(args) {
         Parsed::Help => {
@@ -273,14 +283,22 @@ fn run_scan(
         Some(p) => cwd.join(p),
         None => cwd.to_path_buf(),
     };
-    let root = match std::fs::canonicalize(&target) {
+    let root = match dunce::canonicalize(&target) {
         Ok(r) if r.is_dir() => r,
         Ok(_) => {
-            let _ = writeln!(stderr, "vahta scan: error: not a directory: {}", target.display());
+            let _ = writeln!(
+                stderr,
+                "vahta scan: error: not a directory: {}",
+                target.display()
+            );
             return EXIT_USAGE;
         }
         Err(e) => {
-            let _ = writeln!(stderr, "vahta scan: error: cannot read {}: {e}", target.display());
+            let _ = writeln!(
+                stderr,
+                "vahta scan: error: cannot read {}: {e}",
+                target.display()
+            );
             return EXIT_USAGE;
         }
     };
@@ -297,11 +315,14 @@ fn run_scan(
             Ok(d) => d,
             Err(code) => return code,
         };
-        let mut seen: std::collections::HashSet<String> =
-            findings.iter().map(|f| f.path.clone()).collect();
+        // Compared as resolved paths: the project's are under the
+        // canonicalized root, the deep ones under the home directory as given,
+        // so the strings can differ for one file.
+        let key = |p: &str| dunce::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+        let mut seen: std::collections::HashSet<PathBuf> =
+            findings.iter().map(|f| key(&f.path)).collect();
         for f in deep {
-            if !seen.contains(&f.path) {
-                seen.insert(f.path.clone());
+            if seen.insert(key(&f.path)) {
                 findings.push(f);
             }
         }
@@ -327,21 +348,18 @@ fn run_scan(
 }
 
 /// The whole program, parameterised so it can be driven without a process.
-pub fn run(
-    args: &[String],
-    env: &Env,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
+pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // Say on stderr, never stdout, when a setup we made has gone stale.
-    if args.first().map(String::as_str) != Some("setup") {
-        if let Some(setup_env) = &env.setup {
-            setup::stale_notice(setup_env, stderr);
-        }
+    if args.first().map(String::as_str) != Some("setup")
+        && let Some(setup_env) = &env.setup
+    {
+        setup::stale_notice(setup_env, stderr);
     }
     match args.first().map(String::as_str) {
         Some("setup") => setup::run(&args[1..], env.setup.as_ref(), stdout, stderr),
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
+        Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
+        Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
             EXIT_CLEAN
@@ -351,7 +369,10 @@ pub fn run(
             EXIT_CLEAN
         }
         Some(other) => {
-            let _ = write!(stderr, "vahta: error: unknown command: {other}\n\n{TOP_USAGE}");
+            let _ = write!(
+                stderr,
+                "vahta: error: unknown command: {other}\n\n{TOP_USAGE}"
+            );
             EXIT_USAGE
         }
         None => {
@@ -361,23 +382,23 @@ pub fn run(
     }
 }
 
-/// Python's `Path.home()` on POSIX: `$HOME` (an empty or all-slash value is the
-/// root), else the passwd entry's directory.
+/// Python's `Path.home()`: on POSIX `$HOME` (an empty or all-slash value is
+/// the root), else the passwd entry's directory; on Windows the profile
+/// directory, as `std::env::home_dir` gives it.
 fn home_dir() -> Option<PathBuf> {
-    match std::env::var_os("HOME") {
-        Some(h) => {
-            use std::os::unix::ffi::OsStrExt;
-            let bytes = h.as_bytes();
-            let end = bytes.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1);
-            if end == 0 {
-                Some(PathBuf::from("/"))
-            } else {
-                Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
-            }
-        }
-        #[allow(deprecated)]
-        None => std::env::home_dir(),
+    #[cfg(unix)]
+    if let Some(h) = std::env::var_os("HOME") {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = h.as_bytes();
+        let end = bytes.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1);
+        return if end == 0 {
+            Some(PathBuf::from("/"))
+        } else {
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
+        };
     }
+    #[allow(deprecated)]
+    std::env::home_dir()
 }
 
 /// The setup environment of this process. The hook is the `vahta-hook` next to
@@ -397,6 +418,14 @@ fn setup_env(home: Option<PathBuf>) -> Option<vahta_setup::Env> {
         os: vahta_setup::Os::current(),
         hook,
     })
+}
+
+/// `VAHTA_DATA_DIR`, else `<platform data dir>/vahta`.
+fn data_dir() -> Option<PathBuf> {
+    match std::env::var_os("VAHTA_DATA_DIR") {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => vahta_vault::store::LocalStore::platform_default().map(|s| s.root().to_path_buf()),
+    }
 }
 
 fn main() {
@@ -421,6 +450,7 @@ fn main() {
         home,
         appdata: std::env::var_os("APPDATA"),
         stderr_is_tty: stderr.is_terminal(),
+        data_dir: data_dir(),
     };
     let code = run(&args, &env, &mut stdout.lock(), &mut stderr.lock());
     std::process::exit(code);

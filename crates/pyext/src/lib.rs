@@ -60,7 +60,13 @@ fn classify_value<'py>(py: Python<'py>, value: &str) -> PyResult<Bound<'py, PyTu
         Some(r) => PyString::new(py, r).into_any().unbind(),
         None => py.None(),
     };
-    PyTuple::new(py, [PyString::new(py, tier_str(tier)).into_any().unbind(), reason_obj])
+    PyTuple::new(
+        py,
+        [
+            PyString::new(py, tier_str(tier)).into_any().unbind(),
+            reason_obj,
+        ],
+    )
 }
 
 #[pyfunction]
@@ -139,7 +145,8 @@ fn build_hitset<'py>(
         hits.setattr("bearer_possible", true)?;
     }
     for name in &computed.flag_names {
-        hits.getattr("flag_names")?.call_method1("append", (name,))?;
+        hits.getattr("flag_names")?
+            .call_method1("append", (name,))?;
     }
 
     // Order is preserved from the Rust side, and `record_assignment` applies

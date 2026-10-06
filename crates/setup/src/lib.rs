@@ -68,7 +68,11 @@ pub struct Env {
 fn expand(template: &str, env: &Env) -> Option<PathBuf> {
     let join = |base: PathBuf, tail: &str| {
         let tail = tail.trim_start_matches('/');
-        if tail.is_empty() { base } else { base.join(tail) }
+        if tail.is_empty() {
+            base
+        } else {
+            base.join(tail)
+        }
     };
     if template == "~" || template.starts_with("~/") {
         return Some(join(env.home.clone(), &template[1..]));
@@ -104,7 +108,10 @@ pub struct Detection {
 
 fn on_path(name: &str, env: &Env) -> Option<PathBuf> {
     let names: Vec<String> = if env.os == Os::Windows {
-        ["exe", "cmd", "bat", "com"].iter().map(|e| format!("{name}.{e}")).collect()
+        ["exe", "cmd", "bat", "com"]
+            .iter()
+            .map(|e| format!("{name}.{e}"))
+            .collect()
     } else {
         vec![name.to_string()]
     };
@@ -131,9 +138,15 @@ pub fn detect(m: &Manifest, env: &Env) -> Detection {
         }
     }
     if hits.is_empty() {
-        Detection { found: false, why: tried.join(", ") }
+        Detection {
+            found: false,
+            why: tried.join(", "),
+        }
     } else {
-        Detection { found: true, why: hits.join(", ") }
+        Detection {
+            found: true,
+            why: hits.join(", "),
+        }
     }
 }
 
@@ -143,7 +156,11 @@ pub fn detect(m: &Manifest, env: &Env) -> Detection {
 pub fn quote_word(path: &str, os: Os) -> String {
     if os == Os::Windows {
         let plain = |c: char| c.is_ascii_alphanumeric() || "_./\\:@+=,-".contains(c);
-        if path.chars().all(plain) { path.to_string() } else { format!("\"{path}\"") }
+        if path.chars().all(plain) {
+            path.to_string()
+        } else {
+            format!("\"{path}\"")
+        }
     } else {
         let plain = |c: char| c.is_ascii_alphanumeric() || "_./:@%+=,-".contains(c);
         if !path.is_empty() && path.chars().all(plain) {
@@ -277,7 +294,10 @@ pub enum Refusal {
     /// A part of the file has a type we cannot merge into.
     Shape(String),
     /// The file's `version` is not the one the harness requires.
-    Version { key: String, want: i64 },
+    Version {
+        key: String,
+        want: i64,
+    },
     HookPathNotUtf8,
     NoConfigPath,
     Io(io::Error),
@@ -290,7 +310,10 @@ impl fmt::Display for Refusal {
             Refusal::NotAnObject => write!(f, "does not hold a JSON object at the top level"),
             Refusal::Shape(s) => write!(f, "{s}"),
             Refusal::Version { key, want } => {
-                write!(f, "has a \"{key}\" other than {want}, which this setup does not know")
+                write!(
+                    f,
+                    "has a \"{key}\" other than {want}, which this setup does not know"
+                )
             }
             Refusal::HookPathNotUtf8 => write!(f, "the hook path is not valid UTF-8"),
             Refusal::NoConfigPath => write!(f, "cannot work out where its config lives"),
@@ -306,7 +329,9 @@ impl From<io::Error> for Refusal {
 }
 
 fn parse(text: Option<&str>) -> Result<Map<String, Value>, Refusal> {
-    let Some(text) = text else { return Ok(Map::new()) };
+    let Some(text) = text else {
+        return Ok(Map::new());
+    };
     match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(o)) => Ok(o),
         Ok(_) => Err(Refusal::NotAnObject),
@@ -331,7 +356,9 @@ fn strip(
     shape: Shape,
     os: Os,
 ) -> Result<(usize, Vec<String>), Refusal> {
-    let Some(hooks) = doc.get_mut("hooks") else { return Ok((0, Vec::new())) };
+    let Some(hooks) = doc.get_mut("hooks") else {
+        return Ok((0, Vec::new()));
+    };
     let Value::Object(hooks) = hooks else {
         return Err(Refusal::Shape("\"hooks\" is not an object".into()));
     };
@@ -388,7 +415,12 @@ pub fn install_text(
                 doc.insert(req.key.clone(), req.value.into());
             }
             Some(v) if v.as_i64() == Some(req.value) => {}
-            Some(_) => return Err(Refusal::Version { key: req.key.clone(), want: req.value }),
+            Some(_) => {
+                return Err(Refusal::Version {
+                    key: req.key.clone(),
+                    want: req.value,
+                });
+            }
         }
     }
     strip(&mut doc, m.config.shape, os)?;
@@ -399,21 +431,24 @@ pub fn install_text(
         return Err(Refusal::Shape("\"hooks\" is not an object".into()));
     };
     for e in entries(m, program) {
-        let slot = hooks.entry(e.event.clone()).or_insert_with(|| Value::Array(Vec::new()));
+        let slot = hooks
+            .entry(e.event.clone())
+            .or_insert_with(|| Value::Array(Vec::new()));
         match slot {
             Value::Array(arr) => arr.push(entry_json(&e, m.config.shape)),
-            _ => return Err(Refusal::Shape(format!("\"hooks.{}\" is not an array", e.event))),
+            _ => {
+                return Err(Refusal::Shape(format!(
+                    "\"hooks.{}\" is not an array",
+                    e.event
+                )));
+            }
         }
     }
     Ok(render(doc))
 }
 
 /// The config text after removing our entries; `None` when none were there.
-pub fn uninstall_text(
-    before: &str,
-    m: &Manifest,
-    os: Os,
-) -> Result<Option<String>, Refusal> {
+pub fn uninstall_text(before: &str, m: &Manifest, os: Os) -> Result<Option<String>, Refusal> {
     let mut doc = parse(Some(before))?;
     let (removed, emptied) = strip(&mut doc, m.config.shape, os)?;
     if removed == 0 {
@@ -469,7 +504,7 @@ fn read_config(path: &Path) -> Result<Option<String>, Refusal> {
 
 pub fn plan(m: &Manifest, env: &Env, action: Action) -> Result<Plan, Refusal> {
     let path = config_path(m, env).ok_or(Refusal::NoConfigPath)?;
-    let path = fs::canonicalize(&path).unwrap_or(path);
+    let path = dunce::canonicalize(&path).unwrap_or(path);
     let before = read_config(&path)?;
     let after = match action {
         Action::Install => {
@@ -482,7 +517,11 @@ pub fn plan(m: &Manifest, env: &Env, action: Action) -> Result<Plan, Refusal> {
             None => None,
         },
     };
-    Ok(Plan { path, before, after })
+    Ok(Plan {
+        path,
+        before,
+        after,
+    })
 }
 
 /// Write a plan: back the old file up to `<file>.vahta-backup`, write a temp
@@ -491,8 +530,14 @@ pub fn plan(m: &Manifest, env: &Env, action: Action) -> Result<Plan, Refusal> {
 /// later run would otherwise replace the person's original with our own
 /// intermediate version. Returns the backup's path when one was made now.
 pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
-    let Some(after) = &plan.after else { return Ok(None) };
-    let name = plan.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let Some(after) = &plan.after else {
+        return Ok(None);
+    };
+    let name = plan
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if let Some(dir) = plan.path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -502,7 +547,9 @@ pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
         fs::copy(&plan.path, &b)?;
         backup = Some(b);
     }
-    let tmp = plan.path.with_file_name(format!(".{name}.vahta-tmp-{}", std::process::id()));
+    let tmp = plan
+        .path
+        .with_file_name(format!(".{name}.vahta-tmp-{}", std::process::id()));
     let result = (|| {
         fs::write(&tmp, after)?;
         if plan.before.is_some() {
@@ -519,7 +566,11 @@ pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
 /// A unified diff of one file's change, for `--dry-run`.
 pub fn unified_diff(path: &Path, before: Option<&str>, after: &str) -> String {
     let shown = path.display().to_string();
-    let old = if before.is_some() { shown.clone() } else { "/dev/null".to_string() };
+    let old = if before.is_some() {
+        shown.clone()
+    } else {
+        "/dev/null".to_string()
+    };
     similar::TextDiff::from_lines(before.unwrap_or(""), after)
         .unified_diff()
         .context_radius(3)
@@ -567,11 +618,16 @@ pub struct Status {
 /// The installed entries of ours, with the program word of each.
 fn installed(doc: &Map<String, Value>, shape: Shape, os: Os) -> Vec<(Entry, String)> {
     let mut out = Vec::new();
-    let Some(Value::Object(hooks)) = doc.get("hooks") else { return out };
+    let Some(Value::Object(hooks)) = doc.get("hooks") else {
+        return out;
+    };
     for (event, arr) in hooks {
         let Value::Array(arr) = arr else { continue };
         for entry in arr {
-            let matcher = entry.get("matcher").and_then(Value::as_str).map(String::from);
+            let matcher = entry
+                .get("matcher")
+                .and_then(Value::as_str)
+                .map(String::from);
             let commands: Vec<&Value> = match shape {
                 Shape::Flat => vec![entry],
                 Shape::Grouped => match entry.get("hooks") {
@@ -580,13 +636,17 @@ fn installed(doc: &Map<String, Value>, shape: Shape, os: Os) -> Vec<(Entry, Stri
                 },
             };
             for item in commands {
-                if let Some(c) = command_of(item) {
-                    if let Some(word) = our_program(c, os) {
-                        out.push((
-                            Entry { event: event.clone(), matcher: matcher.clone(), command: c.into() },
-                            word,
-                        ));
-                    }
+                if let Some(c) = command_of(item)
+                    && let Some(word) = our_program(c, os)
+                {
+                    out.push((
+                        Entry {
+                            event: event.clone(),
+                            matcher: matcher.clone(),
+                            command: c.into(),
+                        },
+                        word,
+                    ));
                 }
             }
         }
@@ -604,11 +664,21 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
         problems: Vec::new(),
     };
     let Some(path) = &config_path else {
-        return Inspect { config_path, state: State::None, problems: Vec::new() };
+        return Inspect {
+            config_path,
+            state: State::None,
+            problems: Vec::new(),
+        };
     };
     let text = match read_config(path) {
         Ok(Some(t)) => t,
-        Ok(None) => return Inspect { config_path, state: State::None, problems: Vec::new() },
+        Ok(None) => {
+            return Inspect {
+                config_path,
+                state: State::None,
+                problems: Vec::new(),
+            };
+        }
         Err(e) => return unreadable(config_path, e.to_string()),
     };
     let doc = match parse(Some(&text)) {
@@ -617,17 +687,28 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
     };
     let have = installed(&doc, m.config.shape, env.os);
     if have.is_empty() {
-        return Inspect { config_path, state: State::None, problems: Vec::new() };
+        return Inspect {
+            config_path,
+            state: State::None,
+            problems: Vec::new(),
+        };
     }
     // Compared without the program path: a dev build and an installed `vahta`
     // must agree on whether the setup is current. Where the hook lives is
     // reported separately, as a problem below.
-    let args_only = |e: &Entry| Entry { command: arguments(&e.command, env.os), ..e.clone() };
+    let args_only = |e: &Entry| Entry {
+        command: arguments(&e.command, env.os),
+        ..e.clone()
+    };
     let mut want: Vec<Entry> = entries(m, "vahta-hook").iter().map(args_only).collect();
     let mut got: Vec<Entry> = have.iter().map(|(e, _)| args_only(e)).collect();
     want.sort();
     got.sort();
-    let state = if want == got { State::Current } else { State::Outdated };
+    let state = if want == got {
+        State::Current
+    } else {
+        State::Outdated
+    };
 
     let mut problems = Vec::new();
     let here = env.hook.to_string_lossy();
@@ -641,7 +722,11 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
             problems.push(elsewhere);
         }
     }
-    Inspect { config_path, state, problems }
+    Inspect {
+        config_path,
+        state,
+        problems,
+    }
 }
 
 pub fn status(m: &Manifest, env: &Env) -> Status {

@@ -20,3 +20,13 @@ path = "src/main.rs"
 vahta-scan = { path = "../scan" }
 vahta-harness = { path = "../harness" }
 vahta-setup = { path = "../setup" }
+dunce = "1"
+vahta-vault = { path = "../vault" }
+# `--json` output of `vahta list` and `vahta check`.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+# The tests build vaults to point the commands at; that needs the cheap KDF.
+# A dev-dependency's features are not enabled in a normal build of this crate,
+# and CI checks that.
+vahta-vault = { path = "../vault", features = ["test-kdf"] }

@@ -6,7 +6,9 @@
 //! a byte-for-byte diff is the comparison.
 
 use std::io::{self, Read, Write};
-use vahta_detect::{classify_value, entropy, transition_rate, vowel_bearing_segments, word_segments};
+use vahta_detect::{
+    classify_value, entropy, transition_rate, vowel_bearing_segments, word_segments,
+};
 
 fn main() -> io::Result<()> {
     let mut raw = String::new();

@@ -20,7 +20,7 @@
 //! a kind, a secret *name*, a reason code or a count.
 
 use crate::filenames::is_dotenv_filename;
-use crate::finding::{gated_confidences, leak_count, Finding, Scope};
+use crate::finding::{Finding, Scope, gated_confidences, leak_count};
 use crate::{STRICT_CERTAIN, STRICT_HIGH, STRICT_PARANOID};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -220,11 +220,11 @@ pub fn format_count_summary(findings: &[Finding]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for reason in REASON_LABEL_ORDER {
-        if let Some((_, n)) = buckets.iter().find(|(k, _)| k == reason) {
-            if *n > 0 {
-                parts.push(format!("{} {}", n, reason_label(reason)));
-                seen.push(reason);
-            }
+        if let Some((_, n)) = buckets.iter().find(|(k, _)| k == reason)
+            && *n > 0
+        {
+            parts.push(format!("{} {}", n, reason_label(reason)));
+            seen.push(reason);
         }
     }
     // Python sorts `buckets.items()`, i.e. by key then value; keys are unique
@@ -307,7 +307,11 @@ pub fn format_human_report(findings: &[Finding], project_root: &str, strict: &st
     ];
     let transcript_hits = transcript_line_hit_count(findings);
     if transcript_hits != 0 {
-        let unit = if transcript_hits == 1 { "LEAK" } else { "LEAKs" };
+        let unit = if transcript_hits == 1 {
+            "LEAK"
+        } else {
+            "LEAKs"
+        };
         lines.push(format!(
             "{transcript_hits} {unit} found in agent session transcripts \
              (line-hits; advisory detection)"
@@ -731,7 +735,13 @@ mod tests {
         let all = [
             f("/t1", "agent_session_transcript", "certain", 4, Scope::Deep),
             f("/t2", "agent_session_transcript", "likely", 3, Scope::Deep),
-            f("/t3", "agent_session_transcript", "possible", 9, Scope::Deep),
+            f(
+                "/t3",
+                "agent_session_transcript",
+                "possible",
+                9,
+                Scope::Deep,
+            ),
             f("/other", "dotenv", "certain", 11, Scope::Project),
         ];
         assert_eq!(transcript_line_hit_count(&all), 7);
@@ -1065,12 +1075,10 @@ mod tests {
             1,
             Scope::Deep,
         )];
-        assert!(
-            format_human_report(&one, "/proj", STRICT_HIGH).contains(
-                "1 LEAK found in agent session transcripts \
+        assert!(format_human_report(&one, "/proj", STRICT_HIGH).contains(
+            "1 LEAK found in agent session transcripts \
                  (line-hits; advisory detection)"
-            )
-        );
+        ));
     }
 
     /// A zero-count transcript finding is gated in but not listed, so the
@@ -1135,7 +1143,10 @@ mod tests {
         b.importable = true;
         assert_eq!(
             format_import_next_line(&[a, b], "/proj"),
-            Some("Next: in your own terminal, ka import .env sub/.env.local".to_string())
+            Some(format!(
+                "Next: in your own terminal, ka import .env {}",
+                std::path::Path::new("sub").join(".env.local").display()
+            ))
         );
     }
 

@@ -5,10 +5,10 @@
 //! dicts, which in CPython preserve insertion order, and the reported name and
 //! reason lists are compared directly by the test suite.
 
-use crate::classify::{classify_value, Confidence};
+use crate::classify::{Confidence, classify_value};
 use crate::matchers::{
-    classify_bearer_capture, find_prefix_kind, iter_assignments, iter_flag_values,
-    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM,
+    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_prefix_kind,
+    iter_assignments, iter_flag_values,
 };
 
 /// Assignment, flag-form, prefix and Bearer hits for one text blob.
@@ -55,10 +55,8 @@ impl HitSet {
     fn rebuild(&mut self, likely: &ByName, possible: &ByName) {
         self.likely_names = likely.iter().map(|(_, (name, _))| name.clone()).collect();
         self.possible_names = possible.iter().map(|(_, (name, _))| name.clone()).collect();
-        self.likely_reasons_by_name =
-            likely.iter().map(|(_, (_, r))| r.clone()).collect();
-        self.possible_reasons_by_name =
-            possible.iter().map(|(_, (_, r))| r.clone()).collect();
+        self.likely_reasons_by_name = likely.iter().map(|(_, (_, r))| r.clone()).collect();
+        self.possible_reasons_by_name = possible.iter().map(|(_, (_, r))| r.clone()).collect();
         self.likely_keys = likely.iter().map(|(k, _)| k.clone()).collect();
         self.possible_keys = possible.iter().map(|(k, _)| k.clone()).collect();
 
@@ -226,66 +224,6 @@ pub fn looks_like_json_container(s: &str) -> bool {
     t.starts_with('{') || t.starts_with('[')
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assignment(name: &str, value: &str) -> String {
-        format!("{name}={value}")
-    }
-
-    #[test]
-    fn an_assignment_is_recorded_under_its_name() {
-        let hits = scan_text_hits(&assignment("API_KEY", "aB3xQ9mK2pL7vN4wZ8"));
-        assert_eq!(hits.likely_names, vec!["API_KEY"]);
-        assert!(hits.flag_names.is_empty());
-    }
-
-    #[test]
-    fn an_upgraded_hit_takes_the_later_spelling_of_the_name() {
-        // Python: `chosen[key] = (tier, name, ...)` replaces the whole entry
-        // when a possible hit is upgraded to likely.
-        let name = ["tok", "en"].concat();
-        let first = assignment(&name, "Frombuild");
-        let second = format!("\"{}\": \"{}\"", name.to_uppercase(), "aB3xQ9mK2pL7vN4wZ8");
-        let hits = scan_text_hits(&format!("{first}\n{second}"));
-        assert_eq!(hits.likely_names, vec![name.to_uppercase()]);
-        assert!(hits.possible_names.is_empty());
-    }
-
-    #[test]
-    fn a_flag_form_hit_says_it_is_a_flag() {
-        let text = format!("mysql --password {} -u root", "Zk9pL2xQ7mN4vB8w");
-        let hits = scan_text_hits(&text);
-        assert_eq!(hits.flag_names, vec!["PASSWORD"]);
-        assert!(hits.likely_reasons.iter().any(|r| r == REASON_FLAG_FORM));
-        assert_eq!(
-            find_secret_kind(&text).as_deref(),
-            Some("--password flag value")
-        );
-    }
-
-    #[test]
-    fn recommended_usage_stays_quiet() {
-        assert_eq!(
-            find_secret_kind("ka run --secret GOOGLE_API_KEY -- ./deploy.sh"),
-            None
-        );
-        assert_eq!(find_secret_kind("vault login --token-file ./token.txt"), None);
-        assert_eq!(
-            find_secret_kind("mysql --password --host=db.internal.example.com"),
-            None
-        );
-    }
-
-    #[test]
-    fn json_container_detection() {
-        assert!(looks_like_json_container("  {\"a\": 1}"));
-        assert!(looks_like_json_container("[1]"));
-        assert!(!looks_like_json_container("a = 1"));
-    }
-}
-
 impl HitSet {
     fn to_stores(&self) -> (ByName, ByName) {
         let likely = self
@@ -351,10 +289,10 @@ impl HitSet {
             }
             possible.push((key, pair));
         }
-        if self.prefix.is_none() {
-            if let Some(p) = extra.prefix {
-                self.prefix = Some(p);
-            }
+        if self.prefix.is_none()
+            && let Some(p) = extra.prefix
+        {
+            self.prefix = Some(p);
         }
         self.bearer_likely |= extra.bearer_likely;
         self.bearer_possible |= extra.bearer_possible;
@@ -382,4 +320,67 @@ pub fn scan_texts<S: AsRef<str>>(texts: &[S]) -> HitSet {
         acc.merge(&hits);
     }
     acc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment(name: &str, value: &str) -> String {
+        format!("{name}={value}")
+    }
+
+    #[test]
+    fn an_assignment_is_recorded_under_its_name() {
+        let hits = scan_text_hits(&assignment("API_KEY", "aB3xQ9mK2pL7vN4wZ8"));
+        assert_eq!(hits.likely_names, vec!["API_KEY"]);
+        assert!(hits.flag_names.is_empty());
+    }
+
+    #[test]
+    fn an_upgraded_hit_takes_the_later_spelling_of_the_name() {
+        // Python: `chosen[key] = (tier, name, ...)` replaces the whole entry
+        // when a possible hit is upgraded to likely.
+        let name = ["tok", "en"].concat();
+        let first = assignment(&name, "Frombuild");
+        let second = format!("\"{}\": \"{}\"", name.to_uppercase(), "aB3xQ9mK2pL7vN4wZ8");
+        let hits = scan_text_hits(&format!("{first}\n{second}"));
+        assert_eq!(hits.likely_names, vec![name.to_uppercase()]);
+        assert!(hits.possible_names.is_empty());
+    }
+
+    #[test]
+    fn a_flag_form_hit_says_it_is_a_flag() {
+        let text = format!("mysql --password {} -u root", "Zk9pL2xQ7mN4vB8w");
+        let hits = scan_text_hits(&text);
+        assert_eq!(hits.flag_names, vec!["PASSWORD"]);
+        assert!(hits.likely_reasons.iter().any(|r| r == REASON_FLAG_FORM));
+        assert_eq!(
+            find_secret_kind(&text).as_deref(),
+            Some("--password flag value")
+        );
+    }
+
+    #[test]
+    fn recommended_usage_stays_quiet() {
+        assert_eq!(
+            find_secret_kind("ka run --secret GOOGLE_API_KEY -- ./deploy.sh"),
+            None
+        );
+        assert_eq!(
+            find_secret_kind("vault login --token-file ./token.txt"),
+            None
+        );
+        assert_eq!(
+            find_secret_kind("mysql --password --host=db.internal.example.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn json_container_detection() {
+        assert!(looks_like_json_container("  {\"a\": 1}"));
+        assert!(looks_like_json_container("[1]"));
+        assert!(!looks_like_json_container("a = 1"));
+    }
 }
