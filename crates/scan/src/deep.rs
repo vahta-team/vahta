@@ -1558,7 +1558,7 @@ mod tests {
                 p.strip_prefix(&home)
                     .unwrap_or(p)
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect();
         v.sort();
@@ -1667,20 +1667,48 @@ mod tests {
 
     #[test]
     fn candidate_paths_follow_python_and_appdata_adds_three() {
-        let home = Path::new("/nonexistent-vahta-home");
+        // Absolute on every platform: a bare `/x` gets the cwd's drive on Windows.
+        let home = &std::env::temp_dir().join("nonexistent-vahta-home");
         let base = deep_candidate_paths(home, None);
         assert_eq!(base.len(), 11 + 4 + 4);
         assert!(base.contains(&home.join(".env")));
         assert!(base.contains(&home.join(".ssh").join("id_ed25519")));
-        assert!(base.contains(&home.join(".config/claude/claude_desktop_config.json")));
+        assert!(
+            base.contains(
+                &home
+                    .join(".config")
+                    .join("claude")
+                    .join("claude_desktop_config.json")
+            )
+        );
         assert_eq!(deep_candidate_paths(home, Some(OsStr::new(""))), base);
         let with = deep_candidate_paths(home, Some(OsStr::new("/appdata")));
         assert_eq!(with.len(), base.len() + 3);
-        assert!(with.contains(&PathBuf::from("/appdata/Claude/claude_desktop_config.json")));
-        assert!(with.contains(&PathBuf::from("/appdata/Cursor/User/mcp.json")));
-        assert!(with.contains(&PathBuf::from(
-            "/appdata/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"
-        )));
+        assert!(
+            with.contains(
+                &Path::new("/appdata")
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            )
+        );
+        assert!(
+            with.contains(
+                &Path::new("/appdata")
+                    .join("Cursor")
+                    .join("User")
+                    .join("mcp.json")
+            )
+        );
+        assert!(
+            with.contains(
+                &Path::new("/appdata")
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("PowerShell")
+                    .join("PSReadLine")
+                    .join("ConsoleHost_history.txt")
+            )
+        );
     }
 
     #[test]

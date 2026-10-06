@@ -463,12 +463,19 @@ fn status_none_current_outdated_and_hook_paths() {
     // So is an old --setup number, and a missing entry.
     fs::write(&path, text.replace("--setup 1", "--setup 0")).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
-    let fewer = text.replacen(
-        "vahta-hook --harness claude --event prompt",
-        "key-amnesia-hook --x",
-        1,
-    );
-    fs::write(&path, fewer).unwrap();
+    // Edited as JSON: the hook path may be quoted (a temp dir with `~` on Windows).
+    let mut fewer: Value = serde_json::from_str(&text).unwrap();
+    for groups in fewer["hooks"].as_object_mut().unwrap().values_mut() {
+        for g in groups.as_array_mut().unwrap() {
+            g["hooks"].as_array_mut().unwrap().retain(|h| {
+                !h["command"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("--harness claude --event prompt")
+            });
+        }
+    }
+    fs::write(&path, fewer.to_string()).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
 
     // Installed path missing, or not the one next to this binary.
