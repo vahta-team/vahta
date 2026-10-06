@@ -1,0 +1,17 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git commit -m 'agents cannot run vahta reveal'"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}

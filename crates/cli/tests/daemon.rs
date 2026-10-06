@@ -713,7 +713,9 @@ fn with_no_display_the_real_surface_fails_closed() {
     assert!(!s.vault_path().exists());
 }
 
-#[cfg(unix)]
+// macOS opens Terminal.app, not a terminal found on PATH, so the fake terminal
+// below is only reachable on Linux and the BSDs.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn the_real_window_process_connects_back_with_its_token_and_carries_the_answers() {
     use std::os::unix::fs::PermissionsExt;
@@ -1311,7 +1313,9 @@ fn exit_codes_streams_stdin_cwd_and_the_environment_pass_through() {
         .env("FOO", "bar baz")
         .env("LD_PRELOAD", "/nonexistent.so")
         .env("LD_LIBRARY_PATH", "/nonexistent")
-        .env("DYLD_INSERT_LIBRARIES", "/nonexistent")
+        // Not DYLD_INSERT_LIBRARIES: on macOS that would stop the vahta
+        // client itself, which dyld refuses to start with a missing library.
+        .env("DYLD_FAKE_ONE", "/nonexistent")
         .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
         .arg("pwd; echo \"$FOO\"; env | grep -c -E '^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|VAHTA_)' || true")
         .output()

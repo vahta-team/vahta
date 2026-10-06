@@ -401,6 +401,99 @@ fn strip(
     Ok((removed, emptied))
 }
 
+// --- deny rules ----------------------------------------------------------------------------
+
+/// The list at the dotted `key`, if it is there. A part of the path that is not
+/// an object, or a list that is not an array, is refused.
+fn deny_list<'a>(
+    doc: &'a mut Map<String, Value>,
+    key: &str,
+    create: bool,
+) -> Result<Option<&'a mut Vec<Value>>, Refusal> {
+    let mut parts: Vec<&str> = key.split('.').collect();
+    let last = parts.pop().unwrap_or(key);
+    let mut obj = doc;
+    let mut at = String::new();
+    for part in parts {
+        if !at.is_empty() {
+            at.push('.');
+        }
+        at.push_str(part);
+        if !obj.contains_key(part) {
+            if !create {
+                return Ok(None);
+            }
+            obj.insert(part.to_string(), Value::Object(Map::new()));
+        }
+        match obj.get_mut(part) {
+            Some(Value::Object(o)) => obj = o,
+            _ => return Err(Refusal::Shape(format!("\"{at}\" is not an object"))),
+        }
+    }
+    if !obj.contains_key(last) {
+        if !create {
+            return Ok(None);
+        }
+        obj.insert(last.to_string(), Value::Array(Vec::new()));
+    }
+    match obj.get_mut(last) {
+        Some(Value::Array(a)) => Ok(Some(a)),
+        _ => Err(Refusal::Shape(format!("\"{key}\" is not a list"))),
+    }
+}
+
+/// Remove our deny rules. Returns how many were removed; a list (and an object
+/// above it) that only that emptied is removed too.
+fn strip_deny(doc: &mut Map<String, Value>, m: &Manifest) -> Result<usize, Refusal> {
+    let Some(d) = &m.config.deny else {
+        return Ok(0);
+    };
+    let Some(list) = deny_list(doc, &d.key, false)? else {
+        return Ok(0);
+    };
+    let before = list.len();
+    list.retain(|v| !v.as_str().is_some_and(|s| d.rules.iter().any(|r| r == s)));
+    let removed = before - list.len();
+    if removed > 0 && list.is_empty() {
+        // `permissions.deny` -> remove `deny`, then `permissions` if empty.
+        let parts: Vec<&str> = d.key.split('.').collect();
+        for depth in (1..=parts.len()).rev() {
+            let (path, leaf) = parts[..depth].split_at(depth - 1);
+            let mut obj = &mut *doc;
+            for p in path {
+                match obj.get_mut(*p) {
+                    Some(Value::Object(o)) => obj = o,
+                    _ => return Ok(removed),
+                }
+            }
+            let empty = match obj.get(leaf[0]) {
+                Some(Value::Array(a)) => a.is_empty(),
+                Some(Value::Object(o)) => o.is_empty(),
+                _ => false,
+            };
+            if !empty {
+                break;
+            }
+            obj.shift_remove(leaf[0]);
+        }
+    }
+    Ok(removed)
+}
+
+/// Whether every deny rule of ours is in the config.
+fn deny_present(doc: &mut Map<String, Value>, m: &Manifest) -> bool {
+    let Some(d) = &m.config.deny else {
+        return true;
+    };
+    match deny_list(doc, &d.key, false) {
+        Ok(Some(list)) => d
+            .rules
+            .iter()
+            .all(|r| list.iter().any(|v| v.as_str() == Some(r.as_str()))),
+        _ => false,
+    }
+}
+
 /// The config text after installing `program` into `before` (`None` = no file).
 pub fn install_text(
     before: Option<&str>,
@@ -424,6 +517,13 @@ pub fn install_text(
         }
     }
     strip(&mut doc, m.config.shape, os)?;
+    if let Some(d) = &m.config.deny
+        && let Some(list) = deny_list(&mut doc, &d.key, true)?
+    {
+        // Ours go last, once each; the person's own rules keep their place.
+        list.retain(|v| !v.as_str().is_some_and(|s| d.rules.iter().any(|r| r == s)));
+        list.extend(d.rules.iter().cloned().map(Value::String));
+    }
     if !doc.contains_key("hooks") {
         doc.insert("hooks".into(), Value::Object(Map::new()));
     }
@@ -451,6 +551,7 @@ pub fn install_text(
 pub fn uninstall_text(before: &str, m: &Manifest, os: Os) -> Result<Option<String>, Refusal> {
     let mut doc = parse(Some(before))?;
     let (removed, emptied) = strip(&mut doc, m.config.shape, os)?;
+    let removed = removed + strip_deny(&mut doc, m)?;
     if removed == 0 {
         return Ok(None);
     }
@@ -681,7 +782,7 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
         }
         Err(e) => return unreadable(config_path, e.to_string()),
     };
-    let doc = match parse(Some(&text)) {
+    let mut doc = match parse(Some(&text)) {
         Ok(d) => d,
         Err(e) => return unreadable(config_path, e.to_string()),
     };
@@ -704,7 +805,7 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
     let mut got: Vec<Entry> = have.iter().map(|(e, _)| args_only(e)).collect();
     want.sort();
     got.sort();
-    let state = if want == got {
+    let state = if want == got && deny_present(&mut doc, m) {
         State::Current
     } else {
         State::Outdated

@@ -1,0 +1,23 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "VAHTA_SURFACE_TOKEN=x vahta _surface"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": {
+    "permission": "deny",
+    "user_message": "vahta blocked `vahta _surface`: it is Vahta's prompt window, which only Vahta opens, for the person. Do not run it.",
+    "agent_message": "vahta blocked `vahta _surface`: it is Vahta's prompt window, which only Vahta opens, for the person. Do not run it."
+  },
+  "exit": 0
+}

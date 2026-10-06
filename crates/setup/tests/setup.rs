@@ -155,6 +155,7 @@ fn two_installs_are_byte_identical() {
 
 #[test]
 fn foreign_entries_keep_their_order_and_ours_come_last() {
+    let v = m("claude").setup_version;
     let out = install(
         "claude",
         Some(&read_fixture("claude", "foreign.before.json")),
@@ -163,10 +164,10 @@ fn foreign_entries_keep_their_order_and_ours_come_last() {
     assert_eq!(
         commands(&out, "PreToolUse"),
         [
-            "/home/u/.local/bin/key-amnesia-hook",
-            "/usr/local/bin/audit-log --pre",
-            "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 1",
-            "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 1",
+            "/home/u/.local/bin/key-amnesia-hook".to_string(),
+            "/usr/local/bin/audit-log --pre".to_string(),
+            format!("/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup {v}"),
+            format!("/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup {v}"),
         ]
     );
     // Top-level keys keep their order, new ones go after.
@@ -461,7 +462,15 @@ fn status_none_current_outdated_and_hook_paths() {
     fs::write(&path, text.replace("Read|Grep", "Read")).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
     // So is an old --setup number, and a missing entry.
-    fs::write(&path, text.replace("--setup 1", "--setup 0")).unwrap();
+    let v = mf.setup_version;
+    fs::write(
+        &path,
+        text.replace(&format!("--setup {v}"), &format!("--setup {}", v - 1)),
+    )
+    .unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Outdated);
+    // A deny rule of ours that was removed by hand: outdated too.
+    fs::write(&path, text.replace("\"Bash(vahta copy:*)\",", "")).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
     // Edited as JSON: the hook path may be quoted (a temp dir with `~` on Windows).
     let mut fewer: Value = serde_json::from_str(&text).unwrap();
@@ -593,4 +602,43 @@ fn the_diff_shows_a_change_and_nothing_for_none() {
     );
     let d = vahta_setup::unified_diff(Path::new("/h/x.json"), None, "{}\n");
     assert!(d.contains("--- /dev/null") && d.contains("+{}"), "{d}");
+}
+
+#[test]
+fn deny_rules_are_added_once_beside_the_persons_and_removed_alone() {
+    let before = r#"{"permissions": {"deny": ["Bash(rm -rf:*)", "Bash(vahta copy:*)"]}}"#;
+    let once = install("claude", Some(before)).unwrap();
+    let twice = install("claude", Some(&once)).unwrap();
+    assert_eq!(once, twice);
+    let doc: Value = serde_json::from_str(&once).unwrap();
+    let deny: Vec<&str> = doc["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    // The person's rule keeps its place; ours follow, each once.
+    assert_eq!(deny[0], "Bash(rm -rf:*)");
+    assert_eq!(
+        deny.iter().filter(|r| **r == "Bash(vahta copy:*)").count(),
+        1
+    );
+    assert!(deny.contains(&"Bash(vh reveal:*)"));
+
+    let mf = m("claude");
+    let back = uninstall_text(&once, &mf, Os::Linux).unwrap().unwrap();
+    let doc: Value = serde_json::from_str(&back).unwrap();
+    assert_eq!(
+        doc["permissions"]["deny"],
+        serde_json::json!(["Bash(rm -rf:*)"])
+    );
+
+    // Ours alone: the list and the object they made go with them.
+    let only = install("claude", None).unwrap();
+    let back = uninstall_text(&only, &mf, Os::Linux).unwrap().unwrap();
+    let doc: Value = serde_json::from_str(&back).unwrap();
+    assert!(doc.get("permissions").is_none(), "{back}");
+
+    // A deny that is not a list is refused, never clobbered.
+    assert!(install("claude", Some(r#"{"permissions": {"deny": "x"}}"#)).is_err());
 }

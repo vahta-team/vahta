@@ -10,6 +10,7 @@
 //! limits below, `json.loads`-faithful. Replies are rendered with serde_json
 //! from the trusted TOML templates, because that is a writer, not a reader.
 
+mod agentguard;
 mod readguard;
 
 use std::io::{Read, Write};
@@ -123,6 +124,27 @@ fn vahta_file_touched(ev: &Event) -> Option<String> {
     }
 }
 
+/// Refusing a Vahta command that is for the person only.
+fn deny_vahta_command(invocation: &str) -> Decision {
+    let msg = if invocation.ends_with("_surface") {
+        format!(
+            "vahta blocked `{invocation}`: it is Vahta's prompt window, which only Vahta opens, for \
+             the person. Do not run it."
+        )
+    } else {
+        format!(
+            "vahta blocked `{invocation}`: it shows or copies a secret value, which is for the \
+             person, not an agent (a window can be captured, the clipboard can be read). Ask the \
+             person to run it in their own terminal if they need it; to use a value, run the \
+             command that needs it with `vahta run`."
+        )
+    };
+    Decision::Deny {
+        user_message: msg.clone(),
+        agent_message: msg,
+    }
+}
+
 /// Refusing to read a file: names the file and the kind, never a value.
 fn deny_read(file: &str, kind: &str) -> Decision {
     let msg = format!(
@@ -138,8 +160,14 @@ fn deny_read(file: &str, kind: &str) -> Decision {
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
     match args.kind {
         Kind::BeforeTool => {
-            // Vahta's own files first: they are refused whatever is in the
-            // call, and the answer names the path, not the text.
+            // Commands for the person only, then Vahta's own files: both are
+            // refused whatever else is in the call, and the answer names the
+            // command or the path, not the text.
+            if ev.group == Some(vahta_harness::Group::Shell)
+                && let Some(invocation) = agentguard::forbidden_command(&ev.text)
+            {
+                return deny_vahta_command(&invocation);
+            }
             if let Some(file) = vahta_file_touched(ev) {
                 return deny_vahta_file(&file);
             }

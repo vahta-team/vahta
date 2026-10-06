@@ -273,13 +273,34 @@ pub fn is_type_annotation(value: &str) -> bool {
 /// shape is considered, a UUID is promoted before the transition floor can
 /// demote it, and the word-shaped demotion is applied only when there are no
 /// digits — otherwise a JWT would demote through its own base64 segments.
+/// `re.match(r"\$\{\{|\{\{|\$\{[A-Za-z_]|\$\(|\$[A-Za-z_]|%[A-Za-z_][A-Za-z0-9_]*%")`:
+/// the value starts with a reference to where the credential comes from (a
+/// shell variable, a CI expression, a template, a command substitution, a
+/// Windows `%VAR%`), so it is not the credential. Without this the text after
+/// the reference (a URL, a JSON escape) made the value look random. `$` then a
+/// digit (a bcrypt hash) is not a reference.
+pub fn starts_with_reference(value: &str) -> bool {
+    let b = value.as_bytes();
+    let ident_start = |i: usize| b.get(i).is_some_and(|c| is_ident_start(*c as char));
+    match b {
+        [b'$', b'{', b'{', ..] | [b'{', b'{', ..] | [b'$', b'(', ..] => true,
+        [b'$', b'{', ..] => ident_start(2),
+        [b'$', ..] => ident_start(1),
+        [b'%', ..] => {
+            let n = ident_len(b, 1);
+            n > 0 && b.get(1 + n) == Some(&b'%')
+        }
+        _ => false,
+    }
+}
+
 pub fn classify_value(value: &str) -> (Confidence, Option<&'static str>) {
     let v = strip_quotes(value);
 
     if v.chars().count() < MIN_VALUE_LEN {
         return (Confidence::None, None);
     }
-    if is_placeholder(v) || is_nil_or_all_zero(v) {
+    if is_placeholder(v) || is_nil_or_all_zero(v) || starts_with_reference(v) {
         return (Confidence::None, None);
     }
     if is_function_call(v) {
@@ -349,6 +370,32 @@ pub fn assignment_is_secret(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_starting_with_a_reference_is_none() {
+        // Built from pieces: the product's own hook reads this file too.
+        let d = "$";
+        for v in [
+            format!("{d}{{GH_TOKEN}}@github.com/o/r.git"),
+            format!("{d}{{{{ secrets.GITHUB_TOKEN }}}}@x"),
+            "{{TEMPLATE_NAME}}\\n".to_string(),
+            format!("{d}(cat .token-file)Xy9"),
+            format!("{d}TOKEN/path/Ab9"),
+            "%TOKEN%Ab9xyz".to_string(),
+        ] {
+            assert!(starts_with_reference(&v), "{v}");
+            assert_eq!(classify_value(&v).0, Confidence::None, "{v}");
+        }
+        for v in [
+            format!("{d}2b{d}12{d}aB3xQ9mK2pL7vN4wZ8"),
+            "%aB3xQ9mK2pL7vN4wZ8".to_string(),
+            format!("{d}{{"),
+            format!("{d}9abc"),
+            "aB3xQ9mK2pL7vN4wZ8".to_string(),
+        ] {
+            assert!(!starts_with_reference(&v), "{v}");
+        }
+    }
 
     #[test]
     fn too_short_is_none() {
