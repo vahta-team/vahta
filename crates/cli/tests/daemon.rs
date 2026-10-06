@@ -693,6 +693,9 @@ fn copy_puts_the_value_on_the_clipboard_and_takes_it_back() {
     assert!(journal.contains("copy_cleared") && !journal.contains("fake-one"));
 }
 
+// Only Linux and the BSDs can lack a display: Windows and macOS always have a
+// console or Terminal.app to open, which on CI nobody answers.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[test]
 fn with_no_display_the_real_surface_fails_closed() {
     // A daemon with the real terminal surface, and nowhere to open a window.
@@ -880,6 +883,15 @@ fn an_each_use_or_unknown_name_refuses_the_whole_unlock_before_any_window() {
     assert_eq!(out.status.code(), Some(3));
     let err = text(&out.stderr);
     assert!(err.contains("ALPHA") && err.contains("each-use"), "{err}");
+    // Only the causes present are explained.
+    assert!(!err.contains("not in this vault"), "{err}");
+    let out = s.vahta(&["unlock", "--secret", "NOPE"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("not in this vault") && !err.contains("each-use"),
+        "{err}"
+    );
     // A vault with only each-use secrets has nothing to open a session for.
     let only = Sandbox::new();
     only.with_vault(&[("ALPHA", "fake-three", "each-use")]);
