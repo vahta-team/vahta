@@ -1,5 +1,5 @@
-//! `vahta init`, `set`, `remove`, `import`, `reveal` and `copy`: the commands
-//! that change or show a vault.
+//! `vahta init`, `add`, `reset`, `remove`, `import`, `reveal` and `copy`: the
+//! commands that change or show a vault.
 //!
 //! None of them takes a secret, a password or a value as an argument, or reads
 //! one from standard input. They ask the daemon, and the daemon opens a prompt
@@ -25,17 +25,32 @@ options:
   -h, --help             show this help
 ";
 
-pub const SET_USAGE: &str = "\
-usage: vahta set NAME [--tier session|each-use] [--file FILENAME] [--json]
+pub const ADD_USAGE: &str = "\
+usage: vahta add NAME [--tier session|each-use] [--file FILENAME] [--json]
 
-Store a secret. A window opens where you type the vault password and then the
-value, hidden, twice; the value never passes through this command. An existing
-NAME is replaced.
+Store a new secret. A window opens where you type the vault password and then
+the value, hidden, twice; the value never passes through this command. A NAME
+the vault already has is refused: use `vahta reset NAME` to replace its value.
 
 options:
   --tier TIER            session (default): a session may hold it, so `vahta
                          run` can use it without a window while one is open.
                          each-use: it needs the password every time.
+  --file FILENAME        the secret is a file with this name, not a variable
+  --json                 machine-readable result
+  -h, --help             show this help
+";
+
+pub const RESET_USAGE: &str = "\
+usage: vahta reset NAME [--tier session|each-use] [--file FILENAME] [--json]
+
+Replace the value of a secret the vault has, as when rotating it. A window
+opens where you type the vault password and then the new value, hidden, twice.
+A NAME the vault does not have is refused: use `vahta add NAME` to create it.
+The secret keeps its tier and kind unless --tier or --file is given.
+
+options:
+  --tier TIER            session or each-use (see `vahta add --help`)
   --file FILENAME        the secret is a file with this name, not a variable
   --json                 machine-readable result
   -h, --help             show this help
@@ -90,7 +105,8 @@ options:
 fn usage_of(command: &str) -> &'static str {
     match command {
         "init" => INIT_USAGE,
-        "set" => SET_USAGE,
+        "add" => ADD_USAGE,
+        "reset" => RESET_USAGE,
         "remove" => REMOVE_USAGE,
         "import" => IMPORT_USAGE,
         "reveal" => REVEAL_USAGE,
@@ -137,7 +153,7 @@ fn parse(command: &str, args: &[String]) -> Args {
         match a {
             "-h" | "--help" => return Args::Help,
             "--json" => p.json = true,
-            "--tier" if command == "set" => match value("--tier") {
+            "--tier" if matches!(command, "add" | "reset") => match value("--tier") {
                 Ok(v) => match v.as_str() {
                     "session" => p.tier = Some(Tier::Session),
                     "each-use" | "each_use" => p.tier = Some(Tier::EachUse),
@@ -149,7 +165,7 @@ fn parse(command: &str, args: &[String]) -> Args {
                 },
                 Err(e) => return Args::Error(e),
             },
-            "--file" if command == "set" => match value("--file") {
+            "--file" if matches!(command, "add" | "reset") => match value("--file") {
                 Ok(v) => p.file = Some(v),
                 Err(e) => return Args::Error(e),
             },
@@ -188,7 +204,7 @@ pub fn run(
         Args::Run(p) => p,
     };
     let cwd = env.cwd.to_string_lossy().into_owned();
-    let wants_name = matches!(command, "set" | "remove" | "reveal" | "copy");
+    let wants_name = matches!(command, "add" | "reset" | "remove" | "reveal" | "copy");
     if parsed.positional.len() != usize::from(wants_name) {
         let _ = write!(
             stderr,
@@ -204,10 +220,16 @@ pub fn run(
     let name = parsed.positional.first().cloned().unwrap_or_default();
     let request = match command {
         "init" => ClientRequest::Init { cwd },
-        "set" => ClientRequest::Set {
+        "add" => ClientRequest::Add {
             cwd,
             name,
             tier: parsed.tier.unwrap_or(Tier::Session),
+            file: parsed.file,
+        },
+        "reset" => ClientRequest::Reset {
+            cwd,
+            name,
+            tier: parsed.tier,
             file: parsed.file,
         },
         "remove" => ClientRequest::Remove { cwd, name },

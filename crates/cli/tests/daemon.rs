@@ -123,7 +123,7 @@ impl Sandbox {
         .unwrap()
     }
 
-    /// `vahta init` and `vahta set` for each of `items`, through the window.
+    /// `vahta init` and `vahta add` for each of `items`, through the window.
     fn with_vault(&self, items: &[(&str, &str, &str)]) {
         self.script(&[r#"{"secret":"correct horse"}"#, r#"{"ack":true}"#]);
         let out = self.vahta(&["init"]);
@@ -133,7 +133,7 @@ impl Sandbox {
                 r#"{"secret":"correct horse"}"#,
                 &format!(r#"{{"secret":"{value}"}}"#),
             ]);
-            let out = self.vahta(&["set", name, "--tier", tier]);
+            let out = self.vahta(&["add", name, "--tier", tier]);
             assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         }
     }
@@ -407,10 +407,10 @@ fn a_hostile_peer_gets_an_error_and_the_daemon_carries_on() {
     ));
 }
 
-// --- init, set, remove, import, reveal, copy -----------------------------------------
+// --- init, add, reset, remove, import, reveal, copy ---------------------------------
 
 #[test]
-fn init_and_set_go_through_the_window_and_nothing_secret_comes_back() {
+fn init_and_add_go_through_the_window_and_nothing_secret_comes_back() {
     let s = Sandbox::new();
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"ack":true}"#]);
     let out = s.vahta(&["init"]);
@@ -440,11 +440,11 @@ fn init_and_set_go_through_the_window_and_nothing_secret_comes_back() {
     assert_eq!(s.asks(), before);
 
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-one"}"#]);
-    let out = s.vahta(&["set", "ZETA"]);
+    let out = s.vahta(&["add", "ZETA"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout).trim(), "saved ZETA");
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-two"}"#]);
-    let out = s.vahta(&["set", "ALPHA", "--tier", "each-use", "--file", "alpha.pem"]);
+    let out = s.vahta(&["add", "ALPHA", "--tier", "each-use", "--file", "alpha.pem"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
     // The index shows names, kinds and tiers without any password...
@@ -480,7 +480,7 @@ fn init_and_set_go_through_the_window_and_nothing_secret_comes_back() {
 
     // The journal names what happened and holds no value.
     let journal = fs::read_to_string(s.root.join("data/journal.jsonl")).unwrap();
-    assert!(journal.contains("\"event\":\"set\"") && journal.contains("ALPHA"));
+    assert!(journal.contains("\"event\":\"add\"") && journal.contains("ALPHA"));
     for leak in ["fake-one", "fake-two", "correct horse", &key] {
         assert!(!journal.contains(leak), "the journal holds {leak}");
     }
@@ -498,7 +498,7 @@ fn a_wrong_password_is_asked_again_and_cancelling_changes_nothing() {
         r#"{"secret":"correct horse"}"#,
         r#"{"secret":"fake-new"}"#,
     ]);
-    let out = s.vahta(&["set", "ZETA"]);
+    let out = s.vahta(&["reset", "ZETA"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let log = s.window_log();
     let any_warning = log.iter().any(|e| {
@@ -513,12 +513,12 @@ fn a_wrong_password_is_asked_again_and_cancelling_changes_nothing() {
 
     // Cancelled at the password: exit 4, the file untouched.
     s.script(&[r#"{"cancel":true}"#]);
-    let out = s.vahta(&["set", "ZETA"]);
+    let out = s.vahta(&["reset", "ZETA"]);
     assert_eq!(out.status.code(), Some(4));
     assert!(text(&out.stderr).contains("cancelled"));
     // Cancelled at the value, after the password: still untouched.
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"cancel":true}"#]);
-    assert_eq!(s.vahta(&["set", "ZETA"]).status.code(), Some(4));
+    assert_eq!(s.vahta(&["reset", "ZETA"]).status.code(), Some(4));
     assert_eq!(fs::read(s.vault_path()).unwrap(), after_set);
 
     // Three wrong passwords end the request.
@@ -527,7 +527,7 @@ fn a_wrong_password_is_asked_again_and_cancelling_changes_nothing() {
         r#"{"secret":"nope"}"#,
         r#"{"secret":"nein"}"#,
     ]);
-    let out = s.vahta(&["set", "ZETA"]);
+    let out = s.vahta(&["reset", "ZETA"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("too many wrong passwords"));
     assert_eq!(fs::read(s.vault_path()).unwrap(), after_set);
@@ -537,13 +537,13 @@ fn a_wrong_password_is_asked_again_and_cancelling_changes_nothing() {
 fn what_can_be_refused_is_refused_before_any_window() {
     let s = Sandbox::new();
     // No vault yet.
-    let out = s.vahta(&["set", "ZETA"]);
+    let out = s.vahta(&["add", "ZETA"]);
     assert_eq!(out.status.code(), Some(3));
     assert!(text(&out.stderr).contains("vahta init"));
     s.with_vault(&[("ZETA", "fake-one", "session")]);
     let asks = s.asks();
 
-    let out = s.vahta(&["set", "1bad"]);
+    let out = s.vahta(&["add", "1bad"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("letters, digits and underscores"));
     // An unknown name, in the structured form an agent can read.
@@ -556,10 +556,10 @@ fn what_can_be_refused_is_refused_before_any_window() {
     let out = s.vahta(&["reveal", "NOPE"]);
     assert_eq!(out.status.code(), Some(3));
     // Usage errors.
-    assert_eq!(s.vahta(&["set"]).status.code(), Some(2));
-    assert_eq!(s.vahta(&["set", "A", "B"]).status.code(), Some(2));
+    assert_eq!(s.vahta(&["add"]).status.code(), Some(2));
+    assert_eq!(s.vahta(&["add", "A", "B"]).status.code(), Some(2));
     assert_eq!(
-        s.vahta(&["set", "A", "--tier", "weekly"]).status.code(),
+        s.vahta(&["add", "A", "--tier", "weekly"]).status.code(),
         Some(2)
     );
     assert_eq!(s.vahta(&["import"]).status.code(), Some(2));
@@ -570,10 +570,81 @@ fn what_can_be_refused_is_refused_before_any_window() {
         Some(2)
     );
     assert_eq!(
-        s.vahta(&["set", "A", "--value", "fake-one"]).status.code(),
+        s.vahta(&["add", "A", "--value", "fake-one"]).status.code(),
         Some(2)
     );
     assert_eq!(s.asks(), asks, "a window opened for a refusal");
+}
+
+#[test]
+fn add_refuses_a_name_there_is_and_reset_one_there_is_not() {
+    let s = Sandbox::new();
+    s.with_vault(&[("ZETA", "fake-one", "each-use")]);
+    let asks = s.asks();
+    // Both refusals come from the plain index, before any window.
+    let out = s.vahta(&["add", "ZETA", "--json"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["refused"]["kind"], "exists");
+    assert_eq!(doc["refused"]["names"][0]["name"], "ZETA");
+    assert!(
+        doc["refused"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("vahta reset ZETA")
+    );
+    let out = s.vahta(&["reset", "NOPE"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        text(&out.stderr).contains("vahta add NOPE"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(s.asks(), asks, "a window opened for a refusal");
+
+    // A reset replaces the value and keeps the tier it had.
+    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-new"}"#]);
+    let out = s.vahta(&["reset", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim(), "replaced ZETA");
+    let vault = s.open_vault();
+    assert_eq!(vault.get("ZETA").unwrap().expose(), b"fake-new");
+    assert_eq!(vault.entries()[0].tier, Tier::EachUse);
+    let journal = fs::read_to_string(s.root.join("data/journal.jsonl")).unwrap();
+    assert!(journal.contains("\"event\":\"reset\""));
+    assert!(!journal.contains("fake-new") && !journal.contains("fake-one"));
+
+    // The old command says which of the two to use, and does nothing.
+    let asks = s.asks();
+    let out = s.vahta(&["set", "ZETA"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("unknown command: set")
+            && err.contains("vahta add")
+            && err.contains("vahta reset"),
+        "{err}"
+    );
+    assert_eq!(s.asks(), asks);
+}
+
+#[test]
+fn vh_is_the_same_program() {
+    // `--version` and `--help` touch no directory and no daemon.
+    let out = Command::new(env!("CARGO_BIN_EXE_vh"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        text(&out.stdout).trim(),
+        format!("vahta {}", env!("CARGO_PKG_VERSION"))
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_vh"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(text(&out.stdout).contains("`vh` is the short name"));
 }
 
 #[test]
@@ -1120,7 +1191,7 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
     drop(conn);
 
     // A command that needs the daemon is told, and pointed at the way out.
-    let out = s.vahta(&["set", "ZETA"]);
+    let out = s.vahta(&["add", "ZETA"]);
     assert_eq!(out.status.code(), Some(5));
     let err = text(&out.stderr);
     assert!(
@@ -1451,7 +1522,7 @@ fn a_changed_secret_fails_the_session_closed_with_a_message_to_unlock_again() {
     );
     // The value is replaced (through the window, as it must be).
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-new"}"#]);
-    assert_eq!(s.vahta(&["set", "ZETA"]).status.code(), Some(0));
+    assert_eq!(s.vahta(&["reset", "ZETA"]).status.code(), Some(0));
     let asks = s.asks();
     let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
     // Refused, not run, and not silently re-prompted.
@@ -1713,13 +1784,13 @@ fn nothing_secret_is_in_the_journal_the_daemons_stderr_or_any_clients_output() {
         ("ALPHA", "fake-three", "each-use"),
     ] {
         s.script(&[pw, &format!(r#"{{"secret":"{value}"}}"#)]);
-        assert_eq!(run(&["set", name, "--tier", tier]).status.code(), Some(0));
+        assert_eq!(run(&["add", name, "--tier", tier]).status.code(), Some(0));
     }
     // A wrong password, a cancel, and a refusal.
     s.script(&[r#"{"secret":"wrong"}"#, pw, r#"{"secret":"fake-new"}"#]);
-    run(&["set", "ZETA"]);
+    run(&["reset", "ZETA"]);
     s.script(&[r#"{"cancel":true}"#]);
-    run(&["set", "ZETA"]);
+    run(&["reset", "ZETA"]);
     run(&["unlock", "--secret", "ALPHA", "--json"]);
     // A session, runs that print the values on both streams, a reveal, a run
     // with the password, a delegation, a failure, the list and a lock.

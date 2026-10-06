@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Install vahta and vahta-hook from this checkout, for daily use on this machine.
+# Install vahta (and its short name vh) and vahta-hook from this checkout, for
+# daily use on this machine.
 #
 # Linux and macOS. Windows is out of scope for now.
 #
-# This is not a release: nothing is published anywhere. It builds the two Rust
+# This is not a release: nothing is published anywhere. It builds the Rust
 # binaries and copies them into a directory you own, then points the harnesses
 # that already run vahta-hook at the installed copy.
 #
@@ -19,20 +20,21 @@ usage() {
 usage: install-local.sh [--prefix DIR] [--no-setup]
        install-local.sh [--prefix DIR] --uninstall [--force]
 
-Build vahta and vahta-hook from this checkout and install them.
+Build vahta, vh (the short name of vahta) and vahta-hook from this checkout
+and install them.
 
 options:
   --prefix DIR   install into DIR (default: ${XDG_BIN_HOME:-$HOME/.local/bin});
                  created if missing
   --no-setup     do not run `vahta setup --refresh` or print the setup table
-  --uninstall    remove vahta and vahta-hook from the prefix. Refuses while a
+  --uninstall    remove vahta, vh and vahta-hook from the prefix. Refuses while a
                  harness config still points at the prefix, unless --force
   --force        with --uninstall: remove the binaries anyway
   -h, --help     show this help
 
 Each binary is copied to a temporary file in the prefix and renamed over the
 target, so a harness that is running the hook at that moment is not disturbed.
-vahta-hook goes in before vahta.
+vahta-hook goes in before vahta and vh.
 
 After installing, `vahta setup --refresh` repoints every harness that already
 has vahta entries at the installed hook; harnesses without any are left alone.
@@ -108,7 +110,7 @@ if [ "$uninstall" -eq 1 ]; then
     } >&2
     exit 1
   fi
-  for name in vahta vahta-hook; do
+  for name in vahta vh vahta-hook; do
     if [ -e "$prefix/$name" ] || [ -L "$prefix/$name" ]; then
       rm -f -- "$prefix/$name"
       echo "removed $prefix/$name"
@@ -123,13 +125,13 @@ command -v cargo >/dev/null 2>&1 || die "cargo not found; install a Rust toolcha
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
-echo "building vahta and vahta-hook (release)..."
+echo "building vahta, vh and vahta-hook (release)..."
 cargo build --release --locked -p vahta-cli -p vahta-hook
 
 target_dir="$(cargo metadata --format-version 1 --no-deps --locked 2>/dev/null \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 target_dir="${target_dir:-$repo/target}"
-for name in vahta vahta-hook; do
+for name in vahta vh vahta-hook; do
   [ -x "$target_dir/release/$name" ] || die "build did not produce $target_dir/release/$name"
 done
 
@@ -152,10 +154,12 @@ install_one() {
 # The hook first: a vahta that is newer than its hook is the worse way round.
 install_one vahta-hook
 install_one vahta
+install_one vh
 
 echo
 echo "smoke checks..."
 "$prefix/vahta" --version || die "$prefix/vahta --version failed"
+"$prefix/vh" --version >/dev/null || die "$prefix/vh --version failed"
 hook_out="$(echo '{}' | "$prefix/vahta-hook" --harness claude --event before_tool)" \
   || die "vahta-hook exited non-zero on an empty event"
 [ -z "$hook_out" ] || die "vahta-hook printed something on an empty event: $hook_out"

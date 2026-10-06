@@ -12,9 +12,20 @@ publish = false
 [lints]
 workspace = true
 
+# The program is the library, so that `vahta` and its short name `vh` are two
+# thin binaries over the same code rather than one file built twice (which
+# cargo warns about).
+[lib]
+name = "vahta_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "vahta"
 path = "src/main.rs"
+
+[[bin]]
+name = "vh"
+path = "src/bin/vh.rs"
 
 [dependencies]
 vahta-scan = { path = "../scan" }

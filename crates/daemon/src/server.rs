@@ -454,13 +454,42 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ClientRequest::Status {} => (ClientReply::Status(shared.status()), false),
             ClientRequest::Stop {} => (ClientReply::Ok {}, true),
             ClientRequest::Init { cwd } => (ops::init(&ctx, &cwd).unwrap_or_else(|r| r), false),
-            ClientRequest::Set {
+            ClientRequest::Add {
                 cwd,
                 name,
                 tier,
                 file,
             } => (
-                ops::set(&ctx, &cwd, &name, tier, file.as_deref()).unwrap_or_else(|r| r),
+                ops::store(
+                    &ctx,
+                    &cwd,
+                    ops::StoreMode::Add,
+                    ops::Store {
+                        name: &name,
+                        tier: Some(tier),
+                        file: file.as_deref(),
+                    },
+                )
+                .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Reset {
+                cwd,
+                name,
+                tier,
+                file,
+            } => (
+                ops::store(
+                    &ctx,
+                    &cwd,
+                    ops::StoreMode::Reset,
+                    ops::Store {
+                        name: &name,
+                        tier,
+                        file: file.as_deref(),
+                    },
+                )
+                .unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Remove { cwd, name } => {
