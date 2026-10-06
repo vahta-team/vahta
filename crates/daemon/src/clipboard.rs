@@ -81,11 +81,18 @@ pub fn detect(env: &Environment) -> Option<Tool> {
         });
     }
     if env.wayland
-        && let (Some(copy), Some(paste)) = (
+        && let (Some(mut copy), Some(paste)) = (
             argv(env, &["wl-copy"]),
             argv(env, &["wl-paste", "--no-newline"]),
         )
     {
+        // Clipboard history managers (cliphist, Omarchy's, KDE's) skip what
+        // is offered as `x-kde-passwordManagerHint`, which `--sensitive` adds
+        // (wl-clipboard 2.3). Without it the value lands in their history,
+        // often a file on disk, before it is cleared here.
+        if wl_copy_knows_sensitive(&copy[0]) {
+            copy.push(PathBuf::from("--sensitive"));
+        }
         return Some(Tool {
             copy,
             paste,
@@ -115,6 +122,20 @@ pub fn detect(env: &Environment) -> Option<Tool> {
         }
     }
     None
+}
+
+/// Whether this `wl-copy` takes `--sensitive`, from its help.
+fn wl_copy_knows_sensitive(wl_copy: &std::path::Path) -> bool {
+    Command::new(wl_copy)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            out.stdout
+                .windows(b"--sensitive".len())
+                .any(|w| w == b"--sensitive")
+        })
 }
 
 fn feed(command: &[PathBuf], input: &[u8]) -> std::io::Result<()> {
@@ -201,7 +222,11 @@ mod tests {
         };
         script(
             "wl-copy",
-            "if [ \"$1\" = \"--clear\" ]; then : > \"$clip\"; else cat > \"$clip\"; fi",
+            "case \"$1\" in\n\
+             --help) echo '    --sensitive  Hint that the content is sensitive.' ;;\n\
+             --clear) : > \"$clip\" ;;\n\
+             *) echo \"$*\" > \"$clip.args\"; cat > \"$clip\" ;;\n\
+             esac",
         );
         script("wl-paste", "cat \"$clip\"");
     }
@@ -221,6 +246,9 @@ mod tests {
         let tool = detect(&env(tmp.path())).expect("a tool");
         tool.set(b"fake-one").unwrap();
         assert_eq!(tool.get().unwrap().as_slice(), b"fake-one");
+        // Offered as sensitive, so history managers skip it.
+        let args = std::fs::read_to_string(tmp.path().join("clip.args")).unwrap();
+        assert_eq!(args.trim(), "--sensitive");
         // Still ours: cleared.
         assert!(tool.clear_if_unchanged(b"fake-one").unwrap());
         assert_eq!(tool.get().unwrap().as_slice(), b"");
