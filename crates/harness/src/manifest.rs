@@ -116,6 +116,20 @@ pub struct Config {
     pub shape: Shape,
     /// A field the file must carry, e.g. Cursor's `version: 1`.
     pub require: Option<Require>,
+    /// Command rules the harness itself enforces, written next to the hooks: a
+    /// second layer for what the hook already refuses.
+    pub deny: Option<DenyRules>,
+}
+
+/// A list of strings in the config that the harness reads as commands to
+/// refuse (Claude Code's `permissions.deny`). Setup adds these exact strings
+/// and, on uninstall, removes exactly these; the person's own stay.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DenyRules {
+    /// Dotted path of the list, e.g. `permissions.deny`.
+    pub key: String,
+    pub rules: Vec<String>,
 }
 
 /// The two layouts of a hook registration.

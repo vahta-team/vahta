@@ -29,7 +29,7 @@ const READERS: &[&str] = &[
     "cat", "head", "tail", "less", "more", "bat", "nl", "tac", "grep", "rg", "sed", "awk",
     "strings", "xxd", "od", "base64", "sort", "uniq", "cut", "source", ".",
 ];
-const WRAPPERS: &[&str] = &["sudo", "command", "exec", "time", "nohup", "builtin"];
+pub(crate) const WRAPPERS: &[&str] = &["sudo", "command", "exec", "time", "nohup", "builtin"];
 
 /// The kind of the first finding at the gate, if any.
 fn gated_kind(findings: &[vahta_scan::Finding]) -> Option<String> {
@@ -81,7 +81,7 @@ pub fn secret_kind_in(given: &str, cwd: Option<&str>, content: Option<&str>) -> 
     }
 }
 
-enum Tok {
+pub(crate) enum Tok {
     Word(String),
     /// `;`, `&&`, `||`, `|`, `&`, newline.
     Sep,
@@ -95,7 +95,7 @@ enum Tok {
 
 /// Shell words and separators. Lenient: an unterminated quote runs to the end.
 #[allow(unused_assignments)]
-fn tokenize(cmd: &str) -> Vec<Tok> {
+pub(crate) fn tokenize(cmd: &str) -> Vec<Tok> {
     let mut out = Vec::new();
     let mut word = String::new();
     let mut have = false;
@@ -194,7 +194,7 @@ fn tokenize(cmd: &str) -> Vec<Tok> {
     out
 }
 
-fn is_assignment(w: &str) -> bool {
+pub(crate) fn is_assignment(w: &str) -> bool {
     match w.split_once('=') {
         Some((name, _)) => {
             !name.is_empty()

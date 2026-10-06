@@ -1,6 +1,16 @@
 {
-  "setup_version": 1,
+  "setup_version": 2,
   "fragment": {
+    "permissions": {
+      "deny": [
+        "Bash(vahta reveal:*)",
+        "Bash(vahta copy:*)",
+        "Bash(vahta _surface:*)",
+        "Bash(vh reveal:*)",
+        "Bash(vh copy:*)",
+        "Bash(vh _surface:*)"
+      ]
+    },
     "hooks": {
       "PreToolUse": [
         {
@@ -8,7 +18,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "{hook} --harness claude --event before_tool --setup 1"
+              "command": "{hook} --harness claude --event before_tool --setup 2"
             }
           ]
         },
@@ -17,7 +27,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "{hook} --harness claude --event before_read --setup 1"
+              "command": "{hook} --harness claude --event before_read --setup 2"
             }
           ]
         }
@@ -27,7 +37,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "{hook} --harness claude --event session_start --setup 1"
+              "command": "{hook} --harness claude --event session_start --setup 2"
             }
           ]
         }
@@ -37,7 +47,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "{hook} --harness claude --event prompt --setup 1"
+              "command": "{hook} --harness claude --event prompt --setup 2"
             }
           ]
         }
@@ -48,7 +58,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "{hook} --harness claude --event after_tool --setup 1"
+              "command": "{hook} --harness claude --event after_tool --setup 2"
             }
           ]
         }
