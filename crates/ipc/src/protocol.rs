@@ -3,10 +3,16 @@
 //!
 //! Two kinds of peer speak it, told apart by the first frame, the [`Hello`]:
 //!
-//! * a **client** (the `vahta` command, later the hook and the MCP server),
+//! * a **client** (the `vahta` command, the hook, later the MCP server),
 //!   which sends [`ClientRequest`]s and receives [`ClientReply`]s. These types
 //!   have no field for a secret value or the password, and every one refuses
-//!   unknown fields, so a message carrying one is not a message;
+//!   unknown fields, so a message carrying one is not a message. Two
+//!   deliberate exceptions, both about a tool's output rather than the vault:
+//!   the hook sends the output it already holds ([`ClientRequest::OutputScan`])
+//!   so the daemon can find the values it knows in it, and after the person
+//!   says yes in a window, `vahta output allow` receives that output back
+//!   ([`ClientReply::OutputReleased`]). A reply to the hook never carries a
+//!   value: only where the values are;
 //! * a **surface** (the prompt window), authenticated by a one-time token the
 //!   daemon issued for exactly one request. Only this connection carries the
 //!   password, a typed value or a value to show.
@@ -23,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -273,6 +279,20 @@ pub enum ClientRequest {
         renames: Vec<(String, String)>,
         label: Option<String>,
     },
+    /// The hook, after a tool ran and before its output reaches the model:
+    /// `texts` are the strings of that output (every one, in order), and
+    /// `spans` what the hook's own detector would cut. The daemon adds the
+    /// values it holds for the caller's agent, drops what the person has
+    /// already let through, and answers with [`ClientReply::OutputSpans`].
+    /// `possible` names the kinds the detector found too weak to cut, for the
+    /// journal only.
+    OutputScan {
+        cwd: String,
+        tool: String,
+        texts: Vec<String>,
+        spans: Vec<OutputSpan>,
+        possible: Vec<String>,
+    },
     /// Narrow the caller's session for a sub-agent. The child session is
     /// anchored to the calling process, which then runs the sub-agent; the
     /// session ends when it exits. A scope that is not a subset of the
@@ -284,6 +304,18 @@ pub enum ClientRequest {
         duration: DurationSpec,
         label: Option<String>,
     },
+}
+
+/// One value to cut out of a tool's output: `text` is which of the output's
+/// strings, `start..end` the byte range in it, and `label` what replaces it:
+/// a secret's name when the daemon knew the value, else the detector's kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSpan {
+    pub text: usize,
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
 }
 
 /// What the client sends while a command runs: the command's input, and the
@@ -485,6 +517,14 @@ pub enum ClientReply {
     /// The request could not be carried out; `message` says why, never a value.
     Error {
         message: String,
+    },
+    /// The answer to an `OutputScan`: what to cut, and the reference under
+    /// which the daemon keeps the original for a while, so the agent can ask
+    /// the person for it (`vahta output allow <reference>`). No reference when
+    /// nothing is cut, or the original could not be kept.
+    OutputSpans {
+        spans: Vec<OutputSpan>,
+        reference: Option<String>,
     },
 }
 

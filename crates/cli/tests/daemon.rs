@@ -1856,3 +1856,148 @@ fn sessions_end_when_the_machine_sleeps_unless_the_config_says_not_to() {
     let out = s.vahta(&["daemon", "restart"]);
     assert_eq!(out.status.code(), Some(5));
 }
+
+// --- the hook and a tool's output ----------------------------------------------------
+
+/// The real `vahta-hook`, built once per test run next to `vahta`. It is
+/// another package's binary, so cargo does not hand it to this test; building
+/// it here (a no-op when it is fresh) means the test never runs a stale one.
+fn hook_bin() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let dir = Path::new(env!("CARGO_BIN_EXE_vahta")).parent().unwrap();
+            let mut cmd = Command::new(env!("CARGO"));
+            cmd.args(["build", "--quiet", "-p", "vahta-hook"]);
+            if dir.file_name().is_some_and(|n| n == "release") {
+                cmd.arg("--release");
+            }
+            let status = cmd.status().expect("run cargo build");
+            assert!(status.success(), "cargo build -p vahta-hook failed");
+            dir.join(format!("vahta-hook{}", std::env::consts::EXE_SUFFIX))
+        })
+        .clone()
+}
+
+impl Sandbox {
+    /// Feed the hook a Claude PostToolUse event whose Bash output is `stdout`,
+    /// as Claude would, from this test process (so the hook's anchor is the
+    /// anchor `vahta unlock` and `vahta run` get from here). Returns its reply.
+    fn hook_after_bash(&self, stdout: &str) -> Option<Value> {
+        let payload = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat notes.txt"},
+            "tool_response": {"stdout": stdout, "stderr": ""},
+            "cwd": self.project(),
+        });
+        let mut child = Command::new(hook_bin())
+            .args(["--harness", "claude", "--event", "after_tool"])
+            .current_dir(self.project())
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", self.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.root.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run vahta-hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let text = text(&out.stdout);
+        (!text.trim().is_empty()).then(|| serde_json::from_str(&text).unwrap())
+    }
+}
+
+/// The rewritten Bash stdout and the message for the model, from a reply.
+fn redacted(reply: &Value) -> (String, String) {
+    let hso = &reply["hookSpecificOutput"];
+    (
+        hso["updatedToolOutput"]["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        hso["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+/// The `vahta output allow <ref>` reference in a message for the model.
+fn reference_in(message: &str) -> String {
+    let after = message
+        .split("vahta output allow ")
+        .nth(1)
+        .expect("a reference in the message");
+    after.split_whitespace().next().unwrap().to_string()
+}
+
+#[test]
+fn the_hook_cuts_a_session_value_by_name_and_keeps_the_original() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // The value, as a later tool (a file read, say) would show it. Plain text:
+    // the detector sees nothing here, so a cut can only be the daemon's.
+    let reply = s
+        .hook_after_bash("the notes say fake-one and more")
+        .expect("the hook answered");
+    let (stdout, message) = redacted(&reply);
+    assert_eq!(stdout, "the notes say ***REDACTED(ZETA)*** and more");
+    assert!(message.contains("vahta output allow "), "{message}");
+    // There is a reference, so the person is not bothered.
+    assert!(reply.get("systemMessage").is_none(), "{reply}");
+    assert!(!reply.to_string().contains("fake-one"));
+
+    // Clean output gets no answer at all.
+    assert!(s.hook_after_bash("nothing to see").is_none());
+
+    // The journal names what was cut and keeps no value.
+    let journal = s.journal();
+    assert!(journal.contains("output_redacted") && journal.contains("ZETA"));
+    assert!(journal.contains(&reference_in(&message)));
+    assert!(!journal.contains("fake-one"));
+}
+
+#[test]
+fn the_hook_cuts_the_values_of_a_run_that_had_no_session() {
+    let s = sandbox_with_secrets();
+    // Each-use: a run with the password, no session anywhere.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["run", "--secret", "ALPHA", "--", "printenv", "ALPHA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.sessions().is_empty());
+    let reply = s.hook_after_bash("x fake-three y").unwrap();
+    assert_eq!(redacted(&reply).0, "x ***REDACTED(ALPHA)*** y");
+}
+
+#[test]
+fn without_a_daemon_the_hook_cuts_what_the_detector_finds_and_says_so() {
+    let s = Sandbox::new();
+    let key = ["sk-", "ant-", &"a".repeat(25)].concat();
+    let reply = s.hook_after_bash(&format!("found {key}")).unwrap();
+    let (stdout, message) = redacted(&reply);
+    assert_eq!(stdout, "found ***REDACTED(Anthropic-style key)***");
+    assert!(message.contains("not kept"), "{message}");
+    assert!(
+        reply["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("redacted")
+    );
+    // And no daemon was started for it.
+    assert_eq!(s.vahta(&["daemon", "status"]).status.code(), Some(5));
+}

@@ -19,6 +19,10 @@ workspace = true
 test-surface = ["vahta-vault/test-kdf"]
 
 [dependencies]
+# The release list of let-through output values: HMAC-SHA256 under a key
+# drawn at start (both already in the tree through vahta-vault).
+hmac = "0.12"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vahta-ipc = { path = "../ipc" }

@@ -16,6 +16,7 @@ mod clipboard;
 mod dotenv;
 pub mod journal;
 mod ops;
+mod output;
 mod run;
 mod run_ops;
 mod scrub;

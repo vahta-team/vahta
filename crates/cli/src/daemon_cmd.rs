@@ -344,6 +344,7 @@ pub fn report(
         ClientReply::Status(_)
         | ClientReply::Session(_)
         | ClientReply::Sessions { .. }
+        | ClientReply::OutputSpans { .. }
         | ClientReply::RunStarted {} => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
             EXIT_FAILED

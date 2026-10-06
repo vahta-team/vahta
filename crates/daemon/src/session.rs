@@ -174,6 +174,21 @@ impl Sessions {
         best.map(|(_, s)| s)
     }
 
+    /// Every session, of any vault, that a caller with this `chain` belongs
+    /// to: by anchor or by a process the daemon launched under it. For the
+    /// hook, which asks about values in a tool's output, not about one vault.
+    pub fn covering(&self, chain: &[ProcessId]) -> Vec<&Session> {
+        self.items
+            .iter()
+            .filter(|s| {
+                chain.contains(&s.anchor)
+                    || chain
+                        .iter()
+                        .any(|p| self.launched.get(p).is_some_and(|id| id == &s.id))
+            })
+            .collect()
+    }
+
     /// Whether a child with `names` and `deadline` may be made under `parent`.
     pub fn check_delegate(
         parent: &Session,

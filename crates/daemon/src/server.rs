@@ -25,6 +25,7 @@ use crate::config::Config;
 use crate::journal::Entry as JournalEntry;
 use crate::journal::{Entry, Journal};
 use crate::ops::{self, Ctx};
+use crate::output::{self, Outputs};
 use crate::paths::{PathError, Paths};
 use crate::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, ProtocolError, StatusInfo,
@@ -109,6 +110,9 @@ pub(crate) struct Shared {
     pub(crate) registry: Arc<SurfaceRegistry>,
     pub(crate) store: LocalStore,
     pub(crate) sessions: Mutex<Sessions>,
+    /// Tool outputs kept for the agent to ask about, and what the person has
+    /// let through (see `output.rs`).
+    pub(crate) outputs: Mutex<Outputs>,
     started: Instant,
     stop: AtomicBool,
     connections: AtomicUsize,
@@ -228,6 +232,12 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         }
     };
     let store = LocalStore::new(options.paths.data.clone());
+    let outputs = Outputs::new().ok_or_else(|| {
+        ServerError::Io(
+            "draw a key",
+            io::Error::other("the system random generator failed"),
+        )
+    })?;
     let shared = Arc::new(Shared {
         options,
         journal,
@@ -236,6 +246,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         registry,
         store,
         sessions: Mutex::new(Sessions::default()),
+        outputs: Mutex::new(outputs),
         started: Instant::now(),
         stop: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
@@ -294,7 +305,8 @@ fn idle_watch(shared: &Arc<Shared>) {
 }
 
 /// Once a half second: end sessions that have run out or lost their anchor,
-/// and ask about extending the ones near their end.
+/// ask about extending the ones near their end, and let go of tool outputs
+/// and released values whose time is up.
 fn sweep_sessions(shared: &Arc<Shared>) {
     let alive = |p: &vahta_os::ProcessId| vahta_os::identity_of(p.pid).is_ok_and(|id| id == *p);
     while !shared.stopping() {
@@ -303,6 +315,15 @@ fn sweep_sessions(shared: &Arc<Shared>) {
             Ok(mut sessions) => sessions.sweep(Instant::now(), &alive),
             Err(_) => continue,
         };
+        // Taken one after the other, never one inside the other.
+        let live: Vec<String> = shared
+            .sessions
+            .lock()
+            .map(|s| s.infos(Instant::now()).into_iter().map(|i| i.id).collect())
+            .unwrap_or_default();
+        if let Ok(mut outputs) = shared.outputs.lock() {
+            outputs.sweep(Instant::now(), &alive, &|id| live.iter().any(|l| l == id));
+        }
         shared.record_ended(swept.ended);
         for ask in swept.ask {
             let shared = shared.clone();
@@ -518,6 +539,16 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 label,
             } => (
                 run_ops::delegate(&ctx, &cwd, names, duration, label).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::OutputScan {
+                cwd,
+                tool,
+                texts,
+                spans,
+                possible,
+            } => (
+                output::scan(&ctx, cwd, tool, texts, spans, possible).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Sessions {} => (session_ops::list(&ctx).unwrap_or_else(|r| r), false),

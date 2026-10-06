@@ -48,11 +48,11 @@ fn walk(v: &mut Value, f: &mut dyn FnMut(&mut String)) {
     }
 }
 
-/// What the detector finds in `texts`: the likely values, to cut, and how many
-/// merely possible ones were left in.
-pub fn detector_cuts(texts: &[String]) -> (Vec<Cut>, usize) {
+/// What the detector finds in `texts`: the likely values, to cut, and the
+/// kinds of the merely possible ones, which are left in.
+pub fn detector_cuts(texts: &[String]) -> (Vec<Cut>, Vec<String>) {
     let mut cuts = Vec::new();
-    let mut possible = 0;
+    let mut possible = Vec::new();
     for (i, text) in texts.iter().enumerate() {
         for span in find_secret_spans(text) {
             match span.confidence {
@@ -61,7 +61,7 @@ pub fn detector_cuts(texts: &[String]) -> (Vec<Cut>, usize) {
                     range: span.range,
                     label: span.kind,
                 }),
-                _ => possible += 1,
+                _ => possible.push(span.kind),
             }
         }
     }
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(texts.len(), 3);
         let (cuts, possible) = detector_cuts(&texts);
         assert_eq!(cuts.len(), 2);
-        assert_eq!(possible, 0);
+        assert!(possible.is_empty());
         apply(&mut v, &cuts);
         assert_eq!(
             v["stdout"],
