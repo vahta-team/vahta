@@ -73,6 +73,18 @@ Or from source: `pip install git+https://github.com/vahta-team/vahta`, or from a
 
 > Windows and Linux supported. macOS isolated-console spawn is **experimental** (PID-file wrapper around Terminal.app / osascript) until a real Mac user confirms the visible window path — see [wiki — macOS](https://github.com/vahta-team/vahta/wiki/macOS).
 
+### Install from source (local)
+
+To run the Rust binaries (`vahta` and `vahta-hook`) from a checkout, every day, on your own machine — this publishes nothing:
+
+```bash
+scripts/install-local.sh                  # into ${XDG_BIN_HOME:-~/.local/bin}
+scripts/install-local.sh --prefix DIR     # or somewhere else
+scripts/install-local.sh --uninstall      # remove both binaries again
+```
+
+It builds with `cargo build --release --locked`, installs `vahta-hook` and then `vahta` by copying to a temp file and renaming over the target (a harness running the hook at that moment is not disturbed), runs a smoke check on both, and warns if the prefix is not on your `PATH`. Harness hooks follow the new copy: the script runs `vahta setup --refresh`, which repoints every harness that already has our entries and leaves the rest alone (`--no-setup` skips that). `--uninstall` refuses while a harness config still points into the prefix; run `vahta setup --all --uninstall` first, or pass `--force`. Linux and macOS; Windows is not covered yet.
+
 ### Agent bootstrap
 
 Paste this into your coding agent when you want it to install and teach itself key-amnesia:

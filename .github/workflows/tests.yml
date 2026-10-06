@@ -14,6 +14,13 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the runs for its older commits, which
+# otherwise hold the few macOS runners for hours. Pushes to master and
+# release branches each keep their own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     strategy:
@@ -163,6 +170,20 @@ jobs:
           cargo test --workspace --release
           cargo build --release -p vahta-detect --example dump_unicode
           "${{ steps.py.outputs.python }}" benchmarks/diff_unicode.py
+
+      # The local install script, against a throwaway prefix and HOME so it
+      # cannot touch the runner's own configs. Cargo and rustup keep their real
+      # homes. No setup step: no harness is installed here.
+      - name: Local install script
+        if: matrix.impl == 'rust'
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export HOME="$(mktemp -d)"
+          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --no-setup
+          test -x "$RUNNER_TEMP/vahta-bin/vahta" && test -x "$RUNNER_TEMP/vahta-bin/vahta-hook"
+          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --uninstall
+          test ! -e "$RUNNER_TEMP/vahta-bin/vahta" && test ! -e "$RUNNER_TEMP/vahta-bin/vahta-hook"
 
       # The checkable promise: the open build cannot make a network request,
       # because nothing in its dependency tree is an HTTP or TLS client.
