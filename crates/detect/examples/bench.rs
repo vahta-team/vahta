@@ -28,10 +28,10 @@ fn collect(dir: &Path, out: &mut Vec<String>) {
                 continue;
             }
             collect(&p, out);
-        } else if let Ok(s) = std::fs::read_to_string(&p) {
-            if s.len() < 400_000 {
-                out.push(s);
-            }
+        } else if let Ok(s) = std::fs::read_to_string(&p)
+            && s.len() < 400_000
+        {
+            out.push(s);
         }
     }
 }

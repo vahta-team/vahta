@@ -722,16 +722,16 @@ fn assignments_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
         // The legacy `(?P=nq)` only pairs quotes inside the match: a quote
         // immediately before the name is usually JSON wrapping, not a quoted
         // key, so an opener is required only when the tail captured a closer.
-        if let Some(nq2) = tail.nq2 {
-            if i == 0 || chars[i - 1].ch() != nq2 {
-                continue;
-            }
+        if let Some(nq2) = tail.nq2
+            && (i == 0 || chars[i - 1].ch() != nq2)
+        {
+            continue;
         }
         // Value quotes: a closer is required only when an opener was captured.
-        if let Some(q) = tail.q {
-            if tail.q2 != Some(q) {
-                continue;
-            }
+        if let Some(q) = tail.q
+            && tail.q2 != Some(q)
+        {
+            continue;
         }
 
         let name = collect_string(&chars[i..kw_end]);

@@ -294,17 +294,17 @@ pub fn iter_agent_transcript_files(home: &Path) -> Vec<PathBuf> {
     // `glob("*/events.jsonl")`: each direct child that is a directory (links
     // followed), then the literal name if it exists at all.
     let copilot_state = home.join(".copilot").join("session-state");
-    if copilot_state.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&copilot_state) {
-            for entry in entries.flatten() {
-                let dir = entry.path();
-                if !dir.is_dir() {
-                    continue;
-                }
-                let candidate = dir.join("events.jsonl");
-                if std::fs::symlink_metadata(&candidate).is_ok() {
-                    emit(candidate, &mut out);
-                }
+    if copilot_state.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&copilot_state)
+    {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let candidate = dir.join("events.jsonl");
+            if std::fs::symlink_metadata(&candidate).is_ok() {
+                emit(candidate, &mut out);
             }
         }
     }
@@ -346,10 +346,10 @@ fn secret_keyed_strings(root: &Value, f: &mut dyn FnMut(&str, &str)) {
                 _ => {}
             },
             Item::Entry(key, value) => {
-                if let Value::Str(s) = value {
-                    if is_secret_name(key) {
-                        f(key, s);
-                    }
+                if let Value::Str(s) = value
+                    && is_secret_name(key)
+                {
+                    f(key, s);
                 }
                 stack.push(Item::Node(value));
             }
@@ -511,11 +511,11 @@ fn scan_unparsed_line(line: &str, limits: json::Limits) -> HitSet {
         if let Some(key) = key.filter(|k| is_secret_name(k)) {
             top_keys.extend(key_record(key, s));
         }
-        if looks_like_json_container(s) {
-            if let Some(n) = unwrap_nested(s, limits) {
-                nested.push(n);
-                return;
-            }
+        if looks_like_json_container(s)
+            && let Some(n) = unwrap_nested(s, limits)
+        {
+            nested.push(n);
+            return;
         }
         text.merge(&scan_text_hits(s));
     });
@@ -671,10 +671,10 @@ pub fn findings_for_transcript_with_limits<E>(
 
     for (index, raw) in universal_lines(&text).enumerate() {
         let line_no = index + 1;
-        if line_no % PROGRESS_LINE_EVERY == 0 {
-            if let Some(p) = progress.as_deref_mut() {
-                p(&file_name, line_no, 0).map_err(DeepError::Progress)?;
-            }
+        if line_no % PROGRESS_LINE_EVERY == 0
+            && let Some(p) = progress.as_deref_mut()
+        {
+            p(&file_name, line_no, 0).map_err(DeepError::Progress)?;
         }
         let line = raw.trim_matches(vahta_detect::is_python_space);
         if line.is_empty() {
@@ -697,10 +697,10 @@ pub fn findings_for_transcript_with_limits<E>(
         }
         if has_certain {
             certain_lines.push(line_no);
-            if let Some(prefix) = hits.prefix {
-                if seen_certain.insert(prefix.to_string()) {
-                    certain_names.push(prefix.to_string());
-                }
+            if let Some(prefix) = hits.prefix
+                && seen_certain.insert(prefix.to_string())
+            {
+                certain_names.push(prefix.to_string());
             }
         }
         if has_likely {

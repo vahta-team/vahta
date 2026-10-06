@@ -217,5 +217,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --exclude vahta-pyext --exclude vahta-pyext-scan -- -D warnings
 
+      # The vault's cheap test KDF exists so tests need not spend a gigabyte per
+      # unlock. If a shipped crate ever turned it on, a vault could be made with
+      # a weak password hash, so no build of the CLI may see the feature.
+      - name: No test KDF in the shipped CLI
+        run: |
+          set -euo pipefail
+          if cargo tree -p vahta-cli -e features,normal,build --prefix none | grep -q 'test-kdf'; then
+            echo "the test-kdf feature of vahta-vault is enabled in vahta-cli" >&2
+            cargo tree -p vahta-cli -e features,normal,build -i vahta-vault >&2
+            exit 1
+          fi
+          echo "test-kdf is not enabled in vahta-cli"
+
       - name: Test
         run: cargo test --no-fail-fast --workspace --exclude vahta-pyext --exclude vahta-pyext-scan

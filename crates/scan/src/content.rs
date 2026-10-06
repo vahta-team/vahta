@@ -483,10 +483,10 @@ fn json_top_level(text: &str) -> JsonTop {
         if stack_len != 1 {
             return;
         }
-        if let Some(keys) = root_keys.as_mut() {
-            if !keys.contains(&key) {
-                keys.push(key);
-            }
+        if let Some(keys) = root_keys.as_mut()
+            && !keys.contains(&key)
+        {
+            keys.push(key);
         }
     }
 

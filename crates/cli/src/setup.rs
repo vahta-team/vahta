@@ -198,10 +198,10 @@ fn print_table(statuses: &[Status], stdout: &mut dyn Write) {
         if !s.detection.found {
             notes.push(format!("{}: not found ({})", s.title, s.detection.why));
         }
-        if matches!(s.inspect.state, State::Current | State::Outdated) {
-            if let Some(n) = notice_of(&s.name) {
-                notes.push(format!("{}: {n}", s.title));
-            }
+        if matches!(s.inspect.state, State::Current | State::Outdated)
+            && let Some(n) = notice_of(&s.name)
+        {
+            notes.push(format!("{}: {n}", s.title));
         }
         if let State::Unreadable(why) = &s.inspect.state {
             notes.push(format!("{}: config {why}", s.title));

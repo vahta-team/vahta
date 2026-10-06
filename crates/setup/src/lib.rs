@@ -636,17 +636,17 @@ fn installed(doc: &Map<String, Value>, shape: Shape, os: Os) -> Vec<(Entry, Stri
                 },
             };
             for item in commands {
-                if let Some(c) = command_of(item) {
-                    if let Some(word) = our_program(c, os) {
-                        out.push((
-                            Entry {
-                                event: event.clone(),
-                                matcher: matcher.clone(),
-                                command: c.into(),
-                            },
-                            word,
-                        ));
-                    }
+                if let Some(c) = command_of(item)
+                    && let Some(word) = our_program(c, os)
+                {
+                    out.push((
+                        Entry {
+                            event: event.clone(),
+                            matcher: matcher.clone(),
+                            command: c.into(),
+                        },
+                        word,
+                    ));
                 }
             }
         }
