@@ -24,6 +24,7 @@
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
 
+mod daemon_cmd;
 mod setup;
 mod vault_cmds;
 
@@ -40,6 +41,11 @@ use vahta_scan::walk::scan_project_with_threads;
 pub const EXIT_CLEAN: i32 = 0;
 pub const EXIT_LEAKS: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
+/// The daemon commands add: a structured refusal, a prompt window that was
+/// cancelled or timed out, and a daemon that is not available.
+pub const EXIT_REFUSED: i32 = 3;
+pub const EXIT_CANCELLED: i32 = 4;
+pub const EXIT_DAEMON: i32 = 5;
 
 const USAGE: &str = "\
 usage: vahta scan [PATH] [--deep] [--json] [--strict {certain,high,paranoid}]
@@ -76,6 +82,7 @@ commands:
   setup   register vahta-hook with Claude Code, Codex and Cursor
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
+  daemon  run, inspect, stop or restart the daemon that owns the vault
 
 Run `vahta <command> --help` for the options.
 ";
@@ -360,6 +367,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
         Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
         Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
+        Some("daemon") => daemon_cmd::run(&args[1..], env, stdout, stderr),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
             EXIT_CLEAN

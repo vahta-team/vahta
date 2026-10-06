@@ -166,6 +166,10 @@ pub(crate) fn peer_of_pipe(pipe: HANDLE) -> io::Result<Peer> {
     ))
 }
 
+pub(crate) fn effective_uid() -> Option<u32> {
+    None
+}
+
 pub(crate) fn harden_process() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

@@ -962,10 +962,26 @@ version = "0.0.0"
 dependencies = [
  "dunce",
  "serde_json",
+ "vahta-daemon",
  "vahta-harness",
+ "vahta-os",
  "vahta-scan",
  "vahta-setup",
  "vahta-vault",
+]
+
+[[package]]
+name = "vahta-daemon"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "vahta-os",
+ "vahta-vault",
+ "zeroize",
 ]
 
 [[package]]

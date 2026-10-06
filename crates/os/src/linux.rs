@@ -88,6 +88,10 @@ pub(crate) fn peer_of(sock: impl AsFd) -> io::Result<Peer> {
     Ok(Peer::new(id, cred.uid == geteuid(), hold))
 }
 
+pub(crate) fn effective_uid() -> Option<u32> {
+    Some(geteuid().as_raw())
+}
+
 pub(crate) fn harden_process() -> io::Result<()> {
     let dump = set_dumpable_behavior(DumpableBehavior::NotDumpable);
     let core = setrlimit(

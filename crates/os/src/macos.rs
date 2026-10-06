@@ -104,6 +104,10 @@ pub(crate) fn peer_of(sock: impl AsFd) -> io::Result<Peer> {
     Ok(Peer::new(id, euid == geteuid().as_raw(), ()))
 }
 
+pub(crate) fn effective_uid() -> Option<u32> {
+    Some(geteuid().as_raw())
+}
+
 pub(crate) fn harden_process() -> io::Result<()> {
     setrlimit(
         Resource::Core,

@@ -116,6 +116,11 @@ pub fn owned_by_me(pid: u32) -> bool {
     sys::owned_by_me(pid)
 }
 
+/// This process's effective user id, where users have numeric ids (Unix).
+pub fn effective_uid() -> Option<u32> {
+    sys::effective_uid()
+}
+
 /// Make this process harder to read from outside: not dumpable, no core
 /// files. Call once at startup. The error names the step that failed; the
 /// process carries on, as hardening is best effort.
