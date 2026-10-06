@@ -47,9 +47,12 @@ impl Drop for Tmp {
 fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
     let tmp = Tmp::new();
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    // Forward slashes: the fixtures join paths with `/`, and a Windows `\`
+    // would be a JSON (and shell) escape. Windows accepts both separators.
+    let tmp_path = tmp.0.to_string_lossy().replace('\\', "/");
     let text = text
         .replace("{{SECRET_ANTHROPIC}}", &secret_anthropic())
-        .replace("{{TMP}}", &tmp.0.to_string_lossy());
+        .replace("{{TMP}}", &tmp_path);
     let fx: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     if let Some(files) = fx["files"].as_object() {
         for (rel, content) in files {
