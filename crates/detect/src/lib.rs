@@ -19,6 +19,7 @@ pub mod matchers;
 pub mod primitives;
 #[rustfmt::skip]
 mod pyunicode;
+pub mod spans;
 
 pub use classify::{
     Confidence, HEX_LIKELY_MIN_LEN, LIKELY_TRANSITION_FLOOR, MIN_VALUE_LEN,
@@ -30,10 +31,12 @@ pub use classify::{
 };
 pub use hits::{HitSet, find_secret_kind, looks_like_json_container, scan_text_hits, scan_texts};
 pub use matchers::{
-    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_prefix_kind,
-    is_secret_name, iter_assignments, iter_flag_values,
+    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_bearer_spans,
+    find_prefix_kind, find_prefix_spans, is_secret_name, iter_assignments, iter_assignments_at,
+    iter_flag_values, iter_flag_values_at,
 };
 pub use primitives::{
     CharClass, char_class, entropy, fold_ci, has_vowel, is_digit_python, is_python_space,
     is_word_python, transition_rate, vowel_bearing_segments, word_segments,
 };
+pub use spans::{SecretSpan, find_secret_spans, redact_spans};
