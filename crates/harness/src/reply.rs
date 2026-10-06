@@ -18,6 +18,17 @@ pub enum Decision {
         user_message: String,
         agent_message: String,
     },
+    /// after_tool: let the result through with its secrets cut out. `output`
+    /// is the rewritten result in the shape the tool gave it; `mcp` says it
+    /// came from an MCP tool. `agent_message` tells the model what was cut and
+    /// how to ask for it; `user_message` may be empty, and then the person is
+    /// told nothing.
+    Redact {
+        output: Value,
+        mcp: bool,
+        agent_message: String,
+        user_message: String,
+    },
 }
 
 /// What the hook process emits.
@@ -28,33 +39,74 @@ pub struct Output {
     pub exit_code: i32,
 }
 
-fn fill(template: &str, user: &str, agent: &str) -> String {
-    template
-        .replace("{user_message}", user)
-        .replace("{agent_message}", agent)
-        .replace("{reason}", agent)
+/// What a template is filled with.
+struct Fill<'a> {
+    user: &'a str,
+    agent: &'a str,
+    /// A redact reply's rewritten output.
+    output: Option<&'a Value>,
 }
 
-fn fill_value(v: &Value, user: &str, agent: &str) -> Value {
-    match v {
-        Value::String(s) => Value::String(fill(s, user, agent)),
-        Value::Array(a) => Value::Array(a.iter().map(|x| fill_value(x, user, agent)).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, x)| (k.clone(), fill_value(x, user, agent)))
-                .collect(),
-        ),
-        other => other.clone(),
+const PLACEHOLDERS: [&str; 5] = [
+    "{user_message}",
+    "{agent_message}",
+    "{reason}",
+    "{redacted_text}",
+    "{redacted_output}",
+];
+
+impl Fill<'_> {
+    /// The rewritten output as one string: itself if it is one, else its JSON.
+    fn output_text(&self) -> String {
+        match self.output {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
+    fn text(&self, template: &str) -> String {
+        let mut out = template
+            .replace("{user_message}", self.user)
+            .replace("{agent_message}", self.agent)
+            .replace("{reason}", self.agent);
+        if out.contains("{redacted_text}") {
+            out = out.replace("{redacted_text}", &self.output_text());
+        }
+        out
+    }
+
+    /// A filled leaf, or `None` for one to leave out: exactly one placeholder
+    /// that filled to nothing.
+    fn value(&self, v: &Value) -> Option<Value> {
+        Some(match v {
+            Value::String(s) if s == "{redacted_output}" => self.output?.clone(),
+            Value::String(s) => {
+                let filled = self.text(s);
+                if filled.is_empty() && PLACEHOLDERS.contains(&s.as_str()) {
+                    return None;
+                }
+                Value::String(filled)
+            }
+            Value::Array(a) => Value::Array(a.iter().filter_map(|x| self.value(x)).collect()),
+            Value::Object(o) => Value::Object(
+                o.iter()
+                    .filter_map(|(k, x)| self.value(x).map(|x| (k.clone(), x)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        })
     }
 }
 
-fn emit(reply: &Reply, user: &str, agent: &str) -> Output {
+fn emit(reply: &Reply, fill: &Fill<'_>) -> Output {
     match reply.style {
         Style::Json => {
             let Some(body) = &reply.body else {
                 return Output::default();
             };
-            let mut stdout = serde_json::to_vec(&fill_value(body, user, agent)).unwrap_or_default();
+            let filled = fill.value(body).unwrap_or(Value::Null);
+            let mut stdout = serde_json::to_vec(&filled).unwrap_or_default();
             stdout.push(b'\n');
             Output {
                 stdout,
@@ -67,7 +119,7 @@ fn emit(reply: &Reply, user: &str, agent: &str) -> Output {
             stderr: reply
                 .stderr
                 .as_deref()
-                .map(|s| fill(s, user, agent).into_bytes())
+                .map(|s| fill.text(s).into_bytes())
                 .unwrap_or_default(),
             exit_code: reply.exit_code,
         },
@@ -87,31 +139,189 @@ impl Manifest {
         }
     }
 
+    fn redact_reply(&self, mcp: bool) -> Option<&Reply> {
+        let replies = self.replies.after_tool.as_ref()?;
+        if mcp {
+            replies.redact_mcp.as_ref().or(replies.redact.as_ref())
+        } else {
+            replies.redact.as_ref()
+        }
+    }
+
+    /// Whether this harness can rewrite a tool's result (an MCP tool's when
+    /// `mcp`). Where it cannot, the hook says what it found instead.
+    pub fn can_redact(&self, mcp: bool) -> bool {
+        self.redact_reply(mcp).is_some()
+    }
+
     /// Phrase `decision` for an event of `kind`. A verdict the manifest has no
     /// reply for is silence with exit 0, which every harness reads as allow.
     pub fn render(&self, kind: Kind, decision: &Decision) -> Output {
         let Some(replies) = self.replies_for(kind) else {
             return Output::default();
         };
-        let (reply, user, agent) = match decision {
-            Decision::Allow => (replies.allow.as_ref(), "", ""),
+        let (reply, fill) = match decision {
+            Decision::Allow => (
+                replies.allow.as_ref(),
+                Fill {
+                    user: "",
+                    agent: "",
+                    output: None,
+                },
+            ),
             Decision::Deny {
                 user_message,
                 agent_message,
             } => (
                 replies.deny.as_ref(),
-                user_message.as_str(),
-                agent_message.as_str(),
+                Fill {
+                    user: user_message,
+                    agent: agent_message,
+                    output: None,
+                },
             ),
             Decision::Notice {
                 user_message,
                 agent_message,
             } => (
                 replies.notice.as_ref(),
-                user_message.as_str(),
-                agent_message.as_str(),
+                Fill {
+                    user: user_message,
+                    agent: agent_message,
+                    output: None,
+                },
+            ),
+            Decision::Redact {
+                output,
+                mcp,
+                agent_message,
+                user_message,
+            } => (
+                if kind == Kind::AfterTool {
+                    self.redact_reply(*mcp)
+                } else {
+                    None
+                },
+                Fill {
+                    user: user_message,
+                    agent: agent_message,
+                    output: Some(output),
+                },
             ),
         };
-        reply.map(|r| emit(r, user, agent)).unwrap_or_default()
+        reply.map(|r| emit(r, &fill)).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn render(harness: &str, decision: &Decision) -> Value {
+        let m = crate::manifest(harness).unwrap().unwrap();
+        let out = m.render(Kind::AfterTool, decision);
+        assert_eq!(out.exit_code, 0);
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    fn redact(output: Value, mcp: bool, user: &str) -> Decision {
+        Decision::Redact {
+            output,
+            mcp,
+            agent_message: "1 value was redacted".to_string(),
+            user_message: user.to_string(),
+        }
+    }
+
+    #[test]
+    fn claude_rewrites_a_result_in_its_own_shape() {
+        let shaped = json!({"stdout": "a ***REDACTED(K)*** b", "stderr": "", "interrupted": false});
+        let doc = render("claude", &redact(shaped.clone(), false, ""));
+        let hso = &doc["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PostToolUse");
+        assert_eq!(hso["updatedToolOutput"], shaped);
+        assert_eq!(hso["additionalContext"], "1 value was redacted");
+        assert!(hso.get("updatedMCPToolOutput").is_none());
+        // No message for the person: the key is left out, not sent empty.
+        assert!(doc.get("systemMessage").is_none(), "{doc}");
+        // With one, it is there.
+        let doc = render("claude", &redact(json!("x"), false, "said"));
+        assert_eq!(doc["systemMessage"], "said");
+        assert_eq!(doc["hookSpecificOutput"]["updatedToolOutput"], "x");
+    }
+
+    #[test]
+    fn claude_rewrites_an_mcp_result_as_a_string_or_an_object() {
+        let doc = render(
+            "claude",
+            &redact(json!("plain ***REDACTED(K)***"), true, ""),
+        );
+        let hso = &doc["hookSpecificOutput"];
+        assert_eq!(hso["updatedMCPToolOutput"], "plain ***REDACTED(K)***");
+        assert!(hso.get("updatedToolOutput").is_none());
+        let structured = json!({"content": [{"type": "text", "text": "***REDACTED(K)***"}]});
+        let doc = render("claude", &redact(structured.clone(), true, ""));
+        assert_eq!(
+            doc["hookSpecificOutput"]["updatedMCPToolOutput"],
+            structured
+        );
+    }
+
+    #[test]
+    fn cursor_rewrites_only_mcp_results() {
+        let m = crate::manifest("cursor").unwrap().unwrap();
+        assert!(m.can_redact(true));
+        assert!(!m.can_redact(false));
+        let doc = render(
+            "cursor",
+            &redact(json!({"text": "***REDACTED(K)***"}), true, ""),
+        );
+        assert_eq!(doc["updated_mcp_tool_output"]["text"], "***REDACTED(K)***");
+        assert_eq!(doc["additional_context"], "1 value was redacted");
+        // A non-MCP redact has no reply: silence, which the hook never sends.
+        let out = m.render(Kind::AfterTool, &redact(json!("x"), false, ""));
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn codex_blocks_with_the_redacted_text_as_the_reason() {
+        let m = crate::manifest("codex").unwrap().unwrap();
+        assert!(m.can_redact(true) && m.can_redact(false));
+        let doc = render("codex", &redact(json!("out ***REDACTED(K)***"), false, ""));
+        assert_eq!(doc["decision"], "block");
+        let reason = doc["reason"].as_str().unwrap();
+        assert!(reason.starts_with("out ***REDACTED(K)***"), "{reason}");
+        assert!(reason.contains("1 value was redacted"));
+        assert!(doc.get("systemMessage").is_none());
+        // Structured output is given as its JSON text.
+        let doc = render("codex", &redact(json!({"stdout": "s"}), false, "u"));
+        assert!(
+            doc["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with(r#"{"stdout":"s"}"#)
+        );
+        assert_eq!(doc["systemMessage"], "u");
+    }
+
+    #[test]
+    fn a_redact_is_never_rendered_for_another_kind() {
+        let m = crate::manifest("claude").unwrap().unwrap();
+        let out = m.render(Kind::BeforeTool, &redact(json!("x"), false, "u"));
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn the_existing_replies_are_unchanged() {
+        let doc = render(
+            "claude",
+            &Decision::Notice {
+                user_message: "u".into(),
+                agent_message: "a".into(),
+            },
+        );
+        assert_eq!(doc["systemMessage"], "u");
+        assert_eq!(doc["hookSpecificOutput"]["additionalContext"], "a");
     }
 }

@@ -229,6 +229,12 @@ pub struct KindReplies {
     pub deny: Option<Reply>,
     /// Neither allow nor deny: tell the model and the user, change nothing.
     pub notice: Option<Reply>,
+    /// after_tool: let the result through with secrets cut out of it, and tell
+    /// the model so. Absent where the harness cannot rewrite a result.
+    pub redact: Option<Reply>,
+    /// The same for an MCP tool's result, where the harness rewrites those
+    /// through a field of their own. Absent means `redact` covers MCP too.
+    pub redact_mcp: Option<Reply>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -249,7 +255,11 @@ pub struct Reply {
     #[serde(default)]
     pub exit_code: i32,
     /// `json`: the document. String leaves may use `{reason}`, `{user_message}`
-    /// and `{agent_message}`.
+    /// and `{agent_message}`, and in a redact reply `{redacted_text}` (the
+    /// rewritten output as one string). A leaf that is exactly
+    /// `"{redacted_output}"` becomes the rewritten output itself, a string or
+    /// an object as the tool gave it. A leaf that is exactly one placeholder
+    /// and fills to nothing is left out, so an empty message is not sent.
     pub body: Option<Value>,
     /// `exit_code`: the stderr text, same placeholders.
     pub stderr: Option<String>,
