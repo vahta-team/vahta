@@ -20,6 +20,7 @@ use crate::server::Shared;
 /// Whether a logind signal means "end the sessions": the machine is going to
 /// sleep (`PrepareForSleep(true)`), or a session was asked to lock (`Lock`).
 /// The other half of the pair, waking up, ends nothing.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn means_lock(member: &str, going_to_sleep: Option<bool>) -> bool {
     match member {
         "PrepareForSleep" => going_to_sleep == Some(true),
