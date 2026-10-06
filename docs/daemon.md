@@ -35,6 +35,7 @@ nothing was done.
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
 | `vahta run [--secret NAME]... [--as NAME=VAR]... -- COMMAND` | Run a command with secrets in its environment. | only without a session |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
+| `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list`, `vahta check` | Names, kinds and tiers; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta daemon run\|status\|stop\|restart` | The daemon itself. | no |
 
@@ -166,6 +167,7 @@ session_minutes = 30    # default length of `vahta unlock`
 lock_on_sleep = true    # end sessions on suspend and screen lock (Linux)
 terminal = "kitty"      # the terminal the window opens in (Linux); empty = detect
 idle_minutes = 10       # the daemon exits after this long with nothing to do
+hook_output = "redact"  # or "observe": the hook only reports secrets in tool output
 ```
 
 A misspelt key is an error, not a silent default. On Linux the window opens in
@@ -194,6 +196,11 @@ captured and the clipboard can be read, so these are for the person, in their
 own terminal. `vahta setup --claude` writes the same commands into Claude
 Code's `permissions.deny` as a second layer; Codex and Cursor have no command
 deny list, so there the hook is the only layer.
+
+The hook also cuts secrets out of what a tool returns before the model sees
+it: the detector's likely finds, and, with the daemon running, every value it
+holds for that agent. [hooks.md](hooks.md) says how, and how the agent asks the
+person for what was cut.
 
 ## What this does not protect against
 

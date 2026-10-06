@@ -642,3 +642,121 @@ fn deny_rules_are_added_once_beside_the_persons_and_removed_alone() {
     // A deny that is not a list is refused, never clobbered.
     assert!(install("claude", Some(r#"{"permissions": {"deny": "x"}}"#)).is_err());
 }
+
+/// A refresh keeps ours where they are and appends only what is new;
+/// `--last` moves ours behind everything.
+#[test]
+fn ours_keep_their_place_unless_they_are_to_go_last() {
+    use vahta_setup::{Placement, install_text_placed};
+    let v = m("claude").setup_version;
+    let ours = |kind: &str, setup: u32| serde_json::json!({"type": "command", "command": format!("{HOOK} --harness claude --event {kind} --setup {setup}")});
+    // Ours first, an old setup version, then someone else's rewriter; no
+    // PostToolUse of ours yet; and a group where our command shares with theirs.
+    let before = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [ours("before_tool", 1)]},
+                {"matcher": "Read", "hooks": [ours("before_read", 1)]},
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/other-hook"}]}
+            ],
+            "PostToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/rewriter"}]}
+            ],
+            "SessionStart": [
+                {"hooks": [ours("session_start", 1), {"type": "command", "command": "/usr/bin/greeter"}]}
+            ]
+        }
+    })
+    .to_string();
+    let kept = install_text_placed(
+        Some(&before),
+        &m("claude"),
+        Os::Linux,
+        HOOK,
+        Placement::Keep,
+    )
+    .unwrap();
+    assert_eq!(
+        commands(&kept, "PreToolUse"),
+        [
+            format!("{HOOK} --harness claude --event before_tool --setup {v}"),
+            format!("{HOOK} --harness claude --event before_read --setup {v}"),
+            "/usr/bin/other-hook".to_string(),
+        ]
+    );
+    // New: appended after the person's own.
+    assert_eq!(
+        commands(&kept, "PostToolUse"),
+        [
+            "/usr/bin/rewriter".to_string(),
+            format!("{HOOK} --harness claude --event after_tool --setup {v}"),
+        ]
+    );
+    // Theirs stay in the shared group; ours is taken out and appended.
+    assert_eq!(
+        commands(&kept, "SessionStart"),
+        [
+            "/usr/bin/greeter".to_string(),
+            format!("{HOOK} --harness claude --event session_start --setup {v}"),
+        ]
+    );
+    // Stable: a second refresh changes nothing.
+    assert_eq!(install("claude", Some(&kept)).unwrap(), kept);
+
+    let last = install_text_placed(
+        Some(&before),
+        &m("claude"),
+        Os::Linux,
+        HOOK,
+        Placement::Last,
+    )
+    .unwrap();
+    assert_eq!(
+        commands(&last, "PreToolUse"),
+        [
+            "/usr/bin/other-hook".to_string(),
+            format!("{HOOK} --harness claude --event before_tool --setup {v}"),
+            format!("{HOOK} --harness claude --event before_read --setup {v}"),
+        ]
+    );
+    assert_eq!(
+        commands(&last, "PostToolUse").last().unwrap(),
+        &format!("{HOOK} --harness claude --event after_tool --setup {v}")
+    );
+    // Both are complete and current.
+    for text in [&kept, &last] {
+        assert_eq!(
+            text.matches("vahta-hook --harness").count(),
+            m("claude").events.len()
+        );
+    }
+}
+
+/// An entry of ours that this setup no longer writes goes; a duplicate goes.
+#[test]
+fn a_stale_or_duplicate_entry_of_ours_is_removed_in_place() {
+    let v = m("cursor").setup_version;
+    let before = serde_json::json!({
+        "version": 1,
+        "hooks": {
+            "preToolUse": [
+                {"command": format!("{HOOK} --harness cursor --event before_tool --setup {v}"), "matcher": "Shell|Write"},
+                {"command": "./mine.sh"},
+                {"command": format!("{HOOK} --harness cursor --event before_tool --setup {v}"), "matcher": "Shell|Write"}
+            ],
+            "afterAgentResponse": [
+                {"command": format!("{HOOK} --harness cursor --event gone_kind --setup 0")}
+            ]
+        }
+    })
+    .to_string();
+    let out = install("cursor", Some(&before)).unwrap();
+    assert_eq!(
+        commands(&out, "preToolUse"),
+        [
+            format!("{HOOK} --harness cursor --event before_tool --setup {v}"),
+            "./mine.sh".to_string(),
+        ]
+    );
+    assert!(commands(&out, "afterAgentResponse").is_empty());
+}
