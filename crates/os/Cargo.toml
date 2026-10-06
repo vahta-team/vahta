@@ -1,0 +1,40 @@
+[package]
+name = "vahta-os"
+version = "0.0.0"
+description = "The operating-system calls Vahta needs: who is on the other end of a local connection, process ancestry, hardening, and the local socket"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+# The one crate in the workspace that may contain `unsafe`, and only for calls
+# into the operating system. It does not use `[lints] workspace = true`, which
+# forbids unsafe code; CI checks that every other crate does. Every unsafe
+# block carries a `// SAFETY:` comment and an unsafe function body is not
+# implicitly unsafe.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["std", "process", "net", "mm", "fs"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

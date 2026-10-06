@@ -999,6 +999,15 @@ name = "vahta-json"
 version = "0.0.0"
 
 [[package]]
+name = "vahta-os"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
 name = "vahta-pyext"
 version = "0.0.0"
 dependencies = [
