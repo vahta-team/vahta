@@ -24,10 +24,6 @@
 //! * **Children inherit.** The daemon remembers the processes it launched and
 //!   under which session, so a `vahta run` from inside one uses that session.
 
-// The lookups by process tree, the launch table and the delegation checks are
-// used by `run` and `delegate`, which come next.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -120,10 +116,6 @@ pub struct Sessions {
 impl Sessions {
     pub fn len(&self) -> usize {
         self.items.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
     }
 
     pub fn add(&mut self, session: Session) {
@@ -326,6 +318,7 @@ impl Sessions {
 pub fn info_of(s: &Session, now: Instant) -> SessionInfo {
     SessionInfo {
         id: s.id.clone(),
+        tenant: s.tenant.to_string(),
         parent: s.parent.clone(),
         project: s.project.display().to_string(),
         vault: s.vault_path.display().to_string(),

@@ -121,6 +121,23 @@ pub fn effective_uid() -> Option<u32> {
     sys::effective_uid()
 }
 
+/// A signal a command can be sent. Unix only; on Windows there is no such
+/// thing to send to a process group and [`signal_process_group`] says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    Interrupt,
+    Terminate,
+    Hangup,
+    Kill,
+}
+
+/// Send `sig` to the process group led by `pid` (a command started with its own
+/// group). On Windows this is `Unsupported` and the caller ends the process
+/// another way.
+pub fn signal_process_group(pid: u32, sig: Signal) -> io::Result<()> {
+    sys::signal_process_group(pid, sig)
+}
+
 /// Make this process harder to read from outside: not dumpable, no core
 /// files. Call once at startup. The error names the step that failed; the
 /// process carries on, as hardening is best effort.

@@ -1125,3 +1125,654 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
     });
     assert!(s.sessions().is_empty());
 }
+
+// --- run and delegate -----------------------------------------------------------------------
+
+const VAHTA: &str = env!("CARGO_BIN_EXE_vahta");
+
+impl Sandbox {
+    fn passwords_asked(&self) -> usize {
+        self.window_log()
+            .iter()
+            .filter(|e| e["ask"] == "password")
+            .count()
+    }
+}
+
+#[test]
+fn run_with_the_password_injects_the_value_and_scrubs_it_from_the_output() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    // The window said what it was approving: names, the command, one run only.
+    let ask = s
+        .window_log()
+        .into_iter()
+        .rev()
+        .find(|e| e["ask"] == "password")
+        .unwrap();
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("Secrets: ZETA") && lines.contains("Command: printenv ZETA"),
+        "{lines}"
+    );
+    assert!(lines.contains("no session is opened"));
+    // No session came of it.
+    assert!(s.sessions().is_empty());
+    // The next run asks again.
+    let before = s.passwords_asked();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(
+        s.vahta(&["run", "--secret", "ZETA", "--", "true"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(s.passwords_asked(), before + 1);
+    let journal = s.journal();
+    assert!(journal.contains("\"event\":\"run\"") && journal.contains("\"reason\":\"password\""));
+    assert!(journal.contains("run_end") && !journal.contains("fake-"));
+}
+
+#[test]
+fn names_and_variables_come_from_the_flags_and_vahta_toml() {
+    let s = sandbox_with_secrets();
+    // No names and no manifest: nothing to run with.
+    let out = s.vahta(&["run", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(text(&out.stderr).contains("vahta.toml"));
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\nenv = \"MY_ZETA\"\n[secrets.BETA]\n[secrets.GONE]\nrequired = false\n",
+    )
+    .unwrap();
+    // Every manifest name the vault holds, each in its variable.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&[
+        "run",
+        "--",
+        "sh",
+        "-c",
+        "echo \"[$MY_ZETA] [$BETA] [$ZETA] [$GONE]\"",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "[***REDACTED(ZETA)***] [***REDACTED(BETA)***] [] []\n"
+    );
+    // --as overrides the variable; --secret narrows the names.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&[
+        "run",
+        "--secret",
+        "BETA",
+        "--as",
+        "BETA=OTHER",
+        "--",
+        "sh",
+        "-c",
+        "echo \"[$OTHER] [$BETA] [$MY_ZETA]\"",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "[***REDACTED(BETA)***] [] []\n");
+    // What is refused, with no window.
+    let asks = s.asks();
+    for (args, code) in [
+        (vec!["run", "--secret", "NOPE", "--", "true"], 3),
+        (
+            vec!["run", "--secret", "BETA", "--as", "ZETA=X", "--", "true"],
+            1,
+        ),
+        (
+            vec![
+                "run",
+                "--secret",
+                "BETA",
+                "--as",
+                "BETA=LD_PRELOAD",
+                "--",
+                "true",
+            ],
+            1,
+        ),
+        (
+            vec!["run", "--secret", "BETA", "--as", "BETA=1bad", "--", "true"],
+            1,
+        ),
+        (
+            vec![
+                "run", "--secret", "BETA", "--secret", "ZETA", "--as", "BETA=X", "--as", "ZETA=X",
+                "--", "true",
+            ],
+            1,
+        ),
+        (vec!["run", "--secret", "BETA"], 2),
+        (vec!["run", "--as", "NOEQUALS", "--", "true"], 2),
+        (vec!["run", "--bogus", "--", "true"], 2),
+    ] {
+        let out = s.vahta(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    assert_eq!(s.asks(), asks, "a window opened for a refusal");
+}
+
+#[test]
+fn exit_codes_streams_stdin_cwd_and_the_environment_pass_through() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let run = |args: &[&str]| s.vahta(&[&["run", "--secret", "ZETA", "--"][..], args].concat());
+    assert_eq!(run(&["sh", "-c", "exit 7"]).status.code(), Some(7));
+    assert_eq!(run(&["sh", "-c", "kill -9 $$"]).status.code(), Some(137));
+    // stdout and stderr stay separate, and a value on either is scrubbed.
+    let out = run(&["sh", "-c", "echo out $ZETA; echo err $ZETA >&2"]);
+    assert_eq!(text(&out.stdout), "out ***REDACTED(ZETA)***\n");
+    assert_eq!(text(&out.stderr), "err ***REDACTED(ZETA)***\n");
+    // A program that does not exist is a failure with a reason.
+    let out = run(&["definitely-not-a-program"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("cannot start definitely-not-a-program"));
+
+    // The directory and the environment are the caller's, less what must not
+    // be passed on.
+    let sub = s.project().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let out = s
+        .command(&sub)
+        .env("FOO", "bar baz")
+        .env("LD_PRELOAD", "/nonexistent.so")
+        .env("LD_LIBRARY_PATH", "/nonexistent")
+        .env("DYLD_INSERT_LIBRARIES", "/nonexistent")
+        .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
+        .arg("pwd; echo \"$FOO\"; env | grep -c -E '^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_|VAHTA_)' || true")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let lines: Vec<String> = text(&out.stdout).lines().map(str::to_string).collect();
+    assert!(lines[0].ends_with("/project/sub"), "{lines:?}");
+    assert_eq!(lines[1], "bar baz");
+    assert_eq!(lines[2], "0");
+
+    // stdin is relayed, and what comes back is scrubbed.
+    let mut child = s
+        .command(&s.project())
+        .args(["run", "--secret", "ZETA", "--", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"hello fake-one and fake-on")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(text(&out.stdout), "hello ***REDACTED(ZETA)*** and fake-on");
+}
+
+#[test]
+fn a_session_serves_runs_with_no_window_and_each_use_secrets_always_ask() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let asked = s.asks();
+    for _ in 0..2 {
+        let out = s.vahta(&[
+            "run",
+            "--secret",
+            "ZETA",
+            "--secret",
+            "BETA",
+            "--",
+            "sh",
+            "-c",
+            "echo $ZETA $BETA",
+        ]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stdout),
+            "***REDACTED(ZETA)*** ***REDACTED(BETA)***\n"
+        );
+    }
+    assert_eq!(s.asks(), asked, "the session answered both runs");
+    assert_eq!(s.sessions()[0]["uses"], 2);
+    let journal = s.journal();
+    assert!(journal.matches("\"reason\":\"session ").count() >= 2);
+
+    // An each-use secret asks every time, in a session or not; so does a run
+    // that mixes it with covered ones.
+    for args in [
+        vec!["run", "--secret", "ALPHA", "--", "printenv", "ALPHA"],
+        vec!["run", "--secret", "ALPHA", "--secret", "ZETA", "--", "true"],
+    ] {
+        s.script(&[r#"{"secret":"correct horse"}"#]);
+        let before = s.asks();
+        let out = s.vahta(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(s.asks(), before + 1, "{args:?}");
+    }
+    // A name the session does not cover (it covers all session-tier ones, so
+    // narrow it first) asks for this one run and opens no session.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(
+        s.vahta(&["unlock", "--secret", "ZETA"]).status.code(),
+        Some(0)
+    );
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let before = s.asks();
+    let out = s.vahta(&["run", "--secret", "BETA", "--", "printenv", "BETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), before + 1);
+    assert_eq!(s.sessions().len(), 1);
+}
+
+#[test]
+fn lock_ends_the_session_and_the_next_run_asks_again() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    assert_eq!(
+        s.vahta(&["run", "--secret", "ZETA", "--", "true"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let asks = s.asks();
+    assert_eq!(s.vahta(&["lock"]).status.code(), Some(0));
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(
+        s.vahta(&["run", "--secret", "ZETA", "--", "true"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(s.asks(), asks + 1);
+}
+
+#[test]
+fn a_changed_secret_fails_the_session_closed_with_a_message_to_unlock_again() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(
+        s.vahta(&["unlock", "--secret", "ZETA"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        s.vahta(&["run", "--secret", "ZETA", "--", "true"])
+            .status
+            .code(),
+        Some(0)
+    );
+    // The value is replaced (through the window, as it must be).
+    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-new"}"#]);
+    assert_eq!(s.vahta(&["set", "ZETA"]).status.code(), Some(0));
+    let asks = s.asks();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
+    // Refused, not run, and not silently re-prompted.
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("unlock again"));
+    assert_eq!(s.asks(), asks);
+}
+
+#[test]
+fn a_command_started_by_the_daemon_inherits_the_session() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let asks = s.asks();
+    // The inner `vahta run` is a descendant of a process the daemon launched,
+    // not of the unlock's anchor, and names the sandbox explicitly because the
+    // daemon strips VAHTA_* from what it launches.
+    let script = format!(
+        "VAHTA_RUNTIME_DIR='{r}' VAHTA_DATA_DIR='{d}' VAHTA_CONFIG_DIR='{c}' \
+         VAHTA_TEST_SURFACE='{sc}' VAHTA_TEST_SURFACE_LOG='{l}' HOME='{h}' \
+         '{v}' run --secret BETA -- sh -c 'echo $BETA'",
+        r = s.root.join("run").display(),
+        d = s.root.join("data").display(),
+        c = s.root.join("config").display(),
+        sc = s.root.join("script.jsonl").display(),
+        l = s.root.join("surface.log").display(),
+        h = s.root.join("home").display(),
+        v = VAHTA,
+    );
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", &script]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(BETA)***\n");
+    assert_eq!(s.asks(), asks, "the inner run used the session too");
+    // Outer and inner both counted.
+    assert_eq!(s.sessions()[0]["uses"], 2);
+}
+
+#[test]
+fn delegation_narrows_the_session_and_refuses_anything_wider_with_no_window() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock", "--json"]);
+    let root_id = serde_json::from_slice::<Value>(&out.stdout).unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let asks = s.asks();
+
+    // Inside a delegation for ZETA alone: ZETA runs, with no window...
+    let out = s.vahta(&[
+        "delegate", "--secret", "ZETA", "--for", "10m", "--", VAHTA, "run", "--secret", "ZETA",
+        "--", "printenv", "ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    // ...and BETA, which the parent has but the child does not, is refused with
+    // no window, and the refusal is the sub-agent's exit code.
+    let out = s.vahta(&[
+        "delegate", "--secret", "ZETA", "--", VAHTA, "run", "--secret", "BETA", "--", "true",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("BETA") && err.contains("not covered by this session"),
+        "{err}"
+    );
+    assert_eq!(s.asks(), asks, "no window for a delegated session");
+
+    // While it runs, the child is below the parent and belongs to the
+    // delegating process.
+    let out = s.vahta(&[
+        "delegate", "--secret", "ZETA", "--", VAHTA, "sessions", "--json",
+    ]);
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let list = doc["sessions"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    let child = list.iter().find(|x| x["parent"] == root_id).unwrap();
+    assert_eq!(child["names"], serde_json::json!(["ZETA"]));
+    assert_eq!(child["anchor_exe"], "vahta");
+    // Once the command is gone so is the child session; the parent remains.
+    let list = s.sessions();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], root_id);
+
+    // Wider than the parent: refused, no window.
+    for (args, kind) in [
+        (
+            vec!["delegate", "--secret", "ALPHA", "--", "true"],
+            "not_a_subset",
+        ),
+        (
+            vec![
+                "delegate", "--secret", "ZETA", "--secret", "NOPE", "--", "true",
+            ],
+            "not_a_subset",
+        ),
+        (
+            vec!["delegate", "--secret", "ZETA", "--for", "2h", "--", "true"],
+            "later_deadline",
+        ),
+        (
+            vec![
+                "delegate", "--secret", "ZETA", "--for", "forever", "--", "true",
+            ],
+            "later_deadline",
+        ),
+    ] {
+        let mut full = args.clone();
+        full.insert(1, "--label");
+        full.insert(2, "x");
+        let out = s.vahta(&full);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        let _ = kind;
+    }
+    assert_eq!(s.asks(), asks);
+    assert!(s.journal().contains("delegate_refused"));
+    // Usage errors, and a program that cannot start (the session still ends).
+    assert_eq!(s.vahta(&["delegate", "--", "true"]).status.code(), Some(3));
+    assert_eq!(
+        s.vahta(&["delegate", "--secret", "ZETA"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        s.vahta(&[
+            "delegate",
+            "--secret",
+            "ZETA",
+            "--",
+            "definitely-not-a-program"
+        ])
+        .status
+        .code(),
+        Some(127)
+    );
+    assert_eq!(s.sessions().len(), 1);
+    // With no session at all there is nothing to narrow.
+    assert_eq!(s.vahta(&["lock"]).status.code(), Some(0));
+    let out = s.vahta(&["delegate", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(text(&out.stderr).contains("vahta unlock"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_command_is_ended_when_its_client_goes_away() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let pidfile = s.root.join("child.pid");
+    let mut client = s
+        .command(&s.project())
+        .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
+        .arg(format!("echo $$ > '{}'; exec sleep 60", pidfile.display()))
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("the command to start", 10, || {
+        fs::read_to_string(&pidfile).is_ok_and(|p| !p.trim().is_empty())
+    });
+    let pid: u32 = fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = |pid: u32| {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|t| !t.contains(") Z"))
+            .unwrap_or(false)
+    };
+    assert!(alive(pid));
+    client.kill().unwrap();
+    let _ = client.wait();
+    wait_until("the command to be ended", 10, || !alive(pid));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ctrl_c_reaches_the_command_and_its_exit_code_comes_back() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let mut client = s
+        .command(&s.project())
+        .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
+        .arg("trap 'echo got-int; exit 3' INT; echo ready; while :; do sleep 0.05; done")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = client.stdout.take().unwrap();
+    let mut seen = Vec::new();
+    wait_until("the command to be ready", 10, || {
+        use std::io::Read;
+        let mut b = [0u8; 64];
+        // Blocking read, but the command prints its first line at once.
+        let n = stdout.read(&mut b).unwrap_or(0);
+        seen.extend_from_slice(&b[..n]);
+        String::from_utf8_lossy(&seen).contains("ready")
+    });
+    let status = Command::new("kill")
+        .args(["-INT", &client.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut rest = String::new();
+    {
+        use std::io::Read;
+        let _ = stdout.read_to_string(&mut rest);
+    }
+    let status = client.wait().unwrap();
+    assert_eq!(status.code(), Some(3));
+    assert!(rest.contains("got-int"), "{rest:?}");
+}
+
+// --- the invariant ------------------------------------------------------------------------
+
+#[test]
+fn nothing_secret_is_in_the_journal_the_daemons_stderr_or_any_clients_output() {
+    let s = Sandbox::new();
+    // A daemon whose stderr is kept, so it can be searched.
+    let stderr_path = s.root.join("daemon.stderr");
+    let mut daemon = s
+        .command(&s.project())
+        .args(["daemon", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&stderr_path).unwrap())
+        .spawn()
+        .unwrap();
+    let c = connector(&s, false);
+    wait_until("the daemon", 10, || {
+        c.connect_running().ok().flatten().is_some()
+    });
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut run = |args: &[&str]| -> Output {
+        let out = s.vahta(args);
+        seen.push(text(&out.stdout));
+        seen.push(text(&out.stderr));
+        out
+    };
+    let pw = r#"{"secret":"correct horse"}"#;
+    s.script(&[pw, r#"{"ack":true}"#]);
+    run(&["init"]);
+    for (name, value, tier) in [
+        ("ZETA", "fake-one", "session"),
+        ("BETA", "fake-two", "session"),
+        ("ALPHA", "fake-three", "each-use"),
+    ] {
+        s.script(&[pw, &format!(r#"{{"secret":"{value}"}}"#)]);
+        assert_eq!(run(&["set", name, "--tier", tier]).status.code(), Some(0));
+    }
+    // A wrong password, a cancel, and a refusal.
+    s.script(&[r#"{"secret":"wrong"}"#, pw, r#"{"secret":"fake-new"}"#]);
+    run(&["set", "ZETA"]);
+    s.script(&[r#"{"cancel":true}"#]);
+    run(&["set", "ZETA"]);
+    run(&["unlock", "--secret", "ALPHA", "--json"]);
+    // A session, runs that print the values on both streams, a reveal, a run
+    // with the password, a delegation, a failure, the list and a lock.
+    s.script(&[pw]);
+    run(&["unlock", "--json"]);
+    run(&[
+        "run",
+        "--secret",
+        "ZETA",
+        "--secret",
+        "BETA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ZETA $BETA; echo $ZETA $BETA >&2; printenv",
+    ]);
+    s.script(&[pw]);
+    run(&[
+        "run",
+        "--secret",
+        "ALPHA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ALPHA >&2; echo $ALPHA",
+    ]);
+    s.script(&[pw, r#"{"ack":true}"#]);
+    run(&["reveal", "ZETA"]);
+    run(&[
+        "delegate",
+        "--secret",
+        "ZETA",
+        "--",
+        VAHTA,
+        "run",
+        "--secret",
+        "ZETA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ZETA",
+    ]);
+    run(&[
+        "delegate", "--secret", "ZETA", "--", VAHTA, "run", "--secret", "BETA", "--", "true",
+    ]);
+    run(&["run", "--secret", "ZETA", "--", "sh", "-c", "exit 4"]);
+    run(&["sessions", "--json"]);
+    run(&["daemon", "status", "--json"]);
+    run(&["lock"]);
+    run(&["list", "--json"]);
+    run(&["check", "--json"]);
+
+    // Everything the person typed or was shown, in the window's own channel.
+    let window = fs::read_to_string(s.root.join("surface.log")).unwrap();
+    assert!(window.contains("fake-new"), "the window was shown a value");
+    let key = s
+        .window_log()
+        .iter()
+        .find(|e| e["ask"] == "recovery")
+        .map(|e| e["shown"].as_str().unwrap().to_string())
+        .unwrap();
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let journal = s.journal();
+    let daemon_stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(
+        journal.lines().count() > 20,
+        "the journal should have recorded all of this"
+    );
+    let mut everywhere = vec![
+        ("the journal".to_string(), journal),
+        ("the daemon's stderr".to_string(), daemon_stderr),
+    ];
+    for (i, text) in seen.iter().enumerate() {
+        everywhere.push((format!("client output {i}"), text.clone()));
+    }
+    for secret in [
+        "fake-one",
+        "fake-two",
+        "fake-three",
+        "fake-new",
+        "correct horse",
+        "wrong",
+        key.as_str(),
+    ] {
+        for (place, content) in &everywhere {
+            assert!(!content.contains(secret), "{place} holds {secret:?}");
+        }
+    }
+    // The scrubbed values did come back, as markers.
+    assert!(seen.iter().any(|t| t.contains("***REDACTED(ZETA)***")));
+    assert!(seen.iter().any(|t| t.contains("***REDACTED(ALPHA)***")));
+}

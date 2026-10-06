@@ -29,6 +29,11 @@ rpassword = "7"
 # `--json` output of `vahta list` and `vahta check`.
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# `vahta run` forwards Ctrl-C and termination to the command (the daemon runs
+# it), and `vahta delegate` stays alive while its command handles Ctrl-C.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
 [dev-dependencies]
 # The tests build vaults to point the commands at; that needs the cheap KDF.
 # A dev-dependency's features are not enabled in a normal build of this crate,

@@ -341,7 +341,10 @@ pub fn report(
             }
             EXIT_FAILED
         }
-        ClientReply::Status(_) | ClientReply::Session(_) | ClientReply::Sessions { .. } => {
+        ClientReply::Status(_)
+        | ClientReply::Session(_)
+        | ClientReply::Sessions { .. }
+        | ClientReply::RunStarted {} => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
             EXIT_FAILED
         }
@@ -361,5 +364,7 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::NothingToDo => "nothing to do",
         RefusalKind::Exists => "already exists",
         RefusalKind::NoAnchor => "no process to anchor a session to",
+        RefusalKind::Stale => "changed since this session was opened; unlock again",
+        RefusalKind::NoSession => "no session to narrow; run `vahta unlock` first",
     }
 }

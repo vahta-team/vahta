@@ -33,6 +33,7 @@ use crate::protocol::{
 use crate::session::{EXTEND_BY, ExtensionAsk, Sessions};
 use crate::session_ops;
 use crate::surface::{PromptSurface, SurfaceRegistry, TerminalSurface};
+use crate::{run, run_ops};
 
 #[derive(Debug)]
 pub enum ServerError {
@@ -489,6 +490,35 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ),
             ClientRequest::Lock { cwd, all } => (
                 session_ops::lock(&ctx, &cwd, all).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Run {
+                cwd,
+                argv,
+                env,
+                names,
+                renames,
+                label,
+            } => {
+                // A run is the one request that goes on after its reply: the
+                // connection then carries the command's input and output.
+                match run_ops::prepare(&ctx, &cwd, argv, env, names, renames, label) {
+                    Ok(prepared) => {
+                        if write_frame(stream, &ClientReply::RunStarted {}).is_ok() {
+                            run::execute(shared, stream, prepared, (ctx.exe.clone(), ctx.pid));
+                        }
+                        return;
+                    }
+                    Err(reply) => (reply, false),
+                }
+            }
+            ClientRequest::Delegate {
+                cwd,
+                names,
+                duration,
+                label,
+            } => (
+                run_ops::delegate(&ctx, &cwd, names, duration, label).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Sessions {} => (session_ops::list(&ctx).unwrap_or_else(|r| r), false),

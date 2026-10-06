@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 pub use crypto::KdfParams;
 pub use format::current::{Actor, Entry, Kind, Recipient, RecipientKind, Role, Tier};
 pub use session::SessionKeys;
-pub use vault::{Peek, RecipientSecret, Vault, Verification};
+pub use vault::{Peek, RecipientSecret, Vault, Verification, read_file};
 
 /// Names are env-var-like and short. Checked on every write and every read of
 /// a file, so no vault can carry a name the project contract cannot spell.

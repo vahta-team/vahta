@@ -170,6 +170,13 @@ pub(crate) fn effective_uid() -> Option<u32> {
     None
 }
 
+pub(crate) fn signal_process_group(_pid: u32, _sig: crate::Signal) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no process groups to signal on Windows",
+    ))
+}
+
 pub(crate) fn harden_process() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

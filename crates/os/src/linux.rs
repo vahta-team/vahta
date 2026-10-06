@@ -92,6 +92,21 @@ pub(crate) fn effective_uid() -> Option<u32> {
     Some(geteuid().as_raw())
 }
 
+pub(crate) fn signal_process_group(pid: u32, sig: crate::Signal) -> io::Result<()> {
+    use rustix::process::{Pid, Signal, kill_process_group};
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| io::Error::other("bad pid"))?;
+    let signal = match sig {
+        crate::Signal::Interrupt => Signal::INT,
+        crate::Signal::Terminate => Signal::TERM,
+        crate::Signal::Hangup => Signal::HUP,
+        crate::Signal::Kill => Signal::KILL,
+    };
+    kill_process_group(pid, signal).map_err(io::Error::from)
+}
+
 pub(crate) fn harden_process() -> io::Result<()> {
     let dump = set_dumpable_behavior(DumpableBehavior::NotDumpable);
     let core = setrlimit(

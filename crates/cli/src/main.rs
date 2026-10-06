@@ -25,6 +25,7 @@
 //! hold one.
 
 mod daemon_cmd;
+mod run_cmd;
 mod session_cmds;
 mod setup;
 mod surface_cmd;
@@ -88,6 +89,8 @@ commands:
   setup   register vahta-hook with Claude Code, Codex and Cursor
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
+  run     run a command with secrets in its environment, output scrubbed
+  delegate  narrow your session for a sub-agent and run it
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
   sessions  list sessions, or `kill ID` one (no password)
@@ -386,6 +389,8 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some(cmd @ ("init" | "set" | "remove" | "import" | "reveal" | "copy")) => {
             vault_ops::run(cmd, &args[1..], env, stdout, stderr)
         }
+        Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
+        Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),
         Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),
         Some("lock") => session_cmds::run_lock(&args[1..], env, stdout, stderr),
         Some("sessions") => session_cmds::run_sessions(&args[1..], env, stdout, stderr),

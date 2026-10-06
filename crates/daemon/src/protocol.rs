@@ -249,6 +249,135 @@ pub enum ClientRequest {
     SessionKill {
         id: String,
     },
+    /// Run a command with secrets in its environment. The reply is
+    /// `RunStarted`, after which the connection carries [`RunInput`] frames
+    /// from the client and [`RunOutput`] frames from the daemon until the
+    /// command ends.
+    Run {
+        cwd: String,
+        argv: Vec<String>,
+        /// The caller's environment, from which the command's is made.
+        env: Vec<(String, String)>,
+        /// With no names, every name in `vahta.toml` that the vault holds.
+        names: Option<Vec<String>>,
+        /// `(NAME, VARIABLE)`: put NAME in this variable instead.
+        renames: Vec<(String, String)>,
+        label: Option<String>,
+    },
+    /// Narrow the caller's session for a sub-agent. The child session is
+    /// anchored to the calling process, which then runs the sub-agent; the
+    /// session ends when it exits. A scope that is not a subset of the
+    /// parent's, or a later deadline, is refused without a window.
+    Delegate {
+        cwd: String,
+        names: Vec<String>,
+        /// `Default` is as long as the parent has.
+        duration: DurationSpec,
+        label: Option<String>,
+    },
+}
+
+/// What the client sends while a command runs: the command's input, and the
+/// signals its user sends. Input is the caller's own data, relayed as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "msg", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunInput {
+    /// Bytes for the command's standard input, in base64.
+    Stdin {
+        data: String,
+    },
+    /// The caller's standard input has ended.
+    StdinEof {},
+    Signal {
+        signal: RunSignal,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunSignal {
+    Interrupt,
+    Terminate,
+    Hangup,
+}
+
+/// What the daemon sends while a command runs: its output with the secret
+/// values already taken out, and how it ended. The bytes are scrubbed bytes
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "msg", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunOutput {
+    Stdout {
+        data: String,
+    },
+    Stderr {
+        data: String,
+    },
+    /// The command ended: its exit code, or 128 plus the signal that ended it.
+    Exit {
+        code: i32,
+        signal: Option<i32>,
+    },
+    /// The command could not be started or kept running.
+    Failed {
+        message: String,
+    },
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding, for bytes inside a JSON frame.
+pub fn b64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// The inverse of [`b64_encode`]; `None` for anything that is not canonical
+/// padded base64.
+pub fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let value = |c: u8| B64.iter().position(|b| *b == c).map(|p| p as u32);
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for (i, quad) in bytes.chunks(4).enumerate() {
+        let last = (i + 1) * 4 == bytes.len();
+        let pad = quad.iter().rev().take_while(|c| **c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for (j, c) in quad.iter().enumerate() {
+            let v = if j >= 4 - pad { 0 } else { value(*c)? };
+            n = (n << 6) | v;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 /// A session as a client may see it: never a key.
@@ -256,6 +385,8 @@ pub enum ClientRequest {
 #[serde(deny_unknown_fields)]
 pub struct SessionInfo {
     pub id: String,
+    /// Whose daemon holds it: `local` until there is a cloud.
+    pub tenant: String,
     pub parent: Option<String>,
     pub project: String,
     pub vault: String,
@@ -292,6 +423,11 @@ pub enum RefusalKind {
     Exists,
     /// The caller is not something a session can be anchored to.
     NoAnchor,
+    /// The session no longer opens what it covered: a secret was changed,
+    /// removed or re-tiered since it was opened.
+    Stale,
+    /// There is no session to narrow.
+    NoSession,
 }
 
 /// One name in a refusal and why.
@@ -316,6 +452,9 @@ pub struct Refusal {
 #[serde(tag = "reply", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientReply {
     Ok {},
+    /// A `Run` was accepted and the command is running; what follows on this
+    /// connection is `RunInput` and `RunOutput`.
+    RunStarted {},
     Status(StatusInfo),
     /// A session was opened.
     /// Boxed: it is by far the largest reply.
@@ -569,6 +708,39 @@ mod tests {
         write_frame(&mut buf, &answer).unwrap();
         let back: Option<SurfaceAnswer> = read_frame(&mut Cursor::new(buf)).unwrap();
         assert_eq!(back, Some(answer));
+    }
+
+    #[test]
+    fn base64_round_trips_and_refuses_what_is_not_base64() {
+        for bytes in [
+            &b""[..],
+            b"f",
+            b"fo",
+            b"foo",
+            b"foob",
+            b"fooba",
+            b"foobar",
+            &[0, 255, 1, 128, 7],
+        ] {
+            assert_eq!(b64_decode(&b64_encode(bytes)).unwrap(), bytes);
+        }
+        assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(b64_encode(b"fo"), "Zm8=");
+        let all: Vec<u8> = (0..=255).collect();
+        assert_eq!(b64_decode(&b64_encode(&all)).unwrap(), all);
+        for bad in ["Zm9", "Zm9v!", "Zg=a", "=Zm9", "Z===", "Zm9vYg==Zm9v"] {
+            assert!(b64_decode(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn run_messages_refuse_unknown_fields_and_carry_only_bytes() {
+        let bad = r#"{"msg":"stdout","data":"","value":"fake-one"}"#;
+        let r: Result<Option<RunOutput>, _> = read_frame(&mut Cursor::new(frame(bad.as_bytes())));
+        assert!(r.is_err());
+        let bad = r#"{"msg":"signal","signal":"interrupt","password":"x"}"#;
+        let r: Result<Option<RunInput>, _> = read_frame(&mut Cursor::new(frame(bad.as_bytes())));
+        assert!(r.is_err());
     }
 
     #[test]

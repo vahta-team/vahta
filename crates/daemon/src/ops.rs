@@ -36,7 +36,6 @@ pub(crate) struct Ctx<'a> {
     pub exe: Option<String>,
     pub pid: u32,
     /// The peer, with its start time, for the session lookups.
-    #[allow(dead_code)]
     pub peer: vahta_os::ProcessId,
 }
 
