@@ -144,7 +144,8 @@ fn install_dry_run_status_and_uninstall() {
     // As it appears inside the JSON string: Windows backslashes are escaped.
     let hook = s.hook().display().to_string().replace('\\', "\\\\");
     assert!(s.read(CLAUDE).contains(&format!(
-        "{hook} --harness claude --event before_tool --setup 1"
+        "{hook} --harness claude --event before_tool --setup {}",
+        claude_setup_version()
     )));
     assert_eq!(s.read(".claude/settings.json.vahta-backup"), before);
     let o = text(&s.vahta(&["setup"]).stdout);
@@ -284,9 +285,10 @@ fn the_stale_notice_goes_to_stderr_only_and_only_when_outdated() {
     let cfg = s.home().join(CLAUDE);
     fs::write(
         &cfg,
-        fs::read_to_string(&cfg)
-            .unwrap()
-            .replace("--setup 1", "--setup 0"),
+        fs::read_to_string(&cfg).unwrap().replace(
+            &format!("--setup {}", claude_setup_version()),
+            &format!("--setup {}", claude_setup_version() - 1),
+        ),
     )
     .unwrap();
     let out = scan(&s);
@@ -338,4 +340,12 @@ fn codex_setup_says_to_trust_the_hooks_in_codex() {
     assert!(!o.contains("Claude Code: Codex"), "{o}");
     // An uninstall does not ask for trust.
     assert!(!text(&s.vahta(&["setup", "--codex", "--uninstall"]).stdout).contains("run /hooks"));
+}
+
+/// What `vahta setup` writes for Claude Code is at this version now.
+fn claude_setup_version() -> u32 {
+    vahta_harness::manifest("claude")
+        .and_then(Result::ok)
+        .map(|m| m.setup_version)
+        .unwrap_or(0)
 }

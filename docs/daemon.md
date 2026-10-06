@@ -186,6 +186,13 @@ command if it is not found: `terminal = "alacritty -e"`.
 The agent hook refuses to read, edit, write, move, copy, remove or redirect into
 any `.vahta/` directory or `<data dir>/vahta/`, and says which path.
 
+It also refuses `vahta reveal`, `vahta copy` and `vahta _surface` (and `vh …`)
+from an agent, however they are spelled: a window on the screen can be
+captured and the clipboard can be read, so these are for the person, in their
+own terminal. `vahta setup --claude` writes the same commands into Claude
+Code's `permissions.deny` as a second layer; Codex and Cursor have no command
+deny list, so there the hook is the only layer.
+
 ## What this does not protect against
 
 Vahta is built so that an agent cannot *ask* for a secret. It cannot stop everything
