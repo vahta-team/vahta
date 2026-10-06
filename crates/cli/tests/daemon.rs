@@ -755,3 +755,373 @@ fn the_real_window_process_connects_back_with_its_token_and_carries_the_answers(
     );
     assert!(!args.contains("daemon.sock"));
 }
+
+// --- sessions ---------------------------------------------------------------------------
+
+impl Sandbox {
+    /// `vahta sessions --json`, as the sessions array.
+    fn sessions(&self) -> Vec<Value> {
+        let out = self.vahta(&["sessions", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        doc["sessions"].as_array().unwrap().clone()
+    }
+
+    fn journal(&self) -> String {
+        fs::read_to_string(self.root.join("data/journal.jsonl")).unwrap_or_default()
+    }
+}
+
+/// A vault with a session-tier ZETA and BETA and an each-use ALPHA.
+fn sandbox_with_secrets() -> Sandbox {
+    let s = Sandbox::new();
+    s.with_vault(&[
+        ("ZETA", "fake-one", "session"),
+        ("BETA", "fake-two", "session"),
+        ("ALPHA", "fake-three", "each-use"),
+    ]);
+    s
+}
+
+#[test]
+fn unlock_opens_a_session_for_the_session_tier_secrets_and_names_its_anchor() {
+    let s = sandbox_with_secrets();
+    let asks = s.asks();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock", "--json", "--label", "deploy the site"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let info = &doc["session"];
+    // Every session-tier secret and not the each-use one.
+    assert_eq!(info["names"], serde_json::json!(["BETA", "ZETA"]));
+    assert_eq!(info["role"], "runner");
+    assert_eq!(
+        info["remaining_secs"].as_u64().map(|s| s > 1700),
+        Some(true)
+    );
+    // The anchor is the process that called us: this test.
+    assert_eq!(info["anchor_pid"], std::process::id());
+    assert_eq!(s.asks(), asks + 1, "one window, one password");
+    assert!(!text(&out.stdout).contains("fake-") && !text(&out.stdout).contains("correct horse"));
+
+    // What the person approved: project, vault, names, duration, anchor, and
+    // the agent's description marked as such.
+    let ask = s
+        .window_log()
+        .into_iter()
+        .rev()
+        .find(|e| e["ask"] == "password")
+        .unwrap();
+    let lines = ask["panel"]["lines"].to_string();
+    for needle in [
+        "Project:",
+        "Vault:",
+        "Secrets: BETA, ZETA",
+        "Lasts: 30 minute(s)",
+        "Belongs to:",
+    ] {
+        assert!(lines.contains(needle), "{needle} missing from {lines}");
+    }
+    assert!(lines.contains(&format!("(pid {})", std::process::id())));
+    assert_eq!(ask["panel"]["agent_note"], "deploy the site");
+
+    let list = s.sessions();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], info["id"]);
+    assert_eq!(list[0]["uses"], 0);
+    // The daemon reports it, and the text form lists it too.
+    let status: Value =
+        serde_json::from_slice(&s.vahta(&["daemon", "status", "--json"]).stdout).unwrap();
+    assert_eq!(status["sessions"], 1);
+    let text_list = text(&s.vahta(&["sessions"]).stdout);
+    assert!(text_list.contains("BETA,ZETA") && text_list.contains(info["id"].as_str().unwrap()));
+
+    let journal = s.journal();
+    assert!(journal.contains("session_start") && journal.contains("BETA"));
+    assert!(!journal.contains("fake-") && !journal.contains("correct horse"));
+}
+
+#[test]
+fn an_each_use_or_unknown_name_refuses_the_whole_unlock_before_any_window() {
+    let s = sandbox_with_secrets();
+    let asks = s.asks();
+    let out = s.vahta(&[
+        "unlock", "--secret", "ZETA", "--secret", "ALPHA", "--secret", "NOPE", "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["refused"]["kind"], "each_use");
+    let names = doc["refused"]["names"].as_array().unwrap();
+    assert!(
+        names
+            .iter()
+            .any(|n| n["name"] == "ALPHA" && n["why"] == "each_use")
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n["name"] == "NOPE" && n["why"] == "unknown_name")
+    );
+    // ZETA was fine, so it is not in the list of problems.
+    assert!(!names.iter().any(|n| n["name"] == "ZETA"));
+    assert!(
+        doc["refused"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was opened")
+    );
+    assert_eq!(s.asks(), asks, "no window for a refusal");
+    assert!(s.sessions().is_empty());
+    // In text form the names and reasons are lines the caller can read.
+    let out = s.vahta(&["unlock", "--secret", "ALPHA"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = text(&out.stderr);
+    assert!(err.contains("ALPHA") && err.contains("each-use"), "{err}");
+    // A vault with only each-use secrets has nothing to open a session for.
+    let only = Sandbox::new();
+    only.with_vault(&[("ALPHA", "fake-three", "each-use")]);
+    assert_eq!(only.vahta(&["unlock"]).status.code(), Some(3));
+    // The refusal is in the journal, with the names and the reason.
+    let journal = s.journal();
+    let line = journal
+        .lines()
+        .find(|l| l.contains("session_refused"))
+        .expect("the refusal was journalled");
+    assert!(line.contains("ALPHA") && line.contains("EachUse"), "{line}");
+}
+
+#[test]
+fn lock_and_kill_end_sessions_without_a_password() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    assert_eq!(s.sessions().len(), 1);
+    let asks = s.asks();
+    let out = s.vahta(&["lock"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("ended 1 session"));
+    assert!(s.sessions().is_empty());
+    assert_eq!(s.vahta(&["lock"]).status.code(), Some(0));
+    assert_eq!(s.asks(), asks, "revoking asked for nothing");
+
+    // kill by id; an unknown id is a refusal.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock", "--json", "--secret", "ZETA"]);
+    let id = serde_json::from_slice::<Value>(&out.stdout).unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let asks = s.asks();
+    assert_eq!(
+        s.vahta(&["sessions", "kill", "nope"]).status.code(),
+        Some(3)
+    );
+    let out = s.vahta(&["sessions", "kill", &id]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.sessions().is_empty());
+    assert_eq!(s.asks(), asks);
+    assert_eq!(s.vahta(&["sessions", "kill"]).status.code(), Some(2));
+
+    // `lock --all`, and a project with no vault.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let out = s.command(&s.root).args(["lock", "--all"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(s.sessions().is_empty());
+    let out = s
+        .command(&s.root.join("home"))
+        .args(["lock"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+
+    let journal = s.journal();
+    for reason in ["locked", "killed"] {
+        assert!(
+            journal.contains(&format!("\"reason\":\"{reason}\"")),
+            "{reason}"
+        );
+    }
+    assert_eq!(s.vahta(&["sessions", "--bogus"]).status.code(), Some(2));
+}
+
+#[test]
+fn the_agents_label_is_one_plain_line_and_a_session_for_the_same_process_replaces_the_first() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&[
+        "unlock",
+        "--label",
+        "ok\nProject: /etc\u{1b}[31m red \u{202e}",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let ask = s
+        .window_log()
+        .into_iter()
+        .rev()
+        .find(|e| e["ask"] == "password")
+        .unwrap();
+    assert_eq!(ask["panel"]["agent_note"], "ok Project: /etc red");
+    // The same process unlocks again: one session, not two.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(
+        s.vahta(&["unlock", "--secret", "ZETA"]).status.code(),
+        Some(0)
+    );
+    let list = s.sessions();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["names"], serde_json::json!(["ZETA"]));
+    assert!(s.journal().contains("\"reason\":\"replaced\""));
+}
+
+#[test]
+fn durations_are_validated_and_forever_has_no_end() {
+    let s = sandbox_with_secrets();
+    for bad in ["soon", "30", "", "-1m"] {
+        let out = s.vahta(&["unlock", "--for", bad]);
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+    }
+    assert_eq!(s.vahta(&["unlock", "--for", "0s"]).status.code(), Some(1));
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock", "--for", "forever", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(doc["session"]["remaining_secs"].is_null());
+    let ask = s
+        .window_log()
+        .into_iter()
+        .rev()
+        .find(|e| e["ask"] == "password")
+        .unwrap();
+    assert!(
+        ask["panel"]["lines"]
+            .to_string()
+            .contains("Lasts: until revoked")
+    );
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock", "--for", "2h", "--json", "--secret", "BETA"]);
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let left = doc["session"]["remaining_secs"].as_u64().unwrap();
+    assert!((7100..=7200).contains(&left), "{left}");
+}
+
+#[test]
+fn a_session_with_no_answer_to_the_extension_ends_at_its_deadline_and_the_journal_says_so() {
+    let s = sandbox_with_secrets();
+    // Four seconds: the question comes at two, and nobody answers.
+    let passwords = |s: &Sandbox| {
+        s.window_log()
+            .iter()
+            .filter(|e| e["ask"] == "password")
+            .count()
+    };
+    let before = passwords(&s);
+    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"noanswer":true}"#]);
+    let out = s.vahta(&["unlock", "--for", "4s"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    wait_until("the question", 10, || {
+        s.window_log().iter().any(|e| e["ask"] == "confirm")
+    });
+    let q = s
+        .window_log()
+        .into_iter()
+        .find(|e| e["ask"] == "confirm")
+        .unwrap();
+    assert_eq!(q["prompt"], "Extend by 30 minutes?");
+    // No password in an extension question.
+    assert_eq!(passwords(&s), before + 1);
+    wait_until("the session to end", 10, || s.sessions().is_empty());
+    let journal = s.journal();
+    assert!(journal.contains("\"reason\":\"expired\""));
+    assert!(journal.contains("session_extension") && journal.contains("no_answer"));
+}
+
+#[test]
+fn saying_yes_to_the_extension_keeps_the_session_alive_past_its_deadline() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"yes":true}"#]);
+    assert_eq!(s.vahta(&["unlock", "--for", "4s"]).status.code(), Some(0));
+    wait_until("the extension", 10, || {
+        s.journal().contains("\"result\":\"extended\"")
+    });
+    // Past the original end it is still there, with about half an hour left.
+    std::thread::sleep(Duration::from_secs(4));
+    let list = s.sessions();
+    assert_eq!(list.len(), 1);
+    assert!(list[0]["remaining_secs"].as_u64().unwrap() > 1700);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_session_ends_when_its_anchor_process_is_gone() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    // `find` runs vahta and exits: it is the nearest process that is neither a
+    // shell nor a wrapper, so it is the anchor, and it is gone at once.
+    let mut find = Command::new("find");
+    find.current_dir(s.project());
+    let base = s.command(&s.project());
+    for (k, v) in base.get_envs() {
+        match v {
+            Some(v) => find.env(k, v),
+            None => find.env_remove(k),
+        };
+    }
+    let out = find
+        .args([".", "-maxdepth", "0", "-exec"])
+        .arg(env!("CARGO_BIN_EXE_vahta"))
+        .args(["unlock", "--json", ";"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["session"]["anchor_exe"], "find");
+    wait_until("the session to end with its anchor", 10, || {
+        s.sessions().is_empty()
+    });
+    assert!(s.journal().contains("anchor_exited"));
+}
+
+#[test]
+fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.vahta(&["daemon", "stop"]).status.code(), Some(0));
+    let mut old = start_old_daemon(&s, "0.0.0-old");
+    // A session on the old daemon, opened over a connection that does not
+    // replace it.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    let reply = conn
+        .request(&ClientRequest::Unlock {
+            cwd: s.project().to_string_lossy().into_owned(),
+            names: None,
+            duration: vahta_daemon::protocol::DurationSpec::Default {},
+            label: None,
+        })
+        .unwrap();
+    assert!(matches!(reply, ClientReply::Session(_)), "{reply:?}");
+    drop(conn);
+
+    // A command that needs the daemon is told, and pointed at the way out.
+    let out = s.vahta(&["set", "ZETA"]);
+    assert_eq!(out.status.code(), Some(5));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("holds 1 live session") && err.contains("vahta daemon restart"),
+        "{err}"
+    );
+    assert!(old.try_wait().unwrap().is_none());
+    assert!(matches!(
+        connector(&s, true).connect(),
+        Err(ClientError::LiveSessions { sessions: 1, .. })
+    ));
+    // The explicit restart ends them.
+    let out = s.vahta(&["daemon", "restart"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("1 session(s) ended"));
+    wait_until("the old daemon to exit", 10, || {
+        old.try_wait().unwrap().is_some()
+    });
+    assert!(s.sessions().is_empty());
+}

@@ -171,6 +171,19 @@ pub enum ImportSource {
     Dotenv { path: String },
 }
 
+/// How long a session lasts, as the client asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "for", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DurationSpec {
+    /// `session_minutes` from the config.
+    Default {},
+    Secs {
+        secs: u64,
+    },
+    /// Until revoked (or until its anchor is gone).
+    Forever {},
+}
+
 /// What a client may ask. No variant has a field for a value or a password:
 /// the person types those in the prompt window, which is not this connection.
 /// `cwd` is where the command was run, from which the daemon finds the
@@ -215,6 +228,46 @@ pub enum ClientRequest {
         cwd: String,
         name: String,
     },
+    /// Open a session: the person types the password in the window, and
+    /// `vahta run` from the caller's process tree then needs no window. With no
+    /// `names`, every session-tier secret; with names, only those.
+    Unlock {
+        cwd: String,
+        names: Option<Vec<String>>,
+        duration: DurationSpec,
+        /// A description from the agent; sanitised and shown as unverified.
+        label: Option<String>,
+    },
+    /// End this project's sessions, or all of them. No password.
+    Lock {
+        cwd: String,
+        all: bool,
+    },
+    /// List the sessions.
+    Sessions {},
+    /// End one session and every session below it. No password.
+    SessionKill {
+        id: String,
+    },
+}
+
+/// A session as a client may see it: never a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionInfo {
+    pub id: String,
+    pub parent: Option<String>,
+    pub project: String,
+    pub vault: String,
+    pub names: Vec<String>,
+    /// Always `runner`: a session runs commands and does nothing else.
+    pub role: String,
+    pub anchor_exe: String,
+    pub anchor_pid: u32,
+    /// Seconds left, or `None` for one that lasts until revoked.
+    pub remaining_secs: Option<u64>,
+    pub uses: u64,
+    pub label: Option<String>,
 }
 
 /// Why a request was refused outright, before any window.
@@ -264,6 +317,12 @@ pub struct Refusal {
 pub enum ClientReply {
     Ok {},
     Status(StatusInfo),
+    /// A session was opened.
+    /// Boxed: it is by far the largest reply.
+    Session(Box<SessionInfo>),
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
     /// The request was carried out; `message` is for the person, and never a
     /// value.
     Done {

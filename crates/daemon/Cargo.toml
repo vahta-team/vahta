@@ -29,3 +29,5 @@ zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# The session tests build real vaults; that needs the cheap KDF.
+vahta-vault = { path = "../vault", features = ["test-kdf"] }

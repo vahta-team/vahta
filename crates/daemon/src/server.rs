@@ -22,6 +22,7 @@ use vahta_vault::KdfParams;
 use vahta_vault::store::LocalStore;
 
 use crate::config::Config;
+use crate::journal::Entry as JournalEntry;
 use crate::journal::{Entry, Journal};
 use crate::ops::{self, Ctx};
 use crate::paths::{PathError, Paths};
@@ -29,6 +30,8 @@ use crate::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, ProtocolError, StatusInfo,
     read_frame, write_frame,
 };
+use crate::session::{EXTEND_BY, ExtensionAsk, Sessions};
+use crate::session_ops;
 use crate::surface::{PromptSurface, SurfaceRegistry, TerminalSurface};
 
 #[derive(Debug)]
@@ -104,6 +107,7 @@ pub(crate) struct Shared {
     pub(crate) surface: Box<dyn PromptSurface>,
     pub(crate) registry: Arc<SurfaceRegistry>,
     pub(crate) store: LocalStore,
+    pub(crate) sessions: Mutex<Sessions>,
     started: Instant,
     stop: AtomicBool,
     connections: AtomicUsize,
@@ -125,7 +129,7 @@ impl Shared {
     }
 
     pub(crate) fn live_sessions(&self) -> usize {
-        0
+        self.sessions.lock().map(|s| s.len()).unwrap_or(0)
     }
 
     pub(crate) fn stopping(&self) -> bool {
@@ -233,6 +237,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         surface,
         registry,
         store,
+        sessions: Mutex::new(Sessions::default()),
         started: Instant::now(),
         stop: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
@@ -241,6 +246,8 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
 
     let idle_shared = shared.clone();
     std::thread::spawn(move || idle_watch(&idle_shared));
+    let sweep_shared = shared.clone();
+    std::thread::spawn(move || sweep_sessions(&sweep_shared));
 
     while !shared.stopping() {
         match listener.accept() {
@@ -260,6 +267,8 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         }
     }
 
+    // Every session ends with the daemon, keys overwritten.
+    shared.end_all_sessions("daemon_stop");
     shared
         .journal
         .record(Entry::new("daemon_stop").result("ok", None));
@@ -283,6 +292,76 @@ fn idle_watch(shared: &Arc<Shared>) {
             shared.request_stop();
         }
     }
+}
+
+/// Once a half second: end sessions that have run out or lost their anchor,
+/// and ask about extending the ones near their end.
+fn sweep_sessions(shared: &Arc<Shared>) {
+    let alive = |p: &vahta_os::ProcessId| vahta_os::identity_of(p.pid).is_ok_and(|id| id == *p);
+    while !shared.stopping() {
+        std::thread::sleep(Duration::from_millis(500));
+        let swept = match shared.sessions.lock() {
+            Ok(mut sessions) => sessions.sweep(Instant::now(), &alive),
+            Err(_) => continue,
+        };
+        shared.record_ended(swept.ended);
+        for ask in swept.ask {
+            let shared = shared.clone();
+            let _ = std::thread::Builder::new()
+                .name("vahta-extend".to_string())
+                .spawn(move || ask_to_extend(&shared, ask));
+        }
+    }
+}
+
+/// Two minutes before a session ends: "Extend by 30 minutes?". Yes or no, no
+/// password, because the keys are still in memory. With no answer the session
+/// ends at its deadline.
+fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
+    let record = |result: &str, reason: &str| {
+        shared.journal.record(
+            JournalEntry::new("session_extension")
+                .session(&ask.id, None)
+                .names(&ask.scope)
+                .result(result, Some(reason)),
+        );
+    };
+    let mut window = match shared.surface.open("Extend a session") {
+        Ok(w) => w,
+        Err(_) => {
+            record("not_asked", "no window could be opened");
+            return;
+        }
+    };
+    let left = ask.deadline.saturating_duration_since(Instant::now());
+    let panel = crate::protocol::Panel {
+        title: "Extend a session".to_string(),
+        lines: vec![
+            format!("Project: {}", ask.project.display()),
+            format!("Secrets: {}", ask.scope.join(", ")),
+            format!("Belongs to: {} (pid {})", ask.anchor_exe, ask.anchor_pid),
+            format!("It ends in {} seconds.", left.as_secs()),
+        ],
+        warning: None,
+        agent_note: None,
+    };
+    match window.confirm(&panel, "Extend by 30 minutes?", Some(left)) {
+        Ok(Some(true)) => {
+            let extended = shared
+                .sessions
+                .lock()
+                .map(|mut s| s.extend(&ask.id, Instant::now(), EXTEND_BY))
+                .unwrap_or(false);
+            if extended {
+                record("extended", "30 minutes");
+            } else {
+                record("not_extended", "the session had already ended");
+            }
+        }
+        Ok(Some(false)) => record("declined", "the person said no"),
+        _ => record("no_answer", "it ends at its deadline"),
+    }
+    window.close(None);
 }
 
 fn reject(stream: &mut Stream, shared: &Shared, why: &str) {
@@ -370,6 +449,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             shared,
             exe: vahta_os::exe_name(peer.id.pid),
             pid: peer.id.pid,
+            peer: peer.id,
         };
         let (reply, stop) = match request {
             ClientRequest::Status {} => (ClientReply::Status(shared.status()), false),
@@ -396,6 +476,24 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             }
             ClientRequest::Copy { cwd, name } => {
                 (ops::copy(&ctx, &cwd, &name).unwrap_or_else(|r| r), false)
+            }
+            ClientRequest::Unlock {
+                cwd,
+                names,
+                duration,
+                label,
+            } => (
+                session_ops::unlock_session(&ctx, &cwd, names, duration, label)
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Lock { cwd, all } => (
+                session_ops::lock(&ctx, &cwd, all).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Sessions {} => (session_ops::list(&ctx).unwrap_or_else(|r| r), false),
+            ClientRequest::SessionKill { id } => {
+                (session_ops::kill(&ctx, &id).unwrap_or_else(|r| r), false)
             }
         };
         if write_frame(stream, &reply).is_err() {

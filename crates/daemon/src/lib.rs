@@ -11,6 +11,7 @@
 //! the hook), listening on a socket in a private runtime directory, and exits
 //! when it has been idle.
 
+mod anchor;
 pub mod client;
 mod clipboard;
 pub mod config;
@@ -20,6 +21,8 @@ mod ops;
 pub mod paths;
 pub mod protocol;
 pub mod server;
+mod session;
+mod session_ops;
 pub mod surface;
 pub mod terminal;
 pub mod testing;

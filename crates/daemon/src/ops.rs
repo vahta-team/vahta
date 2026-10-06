@@ -35,6 +35,9 @@ pub(crate) struct Ctx<'a> {
     pub shared: &'a Shared,
     pub exe: Option<String>,
     pub pid: u32,
+    /// The peer, with its start time, for the session lookups.
+    #[allow(dead_code)]
+    pub peer: vahta_os::ProcessId,
 }
 
 /// An early end: the reply to send.
@@ -165,14 +168,14 @@ pub(crate) fn unlock(
     Err(error("too many wrong passwords; nothing was done"))
 }
 
-fn lines_for(project: &Project, vault: &Path) -> Vec<String> {
+pub(crate) fn lines_for(project: &Project, vault: &Path) -> Vec<String> {
     vec![
         format!("Project: {}", project.root.display()),
         format!("Vault: {}", vault.display()),
     ]
 }
 
-fn check_name(name: &str) -> Flow<()> {
+pub(crate) fn check_name(name: &str) -> Flow<()> {
     if valid_name(name) {
         Ok(())
     } else {
@@ -180,7 +183,7 @@ fn check_name(name: &str) -> Flow<()> {
     }
 }
 
-fn unknown_name(name: &str) -> ClientReply {
+pub(crate) fn unknown_name(name: &str) -> ClientReply {
     refused_names(
         RefusalKind::UnknownName,
         format!("no secret named {name} in this vault"),

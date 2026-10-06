@@ -341,7 +341,7 @@ pub fn report(
             }
             EXIT_FAILED
         }
-        ClientReply::Status(_) => {
+        ClientReply::Status(_) | ClientReply::Session(_) | ClientReply::Sessions { .. } => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
             EXIT_FAILED
         }
