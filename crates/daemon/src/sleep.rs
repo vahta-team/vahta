@@ -47,6 +47,10 @@ pub(crate) fn start(shared: &Arc<Shared>) {
 }
 
 /// End every session because the machine slept or locked.
+#[cfg_attr(
+    not(any(target_os = "linux", feature = "test-surface")),
+    allow(dead_code)
+)]
 pub(crate) fn lock_now(shared: &Shared, why: &'static str) {
     let n = shared.end_all_sessions("sleep");
     shared.journal.record(
