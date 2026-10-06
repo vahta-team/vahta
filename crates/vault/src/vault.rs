@@ -32,6 +32,7 @@ use crate::crypto::{self, KEY_LEN, KdfParams};
 use crate::format::current::{self, Actor, Entry, Kind, Recipient, RecipientKind, Role, Tier};
 use crate::format::upgrade::{self, AnyUnlocked};
 use crate::format::{self, CURRENT, Loaded, OwnerAccess, OwnerState};
+use crate::session::SessionKeys;
 use crate::store::{LocalStore, StateFile, StateKey};
 use crate::write::{VaultLock, write_atomic};
 use crate::{Error, RecoveryKey, SecretValue, now, valid_name};
@@ -562,6 +563,38 @@ impl Vault {
                 current::value_with_dek(r.fmt, &m.header.vault_id, &dek, sealed)
             }
         }
+    }
+
+    /// What a session keeps instead of the vault: the data keys of `names`,
+    /// the store's MAC key, and the owner key and generation as they are now.
+    /// The caller then drops the vault and with it the vault key. Owner only,
+    /// since only the owner holds a wrap for every secret; a name that is not
+    /// in the vault is [`Error::NotFound`].
+    pub fn session_keys(&self, names: &[String]) -> Result<SessionKeys, Error> {
+        let (fmt, vk) = match &self.access {
+            Access::Owner(u) => (u.fmt, &u.vk),
+            Access::Blocked { old, .. } => (old.as_v1().fmt, &old.as_v1().vk),
+            Access::Recipient(_) => return Err(Error::NotOwner),
+        };
+        let m = self.model();
+        let owner = current::owner_keys(vk);
+        let mut keys = Vec::with_capacity(names.len());
+        for name in names {
+            let i = m
+                .index
+                .iter()
+                .position(|e| &e.name == name)
+                .ok_or_else(|| Error::not_found(name))?;
+            let dek = current::open_dek(fmt, &m.header.vault_id, &owner.enc_sk, &m.secrets[i])?;
+            keys.push((name.clone(), m.index[i].secret_id, dek));
+        }
+        Ok(SessionKeys::new(
+            m.header.vault_id,
+            m.owner.sign_pk,
+            m.header.generation,
+            *self.state_key.mac_key(),
+            keys,
+        ))
     }
 
     // --- Writing: who may ---------------------------------------------------------------

@@ -42,6 +42,8 @@ kind = "before_tool"
 matcher = "Bash|Write|Edit|MultiEdit|mcp__.*"
 tool_name = "tool_name"
 tool_input = "tool_input"
+# The file Write and Edit are about; the hook refuses Vahta's own files.
+file_path = ["tool_input.file_path", "tool_input.path"]
 cwd = "cwd"
 
 # Same Claude event, different job: reading a file. Claude has no dedicated

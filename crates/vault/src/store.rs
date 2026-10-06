@@ -68,6 +68,19 @@ impl StateKey {
         }
     }
 
+    /// The owner's, from a MAC key kept earlier (a session keeps this instead
+    /// of the vault key, which it has dropped).
+    pub(crate) fn owner_from_mac(mac_key: [u8; 32]) -> StateKey {
+        StateKey {
+            file: StateFile::Owner,
+            mac_key: Zeroizing::new(mac_key),
+        }
+    }
+
+    pub(crate) fn mac_key(&self) -> &[u8; 32] {
+        &self.mac_key
+    }
+
     /// A recipient's, from its own signing key.
     pub fn recipient(id: [u8; 16], sign_sk: &[u8; 32]) -> StateKey {
         StateKey {

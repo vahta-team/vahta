@@ -1,0 +1,22 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/.vahta/vault.vht": "not a real vault\n",
+    "proj/vahta.toml": "[secrets.A]\n",
+    "proj/.vahta-notes/x.md": "# notes\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "vahta list"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": null,
+  "exit": 0
+}

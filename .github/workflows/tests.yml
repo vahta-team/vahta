@@ -218,17 +218,56 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude vahta-pyext --exclude vahta-pyext-scan -- -D warnings
 
       # The vault's cheap test KDF exists so tests need not spend a gigabyte per
-      # unlock. If a shipped crate ever turned it on, a vault could be made with
-      # a weak password hash, so no build of the CLI may see the feature.
-      - name: No test KDF in the shipped CLI
+      # unlock, and the daemon's `test-surface` feature lets a test drive a real
+      # daemon with a scripted prompt window instead of a person and a terminal.
+      # If a shipped crate ever turned either on, a vault could be made with a
+      # weak password hash or a prompt answered by a script, so no build of the
+      # CLI may see either feature.
+      - name: No test-only features in the shipped CLI
         run: |
           set -euo pipefail
-          if cargo tree -p vahta-cli -e features,normal,build --prefix none | grep -q 'test-kdf'; then
-            echo "the test-kdf feature of vahta-vault is enabled in vahta-cli" >&2
+          if cargo tree -p vahta-cli -e features,normal,build --prefix none | grep -Eq 'test-kdf|test-surface'; then
+            echo "a test-only feature (test-kdf, test-surface) is enabled in vahta-cli" >&2
             cargo tree -p vahta-cli -e features,normal,build -i vahta-vault >&2
+            cargo tree -p vahta-cli -e features,normal,build -i vahta-daemon >&2
             exit 1
           fi
-          echo "test-kdf is not enabled in vahta-cli"
+          echo "no test-only feature is enabled in vahta-cli"
+
+      # The workspace forbids unsafe code (`unsafe_code = "forbid"` in the
+      # workspace lints). `vahta-os` is the one crate that may contain it, for
+      # operating-system calls only, so: every other crate keeps
+      # `[lints] workspace = true`, and `unsafe` appears in no source outside
+      # crates/os. The two pyo3 crates are the exception to the first rule: they
+      # are built by the Python legs, and pyo3's macros expand to unsafe code,
+      # so they cannot take the lint (they hold no `unsafe` of their own, which
+      # the second rule still checks).
+      - name: Unsafe code only in vahta-os
+        run: |
+          set -euo pipefail
+          bad=0
+          for manifest in crates/*/Cargo.toml; do
+            case "$(dirname "$manifest")" in
+              crates/os|crates/pyext|crates/pyext-scan) continue ;;
+            esac
+            if ! tr -d '\r' < "$manifest" | awk '/^\[lints\]$/ { getline n; if (n == "workspace = true") ok = 1 } END { exit !ok }'; then
+              echo "$manifest must contain [lints] workspace = true" >&2
+              bad=1
+            fi
+          done
+          # Comments may mention the word; code may not.
+          found=$(grep -rnwE 'unsafe' --include='*.rs' crates \
+            | grep -v '^crates/os/' \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+          if [ -n "$found" ]; then
+            echo "unsafe outside crates/os:" >&2
+            echo "$found" >&2
+            bad=1
+          fi
+          # Inside crates/os every unsafe block needs its SAFETY comment; clippy's
+          # undocumented_unsafe_blocks (denied in that crate) enforces it on each
+          # platform's build.
+          exit "$bad"
 
       - name: Test
         run: cargo test --no-fail-fast --workspace --exclude vahta-pyext --exclude vahta-pyext-scan
