@@ -19,7 +19,6 @@ use std::io::{self, Read, Write};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use vahta_vault::Tier;
 use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
@@ -160,6 +159,16 @@ pub struct HelloReply {
 }
 
 // --- Client messages ------------------------------------------------------------------
+
+/// A secret's tier, as a client names it. The vault has its own type; this one
+/// mirrors it on the wire (same spelling) so a client needs no vault crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tier {
+    /// A session may hold it.
+    Session,
+    /// It needs the password every time.
+    EachUse,
+}
 
 /// Which file a project's secrets are imported from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -460,7 +460,8 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 tier,
                 file,
             } => (
-                ops::set(&ctx, &cwd, &name, tier, file.as_deref()).unwrap_or_else(|r| r),
+                ops::set(&ctx, &cwd, &name, ops::vault_tier(tier), file.as_deref())
+                    .unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Remove { cwd, name } => {

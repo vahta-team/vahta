@@ -9,7 +9,7 @@
 use std::io::Write;
 
 use serde_json::json;
-use vahta_daemon::protocol::{ClientReply, ClientRequest, DurationSpec, SessionInfo};
+use vahta_ipc::protocol::{ClientReply, ClientRequest, DurationSpec, SessionInfo};
 
 use crate::daemon_cmd;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};

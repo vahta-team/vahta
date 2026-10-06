@@ -16,7 +16,7 @@ use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use vahta_daemon::protocol::{
+use vahta_ipc::protocol::{
     Hello, HelloKind, HelloReply, PROTOCOL, Panel, Secret, SurfaceAnswer, SurfaceRequest,
     read_frame, write_frame,
 };

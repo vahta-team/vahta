@@ -19,10 +19,9 @@ workspace = true
 test-surface = ["vahta-vault/test-kdf"]
 
 [dependencies]
-dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
 vahta-vault = { path = "../vault" }
 zeroize = "1"

@@ -1468,6 +1468,7 @@ dependencies = [
  "signal-hook",
  "vahta-daemon",
  "vahta-harness",
+ "vahta-ipc",
  "vahta-os",
  "vahta-scan",
  "vahta-setup",
@@ -1478,11 +1479,10 @@ dependencies = [
 name = "vahta-daemon"
 version = "0.0.0"
 dependencies = [
- "dirs",
  "serde",
  "serde_json",
  "tempfile",
- "toml",
+ "vahta-ipc",
  "vahta-os",
  "vahta-vault",
  "zbus",
@@ -1514,6 +1514,19 @@ dependencies = [
  "vahta-harness",
  "vahta-json",
  "vahta-scan",
+]
+
+[[package]]
+name = "vahta-ipc"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "vahta-os",
+ "zeroize",
 ]
 
 [[package]]

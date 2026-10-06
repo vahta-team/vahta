@@ -20,7 +20,9 @@ use zeroize::Zeroizing;
 use crate::clipboard;
 use crate::dotenv;
 use crate::journal::Entry;
-use crate::protocol::{ClientReply, ImportSource, NameIssue, Panel, Refusal, RefusalKind, Secret};
+use crate::protocol::{
+    self, ClientReply, ImportSource, NameIssue, Panel, Refusal, RefusalKind, Secret,
+};
 use crate::server::Shared;
 use crate::surface::{SurfaceError, Window};
 
@@ -88,6 +90,15 @@ pub(crate) fn from_surface(e: SurfaceError) -> ClientReply {
 
 pub(crate) fn from_vault(e: Error) -> ClientReply {
     error(e.to_string())
+}
+
+/// The vault's tier for the one a client named. Two types because a client
+/// does not link the vault crate; they mirror each other one for one.
+pub(crate) fn vault_tier(tier: protocol::Tier) -> Tier {
+    match tier {
+        protocol::Tier::Session => Tier::Session,
+        protocol::Tier::EachUse => Tier::EachUse,
+    }
 }
 
 impl Ctx<'_> {

@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use vahta_daemon::client::{ClientError, Connector};
-use vahta_daemon::paths::Paths;
+use vahta_ipc::client::{ClientError, Connector};
+use vahta_ipc::paths::Paths;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{Tier, Vault};
 
-use vahta_daemon::protocol::{
+use vahta_ipc::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, read_frame, write_frame,
 };
 
@@ -1112,7 +1112,7 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
         .request(&ClientRequest::Unlock {
             cwd: s.project().to_string_lossy().into_owned(),
             names: None,
-            duration: vahta_daemon::protocol::DurationSpec::Default {},
+            duration: vahta_ipc::protocol::DurationSpec::Default {},
             label: None,
         })
         .unwrap();

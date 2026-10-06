@@ -1,0 +1,27 @@
+[package]
+name = "vahta-ipc"
+version = "0.0.0"
+description = "How a client talks to the Vahta daemon: the wire protocol, the client, where the daemon lives and its config"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The hook is a client too, and runs on every tool call: this crate carries
+# what a client needs and nothing of the daemon's weight (no vault crypto, no
+# system bus).
+[dependencies]
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+vahta-os = { path = "../os" }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"

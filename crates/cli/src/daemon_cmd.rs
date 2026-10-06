@@ -9,11 +9,11 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use serde_json::json;
-use vahta_daemon::client::{ClientError, Connection, Connector};
-use vahta_daemon::config::Config;
-use vahta_daemon::paths::Paths;
-use vahta_daemon::protocol::{ClientReply, ClientRequest, RefusalKind, StatusInfo};
 use vahta_daemon::server::{self, Options, ServerError};
+use vahta_ipc::client::{ClientError, Connection, Connector};
+use vahta_ipc::config::Config;
+use vahta_ipc::paths::Paths;
+use vahta_ipc::protocol::{ClientReply, ClientRequest, RefusalKind, StatusInfo};
 
 use crate::{EXIT_CANCELLED, EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_REFUSED, EXIT_USAGE, Env};
 
