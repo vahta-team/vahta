@@ -2250,3 +2250,57 @@ fn observe_mode_changes_nothing_and_the_daemon_journals_it() {
     assert!(!journal.contains("output_redacted"));
     assert!(!journal.contains(&key));
 }
+
+/// Through every path of output redaction (cut, refused, declined, saved,
+/// shown), no value reaches the journal, the window, or any stdout or stderr
+/// except the one printout the person agreed to.
+#[test]
+fn no_value_leaks_through_output_redaction() {
+    let s = sandbox_with_secrets();
+    let key = ["sk-", "ant-", &"d".repeat(25)].concat();
+    let values = ["fake-one", "fake-two", "fake-three", key.as_str()];
+    let mut seen: Vec<String> = Vec::new();
+    let vahta = |seen: &mut Vec<String>, args: &[&str]| {
+        let out = s.vahta(args);
+        seen.push(text(&out.stdout));
+        seen.push(text(&out.stderr));
+        out
+    };
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    vahta(&mut seen, &["unlock"]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    vahta(
+        &mut seen,
+        &["run", "--secret", "ALPHA", "--", "printenv", "ALPHA"],
+    );
+    let output = format!("fake-one {key} fake-three");
+    let reply = s.hook_after_bash(&output).unwrap();
+    seen.push(reply.to_string());
+    let reference = reference_in(&redacted(&reply).1);
+    vahta(&mut seen, &["output", "allow", "000000000000"]);
+    s.script(&[r#"{"choose":1}"#]);
+    vahta(&mut seen, &["output", "allow", &reference]);
+    s.script(&[
+        r#"{"choose":2}"#,
+        r#"{"choose":1}"#,
+        r#"{"text":"SAVED_KEY"}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    vahta(&mut seen, &["output", "allow", &reference, "--json"]);
+    // The one release: its stdout is the output, by the person's choice; its
+    // stderr is still checked.
+    s.script(&[r#"{"choose":0}"#]);
+    let shown = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(text(&shown.stdout), format!("{output}\n"));
+    seen.push(text(&shown.stderr));
+
+    let window = fs::read_to_string(s.root.join("surface.log")).unwrap();
+    for v in values {
+        for (i, t) in seen.iter().enumerate() {
+            assert!(!t.contains(v), "output {i} holds a value: {t}");
+        }
+        assert!(!s.journal().contains(v), "the journal holds a value");
+        assert!(!window.contains(v), "the window was shown a value");
+    }
+}
