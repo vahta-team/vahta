@@ -160,6 +160,12 @@ pub fn spawn_detached(cmd: &mut Command) -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     sys::detach_command(cmd);
+    // Windows passes every inheritable handle to the child, whatever its
+    // standard streams are set to, so the daemon would hold our caller's
+    // stdout pipe open and a caller reading it to the end would wait for the
+    // daemon to exit.
+    #[cfg(windows)]
+    let _held = sys::StdHandlesNotInherited::new();
     cmd.spawn().map(drop)
 }
 

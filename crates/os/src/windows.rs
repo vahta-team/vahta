@@ -17,9 +17,15 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::process::Command;
 
-use windows_sys::Win32::Foundation::{FILETIME, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    FILETIME, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+    SetHandleInformation,
+};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -190,6 +196,49 @@ pub(crate) fn detach_command(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW.
     cmd.creation_flags(0x0000_0008 | 0x0000_0200 | 0x0800_0000);
+}
+
+/// This process's standard handles made not inheritable while it lives, their
+/// flags put back when it is dropped. Held across a spawn, so the child gets
+/// only the handles its `Command` gave it.
+pub(crate) struct StdHandlesNotInherited(Vec<(HANDLE, u32)>);
+
+impl StdHandlesNotInherited {
+    pub(crate) fn new() -> Self {
+        let mut saved = Vec::new();
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: no pointers; returns a handle we do not own, or null or
+            // INVALID_HANDLE_VALUE, which are skipped.
+            let handle = unsafe { GetStdHandle(which) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            let mut flags = 0u32;
+            // SAFETY: `handle` is this process's standard handle, open for as
+            // long as the process does not close it; `flags` is a live out
+            // pointer.
+            if unsafe { GetHandleInformation(handle, &mut flags) } == 0
+                || flags & HANDLE_FLAG_INHERIT == 0
+            {
+                continue;
+            }
+            // SAFETY: as above; only the inherit flag is changed.
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } != 0 {
+                saved.push((handle, flags & HANDLE_FLAG_INHERIT));
+            }
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for StdHandlesNotInherited {
+    fn drop(&mut self) {
+        for &(handle, flag) in &self.0 {
+            // SAFETY: the same standard handle, whose inherit flag is put back
+            // as it was.
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flag) };
+        }
+    }
 }
 
 /// This user's SID as a string (`S-1-5-21-...`).
