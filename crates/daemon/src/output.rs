@@ -32,10 +32,14 @@ use sha2::Sha256;
 use vahta_os::ProcessId;
 use zeroize::Zeroizing;
 
+use vahta_vault::{Kind, Tier, Vault, valid_name};
+
 use crate::anchor;
 use crate::journal::Entry;
-use crate::ops::{Ctx, Flow};
-use crate::protocol::{ClientReply, OutputSpan};
+use crate::ops::{
+    Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, refused, unlock,
+};
+use crate::protocol::{ClientReply, OutputSpan, Panel, RefusalKind};
 use crate::scrub::Scrubber;
 use crate::session_ops::nodes_of;
 use crate::surface::sanitize_label;
@@ -48,10 +52,6 @@ pub const MAX_HELD_BYTES: usize = 768 * 1024;
 const MAX_HELD: usize = 32;
 /// How long a let-through value stays let through when the anchor has no
 /// session.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by `vahta output allow`, which comes next")
-)]
 pub const RELEASE_FOR: Duration = Duration::from_secs(30 * 60);
 /// How long the values of a run are looked for in later output, after the
 /// run: a command may have written one to a file the agent reads next.
@@ -72,12 +72,10 @@ pub(crate) struct HeldCut {
 }
 
 /// An original output, kept for the agent to ask about.
-#[expect(dead_code, reason = "read by `vahta output allow`, which comes next")]
 pub(crate) struct Held {
     pub texts: Zeroizing<Vec<String>>,
     pub cuts: Vec<HeldCut>,
     pub anchor: ProcessId,
-    pub anchor_exe: String,
     pub cwd: String,
     pub tool: String,
     pub expires: Instant,
@@ -85,10 +83,6 @@ pub(crate) struct Held {
 
 /// Until when a let-through value stays let through.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by `vahta output allow`, which comes next")
-)]
 pub(crate) enum Until {
     Session(String),
     Time(Instant),
@@ -139,10 +133,6 @@ impl Outputs {
             .is_some_and(|list| list.iter().any(|r| &r.hash == hash))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by `vahta output allow`, which comes next")
-    )]
     pub fn release(&mut self, anchor: ProcessId, hashes: Vec<[u8; 32]>, until: Until) {
         let list = self.released.entry(anchor).or_default();
         for hash in hashes {
@@ -195,10 +185,6 @@ impl Outputs {
         Some(reference)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by `vahta output allow`, which comes next")
-    )]
     pub fn get(&self, reference: &str) -> Option<&Held> {
         self.held
             .iter()
@@ -383,12 +369,11 @@ pub(crate) fn scan(
 
     let total: usize = texts.iter().map(String::len).sum();
     let reference = match &anchor {
-        Some((anchor, exe)) if total <= MAX_HELD_BYTES => {
+        Some((anchor, _)) if total <= MAX_HELD_BYTES => {
             let held = Held {
                 texts,
                 cuts: cuts.clone(),
                 anchor: *anchor,
-                anchor_exe: exe.clone(),
                 cwd,
                 tool: tool_shown.clone(),
                 expires: Instant::now() + HOLD_FOR,
@@ -433,6 +418,313 @@ pub(crate) fn scan(
     })
 }
 
+// --- vahta output allow -------------------------------------------------------------
+
+/// The longest line of context a window shows around a cut value.
+const CONTEXT_CHARS: usize = 100;
+
+/// The line of `text` around `which`, with every cut in `cuts` (all of this
+/// text, in order) masked as `***`, made one plain line and cut short. A
+/// window can be captured, so it shows where a value was, never the value.
+fn context(text: &str, cuts: &[&HeldCut], which: &HeldCut) -> String {
+    let line_start = text[..which.start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[which.end..]
+        .find('\n')
+        .map_or(text.len(), |i| which.end + i);
+    let mut out = String::new();
+    let mut pos = line_start;
+    for c in cuts {
+        if c.end <= line_start || c.start >= line_end || c.end <= pos {
+            continue;
+        }
+        out.push_str(&text[pos..c.start.max(pos)]);
+        out.push_str("***");
+        pos = c.end.min(line_end);
+    }
+    out.push_str(&text[pos..line_end]);
+    let plain = sanitize_label(&out).unwrap_or_default();
+    if plain.chars().count() > CONTEXT_CHARS {
+        let cut: String = plain.chars().take(CONTEXT_CHARS).collect();
+        format!("{cut}...")
+    } else {
+        plain
+    }
+}
+
+/// One line per value cut: what it is, how long, and where, masked.
+fn cut_lines(texts: &[String], finals: &[HeldCut]) -> Vec<String> {
+    finals
+        .iter()
+        .map(|f| {
+            let text = &texts[f.text];
+            let same: Vec<&HeldCut> = finals.iter().filter(|c| c.text == f.text).collect();
+            let what = if f.exact {
+                format!("{} (a secret Vahta holds)", f.label)
+            } else {
+                format!("looks like: {}", f.label)
+            };
+            format!(
+                "  - {what}, {} characters, in: {}",
+                text[f.start..f.end].chars().count(),
+                context(text, &same, f)
+            )
+        })
+        .collect()
+}
+
+const SHOW: usize = 0;
+const SAVE: usize = 2;
+
+/// What `allow` needs of a held output, copied out from under the lock.
+struct Asked {
+    texts: Zeroizing<Vec<String>>,
+    cuts: Vec<HeldCut>,
+    cwd: String,
+    tool: String,
+}
+
+pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> Flow<ClientReply> {
+    let not_here = || {
+        refused(
+            RefusalKind::UnknownOutput,
+            "no output is kept under that reference for this agent (an output is kept for 10 \
+             minutes, and only its own agent may ask for it); nothing was shown",
+        )
+    };
+    // The agent that asks must be the one whose hook made the reference.
+    let (anchor, anchor_exe) = anchor_of(ctx).ok_or_else(not_here)?;
+    let asked = {
+        let outputs = ctx
+            .shared
+            .outputs
+            .lock()
+            .map_err(|_| error("the output table is unusable"))?;
+        let held = outputs
+            .get(reference)
+            .filter(|h| h.anchor == anchor)
+            .ok_or_else(not_here)?;
+        Asked {
+            texts: held.texts.clone(),
+            cuts: held.cuts.clone(),
+            cwd: held.cwd.clone(),
+            tool: held.tool.clone(),
+        }
+    };
+    let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
+    let session: Option<String> = ctx
+        .shared
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|s| s.covering(&chain).first().map(|s| s.id.clone()));
+    // Without a session the vault's password approves, so there must be one.
+    let vault = match (find_vault(&asked.cwd), &session) {
+        (Ok(found), _) => Some(found),
+        (Err(_), Some(_)) => None,
+        (Err(_), None) => {
+            return Err(refused(
+                RefusalKind::NoVault,
+                format!(
+                    "this agent has no session, and there is no Vahta vault in {} whose \
+                     password could approve showing the output; nothing was shown",
+                    asked.cwd
+                ),
+            ));
+        }
+    };
+
+    let finals = merged(&asked.cuts);
+    let mut labels: Vec<String> = Vec::new();
+    for f in &finals {
+        if !labels.contains(&f.label) {
+            labels.push(f.label.clone());
+        }
+    }
+    let record = |result: &str| {
+        ctx.journal(Entry::new("output_allow").names(&labels).result(
+            result,
+            Some(&format!(
+                "ref {reference}; anchor {anchor_exe} pid {}",
+                anchor.pid
+            )),
+        ));
+    };
+
+    let title = "Show a tool's output to the agent";
+    let mut lines = vec![
+        format!("Tool: {}", asked.tool),
+        format!("Directory: {}", asked.cwd),
+        format!("Agent: {anchor_exe} (pid {})", anchor.pid),
+        "Cut from the output before the agent saw it:".to_string(),
+    ];
+    lines.extend(cut_lines(&asked.texts, &finals));
+    lines.push(match &session {
+        Some(_) => "This agent has a session open: no password is needed to show it.".to_string(),
+        None => "This agent has no session: showing it needs the vault password.".to_string(),
+    });
+    let mut panel = ctx.panel(title, lines);
+    panel.agent_note = reason.as_deref().and_then(sanitize_label);
+    panel.warning = Some(
+        "Shown values enter the agent's context and stay there. Only say yes if the agent \
+         really needs them."
+            .to_string(),
+    );
+    let mut options = vec!["Show to the agent".to_string(), "No".to_string()];
+    if vault.is_some() {
+        options.push("Save as a secret".to_string());
+    }
+    let mut window = ctx.window(title)?;
+    let choice = window
+        .choose(&panel, "What should Vahta do?", &options)
+        .map_err(from_surface)?;
+    match choice {
+        Some(SHOW) => {
+            if session.is_none()
+                && let Some((_, vault_path)) = &vault
+            {
+                // The password only approves; the vault is not changed.
+                drop(unlock(ctx, window.as_mut(), vault_path, &panel)?);
+            }
+            let until = match &session {
+                Some(id) => Until::Session(id.clone()),
+                None => Until::Time(Instant::now() + RELEASE_FOR),
+            };
+            if let Ok(mut outputs) = ctx.shared.outputs.lock() {
+                let hashes: Vec<[u8; 32]> = asked
+                    .cuts
+                    .iter()
+                    .map(|c| outputs.hash(&asked.texts[c.text].as_bytes()[c.start..c.end]))
+                    .collect();
+                outputs.release(anchor, hashes, until);
+            }
+            record("shown");
+            window.close(Some("Shown to the agent."));
+            // The strings the tool gave, one after another; an empty one
+            // (a Bash command's empty stderr) adds nothing.
+            let parts: Vec<&str> = asked
+                .texts
+                .iter()
+                .map(String::as_str)
+                .filter(|t| !t.is_empty())
+                .collect();
+            Ok(ClientReply::OutputReleased {
+                text: parts.join("\n"),
+            })
+        }
+        Some(SAVE) => {
+            let Some((_, vault_path)) = &vault else {
+                return Err(error("there is no vault to save into"));
+            };
+            let saved = save(
+                ctx,
+                window.as_mut(),
+                &mut panel,
+                vault_path,
+                &asked,
+                &finals,
+            )?;
+            record("saved");
+            window.close(Some(&format!("Saved {saved}.")));
+            Ok(ClientReply::Done {
+                message: format!(
+                    "saved as {saved}; the output stays redacted. To use it, run the command \
+                     that needs it with `vahta run --secret {saved} -- COMMAND`"
+                ),
+            })
+        }
+        _ => {
+            record("declined");
+            window.close(None);
+            Err(ClientReply::Cancelled {
+                message: "the person did not agree; the output stays redacted".to_string(),
+            })
+        }
+    }
+}
+
+/// "Save as a secret": which value (if there are several), its name and tier,
+/// then the vault password, which every write needs fresh. Returns the name.
+fn save(
+    ctx: &Ctx<'_>,
+    window: &mut dyn crate::surface::Window,
+    panel: &mut Panel,
+    vault_path: &std::path::Path,
+    asked: &Asked,
+    finals: &[HeldCut],
+) -> Flow<String> {
+    let which = if finals.len() == 1 {
+        0
+    } else {
+        let options: Vec<String> = cut_lines(&asked.texts, finals)
+            .into_iter()
+            .map(|l| l.trim_start_matches("  - ").to_string())
+            .collect();
+        window
+            .choose(panel, "Which value should be saved?", &options)
+            .map_err(from_surface)?
+            .ok_or_else(cancelled)?
+    };
+    let chosen = &finals[which];
+    let value = Zeroizing::new(asked.texts[chosen.text][chosen.start..chosen.end].to_string());
+    let taken = |name: &str| {
+        Vault::peek(vault_path)
+            .map(|p| p.entries.iter().any(|e| e.name == name))
+            .unwrap_or(false)
+    };
+    let mut name = None;
+    for _ in 0..3 {
+        let typed = window
+            .ask_text(panel, "Name for the new secret")
+            .map_err(from_surface)?
+            .ok_or_else(cancelled)?;
+        let typed = typed.trim().to_string();
+        if !valid_name(&typed) {
+            panel.warning = Some(
+                "A name is letters, digits and underscores, not starting with a digit.".to_string(),
+            );
+        } else if taken(&typed) {
+            panel.warning = Some(format!(
+                "The vault already has {typed}; choose another name."
+            ));
+        } else {
+            name = Some(typed);
+            break;
+        }
+    }
+    let name = name.ok_or_else(|| error("no usable name was given; nothing was saved"))?;
+    panel.warning = None;
+    panel.lines.push(format!("Save as: {name}"));
+    let tiers = [
+        "session: a session may use it".to_string(),
+        "each-use: the password every time".to_string(),
+    ];
+    let tier = match window
+        .choose(panel, "Which tier?", &tiers)
+        .map_err(from_surface)?
+        .ok_or_else(cancelled)?
+    {
+        0 => Tier::Session,
+        _ => Tier::EachUse,
+    };
+    let mut vault = unlock(ctx, window, vault_path, panel)?;
+    if vault.entries().iter().any(|e| e.name == name) {
+        return Err(error(
+            "the vault changed while the window was open; nothing was saved",
+        ));
+    }
+    vault
+        .set(&name, value.as_bytes(), Kind::Env, tier)
+        .map_err(from_vault)?;
+    vault.save(vault_path, ctx.store()).map_err(from_vault)?;
+    ctx.journal(
+        Entry::new("output_saved")
+            .vault(&vault.vault_id())
+            .names(std::slice::from_ref(&name))
+            .result("ok", None),
+    );
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,7 +741,6 @@ mod tests {
             texts: Zeroizing::new(vec!["x".to_string()]),
             cuts: Vec::new(),
             anchor,
-            anchor_exe: "agent".to_string(),
             cwd: "/p".to_string(),
             tool: "Bash".to_string(),
             expires,

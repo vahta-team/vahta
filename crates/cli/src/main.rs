@@ -6,7 +6,8 @@
 //! secrets or holds a session goes through the daemon, which is the vault's only
 //! owner: `vahta daemon` (see `daemon_cmd.rs`), `init`, `set`, `remove`,
 //! `import`, `reveal` and `copy` (`vault_ops.rs`), `unlock`, `lock` and
-//! `sessions` (`session_cmds.rs`), `run` and `delegate` (`run_cmd.rs`), and the
+//! `sessions` (`session_cmds.rs`), `run` and `delegate` (`run_cmd.rs`),
+//! `output allow` (`output_cmd.rs`), and the
 //! hidden `_surface`, the prompt window the daemon opens (`surface_cmd.rs`).
 //! These commands take no secret and no password as an argument: the person
 //! types them in the window. `vahta scan [PATH]` is the project path of `ka scan`, and
@@ -32,6 +33,7 @@
 //! hold one.
 
 mod daemon_cmd;
+mod output_cmd;
 mod run_cmd;
 mod session_cmds;
 mod setup;
@@ -101,6 +103,7 @@ commands:
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
   sessions  list sessions, or `kill ID` one (no password)
+  output  `output allow REF`: ask to see what was cut from a tool's output
   init    create this project's vault
   set     store a secret (typed in a window, never on the command line)
   remove  remove a secret
@@ -401,6 +404,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),
         Some("lock") => session_cmds::run_lock(&args[1..], env, stdout, stderr),
         Some("sessions") => session_cmds::run_sessions(&args[1..], env, stdout, stderr),
+        Some("output") => output_cmd::run(&args[1..], env, stdout, stderr),
         // The prompt window, started by the daemon; not listed in the help.
         Some("_surface") => surface_cmd::run(&args[1..]),
         Some("-h") | Some("--help") => {

@@ -198,6 +198,40 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
                 Ok(None) | Err(()) => SurfaceAnswer::Cancel {},
             })
         }
+        SurfaceRequest::Choose {
+            panel,
+            question,
+            options,
+        } => {
+            console.panel(panel);
+            console.say(&safe(question));
+            for (i, option) in options.iter().enumerate() {
+                console.say(&format!("  {}) {}", i + 1, safe(option)));
+            }
+            // A number from the list; anything else asks again, and the end
+            // of input cancels.
+            for _ in 0..3 {
+                console.say(&format!("Choose 1-{}:", options.len()));
+                let Some(line) = Console::line() else {
+                    return Some(SurfaceAnswer::Cancel {});
+                };
+                if let Ok(n) = line.trim().parse::<usize>()
+                    && (1..=options.len()).contains(&n)
+                {
+                    return Some(SurfaceAnswer::Choice { index: n - 1 });
+                }
+            }
+            Some(SurfaceAnswer::Cancel {})
+        }
+        SurfaceRequest::Text { panel, prompt } => {
+            console.panel(panel);
+            print!("{}: ", safe(prompt));
+            let _ = std::io::stdout().flush();
+            Some(match Console::line() {
+                Some(value) => SurfaceAnswer::Text { value },
+                None => SurfaceAnswer::Cancel {},
+            })
+        }
         SurfaceRequest::Show {
             panel,
             what,

@@ -293,6 +293,13 @@ pub enum ClientRequest {
         spans: Vec<OutputSpan>,
         possible: Vec<String>,
     },
+    /// Ask the person to let the agent see what was cut out of a tool's
+    /// output kept under `reference`. Only the agent whose hook made the
+    /// reference may ask. `reason` is the agent's, shown as unverified.
+    OutputAllow {
+        reference: String,
+        reason: Option<String>,
+    },
     /// Narrow the caller's session for a sub-agent. The child session is
     /// anchored to the calling process, which then runs the sub-agent; the
     /// session ends when it exits. A scope that is not a subset of the
@@ -469,6 +476,9 @@ pub enum RefusalKind {
     Stale,
     /// There is no session to narrow.
     NoSession,
+    /// No tool output is kept under that reference for this agent: it was
+    /// never there, its time ran out, or another agent's hook made it.
+    UnknownOutput,
 }
 
 /// One name in a refusal and why.
@@ -525,6 +535,13 @@ pub enum ClientReply {
     OutputSpans {
         spans: Vec<OutputSpan>,
         reference: Option<String>,
+    },
+    /// The person agreed to show the agent a tool's output as it was: `text`
+    /// is that output, its non-empty strings joined by newlines. The one reply that
+    /// carries what may be a secret value, sent only after a "Show to the
+    /// agent" in a window, to the agent that asked.
+    OutputReleased {
+        text: String,
     },
 }
 
@@ -613,6 +630,14 @@ pub enum SurfaceRequest {
         question: String,
         timeout_secs: Option<u64>,
     },
+    /// One of `options`, no secret; answered with its index.
+    Choose {
+        panel: Panel,
+        question: String,
+        options: Vec<String>,
+    },
+    /// A line of plain text, typed in the open: a name, never a value.
+    Text { panel: Panel, prompt: String },
     /// Show something secret until a key is pressed, or `seconds` pass.
     Show {
         panel: Panel,
@@ -638,6 +663,14 @@ pub enum SurfaceAnswer {
     /// A `Show` was seen (acknowledged, or its time ran out).
     Done {},
     Cancel {},
+    /// The index of the option chosen.
+    Choice {
+        index: usize,
+    },
+    /// The line typed for a `Text`.
+    Text {
+        value: String,
+    },
 }
 
 #[cfg(test)]

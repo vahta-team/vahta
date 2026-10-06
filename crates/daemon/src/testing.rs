@@ -96,6 +96,8 @@ pub mod scripted {
     //! * `{"cancel": true}` cancels;
     //! * `{"yes": true}`, `{"no": true}` and `{"noanswer": true}` answer a
     //!   confirmation;
+    //! * `{"choose": N}` picks option N of a choice;
+    //! * `{"text": "..."}` answers a plain-text question;
     //! * `{"ack": true}` acknowledges something shown.
     //!
     //! Every question is appended to the log (`VAHTA_TEST_SURFACE_LOG`) with
@@ -257,6 +259,46 @@ pub mod scripted {
                 Err(unavailable(
                     "the script answered a confirmation with the wrong kind",
                 ))
+            }
+        }
+
+        fn choose(
+            &mut self,
+            panel: &Panel,
+            question: &str,
+            options: &[String],
+        ) -> Result<Option<usize>, SurfaceError> {
+            self.inner.log(json!({
+                "ask": "choose", "prompt": question, "options": options, "panel": panel_json(panel)
+            }));
+            let answer = self.inner.pop()?;
+            if answer.get("cancel").is_some() {
+                return Ok(None);
+            }
+            match answer.get("choose").and_then(Value::as_u64) {
+                Some(n) if (n as usize) < options.len() => Ok(Some(n as usize)),
+                _ => Err(unavailable(
+                    "the script answered a choice with the wrong kind",
+                )),
+            }
+        }
+
+        fn ask_text(
+            &mut self,
+            panel: &Panel,
+            prompt: &str,
+        ) -> Result<Option<String>, SurfaceError> {
+            self.inner
+                .log(json!({"ask": "text", "prompt": prompt, "panel": panel_json(panel)}));
+            let answer = self.inner.pop()?;
+            if answer.get("cancel").is_some() {
+                return Ok(None);
+            }
+            match answer.get("text").and_then(Value::as_str) {
+                Some(s) => Ok(Some(s.to_string())),
+                None => Err(unavailable(
+                    "the script answered a text question with the wrong kind",
+                )),
             }
         }
 

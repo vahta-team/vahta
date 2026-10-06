@@ -92,6 +92,18 @@ pub trait Window: Send {
         timeout: Option<Duration>,
     ) -> Result<Option<bool>, SurfaceError>;
 
+    /// One of `options`; `None` is cancelling.
+    fn choose(
+        &mut self,
+        panel: &Panel,
+        question: &str,
+        options: &[String],
+    ) -> Result<Option<usize>, SurfaceError>;
+
+    /// A line of plain text typed in the open (a name, never a value); `None`
+    /// is cancelling.
+    fn ask_text(&mut self, panel: &Panel, prompt: &str) -> Result<Option<String>, SurfaceError>;
+
     /// Show a value until a key is pressed or `seconds` pass.
     fn show_value(
         &mut self,
@@ -439,6 +451,36 @@ impl Window for TerminalWindow {
             }
             Ok(_) => Err(SurfaceError::Protocol("unexpected answer".to_string())),
             Err(e) => Err(e),
+        }
+    }
+
+    fn choose(
+        &mut self,
+        panel: &Panel,
+        question: &str,
+        options: &[String],
+    ) -> Result<Option<usize>, SurfaceError> {
+        let request = SurfaceRequest::Choose {
+            panel: panel.clone(),
+            question: question.to_string(),
+            options: options.to_vec(),
+        };
+        match self.exchange(&request, ANSWER_TIMEOUT)? {
+            SurfaceAnswer::Choice { index } if index < options.len() => Ok(Some(index)),
+            SurfaceAnswer::Cancel {} => Ok(None),
+            _ => Err(SurfaceError::Protocol("unexpected answer".to_string())),
+        }
+    }
+
+    fn ask_text(&mut self, panel: &Panel, prompt: &str) -> Result<Option<String>, SurfaceError> {
+        let request = SurfaceRequest::Text {
+            panel: panel.clone(),
+            prompt: prompt.to_string(),
+        };
+        match self.exchange(&request, ANSWER_TIMEOUT)? {
+            SurfaceAnswer::Text { value } => Ok(Some(value)),
+            SurfaceAnswer::Cancel {} => Ok(None),
+            _ => Err(SurfaceError::Protocol("unexpected answer".to_string())),
         }
     }
 
