@@ -99,7 +99,9 @@ run` from that process, and from everything it starts, needs no window.
   characters. What you approve is the list Vahta renders, not the label.
 - **Ending.** At the deadline, when the anchor process exits, on `vahta lock` or
   `vahta sessions kill`, when the daemon stops, and (Linux, `lock_on_sleep`, on by
-  default) when the machine suspends or the screen locks through logind.
+  default) when the machine suspends or the screen locks: through logind
+  (`loginctl lock-session`, or a desktop that sets `LockedHint`, as GNOME and
+  KDE do), or, under Hyprland, a lock screen such as hyprlock or Omarchy's.
   Ending a session also ends every session below it and overwrites its keys.
 - **Changes.** If a secret is changed after a session opened, a read through the
   session fails with "changed since this session was opened; unlock again" (exit
@@ -213,9 +215,10 @@ an agent running as you could *do*. Read this before relying on it.
 - **The anchor is a process, not a person.** A session covers the process it
   belongs to and everything it starts. If you unlock from inside an agent, the
   agent and its tools can use the secrets until the session ends.
-- **Sleep and lock.** Ending sessions on suspend and screen lock is Linux only
-  (logind); a screen locker that does not tell logind is not heard. macOS and
-  Windows do not do it yet.
+- **Sleep and lock.** Ending sessions on suspend and screen lock is Linux only.
+  Under Hyprland the lock screen is noticed within about two seconds, by asking
+  the compositor while a session is open. A screen locker on another compositor
+  that does not tell logind is not heard. macOS and Windows do not do it yet.
 - **The hook is a speed bump.** The protection of Vahta's own files in the agent
   hook covers the common ways of reading or changing them (the read, edit and
   write tools, common shell readers, `rm`, `mv`, `cp`, redirections). It does not
