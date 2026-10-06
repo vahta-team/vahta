@@ -418,6 +418,30 @@ pub(crate) fn scan(
     })
 }
 
+/// The hook in observe mode saw secrets in a tool's output and changed
+/// nothing: journal what, by kind and count.
+pub(crate) fn observed(
+    ctx: &Ctx<'_>,
+    tool: &str,
+    kinds: &[String],
+    likely: usize,
+    possible: usize,
+) -> Flow<ClientReply> {
+    let kinds: Vec<String> = kinds.iter().take(32).map(|k| clean_label(k)).collect();
+    let anchor_text = match anchor_of(ctx) {
+        Some((a, exe)) => format!("anchor {exe} pid {}", a.pid),
+        None => "no anchor".to_string(),
+    };
+    ctx.journal(Entry::new("output_observed").names(&kinds).result(
+        "observed",
+        Some(&format!(
+            "tool {}; {likely} likely, {possible} possible; {anchor_text}",
+            clean_label(tool)
+        )),
+    ));
+    Ok(ClientReply::Ok {})
+}
+
 // --- vahta output allow -------------------------------------------------------------
 
 /// The longest line of context a window shows around a cut value.

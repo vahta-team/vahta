@@ -221,6 +221,9 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
 /// rewrite for this tool), the person and the model are told a secret reached
 /// the transcript, as before.
 fn after_tool(m: &Manifest, ev: &Event) -> Decision {
+    if daemon::hook_output() == vahta_ipc::config::HookOutput::Observe {
+        return observe(ev);
+    }
     let mcp = ev.group == Some(vahta_harness::Group::Mcp);
     let Some(output) = ev.output.as_ref().filter(|_| m.can_redact(mcp)) else {
         return secret_in(&ev.text, "output", true);
@@ -252,6 +255,24 @@ fn after_tool(m: &Manifest, ev: &Event) -> Decision {
         agent_message,
         user_message,
     }
+}
+
+/// Observe mode (`hook_output = "observe"`): the output is not changed. The
+/// person and the model are told a secret reached the transcript, exactly as
+/// before redaction existed, and a running daemon journals what was seen.
+fn observe(ev: &Event) -> Decision {
+    let texts = match &ev.output {
+        Some(output) => redact::texts_of(output),
+        None => vec![ev.text.clone()],
+    };
+    let (likely, possible) = redact::detector_cuts(&texts);
+    if !likely.is_empty() || !possible.is_empty() {
+        let mut kinds: Vec<String> = likely.iter().map(|c| c.label.clone()).collect();
+        kinds.extend(possible.iter().cloned());
+        kinds.dedup();
+        daemon::observed(ev.tool.clone(), kinds, likely.len(), possible.len());
+    }
+    secret_in(&ev.text, "output", true)
 }
 
 /// What the model and the person are told about a redaction. Names labels and

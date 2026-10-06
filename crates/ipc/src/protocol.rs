@@ -293,6 +293,15 @@ pub enum ClientRequest {
         spans: Vec<OutputSpan>,
         possible: Vec<String>,
     },
+    /// The hook in observe mode (`hook_output = "observe"`): it changed
+    /// nothing, and tells the daemon what it saw, for the journal. Kinds and
+    /// counts, never a value.
+    OutputObserved {
+        tool: String,
+        kinds: Vec<String>,
+        likely: usize,
+        possible: usize,
+    },
     /// Ask the person to let the agent see what was cut out of a tool's
     /// output kept under `reference`. Only the agent whose hook made the
     /// reference may ask. `reason` is the agent's, shown as unverified.

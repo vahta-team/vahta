@@ -7,11 +7,15 @@
 //! reference to the original it kept. Anything else (no daemon, another
 //! version, an error, silence) is `None`, and the hook cuts what its own
 //! detector found. That is never less than it cut before there was a daemon.
+//!
+//! The person's `hook_output` setting is read here too: `observe` makes the
+//! hook change nothing and only tell the daemon what it saw.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use vahta_ipc::client::Connector;
+use vahta_ipc::config::{Config, HookOutput};
 use vahta_ipc::paths::Paths;
 use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan};
 
@@ -35,7 +39,20 @@ pub struct Scan {
     pub possible: Vec<String>,
 }
 
-pub fn scan(request: Scan) -> Option<Answer> {
+/// The person's choice for the hook (`hook_output` in `config.toml`). A
+/// config that cannot be read is the default, redaction: the hook fails
+/// toward cutting, not toward letting through.
+pub fn hook_output() -> HookOutput {
+    Paths::from_env(None)
+        .ok()
+        .and_then(|p| Config::load(&p.config_file()).ok())
+        .map(|c| c.hook_output)
+        .unwrap_or_default()
+}
+
+/// Send `request` to a running daemon of this version and read its reply,
+/// waiting at most [`WAIT`]; `None` for anything else.
+fn ask(request: ClientRequest) -> Option<ClientReply> {
     let paths = Paths::from_env(None).ok()?;
     let connector = Connector {
         paths,
@@ -46,16 +63,19 @@ pub fn scan(request: Scan) -> Option<Answer> {
     // On a thread, so a daemon that hangs costs the hook `WAIT` and no more;
     // the thread goes with the process.
     std::thread::spawn(move || {
-        let _ = tx.send(exchange(&connector, request));
+        let reply = (|| {
+            let mut conn = connector.connect_running().ok()??;
+            if !conn.daemon.ok || conn.daemon.version != connector.version {
+                return None;
+            }
+            conn.request(&request).ok()
+        })();
+        let _ = tx.send(reply);
     });
     rx.recv_timeout(WAIT).ok().flatten()
 }
 
-fn exchange(connector: &Connector, scan: Scan) -> Option<Answer> {
-    let mut conn = connector.connect_running().ok()??;
-    if !conn.daemon.ok || conn.daemon.version != connector.version {
-        return None;
-    }
+pub fn scan(scan: Scan) -> Option<Answer> {
     let request = ClientRequest::OutputScan {
         cwd: scan.cwd,
         tool: scan.tool,
@@ -72,7 +92,7 @@ fn exchange(connector: &Connector, scan: Scan) -> Option<Answer> {
             .collect(),
         possible: scan.possible,
     };
-    match conn.request(&request).ok()? {
+    match ask(request)? {
         ClientReply::OutputSpans { spans, reference } => Some(Answer {
             cuts: spans
                 .into_iter()
@@ -86,4 +106,15 @@ fn exchange(connector: &Connector, scan: Scan) -> Option<Answer> {
         }),
         _ => None,
     }
+}
+
+/// Observe mode: tell a running daemon what was seen, for its journal. Its
+/// answer does not matter.
+pub fn observed(tool: String, kinds: Vec<String>, likely: usize, possible: usize) {
+    let _ = ask(ClientRequest::OutputObserved {
+        tool,
+        kinds,
+        likely,
+        possible,
+    });
 }

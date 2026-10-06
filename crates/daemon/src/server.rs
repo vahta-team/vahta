@@ -551,6 +551,15 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 output::scan(&ctx, cwd, tool, texts, spans, possible).unwrap_or_else(|r| r),
                 false,
             ),
+            ClientRequest::OutputObserved {
+                tool,
+                kinds,
+                likely,
+                possible,
+            } => (
+                output::observed(&ctx, &tool, &kinds, likely, possible).unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::OutputAllow { reference, reason } => (
                 output::allow(&ctx, &reference, reason).unwrap_or_else(|r| r),
                 false,

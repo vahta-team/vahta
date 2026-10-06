@@ -2216,3 +2216,37 @@ fn output_allow_cancelled_unknown_or_another_agents_is_refused() {
     assert_eq!(s.vahta(&["output", "allow"]).status.code(), Some(2));
     assert_eq!(s.vahta(&["output", "show", "x"]).status.code(), Some(2));
 }
+
+/// `hook_output = "observe"`: nothing is rewritten. The person and the model
+/// are told, as before redaction, and the daemon journals what was seen.
+#[test]
+fn observe_mode_changes_nothing_and_the_daemon_journals_it() {
+    let s = sandbox_with_secrets();
+    fs::write(
+        s.root.join("config/config.toml"),
+        "hook_output = \"observe\"\n",
+    )
+    .unwrap();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let key = ["sk-", "ant-", &"c".repeat(25)].concat();
+    let reply = s.hook_after_bash(&format!("found {key}")).unwrap();
+    let hso = &reply["hookSpecificOutput"];
+    assert!(hso.get("updatedToolOutput").is_none(), "{reply}");
+    assert!(
+        hso["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("reached the transcript")
+    );
+    assert!(
+        reply["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("rotate it")
+    );
+    let journal = s.journal();
+    assert!(journal.contains("output_observed") && journal.contains("Anthropic-style key"));
+    assert!(!journal.contains("output_redacted"));
+    assert!(!journal.contains(&key));
+}
