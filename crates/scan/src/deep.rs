@@ -1667,8 +1667,9 @@ mod tests {
 
     #[test]
     fn candidate_paths_follow_python_and_appdata_adds_three() {
-        // Absolute on every platform: a bare `/x` gets the cwd's drive on Windows.
-        let home = &std::env::temp_dir().join("nonexistent-vahta-home");
+        // Absolute on every platform (a bare `/x` gets the cwd's drive on
+        // Windows), and already resolved (macOS's temp dir is under a link).
+        let home = &resolve_non_strict(&std::env::temp_dir().join("nonexistent-vahta-home"));
         let base = deep_candidate_paths(home, None);
         assert_eq!(base.len(), 11 + 4 + 4);
         assert!(base.contains(&home.join(".env")));
