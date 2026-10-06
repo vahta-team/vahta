@@ -206,10 +206,12 @@ impl Tool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "macos"))]
     use std::os::unix::fs::PermissionsExt;
 
     /// A directory of fake `wl-copy` and `wl-paste` that keep the clipboard in
     /// a file next to them.
+    #[cfg(not(target_os = "macos"))]
     fn fake_wayland(dir: &std::path::Path) {
         let script = |name: &str, body: &str| {
             let p = dir.join(name);
@@ -239,6 +241,8 @@ mod tests {
         }
     }
 
+    // macOS uses pbcopy, whatever the environment says.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn copy_then_clear_only_if_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
