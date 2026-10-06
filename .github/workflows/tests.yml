@@ -14,6 +14,13 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the runs for its older commits, which
+# otherwise hold the few macOS runners for hours. Pushes to master and
+# release branches each keep their own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     strategy:
