@@ -6,7 +6,6 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::Command;
 
-use rustix::mm::{MlockAllFlags, mlockall};
 use rustix::net::sockopt::socket_peercred;
 use rustix::process::{
     DumpableBehavior, PidfdFlags, Resource, Rlimit, geteuid, pidfd_open, set_dumpable_behavior,
@@ -119,13 +118,6 @@ pub(crate) fn harden_process() -> io::Result<()> {
     dump.map_err(|e| io::Error::other(format!("PR_SET_DUMPABLE: {e}")))?;
     core.map_err(|e| io::Error::other(format!("RLIMIT_CORE: {e}")))?;
     Ok(())
-}
-
-pub(crate) fn lock_memory() -> io::Result<()> {
-    // ONFAULT locks pages as they are touched, so a small daemon does not pay
-    // for its whole address space up front.
-    mlockall(MlockAllFlags::CURRENT | MlockAllFlags::FUTURE | MlockAllFlags::ONFAULT)
-        .map_err(io::Error::from)
 }
 
 pub(crate) fn detach_session() {

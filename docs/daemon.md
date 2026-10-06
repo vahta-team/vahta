@@ -149,9 +149,11 @@ If a newer `vahta` meets an older daemon with no sessions, the old one exits and
 new one starts. If it holds sessions, the command says so and points to `vahta
 daemon restart` (which ends them).
 
-On Linux the daemon is not dumpable and writes no core files, asks for its memory
-to be locked (best effort, noted in the journal if it fails), and keeps every key
-in memory that is wiped when it is dropped. A session keeps only the data keys of
+On Linux the daemon is not dumpable and writes no core files, and it keeps every
+key in memory that is wiped when it is dropped. Its memory is **not** locked
+against swap: locking all of it makes the system refuse new threads once the
+locked-memory limit is reached, and locking only the pages that hold keys is not
+done yet. Use encrypted swap (or none) if a key paged to disk matters to you. A session keeps only the data keys of
 the secrets it covers; the vault key is dropped right after the password is
 checked.
 

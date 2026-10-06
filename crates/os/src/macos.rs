@@ -134,13 +134,6 @@ pub(crate) fn harden_process() -> io::Result<()> {
     .map_err(|e| io::Error::other(format!("RLIMIT_CORE: {e}")))
 }
 
-pub(crate) fn lock_memory() -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "macOS has no mlockall; memory is not locked",
-    ))
-}
-
 pub(crate) fn detach_session() {
     let _ = setsid();
 }

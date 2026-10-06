@@ -22,7 +22,7 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["std", "process", "net", "mm", "fs"] }
+rustix = { version = "1", features = ["std", "process", "net", "fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

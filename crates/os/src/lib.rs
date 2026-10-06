@@ -145,13 +145,6 @@ pub fn harden_process() -> io::Result<()> {
     sys::harden_process()
 }
 
-/// Ask the system to keep this process's memory out of swap. Best effort: it
-/// fails under a small `RLIMIT_MEMLOCK`, which is common, and the caller says
-/// so in its journal.
-pub fn lock_memory() -> io::Result<()> {
-    sys::lock_memory()
-}
-
 /// Leave the caller's session, so closing the terminal that started this
 /// process does not signal it. A daemon calls this once at startup.
 pub fn detach_session() {

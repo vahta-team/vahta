@@ -202,9 +202,6 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         if let Err(e) = vahta_os::harden_process() {
             journal.record(Entry::new("harden").result("partial", Some(&e.to_string())));
         }
-        if let Err(e) = vahta_os::lock_memory() {
-            journal.record(Entry::new("lock_memory").result("failed", Some(&e.to_string())));
-        }
         vahta_os::detach_session();
     }
 

@@ -184,13 +184,6 @@ pub(crate) fn harden_process() -> io::Result<()> {
     ))
 }
 
-pub(crate) fn lock_memory() -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "memory locking is not applied on Windows",
-    ))
-}
-
 pub(crate) fn detach_session() {}
 
 pub(crate) fn detach_command(cmd: &mut Command) {
