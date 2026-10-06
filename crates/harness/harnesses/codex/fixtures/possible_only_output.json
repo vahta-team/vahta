@@ -1,0 +1,18 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "cat cfg"
+    },
+    "tool_response": {
+      "stdout": "password = CorrectHorseBatteryStaple",
+      "stderr": ""
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}
