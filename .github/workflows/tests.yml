@@ -10,6 +10,11 @@ on:
   # Manual re-run after GitHub Actions infra flakes without a no-op commit.
   # UI: Actions → tests → Run workflow → master
   workflow_dispatch:
+    inputs:
+      macos_python:
+        description: "Also run ka's Python suite on macOS (75-90 minutes)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,10 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         # macOS Python takes 75-90 minutes (ka's real Argon2id, 1 GiB per
-        # unlock, is slow there), so it runs only for master and release
-        # branches (pushes and manual runs there). Pull requests and runs on
-        # their branches (such as the CI fixer's dispatch) skip it.
-        os: ${{ fromJSON((github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')) && '["windows-latest","ubuntu-latest","macos-latest"]' || '["windows-latest","ubuntu-latest"]') }}
+        # unlock, is slow there) and holds the few macOS runners that the
+        # short Rust job needs. It runs only when asked: Actions -> tests ->
+        # Run workflow, with "macos_python" ticked (once per ka release).
+        os: ${{ fromJSON(inputs.macos_python && '["windows-latest","ubuntu-latest","macos-latest"]' || '["windows-latest","ubuntu-latest"]') }}
         python-version: ["3.10", "3.13"]
         impl: [python]
         include:
