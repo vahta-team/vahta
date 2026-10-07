@@ -10,6 +10,8 @@
 //! * if the session is a delegated one and does not cover a name, the request
 //!   is refused outright, with no window: a sub-agent cannot ask the person for
 //!   more than it was given;
+//! * if a secret has approved command rules (see `binding`), the command must
+//!   pass them first, before any session or window is looked at;
 //! * otherwise a window asks for the password for this one run, and no session
 //!   is created. An each-use secret always asks, even inside a session.
 //!
@@ -24,11 +26,13 @@ use std::time::Instant;
 use vahta_vault::manifest;
 use vahta_vault::{Error, Peek, SecretValue, Tier, Vault, valid_name};
 
+use crate::binding::{self, Verdict};
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, check_name, error, find_vault, from_vault, lines_for, refused, refused_names,
     unknown_name, unlock,
 };
+use crate::pathfind;
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
 use crate::session::{DelegateRefusal, Role, Session, Sessions, ask_time, info_of};
 use crate::session_ops::duration_of;
@@ -62,6 +66,9 @@ pub(crate) struct Prepared {
     /// The session the command runs under, whose descendants inherit it.
     pub session: Option<String>,
     pub names: Vec<String>,
+    /// The canonical path of the program, found once with the caller's PATH.
+    /// This is what runs, and what the command rules were checked against.
+    pub program: PathBuf,
 }
 
 fn to_os(bytes: &[u8]) -> OsString {
@@ -215,6 +222,44 @@ pub(crate) fn prepare(
         .cloned()
         .collect();
 
+    // The program, found once. Its canonical path is what the command rules
+    // are checked against and what is executed.
+    let client_path: Option<OsString> = client_env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| OsString::from(v));
+    let program = pathfind::locate(&argv[0], client_path.as_ref(), &cwd_path);
+    let bound: Vec<&vahta_vault::Binding> = names
+        .iter()
+        .filter_map(|n| peek.bindings.iter().find(|b| &b.name == n))
+        .collect();
+    if bound.is_empty() && program.is_none() {
+        return Err(error(format!(
+            "cannot start {}: no such program (looked in the caller's PATH)",
+            sanitize_for_message(&argv[0])
+        )));
+    }
+    let failures: Vec<(&vahta_vault::Binding, Verdict)> = bound
+        .iter()
+        .map(|b| (*b, binding::check(b, program.as_deref(), &argv)))
+        .filter(|(_, v)| *v != Verdict::Allowed)
+        .collect();
+    if !failures.is_empty() {
+        return Err(not_allowed(
+            ctx,
+            &peek,
+            &project,
+            program.as_deref(),
+            &failures,
+        ));
+    }
+    let Some(program) = program else {
+        return Err(error(format!(
+            "cannot start {}: no such program (looked in the caller's PATH)",
+            sanitize_for_message(&argv[0])
+        )));
+    };
+
     // The caller's session, if any: the deepest one whose anchor is among its
     // ancestors, or under which one of them was launched.
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
@@ -366,7 +411,105 @@ pub(crate) fn prepare(
             .collect(),
         session: via,
         names,
+        program,
     })
+}
+
+/// A program name as a message may carry it: one plain line.
+fn sanitize_for_message(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(120)
+        .collect()
+}
+
+/// The refusal for a command that the approved rules do not let a secret
+/// have, with the fix, and the journal line (the resolved program, never the
+/// arguments).
+fn not_allowed(
+    ctx: &Ctx<'_>,
+    peek: &Peek,
+    project: &vahta_vault::project::Project,
+    program: Option<&std::path::Path>,
+    failures: &[(&vahta_vault::Binding, Verdict)],
+) -> ClientReply {
+    let names: Vec<String> = failures.iter().map(|(b, _)| b.name.clone()).collect();
+    let mut lines = Vec::new();
+    let mut denied = false;
+    for (b, verdict) in failures {
+        match verdict {
+            Verdict::Denied { rule } => {
+                denied = true;
+                lines.push(format!("{} denies this command (rule `{rule}`)", b.name));
+            }
+            Verdict::NotAllowed { why } => lines.push(format!(
+                "{} is not for this command: {why} ({})",
+                b.name,
+                binding::rules_text(b)
+            )),
+            Verdict::Allowed => {}
+        }
+    }
+    let mut message = format!("{}. Nothing was run.", lines.join("; "));
+    let stale = unapproved_rules(project, peek, &names);
+    if !stale.is_empty() {
+        message.push_str(&format!(
+            " The vahta.toml rules for {} are not approved; the person runs `vahta bind` to \
+             approve the file.",
+            stale.join(", ")
+        ));
+    }
+    if denied {
+        message.push_str(
+            " A denied command cannot be approved from a run; tell the person what you need.",
+        );
+    } else {
+        message.push_str(
+            " If the command is legitimate, run it again with `vahta run --ask --reason \"WHY\" \
+             -- COMMAND` and the person is asked, or propose a rule with `vahta bind NAME --allow \
+             PROGRAM`. The person decides: `allow` is the guard, `deny` only slows an agent down.",
+        );
+    }
+    let shown = match program {
+        Some(p) => sanitize_for_message(&p.display().to_string()),
+        None => "(not found)".to_string(),
+    };
+    ctx.journal(
+        Entry::new("run_refused")
+            .vault(&peek.vault_id)
+            .names(&names)
+            .result(
+                "refused",
+                Some(&format!("command_not_allowed; program {shown}")),
+            ),
+    );
+    refused_names(
+        RefusalKind::CommandNotAllowed,
+        message,
+        issue_list(&names, RefusalKind::CommandNotAllowed),
+    )
+}
+
+/// Names whose `vahta.toml` rules are not the approved ones (the vault's copy
+/// is what is enforced). An unreadable file counts as nothing proposed.
+pub(crate) fn unapproved_rules(
+    project: &vahta_vault::project::Project,
+    peek: &Peek,
+    names: &[String],
+) -> Vec<String> {
+    let Ok(m) = manifest::load(&project.manifest_path()) else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .filter(|n| {
+            !manifest::rules_in_sync(
+                m.secrets.get(*n),
+                peek.bindings.iter().find(|b| &b.name == *n),
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 /// The command as the window shows it: one line, cut if long.

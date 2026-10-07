@@ -153,6 +153,24 @@ fn rule_list(
     Ok(out)
 }
 
+/// Whether the rules `vahta.toml` proposes for `entry` are the ones the vault
+/// has approved: the same texts, in the same order, in both lists. No rules on
+/// either side is a match.
+pub fn rules_in_sync(entry: Option<&SecretEntry>, approved: Option<&crate::Binding>) -> bool {
+    let texts = |rules: &[ParsedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
+    let approved_texts =
+        |rules: &[crate::ApprovedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
+    let (proposed_allow, proposed_deny) = match entry {
+        Some(e) => (texts(&e.allow), texts(&e.deny)),
+        None => (Vec::new(), Vec::new()),
+    };
+    let (have_allow, have_deny) = match approved {
+        Some(b) => (approved_texts(&b.allow), approved_texts(&b.deny)),
+        None => (Vec::new(), Vec::new()),
+    };
+    proposed_allow == have_allow && proposed_deny == have_deny
+}
+
 /// The outcome of comparing a manifest with the names in a vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckResult {

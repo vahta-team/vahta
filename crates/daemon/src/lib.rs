@@ -12,12 +12,14 @@
 //! when it has been idle.
 
 mod anchor;
+mod binding;
 mod clipboard;
 mod dotenv;
 pub mod journal;
 mod lock;
 mod ops;
 mod output;
+mod pathfind;
 mod run;
 mod run_ops;
 mod scrub;

@@ -1945,6 +1945,194 @@ fn nothing_secret_is_in_the_journal_the_daemons_stderr_or_any_clients_output() {
     assert!(seen.iter().any(|t| t.contains("***REDACTED(ALPHA)***")));
 }
 
+// --- command rules (binding) -----------------------------------------------------------------
+
+#[cfg(unix)]
+impl Sandbox {
+    /// The canonical path of `program` on this test's PATH.
+    fn which(program: &str) -> PathBuf {
+        let path = std::env::var_os("PATH").unwrap();
+        let found = std::env::split_paths(&path)
+            .map(|d| d.join(program))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("no {program} on PATH"));
+        fs::canonicalize(found).unwrap()
+    }
+
+    /// Approve rules for `name` straight into the vault (the way `vahta bind`
+    /// does, without its window): `allow` programs are looked up on PATH.
+    fn bind_directly(&self, name: &str, allow: &[&str], deny: &[&str]) {
+        use vahta_vault::rules::parse_rule;
+        let mut vault = self.open_vault();
+        let allow = allow
+            .iter()
+            .map(|rule| {
+                let parsed = parse_rule(rule, true).unwrap();
+                let program = match &parsed.program {
+                    vahta_vault::rules::ProgramSpec::Bare(n) => Sandbox::which(n),
+                    other => panic!("test rules use bare names, got {other:?}"),
+                };
+                parsed.to_allow(program.to_string_lossy().into_owned())
+            })
+            .collect();
+        let deny = deny
+            .iter()
+            .map(|rule| parse_rule(rule, false).unwrap().to_deny())
+            .collect();
+        vault
+            .set_bindings(
+                name,
+                Some(vahta_vault::Binding {
+                    name: name.to_string(),
+                    allow,
+                    deny,
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&self.vault_path(), &LocalStore::new(self.root.join("data")))
+            .unwrap();
+    }
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_bound_secret_runs_only_the_commands_on_its_list_and_the_refusal_has_no_window() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    s.bind_directly("ZETA", &["printenv"], &[]);
+
+    let asked = s.asks();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    assert_eq!(s.asks(), asked, "an allowed command opens no window");
+
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("--ask") && err.contains("allow: printenv"),
+        "{err}"
+    );
+    assert!(err.contains("ZETA: this command is not allowed"), "{err}");
+    assert_eq!(s.asks(), asked, "a refusal opens no window");
+    assert!(!text(&out.stdout).contains("fake-"));
+
+    // The journal has the resolved program, not the arguments.
+    let journal = s.journal();
+    let env_path = Sandbox::which("env");
+    assert!(
+        journal.contains("command_not_allowed")
+            && journal.contains(&format!("program {}", env_path.display())),
+        "{journal}"
+    );
+    // A secret with no rules still takes any command.
+    let out = s.vahta(&["run", "--secret", "BETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // One bound name is enough to refuse a mixed run.
+    let out = s.vahta(&["run", "--secret", "BETA", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_program_that_shadows_an_allowed_name_on_the_path_is_refused_and_the_checked_file_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    // A look-alike earlier on the caller's PATH.
+    let bin = s.project().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("printenv");
+    fs::write(&fake, "#!/bin/sh\necho shadow\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let real_dir = Sandbox::which("printenv");
+    let path = std::env::join_paths([bin.as_path(), real_dir.parent().unwrap()]).unwrap();
+    let out = s
+        .command(&s.project())
+        .env("PATH", &path)
+        .args(["run", "--secret", "ZETA", "--", "printenv", "ZETA"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains("shadow"));
+    // The same command with the honest PATH runs the checked file.
+    let out = s
+        .command(&s.project())
+        .env("PATH", real_dir.parent().unwrap())
+        .args(["run", "--secret", "ZETA", "--", "printenv", "ZETA"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // An unbound secret may run the look-alike; that is the project's file.
+    let out = s
+        .command(&s.project())
+        .env("PATH", &path)
+        .args(["run", "--secret", "BETA", "--", "printenv", "BETA"])
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), "shadow\n");
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn deny_groups_refuse_by_name_and_a_hand_edited_toml_changes_nothing() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    s.bind_directly("ZETA", &[], &["@shells"]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", "echo $ZETA"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("denies this command") && err.contains("@shells"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("--ask --reason"),
+        "a denied command is not offered --ask: {err}"
+    );
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // The file proposes; only the vault's copy counts.
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\nallow = [\"true\"]\ndeny = [\"@shells\"]\n",
+    )
+    .unwrap();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an allow in the file alone is not enforced"
+    );
+    s.bind_directly("ZETA", &["printenv"], &["@shells"]);
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\nallow = [\"printenv\", \"env\"]\ndeny = [\"@shells\"]\n",
+    )
+    .unwrap();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a hand edit does not widen the list"
+    );
+    assert!(
+        text(&out.stderr).contains("not approved"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 // --- lock on sleep ---------------------------------------------------------------------------
 
 #[test]

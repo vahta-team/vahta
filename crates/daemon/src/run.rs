@@ -166,9 +166,13 @@ pub(crate) fn execute(
         values,
         session,
         names,
+        program,
     } = prepared;
 
-    let mut command = Command::new(&argv[0]);
+    // The file that was checked is the file that runs: not a second lookup of
+    // the name through whatever PATH the daemon has. The command still sees
+    // the name it was given as its own argv[0].
+    let mut command = Command::new(&program);
     command
         .args(&argv[1..])
         .current_dir(&cwd)
@@ -180,7 +184,7 @@ pub(crate) fn execute(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        command.arg0(&argv[0]).process_group(0);
     }
     let mut child = match command.spawn() {
         Ok(c) => c,

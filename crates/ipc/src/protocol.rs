@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -498,6 +498,9 @@ pub enum RefusalKind {
     /// No tool output is kept under that reference for this agent: it was
     /// never there, its time ran out, or another agent's hook made it.
     UnknownOutput,
+    /// The secret has approved command rules and this command is not allowed by
+    /// them (or is denied by them).
+    CommandNotAllowed,
 }
 
 /// One name in a refusal and why.

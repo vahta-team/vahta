@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 
 use zeroize::Zeroizing;
 
-use crate::terminal::find_in_path;
+use crate::pathfind::find_in_path;
 
 /// The commands for one clipboard.
 #[derive(Debug, Clone)]
