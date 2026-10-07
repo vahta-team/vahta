@@ -2,7 +2,9 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # Once per pull request, not on every push: reviews cost the subscription.
+    # Ask for another with an @claude comment.
+    types: [opened, ready_for_review, reopened]
     # Optional: Only run on specific file changes
     # paths:
     #   - "src/**/*.ts"
@@ -12,6 +14,9 @@ on:
 
 jobs:
   claude-review:
+    # Only pull requests from this repository (a fork's run has no secrets),
+    # and not drafts.
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
