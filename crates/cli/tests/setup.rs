@@ -466,7 +466,7 @@ fn refresh_rejects_other_flags() {
         let out = s.vahta(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(
-            text(&out.stderr).contains("--refresh goes with --dry-run only"),
+            text(&out.stderr).contains("--refresh goes with --dry-run and --last only"),
             "{args:?}"
         );
     }
@@ -543,4 +543,57 @@ fn setup_version(harness: &str) -> u32 {
         .and_then(Result::ok)
         .map(|m| m.setup_version)
         .unwrap_or(0)
+}
+
+#[test]
+fn a_refresh_keeps_ours_in_place_and_last_moves_them_behind() {
+    use serde_json::{Value, json};
+    let s = Sandbox::new(true);
+    s.found(".claude");
+    assert_eq!(s.vahta(&["setup", "--claude"]).status.code(), Some(0));
+    let path = s.home().join(CLAUDE);
+    let post_tool_use = || -> Vec<String> {
+        let doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        doc["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["hooks"][0]["command"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // The person adds a rewriter of their own after ours.
+    let mut doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    doc["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"hooks": [{"type": "command", "command": "/usr/bin/rewriter"}]}));
+    fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    // A refresh leaves the order alone.
+    assert_eq!(s.vahta(&["setup", "--refresh"]).status.code(), Some(0));
+    let order = post_tool_use();
+    assert!(
+        order[0].contains("vahta-hook") && order[1] == "/usr/bin/rewriter",
+        "{order:?}"
+    );
+
+    // --last moves ours behind it.
+    let out = s.vahta(&["setup", "--claude", "--last"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let order = post_tool_use();
+    assert!(
+        order[0] == "/usr/bin/rewriter" && order[1].contains("vahta-hook"),
+        "{order:?}"
+    );
+    // refresh --last is accepted; --last is not for an uninstall.
+    assert_eq!(
+        s.vahta(&["setup", "--refresh", "--last"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        s.vahta(&["setup", "--claude", "--uninstall", "--last"])
+            .status
+            .code(),
+        Some(2)
+    );
 }

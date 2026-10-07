@@ -3,8 +3,10 @@
 //! ```toml
 //! session_minutes = 30     # how long `vahta unlock` lasts by default
 //! lock_on_sleep = true     # end every session on suspend and screen lock
+//! lock_sources = ["logind"]  # which triggers end sessions; unset means all
 //! terminal = "kitty"       # the terminal the prompt window opens in (Linux)
 //! idle_minutes = 10        # the daemon exits after this long with nothing to do
+//! hook_output = "redact"   # or "observe": the hook only reports secrets in tool output
 //! ```
 //!
 //! A missing file is the defaults. A file that does not parse, or carries a key
@@ -21,11 +23,30 @@ use serde::Deserialize;
 pub struct Config {
     pub session_minutes: u64,
     pub lock_on_sleep: bool,
+    /// Which lock sources (see `lock/`) may end sessions, by name. Unset means
+    /// every source this build has; an empty list means none. A name this build
+    /// does not know is journalled and ignored when the daemon starts, not an
+    /// error here: the same file may serve builds with different sources.
+    pub lock_sources: Option<Vec<String>>,
     /// A terminal command prefix, as ka's `terminal` key: the program and the
     /// flag that makes it run the rest of the command line (`alacritty -e`).
     /// Empty means detect one.
     pub terminal: String,
     pub idle_minutes: u64,
+    pub hook_output: HookOutput,
+}
+
+/// What the hook does with a secret in a tool's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutput {
+    /// Cut it out before the model sees it (the default).
+    #[default]
+    Redact,
+    /// Change nothing: tell the person and the model, as before redaction,
+    /// and have the daemon journal what was seen. For trying Vahta out, or for
+    /// a harness whose other hooks also rewrite output.
+    Observe,
 }
 
 impl Default for Config {
@@ -33,8 +54,10 @@ impl Default for Config {
         Config {
             session_minutes: 30,
             lock_on_sleep: true,
+            lock_sources: None,
             terminal: String::new(),
             idle_minutes: 10,
+            hook_output: HookOutput::Redact,
         }
     }
 }
@@ -100,6 +123,19 @@ mod tests {
         assert!(!c.lock_on_sleep);
         assert_eq!(c.terminal, "foot");
         assert_eq!(c.idle_minutes, 10);
+        assert_eq!(c.hook_output, HookOutput::Redact);
+        let c = Config::parse("hook_output = \"observe\"\n").unwrap();
+        assert_eq!(c.hook_output, HookOutput::Observe);
+    }
+
+    #[test]
+    fn lock_sources_unset_named_or_empty() {
+        assert_eq!(Config::parse("").unwrap().lock_sources, None);
+        let c = Config::parse("lock_sources = [\"logind\", \"nope\"]\n").unwrap();
+        assert_eq!(c.lock_sources, Some(vec!["logind".into(), "nope".into()]));
+        let c = Config::parse("lock_sources = []\n").unwrap();
+        assert_eq!(c.lock_sources, Some(Vec::new()));
+        assert!(Config::parse("lock_sources = \"logind\"\n").is_err());
     }
 
     #[test]
@@ -109,6 +145,7 @@ mod tests {
             "session_minutes = \"soon\"\n",
             "session_minutes = 0\n",
             "idle_minutes = 0\n",
+            "hook_output = \"off\"\n",
             "= broken",
         ] {
             assert!(Config::parse(bad).is_err(), "{bad}");

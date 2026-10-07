@@ -74,6 +74,11 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         fx["event"].as_str().unwrap_or(""),
     ])
     .env_remove("VAHTA_HOOK_DISABLE")
+    // The hook looks for a running daemon after a tool's output; it must find
+    // none of the real ones, so every directory it could look in is ours.
+    .env("VAHTA_RUNTIME_DIR", tmp.0.join("run"))
+    .env("VAHTA_DATA_DIR", tmp.0.join("data"))
+    .env("VAHTA_CONFIG_DIR", tmp.0.join("config"))
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());

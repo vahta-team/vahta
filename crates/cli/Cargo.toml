@@ -27,13 +27,20 @@ path = "src/main.rs"
 name = "vh"
 path = "src/bin/vh.rs"
 
+[features]
+default = ["lock-hyprland"]
+# Forwarded to the daemon: the Hyprland lock source. Build with
+# `--no-default-features` to leave it out.
+lock-hyprland = ["vahta-daemon/lock-hyprland"]
+
 [dependencies]
 vahta-scan = { path = "../scan" }
 vahta-harness = { path = "../harness" }
 vahta-setup = { path = "../setup" }
 dunce = "1"
 vahta-vault = { path = "../vault" }
-vahta-daemon = { path = "../daemon" }
+vahta-daemon = { path = "../daemon", default-features = false }
+vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
 # The prompt window reads a password with the terminal's echo off.
 rpassword = "7"

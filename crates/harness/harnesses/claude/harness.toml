@@ -154,6 +154,23 @@ style = "json"
 # to the person. We do not use decision "block": that would hide the result.
 body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
 
+# A result with secrets cut out of it (docs read 2026-10-06). updatedToolOutput
+# replaces the result before the model sees it, and must keep the tool's own
+# shape, so {redacted_output} is the result as the tool gave it with only its
+# strings changed. additionalContext tells the model what was cut and how to
+# ask. systemMessage is left out when the message is empty, which it is
+# unless the daemon was not there to hold the original.
+[replies.after_tool.redact]
+style = "json"
+body = { hookSpecificOutput = { hookEventName = "PostToolUse", updatedToolOutput = "{redacted_output}", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
+
+# An MCP tool's result, a string or an object. The docs now prefer
+# updatedToolOutput for every tool; updatedMCPToolOutput is the field older
+# versions know for MCP, and the current docs still accept it.
+[replies.after_tool.redact_mcp]
+style = "json"
+body = { hookSpecificOutput = { hookEventName = "PostToolUse", updatedMCPToolOutput = "{redacted_output}", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
+
 # The exit-code alternative, for harnesses that cannot read JSON (not used by
 # Claude today):
 #   [replies.before_tool.deny]

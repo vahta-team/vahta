@@ -3,10 +3,16 @@
 //!
 //! Two kinds of peer speak it, told apart by the first frame, the [`Hello`]:
 //!
-//! * a **client** (the `vahta` command, later the hook and the MCP server),
+//! * a **client** (the `vahta` command, the hook, later the MCP server),
 //!   which sends [`ClientRequest`]s and receives [`ClientReply`]s. These types
 //!   have no field for a secret value or the password, and every one refuses
-//!   unknown fields, so a message carrying one is not a message;
+//!   unknown fields, so a message carrying one is not a message. Two
+//!   deliberate exceptions, both about a tool's output rather than the vault:
+//!   the hook sends the output it already holds ([`ClientRequest::OutputScan`])
+//!   so the daemon can find the values it knows in it, and after the person
+//!   says yes in a window, `vahta output allow` receives that output back
+//!   ([`ClientReply::OutputReleased`]). A reply to the hook never carries a
+//!   value: only where the values are;
 //! * a **surface** (the prompt window), authenticated by a one-time token the
 //!   daemon issued for exactly one request. Only this connection carries the
 //!   password, a typed value or a value to show.
@@ -19,12 +25,11 @@ use std::io::{self, Read, Write};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use vahta_vault::Tier;
 use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -161,6 +166,16 @@ pub struct HelloReply {
 
 // --- Client messages ------------------------------------------------------------------
 
+/// A secret's tier, as a client names it. The vault has its own type; this one
+/// mirrors it on the wire (same spelling) so a client needs no vault crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tier {
+    /// A session may hold it.
+    Session,
+    /// It needs the password every time.
+    EachUse,
+}
+
 /// Which file a project's secrets are imported from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
@@ -274,6 +289,36 @@ pub enum ClientRequest {
         renames: Vec<(String, String)>,
         label: Option<String>,
     },
+    /// The hook, after a tool ran and before its output reaches the model:
+    /// `texts` are the strings of that output (every one, in order), and
+    /// `spans` what the hook's own detector would cut. The daemon adds the
+    /// values it holds for the caller's agent, drops what the person has
+    /// already let through, and answers with [`ClientReply::OutputSpans`].
+    /// `possible` names the kinds the detector found too weak to cut, for the
+    /// journal only.
+    OutputScan {
+        cwd: String,
+        tool: String,
+        texts: Vec<String>,
+        spans: Vec<OutputSpan>,
+        possible: Vec<String>,
+    },
+    /// The hook in observe mode (`hook_output = "observe"`): it changed
+    /// nothing, and tells the daemon what it saw, for the journal. Kinds and
+    /// counts, never a value.
+    OutputObserved {
+        tool: String,
+        kinds: Vec<String>,
+        likely: usize,
+        possible: usize,
+    },
+    /// Ask the person to let the agent see what was cut out of a tool's
+    /// output kept under `reference`. Only the agent whose hook made the
+    /// reference may ask. `reason` is the agent's, shown as unverified.
+    OutputAllow {
+        reference: String,
+        reason: Option<String>,
+    },
     /// Narrow the caller's session for a sub-agent. The child session is
     /// anchored to the calling process, which then runs the sub-agent; the
     /// session ends when it exits. A scope that is not a subset of the
@@ -285,6 +330,18 @@ pub enum ClientRequest {
         duration: DurationSpec,
         label: Option<String>,
     },
+}
+
+/// One value to cut out of a tool's output: `text` is which of the output's
+/// strings, `start..end` the byte range in it, and `label` what replaces it:
+/// a secret's name when the daemon knew the value, else the detector's kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSpan {
+    pub text: usize,
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
 }
 
 /// What the client sends while a command runs: the command's input, and the
@@ -438,6 +495,9 @@ pub enum RefusalKind {
     Stale,
     /// There is no session to narrow.
     NoSession,
+    /// No tool output is kept under that reference for this agent: it was
+    /// never there, its time ran out, or another agent's hook made it.
+    UnknownOutput,
 }
 
 /// One name in a refusal and why.
@@ -486,6 +546,21 @@ pub enum ClientReply {
     /// The request could not be carried out; `message` says why, never a value.
     Error {
         message: String,
+    },
+    /// The answer to an `OutputScan`: what to cut, and the reference under
+    /// which the daemon keeps the original for a while, so the agent can ask
+    /// the person for it (`vahta output allow <reference>`). No reference when
+    /// nothing is cut, or the original could not be kept.
+    OutputSpans {
+        spans: Vec<OutputSpan>,
+        reference: Option<String>,
+    },
+    /// The person agreed to show the agent a tool's output as it was: `text`
+    /// is that output, its non-empty strings joined by newlines. The one reply that
+    /// carries what may be a secret value, sent only after a "Show to the
+    /// agent" in a window, to the agent that asked.
+    OutputReleased {
+        text: String,
     },
 }
 
@@ -574,6 +649,14 @@ pub enum SurfaceRequest {
         question: String,
         timeout_secs: Option<u64>,
     },
+    /// One of `options`, no secret; answered with its index.
+    Choose {
+        panel: Panel,
+        question: String,
+        options: Vec<String>,
+    },
+    /// A line of plain text, typed in the open: a name, never a value.
+    Text { panel: Panel, prompt: String },
     /// Show something secret until a key is pressed, or `seconds` pass.
     Show {
         panel: Panel,
@@ -599,6 +682,14 @@ pub enum SurfaceAnswer {
     /// A `Show` was seen (acknowledged, or its time ran out).
     Done {},
     Cancel {},
+    /// The index of the option chosen.
+    Choice {
+        index: usize,
+    },
+    /// The line typed for a `Text`.
+    Text {
+        value: String,
+    },
 }
 
 #[cfg(test)]

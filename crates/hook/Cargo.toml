@@ -21,6 +21,9 @@ vahta-harness = { path = "../harness" }
 vahta-detect = { path = "../detect" }
 vahta-scan = { path = "../scan" }
 vahta-json = { path = "../json" }
+# The client side of the daemon only: the protocol and the socket, none of
+# the vault's cryptography.
+vahta-ipc = { path = "../ipc" }
 dirs = "6"
 serde_json = { version = "1", features = ["preserve_order"] }
 

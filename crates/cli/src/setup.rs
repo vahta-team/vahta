@@ -14,7 +14,7 @@
 use std::io::Write;
 
 use vahta_harness::{HARNESSES, Manifest};
-use vahta_setup::{Action, Env as SetupEnv, HookProblem, Plan, State, Status};
+use vahta_setup::{Action, Env as SetupEnv, HookProblem, Placement, Plan, State, Status};
 
 use crate::{EXIT_CLEAN, EXIT_USAGE};
 
@@ -23,9 +23,9 @@ const EXIT_FAILED: i32 = 1;
 
 pub const USAGE: &str = "\
 usage: vahta setup
-       vahta setup --claude|--codex|--cursor [--force] [--dry-run] [--uninstall]
-       vahta setup --all [--dry-run] [--uninstall]
-       vahta setup --refresh [--dry-run]
+       vahta setup --claude|--codex|--cursor [--force] [--dry-run] [--last] [--uninstall]
+       vahta setup --all [--dry-run] [--last] [--uninstall]
+       vahta setup --refresh [--dry-run] [--last]
 
 Register vahta-hook with the coding agents on this machine.
 
@@ -40,16 +40,22 @@ options:
                          every harness that has entries of ours)
   --force                install even though the harness was not found
   --dry-run              print what would change as a unified diff; write nothing
+  --last                 move our entries behind every other hook of the same
+                         event (by default ours stay where they are). For when
+                         another hook also rewrites tool output: which rewrite
+                         wins is not defined by Claude Code (see docs/hooks.md)
   --uninstall            remove our entries and leave everything else alone
   --refresh              reinstall in every harness that already has entries of
                          ours, whatever their state (current, outdated, or pointing
                          at another vahta-hook), and leave the others alone. Writes
                          nothing when nothing of ours is installed. Takes only
-                         --dry-run; run it after moving or reinstalling vahta
+                         --dry-run and --last; run it after moving or
+                         reinstalling vahta
   -h, --help             show this help
 
 Setup adds one hook entry per event to the harness's user-level config, after
-the entries already there, and never touches an entry that is not ours. A file
+the entries already there, and never touches an entry that is not ours. An
+entry of ours that is already there is updated where it stands. A file
 that is not valid JSON is refused. The file as it was before vahta first
 changed it is kept as <file>.vahta-backup; later runs leave that copy alone.
 ";
@@ -61,6 +67,7 @@ struct Args {
     dry_run: bool,
     uninstall: bool,
     refresh: bool,
+    last: bool,
 }
 
 enum Parsed {
@@ -77,6 +84,7 @@ fn parse(args: &[String]) -> Parsed {
         dry_run: false,
         uninstall: false,
         refresh: false,
+        last: false,
     };
     for a in args {
         match a.as_str() {
@@ -86,6 +94,7 @@ fn parse(args: &[String]) -> Parsed {
             "--dry-run" => out.dry_run = true,
             "--uninstall" => out.uninstall = true,
             "--refresh" => out.refresh = true,
+            "--last" => out.last = true,
             other => match other.strip_prefix("--").filter(|n| HARNESSES.contains(n)) {
                 Some(name) => {
                     if !out.harnesses.iter().any(|h| h == name) {
@@ -97,10 +106,13 @@ fn parse(args: &[String]) -> Parsed {
         }
     }
     let named = !out.harnesses.is_empty();
+    if out.last && out.uninstall {
+        return Parsed::Error("--last goes with an install, not --uninstall".into());
+    }
     if out.refresh {
         if out.uninstall || out.all || named || out.force {
             return Parsed::Error(
-                "--refresh goes with --dry-run only, not --uninstall, --all, --force or a harness flag".into(),
+                "--refresh goes with --dry-run and --last only, not --uninstall, --all, --force or a harness flag".into(),
             );
         }
         return Parsed::Run(out);
@@ -111,7 +123,7 @@ fn parse(args: &[String]) -> Parsed {
     if out.all && out.force {
         return Parsed::Error("--force goes with a harness flag, not --all".into());
     }
-    if !out.all && !named && (out.force || out.dry_run || out.uninstall) {
+    if !out.all && !named && (out.force || out.dry_run || out.uninstall || out.last) {
         return Parsed::Error("name a harness (--claude, --codex, --cursor) or --all".into());
     }
     Parsed::Run(out)
@@ -389,7 +401,12 @@ pub fn run(
     // Plan everything before writing anything.
     let mut plans: Vec<(&Manifest, Plan)> = Vec::new();
     for m in chosen {
-        match vahta_setup::plan(m, env, action) {
+        let placement = if parsed.last {
+            Placement::Last
+        } else {
+            Placement::Keep
+        };
+        match vahta_setup::plan_placed(m, env, action, placement) {
             Ok(p) => plans.push((m, p)),
             Err(e) => {
                 let file = vahta_setup::config_path(m, env)

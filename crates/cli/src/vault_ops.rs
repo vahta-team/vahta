@@ -8,8 +8,8 @@
 
 use std::io::Write;
 
-use vahta_daemon::protocol::{ClientRequest, ImportSource};
-use vahta_vault::Tier;
+use vahta_ipc::protocol::Tier;
+use vahta_ipc::protocol::{ClientRequest, ImportSource};
 
 use crate::daemon_cmd;
 use crate::{EXIT_CLEAN, EXIT_USAGE, Env};

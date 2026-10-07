@@ -55,7 +55,7 @@ impl Shared {
 }
 
 /// The nodes of the peer's ancestor chain, for the anchor choice.
-fn nodes_of(ctx: &Ctx<'_>) -> Vec<Node> {
+pub(crate) fn nodes_of(ctx: &Ctx<'_>) -> Vec<Node> {
     vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS)
         .into_iter()
         .map(|id| Node {

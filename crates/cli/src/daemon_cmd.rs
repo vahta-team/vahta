@@ -9,11 +9,11 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use serde_json::json;
-use vahta_daemon::client::{ClientError, Connection, Connector};
-use vahta_daemon::config::Config;
-use vahta_daemon::paths::Paths;
-use vahta_daemon::protocol::{ClientReply, ClientRequest, RefusalKind, StatusInfo};
 use vahta_daemon::server::{self, Options, ServerError};
+use vahta_ipc::client::{ClientError, Connection, Connector};
+use vahta_ipc::config::Config;
+use vahta_ipc::paths::Paths;
+use vahta_ipc::protocol::{ClientReply, ClientRequest, RefusalKind, StatusInfo};
 
 use crate::{EXIT_CANCELLED, EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_REFUSED, EXIT_USAGE, Env};
 
@@ -344,6 +344,8 @@ pub fn report(
         ClientReply::Status(_)
         | ClientReply::Session(_)
         | ClientReply::Sessions { .. }
+        | ClientReply::OutputSpans { .. }
+        | ClientReply::OutputReleased { .. }
         | ClientReply::RunStarted {} => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
             EXIT_FAILED
@@ -366,5 +368,6 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::NoAnchor => "no process to anchor a session to",
         RefusalKind::Stale => "changed since this session was opened; unlock again",
         RefusalKind::NoSession => "no session to narrow; run `vahta unlock` first",
+        RefusalKind::UnknownOutput => "no output kept under that reference for this agent",
     }
 }

@@ -11,9 +11,16 @@
 //! * A hook command is **ours** when its program's basename (unquoted, `.exe`
 //!   stripped) is `vahta-hook`. Anything else, including key-amnesia's
 //!   `key-amnesia-hook`, is foreign and is never touched or reordered.
-//! * Install removes every entry of ours, then appends the fresh ones **last**
-//!   in each event array (Claude's PostToolUse rewrites are last-registered-
-//!   wins). So running it twice gives the same file.
+//! * Install, by default, rewrites each entry of ours **where it stands** and
+//!   appends only the ones that are new, after the entries already there; an
+//!   entry of ours that is no longer wanted goes. With [`Placement::Last`]
+//!   (`vahta setup --last`) it removes every entry of ours and appends the
+//!   fresh ones last in each event array instead. Either way running it twice
+//!   gives the same file.
+//! * Why both: the order of several hooks that rewrite a tool's output is not
+//!   defined by Claude Code's documentation. Moving ours behind the person's
+//!   own hooks on every refresh would be a change they did not ask for, so it
+//!   happens only when asked (see `docs/hooks.md`).
 //! * A config that exists but is not a JSON object is refused, never clobbered.
 //! * "Current" is content equality with what this binary would write now, not a
 //!   comparison of version numbers.
@@ -494,12 +501,126 @@ fn deny_present(doc: &mut Map<String, Value>, m: &Manifest) -> bool {
     }
 }
 
-/// The config text after installing `program` into `before` (`None` = no file).
+/// Where an install puts our entries in each event array.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// Ours stay where they are; new ones go after the entries already there.
+    #[default]
+    Keep,
+    /// Ours move to the end, behind everything else (`vahta setup --last`).
+    Last,
+}
+
+/// The `--event` kind of one of our commands, which with the event name tells
+/// our entries apart (Claude has two on PreToolUse).
+fn event_kind(command: &str, os: Os) -> Option<String> {
+    let args = arguments(command, os);
+    let mut words = args.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "--event" {
+            return words.next().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Put `wanted` into the hook arrays, each in the place of the entry of ours
+/// it replaces (same event, same `--event` kind), and return the ones that had
+/// no such place. Every other entry of ours is removed. A group that mixes our
+/// command with someone else's keeps theirs, and ours goes to the end.
+fn replace_in_place(
+    hooks: &mut Map<String, Value>,
+    wanted: &[Entry],
+    shape: Shape,
+    os: Os,
+) -> Vec<Entry> {
+    let mut placed = vec![false; wanted.len()];
+    for (event, arr) in hooks.iter_mut() {
+        let Value::Array(arr) = arr else { continue };
+        let mut kept = Vec::with_capacity(arr.len());
+        for mut entry in std::mem::take(arr) {
+            let ours: Vec<String> = match shape {
+                Shape::Flat => command_of(&entry)
+                    .filter(|c| is_ours(c, os))
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect(),
+                Shape::Grouped => match entry.get("hooks") {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter_map(command_of)
+                        .filter(|c| is_ours(c, os))
+                        .map(str::to_string)
+                        .collect(),
+                    _ => Vec::new(),
+                },
+            };
+            if ours.is_empty() {
+                kept.push(entry);
+                continue;
+            }
+            let alone = match shape {
+                Shape::Flat => true,
+                Shape::Grouped => {
+                    matches!(entry.get("hooks"), Some(Value::Array(items)) if items.len() == ours.len())
+                }
+            };
+            let slot = (alone && ours.len() == 1)
+                .then(|| event_kind(&ours[0], os))
+                .flatten()
+                .and_then(|kind| {
+                    wanted.iter().enumerate().position(|(i, w)| {
+                        !placed[i]
+                            && &w.event == event
+                            && event_kind(&w.command, os) == Some(kind.clone())
+                    })
+                });
+            match slot {
+                Some(i) => {
+                    placed[i] = true;
+                    kept.push(entry_json(&wanted[i], shape));
+                }
+                None => {
+                    // Not one we can rewrite here: ours go, theirs stay.
+                    if let (Shape::Grouped, Some(Value::Array(items))) =
+                        (shape, entry.get_mut("hooks"))
+                    {
+                        items.retain(|i| !command_of(i).is_some_and(|c| is_ours(c, os)));
+                        if !items.is_empty() {
+                            kept.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+        *arr = kept;
+    }
+    wanted
+        .iter()
+        .zip(placed)
+        .filter(|(_, p)| !p)
+        .map(|(e, _)| e.clone())
+        .collect()
+}
+
+/// The config text after installing `program` into `before` (`None` = no file),
+/// ours kept where they are.
 pub fn install_text(
     before: Option<&str>,
     m: &Manifest,
     os: Os,
     program: &str,
+) -> Result<String, Refusal> {
+    install_text_placed(before, m, os, program, Placement::Keep)
+}
+
+/// [`install_text`] with the placement chosen.
+pub fn install_text_placed(
+    before: Option<&str>,
+    m: &Manifest,
+    os: Os,
+    program: &str,
+    placement: Placement,
 ) -> Result<String, Refusal> {
     let mut doc = parse(before)?;
     if let Some(req) = &m.config.require {
@@ -516,13 +637,22 @@ pub fn install_text(
             }
         }
     }
-    strip(&mut doc, m.config.shape, os)?;
+    if placement == Placement::Last {
+        strip(&mut doc, m.config.shape, os)?;
+    }
     if let Some(d) = &m.config.deny
         && let Some(list) = deny_list(&mut doc, &d.key, true)?
     {
-        // Ours go last, once each; the person's own rules keep their place.
-        list.retain(|v| !v.as_str().is_some_and(|s| d.rules.iter().any(|r| r == s)));
-        list.extend(d.rules.iter().cloned().map(Value::String));
+        // Once each; the person's own rules keep their place. Ours keep
+        // theirs too, unless they are to go last.
+        if placement == Placement::Last {
+            list.retain(|v| !v.as_str().is_some_and(|s| d.rules.iter().any(|r| r == s)));
+        }
+        for rule in &d.rules {
+            if !list.iter().any(|v| v.as_str() == Some(rule.as_str())) {
+                list.push(Value::String(rule.clone()));
+            }
+        }
     }
     if !doc.contains_key("hooks") {
         doc.insert("hooks".into(), Value::Object(Map::new()));
@@ -530,7 +660,12 @@ pub fn install_text(
     let Some(Value::Object(hooks)) = doc.get_mut("hooks") else {
         return Err(Refusal::Shape("\"hooks\" is not an object".into()));
     };
-    for e in entries(m, program) {
+    let wanted = entries(m, program);
+    let to_append = match placement {
+        Placement::Last => wanted,
+        Placement::Keep => replace_in_place(hooks, &wanted, m.config.shape, os),
+    };
+    for e in to_append {
         let slot = hooks
             .entry(e.event.clone())
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -604,13 +739,29 @@ fn read_config(path: &Path) -> Result<Option<String>, Refusal> {
 }
 
 pub fn plan(m: &Manifest, env: &Env, action: Action) -> Result<Plan, Refusal> {
+    plan_placed(m, env, action, Placement::Keep)
+}
+
+/// [`plan`] with the placement of an install chosen.
+pub fn plan_placed(
+    m: &Manifest,
+    env: &Env,
+    action: Action,
+    placement: Placement,
+) -> Result<Plan, Refusal> {
     let path = config_path(m, env).ok_or(Refusal::NoConfigPath)?;
     let path = dunce::canonicalize(&path).unwrap_or(path);
     let before = read_config(&path)?;
     let after = match action {
         Action::Install => {
             let hook = env.hook.to_str().ok_or(Refusal::HookPathNotUtf8)?;
-            let text = install_text(before.as_deref(), m, env.os, &quote_word(hook, env.os))?;
+            let text = install_text_placed(
+                before.as_deref(),
+                m,
+                env.os,
+                &quote_word(hook, env.os),
+                placement,
+            )?;
             (before.as_deref() != Some(text.as_str())).then_some(text)
         }
         Action::Uninstall => match &before {

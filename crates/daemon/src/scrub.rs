@@ -87,6 +87,21 @@ impl Scrubber {
         self.process(true)
     }
 
+    /// Where the values are in a whole `buf`, as the streaming path would
+    /// redact them: matches that overlap or touch merged into one span, named
+    /// after the first (longest) value in it. For a text that is complete
+    /// already, a tool's output the hook sends.
+    pub fn spans(&self, buf: &[u8]) -> Vec<(usize, usize, String)> {
+        let mut out: Vec<(usize, usize, String)> = Vec::new();
+        for h in self.hits(buf) {
+            match out.last_mut() {
+                Some((_, end, _)) if h.start <= *end => *end = (*end).max(h.end),
+                _ => out.push((h.start, h.end, self.targets[h.target].name.clone())),
+            }
+        }
+        out
+    }
+
     fn hits(&self, buf: &[u8]) -> Vec<Hit> {
         let mut hits = Vec::new();
         for start in 0..buf.len() {
@@ -351,6 +366,26 @@ mod tests {
         let out = all_chunkings(&[("A", "aaaa")], b"aaaaaaaaaaaa");
         assert!(!text(&out).contains('a') || text(&out).starts_with("***REDACTED(A)***"));
         assert!(!text(&out).replace("***REDACTED(A)***", "").contains("aaaa"));
+    }
+
+    #[test]
+    fn spans_of_a_whole_text_match_what_the_stream_redacts() {
+        let s = Scrubber::new(values(&[("SHORT", "abc"), ("LONG", "xxabcxx")]));
+        let text = b"1 xxabcxx 2 abc 3 abcabc";
+        let spans = s.spans(text);
+        let named: Vec<(&[u8], &str)> = spans
+            .iter()
+            .map(|(a, b, n)| (&text[*a..*b], n.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (&b"xxabcxx"[..], "LONG"),
+                (&b"abc"[..], "SHORT"),
+                (&b"abcabc"[..], "SHORT")
+            ]
+        );
+        assert!(Scrubber::new(vec![]).spans(text).is_empty());
     }
 
     #[test]

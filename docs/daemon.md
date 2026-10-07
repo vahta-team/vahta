@@ -36,6 +36,7 @@ nothing was done.
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
 | `vahta run [--secret NAME]... [--as NAME=VAR]... -- COMMAND` | Run a command with secrets in its environment. | only without a session |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
+| `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list`, `vahta check` | Names, kinds and tiers; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta daemon run\|status\|stop\|restart` | The daemon itself. | no |
 
@@ -172,8 +173,10 @@ checked.
 ```toml
 session_minutes = 30    # default length of `vahta unlock`
 lock_on_sleep = true    # end sessions on suspend and screen lock (Linux)
+lock_sources = ["logind", "hyprland"]   # which triggers; unset = all, [] = none
 terminal = "kitty"      # the terminal the window opens in (Linux); empty = detect
 idle_minutes = 10       # the daemon exits after this long with nothing to do
+hook_output = "redact"  # or "observe": the hook only reports secrets in tool output
 ```
 
 A misspelt key is an error, not a silent default. On Linux the window opens in
@@ -181,6 +184,34 @@ the first terminal that works: `VAHTA_TERMINAL` if set, else `terminal` from the
 config, else `$TERMINAL`, else the first of the table Vahta carries that is
 installed (your desktop's own first). Name yours with the flag that makes it run a
 command if it is not found: `terminal = "alacritty -e"`.
+
+### Lock triggers
+
+`lock_on_sleep` ends sessions when something says the person has left. Each way
+of finding out is a *lock source*; this build has two on Linux: `logind`
+(suspend, `loginctl lock-session`, a desktop that sets `LockedHint`) and
+`hyprland` (a lock screen on Hyprland, by asking the compositor). `lock_sources`
+picks among them by name: unset means every source in the build, a list means
+only those, `[]` means none. A name the build does not know is written to the
+journal and ignored. The Hyprland source is the cargo feature `lock-hyprland`,
+on by default; `cargo build --no-default-features` leaves it out.
+
+**Any other locker, with no code.** `vahta lock --all` needs no password (ending
+a session never needs one), so anything that can run a command when the screen
+locks or the machine idles can be a trigger. Put it in the locker's own hook:
+hypridle's `lock_cmd` (`lock_cmd = vahta lock --all; pidof hyprlock || hyprlock`),
+`xss-lock -- sh -c 'vahta lock --all; your-locker'`, or a sway, i3 or Omarchy
+hook.
+
+**Adding a source (for maintainers).** Sources live in
+`crates/daemon/src/lock/`, one file each. Write `lock/<name>.rs` with a type that
+implements `LockSource`: a stable `name()`, and `run(self: Box<Self>, sink)`,
+which runs in its own thread until `sink.stopping()`, or returns at once after
+`sink.note("unavailable", why)` if it does not apply here. It calls
+`sink.lock(why)` to end every session and journal the reason. `sink` is all it
+gets: it cannot see sessions, keys or the prompt surface. Then add one line to
+`sources()` in `lock/mod.rs`, behind the `cfg` that says where it applies (and a
+cargo feature, if it should be optional). The core does not change.
 
 ### Files
 
@@ -202,6 +233,11 @@ captured and the clipboard can be read, so these are for the person, in their
 own terminal. `vahta setup --claude` writes the same commands into Claude
 Code's `permissions.deny` as a second layer; Codex and Cursor have no command
 deny list, so there the hook is the only layer.
+
+The hook also cuts secrets out of what a tool returns before the model sees
+it: the detector's likely finds, and, with the daemon running, every value it
+holds for that agent. [hooks.md](hooks.md) says how, and how the agent asks the
+person for what was cut.
 
 ## What this does not protect against
 
@@ -233,7 +269,8 @@ an agent running as you could *do*. Read this before relying on it.
 - **Sleep and lock.** Ending sessions on suspend and screen lock is Linux only.
   Under Hyprland the lock screen is noticed within about two seconds, by asking
   the compositor while a session is open. A screen locker on another compositor
-  that does not tell logind is not heard. macOS and Windows do not do it yet.
+  that does not tell logind is not heard unless it runs `vahta lock --all` (see
+  Lock triggers). macOS and Windows do not do it yet.
 - **The hook is a speed bump.** The protection of Vahta's own files in the agent
   hook covers the common ways of reading or changing them (the read, edit and
   write tools, common shell readers, `rm`, `mv`, `cp`, redirections). It does not

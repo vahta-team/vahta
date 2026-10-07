@@ -12,25 +12,27 @@
 //! when it has been idle.
 
 mod anchor;
-pub mod client;
 mod clipboard;
-pub mod config;
 mod dotenv;
 pub mod journal;
+mod lock;
 mod ops;
-pub mod paths;
-pub mod protocol;
+mod output;
 mod run;
 mod run_ops;
 mod scrub;
 pub mod server;
 mod session;
 mod session_ops;
-mod sleep;
 pub mod surface;
 pub mod terminal;
 pub mod testing;
 
-/// This build's version, compared at the handshake. A client and a daemon of
-/// different versions do not talk past the hello.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+// The protocol, the client, the paths and the config live in `vahta-ipc`, so
+// that a client (the hook above all) need not build the daemon. Inside the
+// daemon they keep their old paths.
+use vahta_ipc::{config, paths, protocol};
+
+/// This build's version, compared at the handshake: the one `vahta-ipc`
+/// gives every client, so the two cannot drift apart.
+pub const VERSION: &str = vahta_ipc::VERSION;

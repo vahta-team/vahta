@@ -238,39 +238,71 @@ fn word_boundary_at(text: &str, at: usize) -> bool {
 /// Only the two characters *around* the run can be non-ASCII, and those are
 /// decoded in place for `\b`.
 fn rule_matches(rule: &PrefixRule, text: &str) -> bool {
-    let bytes = text.as_bytes();
     for literal in rule.literals {
         let mut from = 0usize;
         while let Some(rel) = text[from..].find(literal) {
             let start = from + rel;
             // Resume one character on, as the scan-by-position original does.
             from = start + 1;
-            if !word_boundary_at(text, start) {
-                continue;
-            }
-            let run_start = start + literal.len();
-            let mut end = run_start;
-            while end < bytes.len() && rule.tail.contains_byte(bytes[end]) {
-                end += 1;
-            }
-            if rule.exact {
-                // `{n}` consumes exactly n and cannot give any back, so the
-                // trailing boundary either holds at n or the rule fails here.
-                let want = run_start + rule.min_tail;
-                if end >= want && word_boundary_at(text, want) {
-                    return true;
-                }
-            } else {
-                while end >= run_start + rule.min_tail {
-                    if word_boundary_at(text, end) {
-                        return true;
-                    }
-                    end -= 1;
-                }
+            if rule_match_at(rule, text, start, literal).is_some() {
+                return true;
             }
         }
     }
     false
+}
+
+/// Where a match of `rule` that opens with `literal` at byte `start` ends, if
+/// one does: the `\b` before it, the run of the tail class, and the trailing
+/// `\b` with the backtracking described on [`rule_matches`].
+fn rule_match_at(rule: &PrefixRule, text: &str, start: usize, literal: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if !word_boundary_at(text, start) {
+        return None;
+    }
+    let run_start = start + literal.len();
+    let mut end = run_start;
+    while end < bytes.len() && rule.tail.contains_byte(bytes[end]) {
+        end += 1;
+    }
+    if rule.exact {
+        // `{n}` consumes exactly n and cannot give any back, so the trailing
+        // boundary either holds at n or the rule fails here.
+        let want = run_start + rule.min_tail;
+        return (end >= want && word_boundary_at(text, want)).then_some(want);
+    }
+    while end >= run_start + rule.min_tail {
+        if word_boundary_at(text, end) {
+            return Some(end);
+        }
+        end -= 1;
+    }
+    None
+}
+
+/// Every vendor-prefixed key in `text`, as byte ranges with the vendor, in no
+/// particular order. A sibling of [`find_prefix_kind`] for the hook's
+/// redaction: the same rules, every occurrence rather than the first rule
+/// that matches, and where each one is. Matches of one rule do not overlap
+/// (`finditer`); matches of two rules may, and the caller merges them.
+pub fn find_prefix_spans(text: &str) -> Vec<(std::ops::Range<usize>, &'static str)> {
+    let mut out = Vec::new();
+    for rule in PREFIX_RULES {
+        for literal in rule.literals {
+            let mut from = 0usize;
+            while let Some(rel) = text[from..].find(literal) {
+                let start = from + rel;
+                match rule_match_at(rule, text, start, literal) {
+                    Some(end) => {
+                        out.push((start..end, rule.kind));
+                        from = end;
+                    }
+                    None => from = start + 1,
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Rules (as a bitmask over [`PREFIX_RULES`] indices) whose literals can open
@@ -374,8 +406,13 @@ fn is_bearer_value_char(c: char) -> bool {
 
 /// `(?i)\bBearer\s+([A-Za-z0-9._\-+=/]{16,})` — the captured value.
 fn find_bearer_value<U: Unit>(chars: &[U]) -> Option<String> {
+    next_bearer(chars, 0).map(|(start, end)| collect_string(&chars[start..end]))
+}
+
+/// The first Bearer capture at or after `from`, as the unit range of its value.
+fn next_bearer<U: Unit>(chars: &[U], from: usize) -> Option<(usize, usize)> {
     const WORD: [char; 6] = ['b', 'e', 'a', 'r', 'e', 'r'];
-    let mut start = 0usize;
+    let mut start = from;
     while start + WORD.len() <= chars.len() {
         let matched = chars[start..start + WORD.len()]
             .iter()
@@ -399,11 +436,61 @@ fn find_bearer_value<U: Unit>(chars: &[U]) -> Option<String> {
             i += 1;
         }
         if i - value_start >= 16 {
-            return Some(collect_string(&chars[value_start..i]));
+            return Some((value_start, i));
         }
         start += 1;
     }
     None
+}
+
+/// Every Bearer capture, as unit ranges of the values; `finditer` order.
+fn bearer_values<U: Unit>(chars: &[U]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some((start, end)) = next_bearer(chars, from) {
+        out.push((start, end));
+        from = end;
+    }
+    out
+}
+
+/// Every `Bearer <value>` in `text`: the byte range of each value and its
+/// tier (never `None`; a value that classifies as none is left out). The
+/// sibling of [`classify_bearer_capture`] for the hook's redaction, which
+/// looks at every capture, where the classifier looks at the first.
+pub fn find_bearer_spans(text: &str) -> Vec<(std::ops::Range<usize>, Confidence)> {
+    let bytes = text.as_bytes();
+    if !bytes
+        .windows(6)
+        .any(|w| w[0] | 0x20 == b'b' && w.eq_ignore_ascii_case(b"bearer"))
+    {
+        return Vec::new();
+    }
+    let ranges = if text.is_ascii() {
+        bearer_values(bytes)
+    } else {
+        to_byte_ranges(text, bearer_values(&text.chars().collect::<Vec<char>>()))
+    };
+    ranges
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let tier = classify_value(&text[start..end]).0;
+            (tier != Confidence::None).then_some((start..end, tier))
+        })
+        .collect()
+}
+
+/// Unit (character) ranges of a non-ASCII `text` as byte ranges.
+fn to_byte_ranges(text: &str, ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let offsets: Vec<usize> = text
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    ranges
+        .into_iter()
+        .map(|(start, end)| (offsets[start], offsets[end]))
+        .collect()
 }
 
 /// Tier of the Bearer value, or `None` if there is no Bearer capture.
@@ -617,6 +704,8 @@ struct AssignTail {
     nq2: Option<char>,
     q: Option<char>,
     value: String,
+    /// Where the value is, in units.
+    value_range: (usize, usize),
     q2: Option<char>,
     #[allow(dead_code)]
     end: usize,
@@ -666,6 +755,7 @@ fn match_assign_tail<U: Unit>(chars: &[U], at: usize) -> Option<AssignTail> {
         return None;
     }
     let value = collect_string(&chars[value_start..i]);
+    let value_range = (value_start, i);
 
     let q2 = if i < chars.len() && (chars[i].ch() == '\'' || chars[i].ch() == '"') {
         let c = chars[i].ch();
@@ -679,6 +769,7 @@ fn match_assign_tail<U: Unit>(chars: &[U], at: usize) -> Option<AssignTail> {
         nq2,
         q,
         value,
+        value_range,
         q2,
         end: i,
     })
@@ -691,14 +782,43 @@ pub fn iter_assignments(text: &str) -> Vec<(String, String)> {
     if text.is_empty() {
         return Vec::new();
     }
-    if text.is_ascii() {
+    let found = if text.is_ascii() {
         assignments_in(text.as_bytes())
     } else {
         assignments_in(&text.chars().collect::<Vec<char>>())
+    };
+    found
+        .into_iter()
+        .map(|(name, value, _)| (name, value))
+        .collect()
+}
+
+/// [`iter_assignments`] with positions instead of values: each name and the
+/// byte range of its value in `text`. For the hook's redaction, which needs
+/// to know where to cut; the value itself is `text[range]`.
+pub fn iter_assignments_at(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if text.is_ascii() {
+        assignments_in(text.as_bytes())
+            .into_iter()
+            .map(|(name, _, (start, end))| (name, start..end))
+            .collect()
+    } else {
+        let found = assignments_in(&text.chars().collect::<Vec<char>>());
+        let (names, ranges): (Vec<String>, Vec<(usize, usize)>) =
+            found.into_iter().map(|(name, _, r)| (name, r)).unzip();
+        names
+            .into_iter()
+            .zip(to_byte_ranges(text, ranges))
+            .map(|(name, (start, end))| (name, start..end))
+            .collect()
     }
 }
 
-fn assignments_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
+/// `(name, value, value range in units)` for each assignment.
+fn assignments_in<U: Unit>(chars: &[U]) -> Vec<(String, String, (usize, usize))> {
     let mut out = Vec::new();
     for (kw_start, kw_end) in find_assign_keywords(chars) {
         // Walk left across `[a-z0-9]+[_-]` groups, bounded.
@@ -735,7 +855,7 @@ fn assignments_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
         }
 
         let name = collect_string(&chars[i..kw_end]);
-        out.push((name, tail.value));
+        out.push((name, tail.value, tail.value_range));
     }
     out
 }
@@ -826,14 +946,42 @@ pub fn iter_flag_values(text: &str) -> Vec<(String, String)> {
     if text.is_empty() || !text.contains('-') {
         return Vec::new();
     }
-    if text.is_ascii() {
+    let found = if text.is_ascii() {
         flag_values_in(text.as_bytes())
     } else {
         flag_values_in(&text.chars().collect::<Vec<char>>())
+    };
+    found
+        .into_iter()
+        .map(|(name, value, _)| (name, value))
+        .collect()
+}
+
+/// [`iter_flag_values`] with positions instead of values: each flag name and
+/// the byte range of its value in `text`.
+pub fn iter_flag_values_at(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    if text.is_empty() || !text.contains('-') {
+        return Vec::new();
+    }
+    if text.is_ascii() {
+        flag_values_in(text.as_bytes())
+            .into_iter()
+            .map(|(name, _, (start, end))| (name, start..end))
+            .collect()
+    } else {
+        let found = flag_values_in(&text.chars().collect::<Vec<char>>());
+        let (names, ranges): (Vec<String>, Vec<(usize, usize)>) =
+            found.into_iter().map(|(name, _, r)| (name, r)).unzip();
+        names
+            .into_iter()
+            .zip(to_byte_ranges(text, ranges))
+            .map(|(name, (start, end))| (name, start..end))
+            .collect()
     }
 }
 
-fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
+/// `(name, value, value range in units)` for each flag form.
+fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String, (usize, usize))> {
     let mut out = Vec::new();
     let mut i = 0usize;
 
@@ -906,6 +1054,7 @@ fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
             continue;
         }
         let value = collect_string(&chars[value_start..j]);
+        let value_range = (value_start, j);
 
         // `(?P=q)`: a closer is required only when an opener was captured.
         if let Some(q) = q {
@@ -917,7 +1066,7 @@ fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String)> {
         }
 
         if is_secret_name(&name) && !is_env_name_value(&value) && !is_path_value(&value) {
-            out.push((name, value));
+            out.push((name, value, value_range));
         }
         // `finditer` does not overlap: resume after the whole match.
         i = j;

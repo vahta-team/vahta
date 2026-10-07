@@ -27,22 +27,22 @@ pub fn scripted_from_env() -> Option<Box<dyn PromptSurface>> {
 /// In a test build, stand in for logind: when the file named by
 /// `VAHTA_TEST_SLEEP_TRIGGER` appears, the machine "went to sleep". The same
 /// path as the real signal, so a test can show the sessions end.
-pub(crate) fn start_sleep_trigger(shared: &std::sync::Arc<crate::server::Shared>) {
+pub(crate) fn start_sleep_trigger(sink: &crate::lock::LockSink) {
     #[cfg(feature = "test-surface")]
     if let Some(path) = std::env::var_os("VAHTA_TEST_SLEEP_TRIGGER") {
-        let shared = shared.clone();
+        let sink = sink.clone();
         std::thread::spawn(move || {
-            while !shared.stopping() {
+            while !sink.stopping() {
                 if std::path::Path::new(&path).exists() {
                     let _ = std::fs::remove_file(&path);
-                    crate::sleep::lock_now(&shared, "test trigger");
+                    sink.lock("test trigger");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         });
     }
     #[cfg(not(feature = "test-surface"))]
-    let _ = shared;
+    let _ = sink;
 }
 
 /// Apply the test overrides to the daemon's options: the version it reports
@@ -96,6 +96,8 @@ pub mod scripted {
     //! * `{"cancel": true}` cancels;
     //! * `{"yes": true}`, `{"no": true}` and `{"noanswer": true}` answer a
     //!   confirmation;
+    //! * `{"choose": N}` picks option N of a choice;
+    //! * `{"text": "..."}` answers a plain-text question;
     //! * `{"ack": true}` acknowledges something shown.
     //!
     //! Every question is appended to the log (`VAHTA_TEST_SURFACE_LOG`) with
@@ -257,6 +259,46 @@ pub mod scripted {
                 Err(unavailable(
                     "the script answered a confirmation with the wrong kind",
                 ))
+            }
+        }
+
+        fn choose(
+            &mut self,
+            panel: &Panel,
+            question: &str,
+            options: &[String],
+        ) -> Result<Option<usize>, SurfaceError> {
+            self.inner.log(json!({
+                "ask": "choose", "prompt": question, "options": options, "panel": panel_json(panel)
+            }));
+            let answer = self.inner.pop()?;
+            if answer.get("cancel").is_some() {
+                return Ok(None);
+            }
+            match answer.get("choose").and_then(Value::as_u64) {
+                Some(n) if (n as usize) < options.len() => Ok(Some(n as usize)),
+                _ => Err(unavailable(
+                    "the script answered a choice with the wrong kind",
+                )),
+            }
+        }
+
+        fn ask_text(
+            &mut self,
+            panel: &Panel,
+            prompt: &str,
+        ) -> Result<Option<String>, SurfaceError> {
+            self.inner
+                .log(json!({"ask": "text", "prompt": prompt, "panel": panel_json(panel)}));
+            let answer = self.inner.pop()?;
+            if answer.get("cancel").is_some() {
+                return Ok(None);
+            }
+            match answer.get("text").and_then(Value::as_str) {
+                Some(s) => Ok(Some(s.to_string())),
+                None => Err(unavailable(
+                    "the script answered a text question with the wrong kind",
+                )),
             }
         }
 
