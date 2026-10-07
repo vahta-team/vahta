@@ -3,23 +3,17 @@
   "env": {},
   "stdin": {
     "hook_event_name": "PostToolUse",
-    "tool_name": "Bash",
+    "tool_name": "mcp__srv__fetch",
     "tool_input": {
-      "command": "ls"
+      "q": "x"
     },
-    "tool_response": {
-      "stdout": "found {{SECRET_ANTHROPIC}}",
-      "stderr": ""
-    },
+    "tool_response": "the key is {{SECRET_ANTHROPIC}} ok",
     "cwd": "/work/proj"
   },
   "stdout": {
     "hookSpecificOutput": {
       "hookEventName": "PostToolUse",
-      "updatedToolOutput": {
-        "stdout": "found ***REDACTED(Anthropic-style key)***",
-        "stderr": ""
-      },
+      "updatedMCPToolOutput": "the key is ***REDACTED(Anthropic-style key)*** ok",
       "additionalContext": "vahta: 1 secret value was redacted from this tool's output before you saw it (Anthropic-style key); each is shown as ***REDACTED(...)***. The original was not kept, so it cannot be shown to you. Do not try to recover it: to use a secret, run the command that needs it with `vahta run`."
     },
     "systemMessage": "vahta redacted 1 secret value (Anthropic-style key) from a tool's output before the model saw it."

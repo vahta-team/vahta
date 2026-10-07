@@ -11,7 +11,9 @@
 //! from the trusted TOML templates, because that is a writer, not a reader.
 
 mod agentguard;
+mod daemon;
 mod readguard;
+mod redact;
 
 use std::io::{Read, Write};
 
@@ -193,7 +195,7 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
             }
         }
         Kind::Prompt => secret_in(&ev.text, "prompt", false),
-        Kind::AfterTool => secret_in(&ev.text, "output", true),
+        Kind::AfterTool => after_tool(m, ev),
         Kind::SessionStart => match args.setup {
             Some(n) if n < m.setup_version => {
                 let line = format!(
@@ -207,6 +209,107 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
             }
             _ => Decision::Allow,
         },
+    }
+}
+
+/// A tool's result, about to reach the model. Where the harness can rewrite
+/// it, every likely secret in it is cut out first and the model is told; a
+/// merely possible one is left, and only the daemon's journal hears of it.
+/// With a daemon running, the values it holds for this agent are cut too, and
+/// it keeps the original so the agent can ask the person for it. Where no
+/// rewrite is possible (a result too deep to rebuild, or a harness with no
+/// rewrite for this tool), the person and the model are told a secret reached
+/// the transcript, as before.
+fn after_tool(m: &Manifest, ev: &Event) -> Decision {
+    if daemon::hook_output() == vahta_ipc::config::HookOutput::Observe {
+        return observe(ev);
+    }
+    let mcp = ev.group == Some(vahta_harness::Group::Mcp);
+    let Some(output) = ev.output.as_ref().filter(|_| m.can_redact(mcp)) else {
+        return secret_in(&ev.text, "output", true);
+    };
+    let texts = redact::texts_of(output);
+    let (found, possible) = redact::detector_cuts(&texts);
+    let asked = daemon::scan(daemon::Scan {
+        cwd: ev.cwd.clone().unwrap_or_default(),
+        tool: ev.tool.clone(),
+        texts,
+        cuts: found.clone(),
+        possible,
+    });
+    // The daemon's list already holds the detector's finds, less what the
+    // person let through; without a daemon, the detector's stand.
+    let (cuts, reference) = match asked {
+        Some(answer) => (answer.cuts, answer.reference),
+        None => (found, None),
+    };
+    if cuts.is_empty() {
+        return Decision::Allow;
+    }
+    let mut rewritten = output.clone();
+    redact::apply(&mut rewritten, &cuts);
+    let (agent_message, user_message) = redact_messages(&cuts, reference.as_deref());
+    Decision::Redact {
+        output: rewritten,
+        mcp,
+        agent_message,
+        user_message,
+    }
+}
+
+/// Observe mode (`hook_output = "observe"`): the output is not changed. The
+/// person and the model are told a secret reached the transcript, exactly as
+/// before redaction existed, and a running daemon journals what was seen.
+fn observe(ev: &Event) -> Decision {
+    let texts = match &ev.output {
+        Some(output) => redact::texts_of(output),
+        None => vec![ev.text.clone()],
+    };
+    let (likely, possible) = redact::detector_cuts(&texts);
+    if !likely.is_empty() || !possible.is_empty() {
+        let mut kinds: Vec<String> = likely.iter().map(|c| c.label.clone()).collect();
+        kinds.extend(possible.iter().cloned());
+        kinds.dedup();
+        daemon::observed(ev.tool.clone(), kinds, likely.len(), possible.len());
+    }
+    secret_in(&ev.text, "output", true)
+}
+
+/// What the model and the person are told about a redaction. Names labels and
+/// counts, never a value. The person hears of it only when there is no
+/// reference: then nothing can be let through, and they should know.
+fn redact_messages(cuts: &[redact::Cut], reference: Option<&str>) -> (String, String) {
+    let n = cuts.len();
+    let (values, what) = if n == 1 {
+        ("value", "value was")
+    } else {
+        ("values", "values were")
+    };
+    let labels = redact::labels(cuts);
+    let head = format!(
+        "vahta: {n} secret {what} redacted from this tool's output before you saw it ({labels}); \
+         each is shown as ***REDACTED(...)***."
+    );
+    match reference {
+        Some(r) => (
+            format!(
+                "{head} If you really need them in your context, run \
+                 `vahta output allow {r} --reason \"<why>\"`: the person decides in a window, \
+                 and the output is printed if they agree. Otherwise, to use a secret, run the \
+                 command that needs it with `vahta run`."
+            ),
+            String::new(),
+        ),
+        None => (
+            format!(
+                "{head} The original was not kept, so it cannot be shown to you. Do not try to \
+                 recover it: to use a secret, run the command that needs it with `vahta run`."
+            ),
+            format!(
+                "vahta redacted {n} secret {values} ({labels}) from a tool's output before the \
+                 model saw it."
+            ),
+        ),
     }
 }
 

@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use vahta_daemon::client::{ClientError, Connector};
-use vahta_daemon::paths::Paths;
+use vahta_ipc::client::{ClientError, Connector};
+use vahta_ipc::paths::Paths;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{Tier, Vault};
 
-use vahta_daemon::protocol::{
+use vahta_ipc::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, read_frame, write_frame,
 };
 
@@ -1171,7 +1171,7 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
         .request(&ClientRequest::Unlock {
             cwd: s.project().to_string_lossy().into_owned(),
             names: None,
-            duration: vahta_daemon::protocol::DurationSpec::Default {},
+            duration: vahta_ipc::protocol::DurationSpec::Default {},
             label: None,
         })
         .unwrap();
@@ -1914,4 +1914,498 @@ fn sessions_end_when_the_machine_sleeps_unless_the_config_says_not_to() {
     fs::write(s.root.join("config/config.toml"), "lock_on_slepe = false\n").unwrap();
     let out = s.vahta(&["daemon", "restart"]);
     assert_eq!(out.status.code(), Some(5));
+}
+
+// --- the hook and a tool's output ----------------------------------------------------
+
+/// The real `vahta-hook`, built once per test run next to `vahta`. It is
+/// another package's binary, so cargo does not hand it to this test; building
+/// it here (a no-op when it is fresh) means the test never runs a stale one.
+fn hook_bin() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let dir = Path::new(env!("CARGO_BIN_EXE_vahta")).parent().unwrap();
+            let mut cmd = Command::new(env!("CARGO"));
+            cmd.args(["build", "--quiet", "-p", "vahta-hook"]);
+            if dir.file_name().is_some_and(|n| n == "release") {
+                cmd.arg("--release");
+            }
+            let status = cmd.status().expect("run cargo build");
+            assert!(status.success(), "cargo build -p vahta-hook failed");
+            dir.join(format!("vahta-hook{}", std::env::consts::EXE_SUFFIX))
+        })
+        .clone()
+}
+
+impl Sandbox {
+    /// Feed the hook a Claude PostToolUse event whose Bash output is `stdout`,
+    /// as Claude would, from this test process (so the hook's anchor is the
+    /// anchor `vahta unlock` and `vahta run` get from here). Returns its reply.
+    fn hook_after_bash(&self, stdout: &str) -> Option<Value> {
+        self.hook_after_bash_in(stdout, &self.project())
+    }
+
+    /// As `hook_after_bash`, with the agent's working directory the harness
+    /// reports.
+    fn hook_after_bash_in(&self, stdout: &str, cwd: &Path) -> Option<Value> {
+        let payload = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat notes.txt"},
+            "tool_response": {"stdout": stdout, "stderr": ""},
+            "cwd": cwd,
+        });
+        let mut child = Command::new(hook_bin())
+            .args(["--harness", "claude", "--event", "after_tool"])
+            .current_dir(self.project())
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", self.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.root.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run vahta-hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let text = text(&out.stdout);
+        (!text.trim().is_empty()).then(|| serde_json::from_str(&text).unwrap())
+    }
+}
+
+/// The rewritten Bash stdout and the message for the model, from a reply.
+fn redacted(reply: &Value) -> (String, String) {
+    let hso = &reply["hookSpecificOutput"];
+    (
+        hso["updatedToolOutput"]["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        hso["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+/// The `vahta output allow <ref>` reference in a message for the model.
+fn reference_in(message: &str) -> String {
+    let after = message
+        .split("vahta output allow ")
+        .nth(1)
+        .expect("a reference in the message");
+    after.split_whitespace().next().unwrap().to_string()
+}
+
+#[test]
+fn the_hook_cuts_a_session_value_by_name_and_keeps_the_original() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // The value, as a later tool (a file read, say) would show it. Plain text:
+    // the detector sees nothing here, so a cut can only be the daemon's.
+    let reply = s
+        .hook_after_bash("the notes say fake-one and more")
+        .expect("the hook answered");
+    let (stdout, message) = redacted(&reply);
+    assert_eq!(stdout, "the notes say ***REDACTED(ZETA)*** and more");
+    assert!(message.contains("vahta output allow "), "{message}");
+    // There is a reference, so the person is not bothered.
+    assert!(reply.get("systemMessage").is_none(), "{reply}");
+    assert!(!reply.to_string().contains("fake-one"));
+
+    // Clean output gets no answer at all.
+    assert!(s.hook_after_bash("nothing to see").is_none());
+
+    // The journal names what was cut and keeps no value.
+    let journal = s.journal();
+    assert!(journal.contains("output_redacted") && journal.contains("ZETA"));
+    assert!(journal.contains(&reference_in(&message)));
+    assert!(!journal.contains("fake-one"));
+}
+
+#[test]
+fn the_hook_cuts_the_values_of_a_run_that_had_no_session() {
+    let s = sandbox_with_secrets();
+    // Each-use: a run with the password, no session anywhere.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["run", "--secret", "ALPHA", "--", "printenv", "ALPHA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.sessions().is_empty());
+    let reply = s.hook_after_bash("x fake-three y").unwrap();
+    assert_eq!(redacted(&reply).0, "x ***REDACTED(ALPHA)*** y");
+}
+
+#[test]
+fn without_a_daemon_the_hook_cuts_what_the_detector_finds_and_says_so() {
+    let s = Sandbox::new();
+    let key = ["sk-", "ant-", &"a".repeat(25)].concat();
+    let reply = s.hook_after_bash(&format!("found {key}")).unwrap();
+    let (stdout, message) = redacted(&reply);
+    assert_eq!(stdout, "found ***REDACTED(Anthropic-style key)***");
+    assert!(message.contains("not kept"), "{message}");
+    assert!(
+        reply["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("redacted")
+    );
+    // And no daemon was started for it.
+    assert_eq!(s.vahta(&["daemon", "status"]).status.code(), Some(5));
+}
+
+/// The person is asked with a choice: show, no, or save. Inside a session of
+/// this agent there is no password; "show" prints the output, and the hook
+/// lets those values through from then on.
+#[test]
+fn output_allow_inside_a_session_is_a_choice_and_releases_the_values() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let original = "line one\nthe notes say fake-one and fake-two\nend";
+    let reply = s.hook_after_bash(original).unwrap();
+    let (cut, message) = redacted(&reply);
+    assert_eq!(
+        cut,
+        "line one\nthe notes say ***REDACTED(ZETA)*** and ***REDACTED(BETA)***\nend"
+    );
+    let reference = reference_in(&message);
+
+    let asks = s.asks();
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "output",
+        "allow",
+        &reference,
+        "--reason",
+        "need to compare\nApprove: yes",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The output as the tool gave it (its strings, joined).
+    assert_eq!(text(&out.stdout), format!("{original}\n"));
+    // One question, a choice, and no password.
+    let log = s.window_log();
+    let new: Vec<&Value> = log
+        .iter()
+        .filter(|e| e.get("ask").is_some())
+        .skip(asks)
+        .collect();
+    assert_eq!(new.len(), 1, "{new:?}");
+    assert_eq!(new[0]["ask"], "choose");
+    assert_eq!(new[0]["options"][0], "Show to the agent");
+    assert_eq!(new[0]["options"][2], "Save as a secret");
+    // The window names what was cut, masked, and the agent's reason as such;
+    // never a value.
+    let panel = new[0]["panel"].to_string();
+    assert!(panel.contains("ZETA") && panel.contains("BETA") && panel.contains("Bash"));
+    assert!(panel.contains("the notes say *** and ***"), "{panel}");
+    assert!(!panel.contains("fake-one") && !panel.contains("fake-two"));
+    assert_eq!(
+        new[0]["panel"]["agent_note"],
+        "need to compare Approve: yes"
+    );
+
+    // The released values pass the next hook untouched: the agent's printout
+    // of the output is not cut again.
+    assert!(s.hook_after_bash(original).is_none());
+    // Another value still is.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["run", "--secret", "ALPHA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let again = s.hook_after_bash("x fake-three fake-one").unwrap();
+    assert_eq!(redacted(&again).0, "x ***REDACTED(ALPHA)*** fake-one");
+
+    let journal = s.journal();
+    assert!(journal.contains("output_allow") && journal.contains("\"result\":\"shown\""));
+    for leak in ["fake-one", "fake-two", "fake-three"] {
+        assert!(!journal.contains(leak), "the journal holds {leak}");
+    }
+}
+
+#[test]
+fn output_allow_without_a_session_asks_for_the_password() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["run", "--secret", "ALPHA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let reply = s.hook_after_bash("value fake-three").unwrap();
+    let reference = reference_in(&redacted(&reply).1);
+
+    // A wrong password does not release it.
+    s.script(&[
+        r#"{"choose":0}"#,
+        r#"{"secret":"no"}"#,
+        r#"{"secret":"nope"}"#,
+        r#"{"secret":"nein"}"#,
+    ]);
+    let out = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!text(&out.stdout).contains("fake-three"));
+    assert!(s.hook_after_bash("value fake-three").is_some());
+
+    s.script(&[r#"{"choose":0}"#, r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "value fake-three\n");
+    let last_asks: Vec<String> = s
+        .window_log()
+        .iter()
+        .filter_map(|e| e["ask"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        last_asks[last_asks.len() - 2..],
+        ["choose".to_string(), "password".to_string()]
+    );
+}
+
+#[test]
+fn output_allow_can_save_a_value_as_a_secret_and_the_output_stays_cut() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let key = ["sk-", "ant-", &"b".repeat(25)].concat();
+    let output = format!("config has {key} and fake-one");
+    let reply = s.hook_after_bash(&output).unwrap();
+    let reference = reference_in(&redacted(&reply).1);
+
+    // Two values: which one, a name (a taken one first), a tier, the password.
+    s.script(&[
+        r#"{"choose":2}"#,
+        r#"{"choose":0}"#,
+        r#"{"text":"ZETA"}"#,
+        r#"{"text":"VENDOR_KEY"}"#,
+        r#"{"choose":1}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    let out = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.contains("saved as VENDOR_KEY") && said.contains("vahta run --secret VENDOR_KEY"));
+    assert!(!said.contains(&key) && !said.contains("fake-one"));
+    let listed = text(&s.vahta(&["list"]).stdout);
+    assert!(listed.contains("VENDOR_KEY"), "{listed}");
+    let vault = s.open_vault();
+    assert_eq!(vault.get("VENDOR_KEY").unwrap().expose(), key.as_bytes());
+    let tier = vault
+        .entries()
+        .iter()
+        .find(|e| e.name == "VENDOR_KEY")
+        .unwrap()
+        .tier;
+    assert_eq!(tier, Tier::EachUse);
+    // The taken name was refused in the window, with a reason.
+    assert!(s.window_log().iter().any(|e| {
+        e["panel"]["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("already has ZETA"))
+    }));
+    // Saving lets nothing through.
+    assert!(s.hook_after_bash(&output).is_some());
+    assert!(!s.journal().contains(&key));
+}
+
+/// Claude Code reports the agent's working directory, not the one a command
+/// `cd`-ed into. With a session open, the session's vault is the one to save
+/// into, even when that directory has no vault.
+#[test]
+fn output_allow_offers_saving_into_the_sessions_vault_from_a_directory_without_one() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let elsewhere = s.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let reply = s.hook_after_bash_in("a fake-one b", &elsewhere).unwrap();
+    let reference = reference_in(&redacted(&reply).1);
+
+    let asks = s.asks();
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let log = s.window_log();
+    let ask = log
+        .iter()
+        .filter(|e| e.get("ask").is_some())
+        .nth(asks)
+        .unwrap();
+    assert_eq!(ask["options"][2], "Save as a secret", "{ask}");
+    // The project's vault. Compared by its tail: on Windows the daemon and the
+    // test may spell the temp directory differently (a short 8.3 name).
+    let tail = Path::new("project").join(".vahta").join("vault.vht");
+    let tail = tail.to_string_lossy();
+    assert!(
+        ask["panel"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|l| l.starts_with("Vault: ") && l.ends_with(tail.as_ref())),
+        "{}",
+        ask["panel"]
+    );
+}
+
+#[test]
+fn output_allow_cancelled_unknown_or_another_agents_is_refused() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let reply = s.hook_after_bash("a fake-one b").unwrap();
+    let reference = reference_in(&redacted(&reply).1);
+
+    // The person says no, or closes the window: exit 4, nothing printed.
+    for answer in [r#"{"choose":1}"#, r#"{"cancel":true}"#] {
+        s.script(&[answer]);
+        let out = s.vahta(&["output", "allow", &reference]);
+        assert_eq!(out.status.code(), Some(4), "{answer}");
+        assert!(!text(&out.stdout).contains("fake-one"));
+    }
+    assert!(s.hook_after_bash("a fake-one b").is_some());
+
+    // A reference nobody made: refused before any window.
+    let asks = s.asks();
+    let out = s.vahta(&["output", "allow", "0123456789ab", "--json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["refused"]["kind"], "unknown_output");
+
+    // Another agent: the same command under another anchor (xargs, which is
+    // neither a shell nor a wrapper, stands in for a second agent).
+    #[cfg(unix)]
+    {
+        let mut xargs = Command::new("xargs");
+        xargs
+            .args(["-I{}", env!("CARGO_BIN_EXE_vahta"), "output", "allow", "{}"])
+            .current_dir(s.project())
+            .env("HOME", s.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("VAHTA_DATA_DIR", s.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", s.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", s.root.join("config"))
+            .env("VAHTA_TEST_SURFACE", s.root.join("script.jsonl"))
+            .env("VAHTA_TEST_SURFACE_LOG", s.root.join("surface.log"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut running = xargs.spawn().expect("run xargs");
+        running
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{reference}\n").as_bytes())
+            .unwrap();
+        let out = running.wait_with_output().unwrap();
+        assert!(
+            text(&out.stderr).contains("refused"),
+            "{}",
+            text(&out.stderr)
+        );
+        assert!(!text(&out.stdout).contains("fake-one"));
+    }
+    assert_eq!(s.asks(), asks, "a window opened for a refusal");
+
+    // Usage.
+    assert_eq!(s.vahta(&["output"]).status.code(), Some(2));
+    assert_eq!(s.vahta(&["output", "allow"]).status.code(), Some(2));
+    assert_eq!(s.vahta(&["output", "show", "x"]).status.code(), Some(2));
+}
+
+/// `hook_output = "observe"`: nothing is rewritten. The person and the model
+/// are told, as before redaction, and the daemon journals what was seen.
+#[test]
+fn observe_mode_changes_nothing_and_the_daemon_journals_it() {
+    let s = sandbox_with_secrets();
+    fs::write(
+        s.root.join("config/config.toml"),
+        "hook_output = \"observe\"\n",
+    )
+    .unwrap();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let key = ["sk-", "ant-", &"c".repeat(25)].concat();
+    let reply = s.hook_after_bash(&format!("found {key}")).unwrap();
+    let hso = &reply["hookSpecificOutput"];
+    assert!(hso.get("updatedToolOutput").is_none(), "{reply}");
+    assert!(
+        hso["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("reached the transcript")
+    );
+    assert!(
+        reply["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("rotate it")
+    );
+    let journal = s.journal();
+    assert!(journal.contains("output_observed") && journal.contains("Anthropic-style key"));
+    assert!(!journal.contains("output_redacted"));
+    assert!(!journal.contains(&key));
+}
+
+/// Through every path of output redaction (cut, refused, declined, saved,
+/// shown), no value reaches the journal, the window, or any stdout or stderr
+/// except the one printout the person agreed to.
+#[test]
+fn no_value_leaks_through_output_redaction() {
+    let s = sandbox_with_secrets();
+    let key = ["sk-", "ant-", &"d".repeat(25)].concat();
+    let values = ["fake-one", "fake-two", "fake-three", key.as_str()];
+    let mut seen: Vec<String> = Vec::new();
+    let vahta = |seen: &mut Vec<String>, args: &[&str]| {
+        let out = s.vahta(args);
+        seen.push(text(&out.stdout));
+        seen.push(text(&out.stderr));
+        out
+    };
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    vahta(&mut seen, &["unlock"]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    vahta(
+        &mut seen,
+        &["run", "--secret", "ALPHA", "--", "printenv", "ALPHA"],
+    );
+    let output = format!("fake-one {key} fake-three");
+    let reply = s.hook_after_bash(&output).unwrap();
+    seen.push(reply.to_string());
+    let reference = reference_in(&redacted(&reply).1);
+    vahta(&mut seen, &["output", "allow", "000000000000"]);
+    s.script(&[r#"{"choose":1}"#]);
+    vahta(&mut seen, &["output", "allow", &reference]);
+    s.script(&[
+        r#"{"choose":2}"#,
+        r#"{"choose":1}"#,
+        r#"{"text":"SAVED_KEY"}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    vahta(&mut seen, &["output", "allow", &reference, "--json"]);
+    // The one release: its stdout is the output, by the person's choice; its
+    // stderr is still checked.
+    s.script(&[r#"{"choose":0}"#]);
+    let shown = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(text(&shown.stdout), format!("{output}\n"));
+    seen.push(text(&shown.stderr));
+
+    let window = fs::read_to_string(s.root.join("surface.log")).unwrap();
+    for v in values {
+        for (i, t) in seen.iter().enumerate() {
+            assert!(!t.contains(v), "output {i} holds a value: {t}");
+        }
+        assert!(!s.journal().contains(v), "the journal holds a value");
+        assert!(!window.contains(v), "the window was shown a value");
+    }
 }

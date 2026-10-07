@@ -29,6 +29,7 @@ vahta-setup = { path = "../setup" }
 dunce = "1"
 vahta-vault = { path = "../vault" }
 vahta-daemon = { path = "../daemon", default-features = false }
+vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
 # The prompt window reads a password with the terminal's echo off.
 rpassword = "7"

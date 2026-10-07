@@ -18,6 +18,62 @@ pub struct Event {
     pub path: Option<String>,
     pub content: Option<String>,
     pub cwd: Option<String>,
+    /// after_tool: the tool's output as the harness sent it, structure and
+    /// all, so a rewrite can keep its shape (Claude wants the shape back).
+    /// `None` when there is no output or it nests past [`OUTPUT_DEPTH`].
+    pub output: Option<serde_json::Value>,
+}
+
+/// How deep an output is kept as a structure. A real tool result is a few
+/// levels; past this, the output is still scanned as text but not rebuilt,
+/// because a deep `serde_json::Value` is dropped recursively and a payload is
+/// hostile input.
+pub const OUTPUT_DEPTH: usize = 64;
+
+/// A parsed payload value as a `serde_json::Value`, or `None` past `depth`.
+/// An integer too big for 64 bits becomes a float, and a float JSON cannot
+/// write (Python reads `NaN`) becomes its text: the rewrite need only be
+/// faithful in its strings, which are what is redacted.
+fn to_serde(v: &Value, depth: usize) -> Option<serde_json::Value> {
+    use serde_json::Value as J;
+    Some(match v {
+        Value::Null => J::Null,
+        Value::Bool(b) => J::Bool(*b),
+        Value::Int(digits) => {
+            if let Ok(n) = digits.parse::<i64>() {
+                J::from(n)
+            } else if let Ok(n) = digits.parse::<u64>() {
+                J::from(n)
+            } else {
+                digits
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                    .map_or_else(|| J::String(digits.clone()), J::Number)
+            }
+        }
+        Value::Float(f) => {
+            serde_json::Number::from_f64(*f).map_or_else(|| J::String(f.to_string()), J::Number)
+        }
+        Value::Str(s) => J::String(s.clone()),
+        Value::Array(items) => {
+            let depth = depth.checked_sub(1)?;
+            J::Array(
+                items
+                    .iter()
+                    .map(|x| to_serde(x, depth))
+                    .collect::<Option<_>>()?,
+            )
+        }
+        Value::Object(entries) => {
+            let depth = depth.checked_sub(1)?;
+            let mut map = serde_json::Map::new();
+            for (k, x) in entries {
+                map.insert(k.clone(), to_serde(x, depth)?);
+            }
+            J::Object(map)
+        }
+    })
 }
 
 /// Every string value, pre-order (Python's `collect_strings`). Iterative:
@@ -188,10 +244,15 @@ impl Manifest {
             Kind::Prompt => ev.text = text_field(payload, &spec.prompt)?,
             Kind::AfterTool => {
                 ev.tool = tool_name(payload, spec);
-                ev.text = match field(payload, &spec.tool_output)? {
+                // Which family: an MCP result is rewritten through its own
+                // field in some harnesses.
+                ev.group = classify(self, payload, &ev.tool);
+                let output = field(payload, &spec.tool_output)?;
+                ev.text = match output {
                     Value::Str(s) => s.clone(),
                     other => joined_strings(other),
                 };
+                ev.output = to_serde(output, OUTPUT_DEPTH);
             }
         }
         Some(ev)

@@ -98,9 +98,18 @@ style = "json"
 # stopReason, decision and reason. Any other field (e.g. Claude's
 # hookSpecificOutput.additionalContext) marks the hook run as failed and the
 # notice is lost. decision:"block" would replace the whole tool result, which
-# is redaction by another name and deferred with it. So: systemMessage only,
+# is redaction by another name, used below for that. So: systemMessage only,
 # surfaced to the user as a warning.
 body = { systemMessage = "{user_message}" }
+
+# THEORETICAL: not yet verified live; remove this note once checked.
+# Redaction: decision "block" replaces the tool's result with `reason`, so the
+# reason is the result with its secrets cut out, then what the model is told
+# about it (Codex has no additionalContext here). One reply for every tool,
+# MCP included.
+[replies.after_tool.redact]
+style = "json"
+body = { decision = "block", reason = "{redacted_text}\n\n{agent_message}", systemMessage = "{user_message}" }
 
 # SessionStart accepts systemMessage and additionalContext (docs read 2026-10-01).
 [replies.session_start.notice]

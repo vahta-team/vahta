@@ -333,6 +333,17 @@ pub(crate) fn prepare(
         env.retain(|(k, _)| k != &OsString::from(var));
         env.push((OsString::from(var), to_os(value.expose())));
     }
+    // The values are looked for in what the agent's tools print later, for
+    // a while: a command may write one where the next tool reads it.
+    if let (Some((anchor, _)), Ok(mut outputs)) =
+        (crate::output::anchor_of(ctx), ctx.shared.outputs.lock())
+    {
+        let given: Vec<(String, Vec<u8>)> = values
+            .iter()
+            .map(|(n, v)| (n.clone(), v.expose().to_vec()))
+            .collect();
+        outputs.note_run(anchor, &given, Instant::now());
+    }
     ctx.journal(
         Entry::new("run")
             .vault(&peek.vault_id)

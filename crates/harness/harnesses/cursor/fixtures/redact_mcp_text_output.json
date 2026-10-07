@@ -1,0 +1,18 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "postToolUse",
+    "tool_name": "MCP:fetch",
+    "tool_input": {
+      "q": "x"
+    },
+    "tool_output": "the key is {{SECRET_ANTHROPIC}} ok",
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "updated_mcp_tool_output": "the key is ***REDACTED(Anthropic-style key)*** ok",
+    "additional_context": "vahta: 1 secret value was redacted from this tool's output before you saw it (Anthropic-style key); each is shown as ***REDACTED(...)***. The original was not kept, so it cannot be shown to you. Do not try to recover it: to use a secret, run the command that needs it with `vahta run`."
+  },
+  "exit": 0
+}

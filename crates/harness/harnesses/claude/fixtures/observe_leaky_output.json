@@ -1,0 +1,27 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "files": {
+    "config/config.toml": "hook_output = \"observe\"\n"
+  },
+  "stdin": {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "ls"
+    },
+    "tool_response": {
+      "stdout": "found {{SECRET_ANTHROPIC}}",
+      "stderr": ""
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "additionalContext": "A secret (Anthropic-style key) reached the transcript through this tool's output. Treat it as exposed: tell the user to rotate it, and do not repeat the value."
+    },
+    "systemMessage": "vahta: a secret (Anthropic-style key) reached the transcript; rotate it."
+  },
+  "exit": 0
+}

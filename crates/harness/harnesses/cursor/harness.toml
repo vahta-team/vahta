@@ -122,9 +122,18 @@ body = { continue = false, user_message = "{user_message}" }
 
 [replies.after_tool.notice]
 style = "json"
-# The docs list `additional_context` for postToolUse. (`updated_mcp_tool_output`
-# would rewrite an MCP result; we do not redact in v1.)
+# The docs list `additional_context` for postToolUse.
 body = { additional_context = "{agent_message}" }
+
+# THEORETICAL: not yet verified live; remove this note once checked.
+# `updated_mcp_tool_output` rewrites an MCP result (docs read 2026-10-01).
+# Cursor has no such field for its own tools, so there is no `redact` here: a
+# secret in a Shell or Read result gets the notice above instead. The docs do
+# not say whether the field takes a string or an object; the result is given
+# back in the shape it arrived in.
+[replies.after_tool.redact_mcp]
+style = "json"
+body = { updated_mcp_tool_output = "{redacted_output}", additional_context = "{agent_message}" }
 
 # Cursor's sessionStart accepts env and additional_context; its docs say user_message
 # is accepted but not enforced, so the notice goes to the agent as context, with a

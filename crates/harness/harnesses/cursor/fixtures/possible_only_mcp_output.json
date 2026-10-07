@@ -1,0 +1,15 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "postToolUse",
+    "tool_name": "MCP:fetch",
+    "tool_input": {
+      "q": "x"
+    },
+    "tool_output": "password = CorrectHorseBatteryStaple",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}
