@@ -139,7 +139,7 @@ mod tests {
             "stdout": format!("found {k} here"),
             "stderr": "",
             "interrupted": false,
-            "nested": [1, {"text": format!("{k}")}],
+            "nested": [1, {"text": k.clone()}],
         });
         let texts = texts_of(&v);
         assert_eq!(texts.len(), 3);
