@@ -1,0 +1,6 @@
+# The Rust that CI and every local check use. Without it CI takes whatever
+# stable the runner ships, and a lint added there fails a PR that passed
+# locally. Moving to a newer Rust is a deliberate one-line PR.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

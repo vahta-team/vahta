@@ -26,7 +26,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        # macOS Python takes 75-90 minutes (ka's real Argon2id, 1 GiB per
+        # unlock, is slow there), so pull requests skip it; pushes to master
+        # and release branches, and manual runs, still test it.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest","ubuntu-latest"]' || '["windows-latest","ubuntu-latest","macos-latest"]') }}
         python-version: ["3.10", "3.13"]
         impl: [python]
         include:
