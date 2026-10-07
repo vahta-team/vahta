@@ -16,7 +16,7 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vahta_ipc::protocol::{
     Hello, HelloKind, HelloReply, PROTOCOL, Panel, Secret, SurfaceAnswer, SurfaceRequest,
@@ -204,6 +204,7 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
             panel,
             question,
             options,
+            timeout_secs,
         } => {
             console.panel(panel);
             console.say(&safe(question));
@@ -211,10 +212,11 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
                 console.say(&format!("  {}) {}", i + 1, safe(option)));
             }
             // A number from the list; anything else asks again, and the end
-            // of input cancels.
+            // of input, or the time running out, cancels.
+            let until = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
             for _ in 0..3 {
                 console.say(&format!("Choose 1-{}:", options.len()));
-                let Some(line) = Console::line() else {
+                let Some(line) = line_until(until) else {
                     return Some(SurfaceAnswer::Cancel {});
                 };
                 if let Ok(n) = line.trim().parse::<usize>()
@@ -225,11 +227,16 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
             }
             Some(SurfaceAnswer::Cancel {})
         }
-        SurfaceRequest::Text { panel, prompt } => {
+        SurfaceRequest::Text {
+            panel,
+            prompt,
+            timeout_secs,
+        } => {
             console.panel(panel);
             print!("{}: ", safe(prompt));
             let _ = std::io::stdout().flush();
-            Some(match Console::line() {
+            let until = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+            Some(match line_until(until) {
                 Some(value) => SurfaceAnswer::Text { value },
                 None => SurfaceAnswer::Cancel {},
             })
@@ -391,4 +398,19 @@ fn own_stdout() -> Option<std::fs::File> {
     #[cfg(windows)]
     let handle = std::os::windows::io::AsHandle::as_handle(&std::io::stdout()).try_clone_to_owned();
     handle.ok().map(std::fs::File::from)
+}
+
+/// A line before `until` (or with no limit), `None` at the end of input or
+/// when the time is up.
+fn line_until(until: Option<Instant>) -> Option<String> {
+    match until {
+        None => Console::line(),
+        Some(t) => {
+            let left = t.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            Console::line_within(Some(left)).ok().flatten()
+        }
+    }
 }

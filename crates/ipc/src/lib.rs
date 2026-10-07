@@ -11,6 +11,7 @@
 
 pub mod client;
 pub mod config;
+pub mod duration;
 pub mod paths;
 pub mod protocol;
 

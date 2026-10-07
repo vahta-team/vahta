@@ -272,7 +272,7 @@ pub mod scripted {
                 "ask": "choose", "prompt": question, "options": options, "panel": panel_json(panel)
             }));
             let answer = self.inner.pop()?;
-            if answer.get("cancel").is_some() {
+            if answer.get("cancel").is_some() || answer.get("noanswer").is_some() {
                 return Ok(None);
             }
             match answer.get("choose").and_then(Value::as_u64) {
@@ -291,7 +291,7 @@ pub mod scripted {
             self.inner
                 .log(json!({"ask": "text", "prompt": prompt, "panel": panel_json(panel)}));
             let answer = self.inner.pop()?;
-            if answer.get("cancel").is_some() {
+            if answer.get("cancel").is_some() || answer.get("noanswer").is_some() {
                 return Ok(None);
             }
             match answer.get("text").and_then(Value::as_str) {

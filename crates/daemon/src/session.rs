@@ -61,6 +61,9 @@ pub struct Session {
     pub parent: Option<String>,
     /// `None` lasts until revoked.
     pub deadline: Option<Instant>,
+    /// How long it was opened for: what "extend" offers by default. `None`
+    /// for one that lasts until revoked.
+    pub length: Option<Duration>,
     /// When the person is asked about extending.
     pub ask_at: Option<Instant>,
     pub extension_pending: bool,
@@ -78,6 +81,8 @@ pub struct Ended {
 pub struct ExtensionAsk {
     pub id: String,
     pub deadline: Instant,
+    /// The session's own length, offered as the extension.
+    pub length: Duration,
     pub scope: Vec<String>,
     pub project: PathBuf,
     pub anchor_exe: String,
@@ -299,6 +304,7 @@ impl Sessions {
                 sweep.ask.push(ExtensionAsk {
                     id: s.id.clone(),
                     deadline,
+                    length: s.length.unwrap_or(EXTEND_BY),
                     scope: s.scope.clone(),
                     project: s.project.clone(),
                     anchor_exe: s.anchor_exe.clone(),
@@ -307,6 +313,26 @@ impl Sessions {
             }
         }
         sweep
+    }
+
+    /// Keep `id` alive until at least `until`, while the person types an
+    /// extension; returns the deadline it had, to go back to. `None` for a
+    /// session that is gone or has no deadline.
+    pub fn hold(&mut self, id: &str, until: Instant) -> Option<Instant> {
+        let s = self.get_mut(id)?;
+        let deadline = s.deadline?;
+        s.deadline = Some(deadline.max(until));
+        Some(deadline)
+    }
+
+    /// Put back the deadline [`Sessions::hold`] returned. A deadline already
+    /// past ends the session at the next sweep.
+    pub fn release_hold(&mut self, id: &str, deadline: Instant) {
+        if let Some(s) = self.get_mut(id)
+            && s.deadline.is_some()
+        {
+            s.deadline = Some(deadline);
+        }
     }
 
     /// Push `id`'s deadline out by `by`. False for a session that is gone or
@@ -432,6 +458,7 @@ mod tests {
             anchor_exe: "claude".to_string(),
             parent: parent.map(str::to_string),
             deadline,
+            length: deadline.map(|d| d.saturating_duration_since(Instant::now())),
             ask_at: deadline.map(|d| ask_time(Instant::now(), d)),
             extension_pending: false,
             label: None,
@@ -663,5 +690,31 @@ mod tests {
         assert_eq!(info.remaining_secs, Some(90));
         let shown = serde_json::to_string(info).unwrap();
         assert!(!shown.contains("fake-"));
+    }
+
+    #[test]
+    fn a_hold_keeps_a_session_and_its_release_puts_the_deadline_back() {
+        let now = Instant::now();
+        let mut s = Sessions::default();
+        s.add(session(
+            "h",
+            &["A"],
+            1,
+            None,
+            Some(now + Duration::from_secs(5)),
+        ));
+        let old = s.hold("h", now + Duration::from_secs(120)).unwrap();
+        assert_eq!(old, now + Duration::from_secs(5));
+        assert_eq!(
+            s.get("h").unwrap().deadline,
+            Some(now + Duration::from_secs(120))
+        );
+        // A hold never shortens.
+        assert_eq!(s.hold("h", now).unwrap(), now + Duration::from_secs(120));
+        s.release_hold("h", old);
+        assert_eq!(s.get("h").unwrap().deadline, Some(old));
+        assert!(s.hold("nope", now).is_none());
+        s.add(session("f", &["A"], 2, None, None));
+        assert!(s.hold("f", now).is_none(), "no deadline, nothing to hold");
     }
 }

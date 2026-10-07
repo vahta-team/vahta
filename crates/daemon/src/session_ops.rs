@@ -25,7 +25,7 @@ use crate::session::{self, Ended, Role, Session, ask_time, info_of};
 use crate::surface::sanitize_label;
 
 /// The most a session may be asked to last, short of `forever`: a year.
-const MAX_SECS: u64 = 366 * 24 * 3600;
+pub(crate) const MAX_SECS: u64 = 366 * 24 * 3600;
 
 impl Shared {
     /// Journal sessions that have ended. Their keys are already overwritten.
@@ -249,6 +249,7 @@ pub(crate) fn unlock_session(
         anchor_exe: anchor_exe.clone(),
         parent: None,
         deadline,
+        length: deadline.map(|d| d.saturating_duration_since(now)),
         ask_at: deadline.map(|d| ask_time(now, d)),
         extension_pending: false,
         label: panel.agent_note.clone(),

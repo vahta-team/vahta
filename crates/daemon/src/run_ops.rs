@@ -658,6 +658,7 @@ pub(crate) fn delegate(
         anchor_exe,
         parent: Some(parent_id.clone()),
         deadline,
+        length: deadline.map(|d| d.saturating_duration_since(now)),
         ask_at: deadline.map(|d| ask_time(now, d)),
         extension_pending: false,
         label: label.as_deref().and_then(sanitize_label),
