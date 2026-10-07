@@ -26,7 +26,8 @@ called this, and everything it starts) uses the secrets with no window.
                     each-use secret, or one that does not exist, refuses the
                     whole request (exit 3) before any window opens.
   --for DURATION    how long: 30m (default; session_minutes in config.toml),
-                    2h, 90s, 1h30m, or `forever` for until revoked
+                    2h, 90s, 1h30m, a clock (1:30:00), or `forever` for
+                    until revoked
   --label TEXT      a description for the window, shown marked as coming from
                     the agent and not verified (one line, 200 characters)
   --json            machine-readable result, and refusals
@@ -57,40 +58,17 @@ belongs to, the time left and how many times it has been used; never a value.
   --json    machine-readable list
 ";
 
-/// `30m`, `2h`, `90s`, `1h30m`, `2d` or `forever`.
+/// `30m`, `2h`, `90s`, `1h30m`, `2d`, a clock (`1:30:00`) or `forever`.
 pub fn parse_duration(text: &str) -> Result<DurationSpec, String> {
     let text = text.trim().to_lowercase();
     if text == "forever" {
         return Ok(DurationSpec::Forever {});
     }
-    let bad = || format!("invalid --for value: {text:?} (use 30m, 2h, 90s, 1h30m, or forever)");
-    let mut total: u64 = 0;
-    let mut digits = String::new();
-    let mut any = false;
-    for c in text.chars() {
-        if c.is_ascii_digit() {
-            digits.push(c);
-            continue;
-        }
-        let unit: u64 = match c {
-            's' => 1,
-            'm' => 60,
-            'h' => 3600,
-            'd' => 86_400,
-            _ => return Err(bad()),
-        };
-        let n: u64 = digits.parse().map_err(|_| bad())?;
-        digits.clear();
-        total = n
-            .checked_mul(unit)
-            .and_then(|s| total.checked_add(s))
-            .ok_or_else(bad)?;
-        any = true;
-    }
-    if !digits.is_empty() || !any {
-        return Err(bad());
-    }
-    Ok(DurationSpec::Secs { secs: total })
+    vahta_ipc::duration::parse_secs(&text)
+        .map(|secs| DurationSpec::Secs { secs })
+        .ok_or_else(|| {
+            format!("invalid --for value: {text:?} (use 30m, 2h, 90s, 1h30m, 1:30:00, or forever)")
+        })
 }
 
 fn human_secs(secs: u64) -> String {

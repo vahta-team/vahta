@@ -1171,14 +1171,18 @@ fn a_session_with_no_answer_to_the_extension_ends_at_its_deadline_and_the_journa
     let out = s.vahta(&["unlock", "--for", "4s"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     wait_until("the question", 10, || {
-        s.window_log().iter().any(|e| e["ask"] == "confirm")
+        s.window_log().iter().any(|e| e["ask"] == "choose")
     });
     let q = s
         .window_log()
         .into_iter()
-        .find(|e| e["ask"] == "confirm")
+        .find(|e| e["ask"] == "choose")
         .unwrap();
-    assert_eq!(q["prompt"], "Extend by 30 minutes?");
+    assert_eq!(q["prompt"], "Extend this session?");
+    // The session's own length is offered, not a fixed half hour.
+    assert_eq!(q["options"][0], "Extend by 4s");
+    assert_eq!(q["options"][1], "No");
+    assert_eq!(q["options"][2], "Other duration...");
     // No password in an extension question.
     assert_eq!(passwords(&s), before + 1);
     wait_until("the session to end", 10, || s.sessions().is_empty());
@@ -1188,18 +1192,70 @@ fn a_session_with_no_answer_to_the_extension_ends_at_its_deadline_and_the_journa
 }
 
 #[test]
-fn saying_yes_to_the_extension_keeps_the_session_alive_past_its_deadline() {
+fn extending_by_the_sessions_own_length_keeps_it_alive_past_its_deadline() {
     let s = sandbox_with_secrets();
-    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"yes":true}"#]);
+    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"choose":0}"#]);
+    assert_eq!(s.vahta(&["unlock", "--for", "8s"]).status.code(), Some(0));
+    wait_until("the extension", 10, || {
+        s.journal().contains("\"result\":\"extended\"")
+    });
+    assert!(s.journal().contains("8s (its own length)"));
+    // Past the original end it is still there, with less than eight seconds.
+    std::thread::sleep(Duration::from_secs(5));
+    let list = s.sessions();
+    assert_eq!(list.len(), 1);
+    let left = list[0]["remaining_secs"].as_u64().unwrap();
+    assert!((1..=8).contains(&left), "{left}");
+}
+
+#[test]
+fn another_duration_can_be_typed_as_units_or_a_clock_and_nonsense_is_asked_again() {
+    let s = sandbox_with_secrets();
+    s.script(&[
+        r#"{"secret":"correct horse"}"#,
+        r#"{"choose":2}"#,
+        r#"{"text":"soon"}"#,
+        r#"{"text":"1:30:00"}"#,
+    ]);
     assert_eq!(s.vahta(&["unlock", "--for", "4s"]).status.code(), Some(0));
     wait_until("the extension", 10, || {
         s.journal().contains("\"result\":\"extended\"")
     });
-    // Past the original end it is still there, with about half an hour left.
+    assert!(s.journal().contains("1h30m (typed)"));
+    let texts: Vec<Value> = s
+        .window_log()
+        .into_iter()
+        .filter(|e| e["ask"] == "text")
+        .collect();
+    assert_eq!(texts.len(), 2);
+    assert!(
+        texts[1]["panel"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("not a duration"),
+        "{}",
+        texts[1]
+    );
     std::thread::sleep(Duration::from_secs(4));
     let list = s.sessions();
     assert_eq!(list.len(), 1);
-    assert!(list[0]["remaining_secs"].as_u64().unwrap() > 1700);
+    assert!(list[0]["remaining_secs"].as_u64().unwrap() > 5300);
+}
+
+#[test]
+fn giving_up_on_another_duration_ends_the_session_at_its_old_deadline() {
+    let s = sandbox_with_secrets();
+    s.script(&[
+        r#"{"secret":"correct horse"}"#,
+        r#"{"choose":2}"#,
+        r#"{"cancel":true}"#,
+    ]);
+    assert_eq!(s.vahta(&["unlock", "--for", "4s"]).status.code(), Some(0));
+    wait_until("the session to end", 10, || {
+        s.journal().contains("\"reason\":\"expired\"")
+    });
+    assert!(s.sessions().is_empty());
+    assert!(!s.journal().contains("\"result\":\"extended\""));
 }
 
 #[cfg(target_os = "linux")]

@@ -104,6 +104,29 @@ pub trait Window: Send {
     /// is cancelling.
     fn ask_text(&mut self, panel: &Panel, prompt: &str) -> Result<Option<String>, SurfaceError>;
 
+    /// [`Window::choose`] for at most `timeout`; `None` is also the time
+    /// running out. A surface with no clock of its own waits as `choose` does.
+    fn choose_within(
+        &mut self,
+        panel: &Panel,
+        question: &str,
+        options: &[String],
+        _timeout: Duration,
+    ) -> Result<Option<usize>, SurfaceError> {
+        self.choose(panel, question, options)
+    }
+
+    /// [`Window::ask_text`] for at most `timeout`; `None` is also the time
+    /// running out.
+    fn ask_text_within(
+        &mut self,
+        panel: &Panel,
+        prompt: &str,
+        _timeout: Duration,
+    ) -> Result<Option<String>, SurfaceError> {
+        self.ask_text(panel, prompt)
+    }
+
     /// Show a value until a key is pressed or `seconds` pass.
     fn show_value(
         &mut self,
@@ -374,6 +397,53 @@ impl TerminalWindow {
         }
     }
 
+    /// A choice, for `timeout` or the usual wait. With a timeout, the
+    /// window's own clock answers first; the time running out is `None`.
+    fn choose_in(
+        &mut self,
+        panel: &Panel,
+        question: &str,
+        options: &[String],
+        timeout: Option<Duration>,
+    ) -> Result<Option<usize>, SurfaceError> {
+        let request = SurfaceRequest::Choose {
+            panel: panel.clone(),
+            question: question.to_string(),
+            options: options.to_vec(),
+            timeout_secs: timeout.map(|t| t.as_secs().max(1)),
+        };
+        let wait = timeout.map_or(ANSWER_TIMEOUT, |t| t + Duration::from_secs(5));
+        match self.exchange(&request, wait) {
+            Ok(SurfaceAnswer::Choice { index }) if index < options.len() => Ok(Some(index)),
+            Ok(SurfaceAnswer::Cancel {}) => Ok(None),
+            Err(SurfaceError::Timeout) if timeout.is_some() => Ok(None),
+            Ok(_) => Err(SurfaceError::Protocol("unexpected answer".to_string())),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A line of text, for `timeout` or the usual wait.
+    fn ask_text_in(
+        &mut self,
+        panel: &Panel,
+        prompt: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Option<String>, SurfaceError> {
+        let request = SurfaceRequest::Text {
+            panel: panel.clone(),
+            prompt: prompt.to_string(),
+            timeout_secs: timeout.map(|t| t.as_secs().max(1)),
+        };
+        let wait = timeout.map_or(ANSWER_TIMEOUT, |t| t + Duration::from_secs(5));
+        match self.exchange(&request, wait) {
+            Ok(SurfaceAnswer::Text { value }) => Ok(Some(value)),
+            Ok(SurfaceAnswer::Cancel {}) => Ok(None),
+            Err(SurfaceError::Timeout) if timeout.is_some() => Ok(None),
+            Ok(_) => Err(SurfaceError::Protocol("unexpected answer".to_string())),
+            Err(e) => Err(e),
+        }
+    }
+
     fn exchange(
         &mut self,
         request: &SurfaceRequest,
@@ -460,28 +530,30 @@ impl Window for TerminalWindow {
         question: &str,
         options: &[String],
     ) -> Result<Option<usize>, SurfaceError> {
-        let request = SurfaceRequest::Choose {
-            panel: panel.clone(),
-            question: question.to_string(),
-            options: options.to_vec(),
-        };
-        match self.exchange(&request, ANSWER_TIMEOUT)? {
-            SurfaceAnswer::Choice { index } if index < options.len() => Ok(Some(index)),
-            SurfaceAnswer::Cancel {} => Ok(None),
-            _ => Err(SurfaceError::Protocol("unexpected answer".to_string())),
-        }
+        self.choose_in(panel, question, options, None)
     }
 
     fn ask_text(&mut self, panel: &Panel, prompt: &str) -> Result<Option<String>, SurfaceError> {
-        let request = SurfaceRequest::Text {
-            panel: panel.clone(),
-            prompt: prompt.to_string(),
-        };
-        match self.exchange(&request, ANSWER_TIMEOUT)? {
-            SurfaceAnswer::Text { value } => Ok(Some(value)),
-            SurfaceAnswer::Cancel {} => Ok(None),
-            _ => Err(SurfaceError::Protocol("unexpected answer".to_string())),
-        }
+        self.ask_text_in(panel, prompt, None)
+    }
+
+    fn choose_within(
+        &mut self,
+        panel: &Panel,
+        question: &str,
+        options: &[String],
+        timeout: Duration,
+    ) -> Result<Option<usize>, SurfaceError> {
+        self.choose_in(panel, question, options, Some(timeout))
+    }
+
+    fn ask_text_within(
+        &mut self,
+        panel: &Panel,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>, SurfaceError> {
+        self.ask_text_in(panel, prompt, Some(timeout))
     }
 
     fn show_value(

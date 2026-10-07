@@ -92,10 +92,14 @@ run` from that process, and from everything it starts, needs no window.
   does not exist, refuses the *whole* request before any window opens (exit 3),
   and the refusal goes to the journal.
 - **Length.** 30 minutes by default (`session_minutes` in `config.toml`);
-  `--for 2h` (also `90s`, `1h30m`) per unlock; `--for forever` until revoked.
-- **Extension.** Two minutes before a session ends the window asks "Extend by 30
-  minutes?". Yes or no; no password, because the keys are still in memory. With no
-  answer the session ends at its deadline, and a new one needs the password.
+  `--for 2h` (also `90s`, `1h30m`, a clock such as `1:30:00`) per unlock;
+  `--for forever` until revoked.
+- **Extension.** Two minutes before a session ends (halfway, for one shorter than
+  four minutes) a window offers: extend by the session's own length, no, or
+  another duration typed as `15m`, `1h30m` or `1:30:00` (up to a year, never
+  `forever`). While a duration is typed the session is held open for up to two
+  minutes. No password, because the keys are still in memory. With no answer the
+  session ends at its deadline, and a new one needs the password.
 - **The anchor.** A session belongs to an *anchor* process and everything it
   starts. The anchor is the nearest ancestor of the calling `vahta` that is not a
   shell or a wrapper (`bash`, `zsh`, `sudo`, `env`, `timeout`, ...), so Claude

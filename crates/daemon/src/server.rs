@@ -32,10 +32,11 @@ use crate::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, ProtocolError, StatusInfo,
     read_frame, write_frame,
 };
-use crate::session::{EXTEND_BY, ExtensionAsk, Sessions};
+use crate::session::{ExtensionAsk, Sessions};
 use crate::session_ops;
 use crate::surface::{PromptSurface, SurfaceRegistry, TerminalSurface};
 use crate::{run, run_ops};
+use vahta_ipc::duration::human;
 
 #[derive(Debug)]
 pub enum ServerError {
@@ -335,9 +336,10 @@ fn sweep_sessions(shared: &Arc<Shared>) {
     }
 }
 
-/// Two minutes before a session ends: "Extend by 30 minutes?". Yes or no, no
-/// password, because the keys are still in memory. With no answer the session
-/// ends at its deadline.
+/// Two minutes before a session ends (halfway, for a short one): extend it by
+/// its own length, no, or a duration the person types. No password, because
+/// the keys are still in memory. With no answer the session ends at its
+/// deadline.
 fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
     let record = |result: &str, reason: &str| {
         shared.journal.record(
@@ -355,35 +357,120 @@ fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
         }
     };
     let left = ask.deadline.saturating_duration_since(Instant::now());
-    let panel = crate::protocol::Panel {
+    let mut panel = crate::protocol::Panel {
         title: "Extend a session".to_string(),
         lines: vec![
             format!("Project: {}", ask.project.display()),
             format!("Secrets: {}", ask.scope.join(", ")),
             format!("Belongs to: {} (pid {})", ask.anchor_exe, ask.anchor_pid),
-            format!("It ends in {} seconds.", left.as_secs()),
+            format!("It ends in {}.", human(left.as_secs())),
         ],
         warning: None,
         agent_note: None,
     };
-    match window.confirm(&panel, "Extend by 30 minutes?", Some(left)) {
-        Ok(Some(true)) => {
-            let extended = shared
-                .sessions
-                .lock()
-                .map(|mut s| s.extend(&ask.id, Instant::now(), EXTEND_BY))
-                .unwrap_or(false);
-            if extended {
-                record("extended", "30 minutes");
-            } else {
-                record("not_extended", "the session had already ended");
-            }
+    let same = human(ask.length.as_secs());
+    let options = [
+        format!("Extend by {same}"),
+        "No".to_string(),
+        "Other duration...".to_string(),
+    ];
+    let by = match window.choose_within(&panel, "Extend this session?", &options, left) {
+        Ok(Some(0)) => Some((ask.length, format!("{same} (its own length)"))),
+        Ok(Some(2)) => other_duration(shared, &ask, window.as_mut(), &mut panel),
+        Ok(Some(_)) => {
+            record("declined", "the person said no");
+            None
         }
-        Ok(Some(false)) => record("declined", "the person said no"),
-        _ => record("no_answer", "it ends at its deadline"),
+        _ => {
+            record("no_answer", "it ends at its deadline");
+            None
+        }
+    };
+    if let Some((by, said)) = by {
+        let extended = shared
+            .sessions
+            .lock()
+            .map(|mut s| s.extend(&ask.id, Instant::now(), by))
+            .unwrap_or(false);
+        if extended {
+            record("extended", &said);
+        } else {
+            record("not_extended", "the session had already ended");
+        }
     }
     window.close(None);
 }
+
+/// How long the session is held open while the person types a duration.
+const TYPING_HOLD: Duration = Duration::from_secs(2 * 60);
+
+/// "Other duration...": the session is held for up to two minutes while the
+/// person types one (`15m`, `1h30m`, `1:30:00`), three tries. `None`, and the
+/// old deadline back, when nothing usable was typed.
+fn other_duration(
+    shared: &Arc<Shared>,
+    ask: &ExtensionAsk,
+    window: &mut dyn crate::surface::Window,
+    panel: &mut crate::protocol::Panel,
+) -> Option<(Duration, String)> {
+    let until = Instant::now() + TYPING_HOLD;
+    let held = shared
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|mut s| s.hold(&ask.id, until))?;
+    let release = || {
+        if let Ok(mut s) = shared.sessions.lock() {
+            s.release_hold(&ask.id, held);
+        }
+    };
+    let record = |result: &str, reason: &str| {
+        shared.journal.record(
+            JournalEntry::new("session_extension")
+                .session(&ask.id, None)
+                .names(&ask.scope)
+                .result(result, Some(reason)),
+        );
+    };
+    for _ in 0..3 {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let typed =
+            match window.ask_text_within(panel, "Extend by (e.g. 15m, 1h30m, 1:30:00)", left) {
+                Ok(Some(t)) => t,
+                _ => {
+                    release();
+                    record("no_answer", "no duration was typed");
+                    return None;
+                }
+            };
+        match vahta_ipc::duration::parse_secs(&typed) {
+            Some(secs) if (1..=MAX_EXTENSION_SECS).contains(&secs) => {
+                // Back to the real deadline first: the extension counts from
+                // it, not from the hold.
+                release();
+                return Some((
+                    Duration::from_secs(secs),
+                    format!("{} (typed)", human(secs)),
+                ));
+            }
+            _ => {
+                panel.warning = Some(format!(
+                    "{:?} is not a duration from 1 second to a year; try 15m, 1h30m or 1:30:00",
+                    typed.chars().take(40).collect::<String>()
+                ));
+            }
+        }
+    }
+    release();
+    record("no_answer", "no usable duration was typed");
+    None
+}
+
+/// A year, as for `vahta unlock --for`.
+const MAX_EXTENSION_SECS: u64 = session_ops::MAX_SECS;
 
 fn reject(stream: &mut Stream, shared: &Shared, why: &str) {
     let reply = HelloReply {

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -687,9 +687,18 @@ pub enum SurfaceRequest {
         panel: Panel,
         question: String,
         options: Vec<String>,
+        /// With no choice in this time, the window cancels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
     },
     /// A line of plain text, typed in the open: a name, never a value.
-    Text { panel: Panel, prompt: String },
+    Text {
+        panel: Panel,
+        prompt: String,
+        /// With no line in this time, the window cancels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
     /// Show something secret until a key is pressed, or `seconds` pass.
     Show {
         panel: Panel,
