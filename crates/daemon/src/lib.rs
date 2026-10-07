@@ -12,6 +12,7 @@
 //! when it has been idle.
 
 mod anchor;
+mod bind_ops;
 mod binding;
 mod clipboard;
 mod dotenv;

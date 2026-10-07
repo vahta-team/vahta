@@ -294,6 +294,24 @@ pub enum ClientRequest {
         /// `--reason`: why, for that window; shown marked as unverified.
         reason: Option<String>,
     },
+    /// Propose command rules for a secret (or, with no name, approve what
+    /// `vahta.toml` says for every name). Replies `Done`, `Refused` or
+    /// `Cancelled`; nothing changes without a window and the password.
+    Bind {
+        cwd: String,
+        /// `None`: approve `vahta.toml` as written.
+        name: Option<String>,
+        /// Rule texts (see the daemon docs); with `name`, they replace the
+        /// secret's approved rules.
+        allow: Vec<String>,
+        deny: Vec<String>,
+        /// Remove the secret's rules.
+        clear: bool,
+        /// Why, for the window; shown marked as unverified.
+        reason: Option<String>,
+        /// The caller's `PATH`, to resolve the programs of the rules.
+        path: Option<String>,
+    },
     /// The hook, after a tool ran and before its output reaches the model:
     /// `texts` are the strings of that output (every one, in order), and
     /// `spans` what the hook's own detector would cut. The daemon adds the

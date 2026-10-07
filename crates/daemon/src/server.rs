@@ -21,6 +21,7 @@ use vahta_os::ipc::{Address, Listener, Stream};
 use vahta_vault::KdfParams;
 use vahta_vault::store::LocalStore;
 
+use crate::bind_ops;
 use crate::config::Config;
 use crate::journal::Entry as JournalEntry;
 use crate::journal::{Entry, Journal};
@@ -574,6 +575,30 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     Err(reply) => (reply, false),
                 }
             }
+            ClientRequest::Bind {
+                cwd,
+                name,
+                allow,
+                deny,
+                clear,
+                reason,
+                path,
+            } => (
+                bind_ops::bind(
+                    &ctx,
+                    bind_ops::BindArgs {
+                        cwd,
+                        name,
+                        allow,
+                        deny,
+                        clear,
+                        reason,
+                        path,
+                    },
+                )
+                .unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::Delegate {
                 cwd,
                 names,

@@ -2369,6 +2369,180 @@ fn the_window_warns_when_the_program_is_inside_the_project() {
     assert_eq!(choice["options"][2], "Add `./deploy.sh` to the list");
 }
 
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn bind_proposes_the_person_approves_and_then_only_the_listed_command_runs() {
+    let s = sandbox_with_secrets();
+    s.script(&[PW_ANSWER]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+
+    // The proposal opens a window that shows the old and new rules, where the
+    // program resolves to, and the reason as the agent's own.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "bind",
+        "ZETA",
+        "--allow",
+        "printenv",
+        "--deny",
+        "@network",
+        "--reason",
+        "deploys read it",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("ZETA: allow: printenv; deny: @network"));
+    let choice = s.last_ask("choose");
+    let lines = choice["panel"]["lines"].to_string();
+    assert!(lines.contains("now:  any command"), "{lines}");
+    assert!(
+        lines.contains("new:  allow: printenv; deny: @network"),
+        "{lines}"
+    );
+    assert!(
+        lines.contains(&format!(
+            "`printenv` is {}",
+            Sandbox::which("printenv").display()
+        )),
+        "{lines}"
+    );
+    assert_eq!(choice["panel"]["agent_note"], "deploys read it");
+    assert_eq!(choice["options"][0], "Approve");
+
+    // Both copies hold it.
+    let toml = fs::read_to_string(s.project().join("vahta.toml")).unwrap();
+    assert!(
+        toml.contains("[secrets.ZETA]") && toml.contains("allow = [\"printenv\"]"),
+        "{toml}"
+    );
+    assert!(toml.contains("deny = [\"@network\"]"), "{toml}");
+    assert_eq!(s.open_vault().bindings().len(), 1);
+
+    // A bound run in the session needs no window; another command is refused
+    // with no window, and the message names --ask.
+    let asked = s.asks();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(text(&out.stderr).contains("--ask"));
+    assert_eq!(s.asks(), asked);
+    let journal = s.journal();
+    assert!(journal.contains("\"event\":\"bind\"") && journal.contains("approved"));
+    assert!(!journal.contains("fake-") && !journal.contains("correct horse"));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn bind_changes_nothing_without_approval_and_the_password() {
+    let s = sandbox_with_secrets();
+    let toml = s.project().join("vahta.toml");
+    for answers in [
+        vec![r#"{"choose":1}"#],
+        vec![r#"{"cancel":true}"#],
+        vec![r#"{"choose":0}"#, r#"{"cancel":true}"#],
+    ] {
+        s.script(&answers);
+        let out = s.vahta(&["bind", "ZETA", "--allow", "printenv"]);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{answers:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(!toml.exists());
+        assert!(s.open_vault().bindings().is_empty());
+    }
+    // An unusable proposal is refused before any window.
+    let asked = s.asks();
+    for (args, code) in [
+        (vec!["bind", "NOPE", "--allow", "printenv"], 3),
+        (vec!["bind", "ZETA", "--allow", "no-such-program-here"], 1),
+        (vec!["bind", "ZETA", "--allow", "@shells"], 1),
+        (vec!["bind", "ZETA", "--deny", "@nope"], 1),
+        (vec!["bind", "ZETA", "--allow", "git 'push'"], 1),
+        (vec!["bind", "ZETA"], 1),
+        (vec!["bind", "ZETA", "--clear", "--allow", "printenv"], 1),
+        (vec!["bind"], 3),
+        (vec!["bind", "--allow", "printenv"], 2),
+    ] {
+        let out = s.vahta(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    assert_eq!(s.asks(), asked, "nothing above opened a window");
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn bind_clear_removes_the_rules_and_a_deny_group_refuses_a_shell() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&["bind", "ZETA", "--deny", "@shells"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", "true"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&["bind", "ZETA", "--clear"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.open_vault().bindings().is_empty());
+    let toml = fs::read_to_string(s.project().join("vahta.toml")).unwrap();
+    assert!(!toml.contains("deny"), "{toml}");
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", "true"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_hand_edited_toml_is_only_a_proposal_until_vahta_bind_approves_it() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    let toml = s.project().join("vahta.toml");
+    // In sync: nothing to approve.
+    fs::write(&toml, "[secrets.ZETA]\nallow = [\"printenv\"]\n").unwrap();
+    let out = s.vahta(&["bind"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("nothing to approve"));
+
+    // Someone adds `env` to the file: still refused.
+    fs::write(&toml, "[secrets.ZETA]\nallow = [\"printenv\", \"env\"]\n").unwrap();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(text(&out.stderr).contains("not approved"));
+
+    // `vahta bind` shows the difference; saying no changes nothing.
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&["bind"]);
+    assert_eq!(out.status.code(), Some(4));
+    let lines = s.last_ask("choose")["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("now:  allow: printenv") && lines.contains("new:  allow: printenv, env"),
+        "{lines}"
+    );
+    assert_eq!(s.open_vault().bindings()[0].allow.len(), 1);
+
+    // Approving makes it effective, and the file is left as written.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&["bind"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        fs::read_to_string(&toml).unwrap(),
+        "[secrets.ZETA]\nallow = [\"printenv\", \"env\"]\n"
+    );
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
 // --- lock on sleep ---------------------------------------------------------------------------
 
 #[test]
