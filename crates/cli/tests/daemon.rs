@@ -2688,6 +2688,8 @@ fn a_payment_key_gets_the_each_use_offer_and_the_agent_learns_the_class_not_the_
 
 // A value with no vendor prefix still gets the offer when its name says what
 // it guards; the name can only raise the class.
+// Uses the helpers that run commands, which only a Unix has.
+#[cfg(unix)]
 #[test]
 fn a_name_like_aws_or_paypal_raises_the_class_of_a_plain_value() {
     let s = Sandbox::new();
@@ -2716,6 +2718,8 @@ fn a_name_like_aws_or_paypal_raises_the_class_of_a_plain_value() {
     assert_eq!(s.asks(), asked + 2, "a password and a value, no offer");
 }
 
+// Uses the helpers that run commands, which only a Unix has.
+#[cfg(unix)]
 /// The scripted window's answer for a typed value, built at run time.
 fn plain_value(n: u32) -> String {
     format!(r#"{{"secret":"fake-plain-value-{n}"}}"#)
@@ -2723,6 +2727,8 @@ fn plain_value(n: u32) -> String {
 
 // --- tier ----------------------------------------------------------------------------------
 
+// Uses the helpers that run commands, which only a Unix has.
+#[cfg(unix)]
 #[test]
 fn tier_moves_a_secret_between_session_and_each_use_without_its_value() {
     let s = Sandbox::new();
