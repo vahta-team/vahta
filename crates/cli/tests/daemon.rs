@@ -2182,10 +2182,17 @@ fn output_allow_offers_saving_into_the_sessions_vault_from_a_directory_without_o
         .nth(asks)
         .unwrap();
     assert_eq!(ask["options"][2], "Save as a secret", "{ask}");
-    let panel = ask["panel"].to_string();
+    // Compared as lines, not as JSON, where a Windows path's backslashes are
+    // escaped.
+    let vault_line = format!("Vault: {}", s.vault_path().display());
     assert!(
-        panel.contains(&format!("Vault: {}", s.vault_path().display())),
-        "{panel}"
+        ask["panel"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str() == Some(vault_line.as_str())),
+        "{}",
+        ask["panel"]
     );
 }
 
