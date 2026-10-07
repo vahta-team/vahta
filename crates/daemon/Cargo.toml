@@ -13,6 +13,10 @@ publish = false
 workspace = true
 
 [features]
+default = ["lock-hyprland"]
+# The Hyprland lock source (Linux): asks the compositor's socket whether a lock
+# screen holds a monitor. Off, the build has logind alone.
+lock-hyprland = []
 # Lets a test drive the daemon without a person and a terminal: a scripted
 # prompt surface, the cheap vault KDF and a few overrides of timing. Never
 # enabled by any shipped crate; CI fails if `vahta-cli` ever sees it.

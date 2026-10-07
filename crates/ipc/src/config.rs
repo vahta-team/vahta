@@ -3,6 +3,7 @@
 //! ```toml
 //! session_minutes = 30     # how long `vahta unlock` lasts by default
 //! lock_on_sleep = true     # end every session on suspend and screen lock
+//! lock_sources = ["logind"]  # which triggers end sessions; unset means all
 //! terminal = "kitty"       # the terminal the prompt window opens in (Linux)
 //! idle_minutes = 10        # the daemon exits after this long with nothing to do
 //! hook_output = "redact"   # or "observe": the hook only reports secrets in tool output
@@ -22,6 +23,11 @@ use serde::Deserialize;
 pub struct Config {
     pub session_minutes: u64,
     pub lock_on_sleep: bool,
+    /// Which lock sources (see `lock/`) may end sessions, by name. Unset means
+    /// every source this build has; an empty list means none. A name this build
+    /// does not know is journalled and ignored when the daemon starts, not an
+    /// error here: the same file may serve builds with different sources.
+    pub lock_sources: Option<Vec<String>>,
     /// A terminal command prefix, as ka's `terminal` key: the program and the
     /// flag that makes it run the rest of the command line (`alacritty -e`).
     /// Empty means detect one.
@@ -48,6 +54,7 @@ impl Default for Config {
         Config {
             session_minutes: 30,
             lock_on_sleep: true,
+            lock_sources: None,
             terminal: String::new(),
             idle_minutes: 10,
             hook_output: HookOutput::Redact,
@@ -119,6 +126,16 @@ mod tests {
         assert_eq!(c.hook_output, HookOutput::Redact);
         let c = Config::parse("hook_output = \"observe\"\n").unwrap();
         assert_eq!(c.hook_output, HookOutput::Observe);
+    }
+
+    #[test]
+    fn lock_sources_unset_named_or_empty() {
+        assert_eq!(Config::parse("").unwrap().lock_sources, None);
+        let c = Config::parse("lock_sources = [\"logind\", \"nope\"]\n").unwrap();
+        assert_eq!(c.lock_sources, Some(vec!["logind".into(), "nope".into()]));
+        let c = Config::parse("lock_sources = []\n").unwrap();
+        assert_eq!(c.lock_sources, Some(Vec::new()));
+        assert!(Config::parse("lock_sources = \"logind\"\n").is_err());
     }
 
     #[test]
