@@ -81,7 +81,15 @@ pub fn locate(name: &str, path: Option<&OsString>, base: &Path) -> Option<PathBu
     } else {
         base.join(found)
     };
-    std::fs::canonicalize(absolute).ok()
+    canonical(&absolute)
+}
+
+/// `std::fs::canonicalize`, but on Windows without the verbatim prefix where
+/// it can go (`\\?\C:\x` becomes `C:\x`): `cmd.exe`, which runs `.cmd` and
+/// `.bat` files, does not accept verbatim paths, and every comparison of
+/// resolved paths must use this one form.
+pub fn canonical(path: &Path) -> Option<PathBuf> {
+    dunce::canonicalize(path).ok()
 }
 
 #[cfg(all(test, unix))]

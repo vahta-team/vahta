@@ -1479,6 +1479,7 @@ dependencies = [
 name = "vahta-daemon"
 version = "0.0.0"
 dependencies = [
+ "dunce",
  "hmac",
  "serde",
  "serde_json",

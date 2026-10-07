@@ -122,7 +122,8 @@ pub(crate) fn rules_text(binding: &Binding) -> String {
 /// Why the agent could change the file at `resolved`: it is inside the project
 /// or in a temp directory. `None` for anywhere else.
 pub(crate) fn agent_writable(resolved: &Path, project_root: &Path) -> Option<&'static str> {
-    let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let root =
+        crate::pathfind::canonical(project_root).unwrap_or_else(|| project_root.to_path_buf());
     if resolved.starts_with(&root) {
         return Some("this file is inside the project, so the agent can change it");
     }
@@ -136,7 +137,7 @@ pub(crate) fn agent_writable(resolved: &Path, project_root: &Path) -> Option<&'s
     #[cfg(not(unix))]
     let temps = vec![std::env::temp_dir()];
     for t in temps {
-        let t = std::fs::canonicalize(&t).unwrap_or(t);
+        let t = crate::pathfind::canonical(&t).unwrap_or(t);
         if resolved.starts_with(&t) {
             return Some("this file is in a temporary directory, so the agent can change it");
         }

@@ -49,7 +49,7 @@ fn proposed_rule(
 ) -> Option<(String, ApprovedRule)> {
     let text = if argv0.contains(['/', '\\']) {
         let root =
-            std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+            crate::pathfind::canonical(project_root).unwrap_or_else(|| project_root.to_path_buf());
         match program.strip_prefix(&root) {
             Ok(rel) => {
                 let rel: Vec<String> = rel
