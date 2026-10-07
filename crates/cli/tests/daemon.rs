@@ -1884,12 +1884,18 @@ impl Sandbox {
     /// as Claude would, from this test process (so the hook's anchor is the
     /// anchor `vahta unlock` and `vahta run` get from here). Returns its reply.
     fn hook_after_bash(&self, stdout: &str) -> Option<Value> {
+        self.hook_after_bash_in(stdout, &self.project())
+    }
+
+    /// As `hook_after_bash`, with the agent's working directory the harness
+    /// reports.
+    fn hook_after_bash_in(&self, stdout: &str, cwd: &Path) -> Option<Value> {
         let payload = serde_json::json!({
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": "cat notes.txt"},
             "tool_response": {"stdout": stdout, "stderr": ""},
-            "cwd": self.project(),
+            "cwd": cwd,
         });
         let mut child = Command::new(hook_bin())
             .args(["--harness", "claude", "--event", "after_tool"])
@@ -2150,6 +2156,37 @@ fn output_allow_can_save_a_value_as_a_secret_and_the_output_stays_cut() {
     // Saving lets nothing through.
     assert!(s.hook_after_bash(&output).is_some());
     assert!(!s.journal().contains(&key));
+}
+
+/// Claude Code reports the agent's working directory, not the one a command
+/// `cd`-ed into. With a session open, the session's vault is the one to save
+/// into, even when that directory has no vault.
+#[test]
+fn output_allow_offers_saving_into_the_sessions_vault_from_a_directory_without_one() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let elsewhere = s.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let reply = s.hook_after_bash_in("a fake-one b", &elsewhere).unwrap();
+    let reference = reference_in(&redacted(&reply).1);
+
+    let asks = s.asks();
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&["output", "allow", &reference]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let log = s.window_log();
+    let ask = log
+        .iter()
+        .filter(|e| e.get("ask").is_some())
+        .nth(asks)
+        .unwrap();
+    assert_eq!(ask["options"][2], "Save as a secret", "{ask}");
+    let panel = ask["panel"].to_string();
+    assert!(
+        panel.contains(&format!("Vault: {}", s.vault_path().display())),
+        "{panel}"
+    );
 }
 
 #[test]

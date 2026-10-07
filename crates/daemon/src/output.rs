@@ -25,6 +25,7 @@
 //! reference, the names and kinds, and never a value.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
@@ -535,17 +536,20 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
         }
     };
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
-    let session: Option<String> = ctx
-        .shared
-        .sessions
-        .lock()
-        .ok()
-        .and_then(|s| s.covering(&chain).first().map(|s| s.id.clone()));
-    // Without a session the vault's password approves, so there must be one.
-    let vault = match (find_vault(&asked.cwd), &session) {
-        (Ok(found), _) => Some(found),
-        (Err(_), Some(_)) => None,
-        (Err(_), None) => {
+    // The covering session's id and its vault.
+    let session: Option<(String, PathBuf)> = ctx.shared.sessions.lock().ok().and_then(|s| {
+        s.covering(&chain)
+            .first()
+            .map(|s| (s.id.clone(), s.vault_path.clone()))
+    });
+    // The vault to save into, and without a session the one whose password
+    // approves showing. The session's own comes first: Claude Code reports the
+    // agent's working directory, not the one a command `cd`-ed into, so the
+    // directory alone may have no vault, or another one.
+    let vault: Option<PathBuf> = match (&session, find_vault(&asked.cwd)) {
+        (Some((_, path)), _) => Some(path.clone()),
+        (None, Ok((_, path))) => Some(path),
+        (None, Err(_)) => {
             return Err(refused(
                 RefusalKind::NoVault,
                 format!(
@@ -582,6 +586,9 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
         "Cut from the output before the agent saw it:".to_string(),
     ];
     lines.extend(cut_lines(&asked.texts, &finals));
+    if let Some(path) = &vault {
+        lines.push(format!("Vault: {}", path.display()));
+    }
     lines.push(match &session {
         Some(_) => "This agent has a session open: no password is needed to show it.".to_string(),
         None => "This agent has no session: showing it needs the vault password.".to_string(),
@@ -604,13 +611,13 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
     match choice {
         Some(SHOW) => {
             if session.is_none()
-                && let Some((_, vault_path)) = &vault
+                && let Some(vault_path) = &vault
             {
                 // The password only approves; the vault is not changed.
                 drop(unlock(ctx, window.as_mut(), vault_path, &panel)?);
             }
             let until = match &session {
-                Some(id) => Until::Session(id.clone()),
+                Some((id, _)) => Until::Session(id.clone()),
                 None => Until::Time(Instant::now() + RELEASE_FOR),
             };
             if let Ok(mut outputs) = ctx.shared.outputs.lock() {
@@ -636,7 +643,7 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
             })
         }
         Some(SAVE) => {
-            let Some((_, vault_path)) = &vault else {
+            let Some(vault_path) = &vault else {
                 return Err(error("there is no vault to save into"));
             };
             let saved = save(
