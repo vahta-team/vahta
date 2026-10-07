@@ -2312,15 +2312,17 @@ fn output_allow_offers_saving_into_the_sessions_vault_from_a_directory_without_o
         .nth(asks)
         .unwrap();
     assert_eq!(ask["options"][2], "Save as a secret", "{ask}");
-    // Compared as lines, not as JSON, where a Windows path's backslashes are
-    // escaped.
-    let vault_line = format!("Vault: {}", s.vault_path().display());
+    // The project's vault. Compared by its tail: on Windows the daemon and the
+    // test may spell the temp directory differently (a short 8.3 name).
+    let tail = Path::new("project").join(".vahta").join("vault.vht");
+    let tail = tail.to_string_lossy();
     assert!(
         ask["panel"]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|l| l.as_str() == Some(vault_line.as_str())),
+            .filter_map(Value::as_str)
+            .any(|l| l.starts_with("Vault: ") && l.ends_with(tail.as_ref())),
         "{}",
         ask["panel"]
     );
