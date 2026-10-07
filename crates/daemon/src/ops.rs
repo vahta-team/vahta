@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Error, Kind, SecretValue, Tier, Vault, valid_name};
+use vahta_vault::{Class, Error, Kind, SecretValue, Tier, Vault, valid_name};
 use zeroize::Zeroizing;
 
 use crate::clipboard;
@@ -362,15 +362,44 @@ pub(crate) fn store(
     if typed.expose().is_empty() {
         return Err(error("a secret cannot be empty; nothing was done"));
     }
+    // What the value looks like it guards, from its vendor prefix alone. The
+    // agent is told the class, never the value.
+    let class = match vahta_detect::secret_class(typed.expose()) {
+        Some(vahta_detect::Class::Payment) => Class::Payment,
+        Some(vahta_detect::Class::Cloud) => Class::Cloud,
+        _ => Class::Other,
+    };
+    let mut tier = tier;
+    if tier == Tier::Session && matches!(class, Class::Payment | Class::Cloud) {
+        // A key that moves money or opens an account is worth the password
+        // every time; the person decides, here, where the value was typed.
+        let question = format!(
+            "This looks like a {} key. Ask for the password on each use?",
+            class.as_str()
+        );
+        let options = [
+            "Each use (recommended)".to_string(),
+            "Keep session".to_string(),
+        ];
+        let picked = window
+            .choose(&panel, &question, &options)
+            .map_err(from_surface)?
+            .ok_or_else(cancelled)?;
+        if picked == 0 {
+            tier = Tier::EachUse;
+        }
+    }
     vault
         .set(name, typed.expose().as_bytes(), kind, tier)
         .map_err(from_vault)?;
+    vault.set_class(name, Some(class)).map_err(from_vault)?;
+    let bound = vault.bindings().iter().any(|b| b.name == name);
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     ctx.journal(
         Entry::new(event)
             .vault(&vault.vault_id())
             .names(&[name.to_string()])
-            .result("ok", None),
+            .result("ok", Some(class.as_str())),
     );
     let capitalised = match mode {
         StoreMode::Add => "Saved",
@@ -378,8 +407,39 @@ pub(crate) fn store(
     };
     window.close(Some(&format!("{capitalised} {name}.")));
     Ok(ClientReply::Done {
-        message: format!("{done} {name}"),
+        message: done_message(done, name, class, tier, bound),
     })
+}
+
+/// What the agent is told after an add or reset: what was done, the class (a
+/// word, never the value) and, unless the secret already has rules, how to ask
+/// the person for some.
+fn done_message(done: &str, name: &str, class: Class, tier: Tier, bound: bool) -> String {
+    let mut text = match class {
+        Class::Payment | Class::Cloud => {
+            format!(
+                "{done} {name} ({} key, {})",
+                class.as_str(),
+                tier_text(tier)
+            )
+        }
+        Class::Other => format!("{done} {name}"),
+    };
+    if bound {
+        return text;
+    }
+    match class {
+        Class::Payment | Class::Cloud => text.push_str(&format!(
+            "\n{name} can be used with any command. Ask the person which commands need it and \
+             propose a rule, e.g. `vahta bind {name} --allow PROGRAM`.\n`allow` is the real \
+             guard; `deny` only slows an agent down."
+        )),
+        Class::Other => text.push_str(&format!(
+            "\n{name} can be used with any command; to limit it, propose a rule: `vahta bind \
+             {name} --allow PROGRAM` (the person approves)."
+        )),
+    }
+    text
 }
 
 /// Refuse a name that is not in the vault. The index is plain, so this needs

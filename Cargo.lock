@@ -1484,6 +1484,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "vahta-detect",
  "vahta-ipc",
  "vahta-os",
  "vahta-vault",

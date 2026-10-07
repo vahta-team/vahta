@@ -18,7 +18,7 @@ use serde_json::json;
 use vahta_vault::manifest::{self, CheckResult};
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Entry, Kind, Peek, Tier, Vault, Verification};
+use vahta_vault::{Class, Entry, Kind, Peek, Tier, Vault, Verification};
 
 use crate::{EXIT_CLEAN, EXIT_FAILED, EXIT_USAGE, Env};
 
@@ -27,6 +27,13 @@ usage: vahta list [--json]
 
 List the secrets in this project's vault: name, kind and tier. Reads the
 vault's signed name index; needs no password and prints no values.
+
+When it is known, a class column says what a secret guards (payment, cloud or
+other, judged when it was added). A rules column says whether the secret has
+approved command rules: `any command` (none), `bound`, or `bound (toml differs)`
+when vahta.toml proposes other rules than the vault has approved (`vahta bind`
+approves them; only the vault's copy is enforced). The JSON adds `class`,
+`bound` and `rules_pending` to every secret.
 
 options:
   --json                 machine-readable JSON instead of text
@@ -37,7 +44,8 @@ pub const CHECK_USAGE: &str = "\
 usage: vahta check [--json]
 
 Compare the project's vahta.toml with its vault. Exit 1 when a required name is
-missing from the vault. With no vault (a CI run) only vahta.toml is validated.
+missing from the vault, or when vahta.toml proposes command rules (allow/deny)
+that the vault has not approved yet (`vahta bind`). With no vault (a CI run) only vahta.toml is validated.
 Optional names that are absent are listed, never a failure.
 
 options:
@@ -100,6 +108,29 @@ fn peek_verified(vault: &Path, store: &LocalStore) -> Result<(Peek, Verification
     Ok((peek, verified))
 }
 
+/// Which names have `vahta.toml` rules that the vault has not approved. Empty
+/// when the file is absent or unreadable (`check` reports an unreadable one):
+/// with nothing proposed there is nothing to call different.
+fn rules_pending(project: &Project, peek: &Peek) -> Vec<String> {
+    let path = project.manifest_path();
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let Ok(m) = manifest::load(&path) else {
+        return Vec::new();
+    };
+    peek.entries
+        .iter()
+        .filter(|e| {
+            !manifest::rules_in_sync(
+                m.secrets.get(&e.name),
+                peek.bindings.iter().find(|b| b.name == e.name),
+            )
+        })
+        .map(|e| e.name.clone())
+        .collect()
+}
+
 pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let json = match parse(args) {
         Args::Help => {
@@ -136,12 +167,17 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
         }
     };
     let entries = sorted(&peek.entries);
+    let pending = rules_pending(&project, &peek);
+    let bound = |name: &str| peek.bindings.iter().any(|b| b.name == name);
 
     if json {
         let secrets: Vec<_> = entries
             .iter()
             .map(|e| {
                 let mut o = json!({"name": e.name, "kind": "env", "tier": tier_text(e.tier)});
+                o["class"] = json!(e.class.map(Class::as_str));
+                o["bound"] = json!(bound(&e.name));
+                o["rules_pending"] = json!(pending.contains(&e.name));
                 if let Kind::File { file_name } = &e.kind {
                     o["kind"] = json!("file");
                     o["file_name"] = json!(file_name);
@@ -169,14 +205,32 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
             let width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
             let kinds: Vec<String> = entries.iter().map(|e| kind_text(&e.kind)).collect();
             let kind_width = kinds.iter().map(String::len).max().unwrap_or(0);
+            // Columns that say nothing for any secret are left out.
+            let show_class = entries.iter().any(|e| e.class.is_some());
+            let show_rules = !peek.bindings.is_empty() || !pending.is_empty();
             for (e, kind) in entries.iter().zip(&kinds) {
-                let _ = writeln!(
-                    stdout,
-                    "{:<width$}  {:<kind_width$}  {}",
+                let mut line = format!(
+                    "{:<width$}  {:<kind_width$}  {:<8}",
                     e.name,
                     kind,
                     tier_text(e.tier)
                 );
+                if show_class {
+                    line.push_str(&format!(
+                        "  {:<7}",
+                        e.class.map(Class::as_str).unwrap_or("-")
+                    ));
+                }
+                if show_rules {
+                    let rules = match (bound(&e.name), pending.contains(&e.name)) {
+                        (true, true) => "bound (toml differs)",
+                        (true, false) => "bound",
+                        (false, true) => "any command (toml differs)",
+                        (false, false) => "any command",
+                    };
+                    line.push_str(&format!("  {rules}"));
+                }
+                let _ = writeln!(stdout, "{}", line.trim_end());
             }
         }
         if verified == Verification::Unpinned {
@@ -200,16 +254,18 @@ fn check_json(
     manifest_path: Option<&Path>,
     vault: Option<&Path>,
     r: &CheckResult,
+    pending: &[String],
     error: Option<&str>,
 ) -> String {
     let doc = json!({
-        "ok": r.ok && error.is_none(),
+        "ok": r.ok && pending.is_empty() && error.is_none(),
         "manifest": manifest_path.map(|p| p.display().to_string()),
         "vault": vault.map(|p| p.display().to_string()),
         "required": r.required,
         "present": r.present,
         "missing": r.missing,
         "optional_absent": r.optional_absent,
+        "rules_pending": pending,
         "error": error,
     });
     serde_json::to_string_pretty(&doc).unwrap_or_default()
@@ -254,7 +310,7 @@ pub fn run_check(
             let _ = writeln!(
                 stdout,
                 "{}",
-                check_json(manifest_path, vault, &empty_result(), Some(msg))
+                check_json(manifest_path, vault, &empty_result(), &[], Some(msg))
             );
         } else {
             let _ = writeln!(stderr, "vahta check: error: {msg}");
@@ -275,7 +331,11 @@ pub fn run_check(
     if !manifest_path.is_file() {
         // ka: "No amnesia.toml found - nothing to check."
         if json {
-            let _ = writeln!(stdout, "{}", check_json(None, None, &empty_result(), None));
+            let _ = writeln!(
+                stdout,
+                "{}",
+                check_json(None, None, &empty_result(), &[], None)
+            );
         } else {
             let _ = writeln!(stdout, "No vahta.toml found - nothing to check.");
         }
@@ -288,42 +348,44 @@ pub fn run_check(
 
     let vault_path = project.vault_path();
     let has_vault = vault_path.is_file();
-    let (names, vault_shown): (Option<Vec<String>>, Option<&Path>) = if has_vault {
-        let Some(store) = store(env) else {
-            return fail(
-                stdout,
-                stderr,
-                Some(&manifest_path),
-                Some(&vault_path),
-                NO_STORE,
-            );
-        };
-        match peek_verified(&vault_path, &store) {
-            Ok((peek, verified)) => {
-                if verified == Verification::Unpinned && !json {
-                    let _ = writeln!(
-                        stderr,
-                        "unverified: this vault has not been unlocked on this machine yet"
-                    );
-                }
-                (
-                    Some(peek.entries.iter().map(|e| e.name.clone()).collect()),
-                    Some(vault_path.as_path()),
-                )
-            }
-            Err(msg) => {
+    let (names, vault_shown, pending): (Option<Vec<String>>, Option<&Path>, Vec<String>) =
+        if has_vault {
+            let Some(store) = store(env) else {
                 return fail(
                     stdout,
                     stderr,
                     Some(&manifest_path),
                     Some(&vault_path),
-                    &msg,
+                    NO_STORE,
                 );
+            };
+            match peek_verified(&vault_path, &store) {
+                Ok((peek, verified)) => {
+                    if verified == Verification::Unpinned && !json {
+                        let _ = writeln!(
+                            stderr,
+                            "unverified: this vault has not been unlocked on this machine yet"
+                        );
+                    }
+                    (
+                        Some(peek.entries.iter().map(|e| e.name.clone()).collect()),
+                        Some(vault_path.as_path()),
+                        rules_pending(&project, &peek),
+                    )
+                }
+                Err(msg) => {
+                    return fail(
+                        stdout,
+                        stderr,
+                        Some(&manifest_path),
+                        Some(&vault_path),
+                        &msg,
+                    );
+                }
             }
-        }
-    } else {
-        (None, None)
-    };
+        } else {
+            (None, None, Vec::new())
+        };
 
     // No vault: the contract alone, which is all CI has. The names it
     // declares are listed as required or optional, none are "missing".
@@ -343,7 +405,7 @@ pub fn run_check(
         let _ = writeln!(
             stdout,
             "{}",
-            check_json(Some(&manifest_path), vault_shown, &result, None)
+            check_json(Some(&manifest_path), vault_shown, &result, &pending, None)
         );
     } else {
         let mut lines = vec![format!("Manifest: {}", manifest_path.display())];
@@ -374,12 +436,26 @@ pub fn run_check(
                 ));
             }
         }
+        if !pending.is_empty() {
+            lines.push(format!(
+                "Rules not approved: {} (vahta.toml proposes command rules that the vault has \
+                 not approved; `vahta bind` shows and approves them)",
+                pending.join(", ")
+            ));
+            if result.ok {
+                lines.push("FAIL".to_string());
+            }
+        }
         let text = lines.join("\n");
-        if result.ok {
+        if result.ok && pending.is_empty() {
             let _ = writeln!(stdout, "{text}");
         } else {
             let _ = writeln!(stderr, "{text}");
         }
     }
-    if result.ok { EXIT_CLEAN } else { EXIT_FAILED }
+    if result.ok && pending.is_empty() {
+        EXIT_CLEAN
+    } else {
+        EXIT_FAILED
+    }
 }

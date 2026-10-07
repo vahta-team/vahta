@@ -442,7 +442,11 @@ fn init_and_add_go_through_the_window_and_nothing_secret_comes_back() {
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-one"}"#]);
     let out = s.vahta(&["add", "ZETA"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout).trim(), "saved ZETA");
+    // The first line says what was done; the rest tells the agent how to ask
+    // for rules, with no value in it.
+    let said = text(&out.stdout);
+    assert_eq!(said.lines().next(), Some("saved ZETA"));
+    assert!(said.contains("vahta bind ZETA --allow PROGRAM") && !said.contains("fake-"));
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-two"}"#]);
     let out = s.vahta(&["add", "ALPHA", "--tier", "each-use", "--file", "alpha.pem"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -606,7 +610,7 @@ fn add_refuses_a_name_there_is_and_reset_one_there_is_not() {
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-new"}"#]);
     let out = s.vahta(&["reset", "ZETA"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout).trim(), "replaced ZETA");
+    assert_eq!(text(&out.stdout).lines().next(), Some("replaced ZETA"));
     let vault = s.open_vault();
     assert_eq!(vault.get("ZETA").unwrap().expose(), b"fake-new");
     assert_eq!(vault.entries()[0].tier, Tier::EachUse);
@@ -2541,6 +2545,145 @@ fn a_hand_edited_toml_is_only_a_proposal_until_vahta_bind_approves_it() {
     s.script(&[PW_ANSWER]);
     let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+// --- class and the add hint ----------------------------------------------------------
+
+#[cfg(unix)]
+/// A key-shaped value built at run time, so no key-like literal is in the
+/// source: `prefix` plus a tail the detector accepts.
+fn key_like(prefix: &str, tail_len: usize) -> String {
+    let tail: String = "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7"
+        .chars()
+        .cycle()
+        .take(tail_len)
+        .collect();
+    format!("{prefix}{tail}")
+}
+
+// Uses the helpers that run commands, which only a Unix has.
+#[cfg(unix)]
+#[test]
+fn a_payment_key_gets_the_each_use_offer_and_the_agent_learns_the_class_not_the_value() {
+    let s = Sandbox::new();
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
+    let live = key_like("sk_live_", 24);
+
+    // Accepting the offer stores each-use.
+    s.script(&[
+        PW_ANSWER,
+        &format!(r#"{{"secret":"{live}"}}"#),
+        r#"{"choose":0}"#,
+    ]);
+    let out = s.vahta(&["add", "STRIPE_KEY"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(
+        said.starts_with("saved STRIPE_KEY (payment key, each-use)\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains("`vahta bind STRIPE_KEY --allow PROGRAM`")
+            && said.contains("`allow` is the real guard"),
+        "{said}"
+    );
+    let ask = s.last_ask("choose");
+    assert_eq!(
+        ask["prompt"],
+        "This looks like a payment key. Ask for the password on each use?"
+    );
+    assert_eq!(ask["options"][0], "Each use (recommended)");
+    let vault = s.open_vault();
+    let e = &vault.entries()[0];
+    assert_eq!(e.tier, Tier::EachUse);
+    assert_eq!(e.class, Some(vahta_vault::Class::Payment));
+
+    // Keeping the session is the person's call.
+    s.script(&[
+        PW_ANSWER,
+        &format!(r#"{{"secret":"{live}"}}"#),
+        r#"{"choose":1}"#,
+    ]);
+    let out = s.vahta(&["add", "STRIPE_TEST"]);
+    assert!(text(&out.stdout).starts_with("saved STRIPE_TEST (payment key, session)"));
+
+    // A cloud key is offered the same; anything else is not asked.
+    let aws = key_like("AKIA", 16).to_uppercase();
+    s.script(&[
+        PW_ANSWER,
+        &format!(r#"{{"secret":"{aws}"}}"#),
+        r#"{"choose":0}"#,
+    ]);
+    let out = s.vahta(&["add", "CLOUD_KEY"]);
+    assert!(
+        text(&out.stdout).starts_with("saved CLOUD_KEY (cloud key, each-use)"),
+        "{}",
+        text(&out.stdout)
+    );
+    let asked = s.asks();
+    s.script(&[PW_ANSWER, r#"{"secret":"fake-plain-value"}"#]);
+    let out = s.vahta(&["add", "PLAIN"]);
+    assert_eq!(s.asks(), asked + 2, "a password and a value, no offer");
+    let said = text(&out.stdout);
+    assert!(
+        said.starts_with("saved PLAIN\n") && !said.contains("key,"),
+        "{said}"
+    );
+    assert!(said.contains("`vahta bind PLAIN --allow PROGRAM`") && !said.contains("real guard"));
+    assert_eq!(
+        s.open_vault()
+            .entries()
+            .iter()
+            .find(|e| e.name == "PLAIN")
+            .unwrap()
+            .class,
+        Some(vahta_vault::Class::Other)
+    );
+
+    // A reset can make the same offer, and names the class again; a secret
+    // that already has rules is not nagged.
+    s.bind_directly("PLAIN", &["printenv"], &[]);
+    s.script(&[PW_ANSWER, r#"{"secret":"fake-other-value"}"#]);
+    let out = s.vahta(&["reset", "PLAIN"]);
+    assert_eq!(text(&out.stdout).trim(), "replaced PLAIN");
+    s.script(&[
+        PW_ANSWER,
+        &format!(r#"{{"secret":"{live}"}}"#),
+        r#"{"choose":0}"#,
+    ]);
+    let out = s.vahta(&["reset", "PLAIN"]);
+    assert_eq!(
+        text(&out.stdout).trim(),
+        "replaced PLAIN (payment key, each-use)"
+    );
+    assert_eq!(
+        s.open_vault()
+            .entries()
+            .iter()
+            .find(|e| e.name == "PLAIN")
+            .unwrap()
+            .tier,
+        Tier::EachUse
+    );
+
+    // The value is nowhere it should not be.
+    let everywhere = [
+        s.journal(),
+        fs::read_to_string(s.root.join("surface.log")).unwrap(),
+    ];
+    for place in &everywhere {
+        assert!(!place.contains(&live) && !place.contains(&aws));
+    }
+    // A cancelled offer stores nothing.
+    s.script(&[
+        PW_ANSWER,
+        &format!(r#"{{"secret":"{live}"}}"#),
+        r#"{"cancel":true}"#,
+    ]);
+    let out = s.vahta(&["add", "NEVER"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(!s.open_vault().entries().iter().any(|e| e.name == "NEVER"));
 }
 
 // --- lock on sleep ---------------------------------------------------------------------------
