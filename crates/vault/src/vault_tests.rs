@@ -594,3 +594,119 @@ fn unlocking_with_the_recovery_key_is_never_blocked() {
     v.save(&t.path, &t.store).unwrap();
     assert_eq!(Vault::peek(&t.path).unwrap().format, CURRENT);
 }
+
+// --- Bindings and class ---------------------------------------------------------
+
+fn sample_binding(name: &str) -> Binding {
+    Binding {
+        name: name.to_string(),
+        allow: vec![
+            crate::rules::parse_rule("tool push", true)
+                .unwrap()
+                .to_allow("/opt/x/tool".to_string()),
+        ],
+        deny: vec![
+            crate::rules::parse_rule("@network", false)
+                .unwrap()
+                .to_deny(),
+        ],
+    }
+}
+
+#[test]
+fn bindings_and_class_round_trip_and_peek_shows_them() {
+    let t = t();
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.set_class("A", Some(Class::Cloud)).unwrap();
+    v.set_bindings("A", Some(sample_binding("ignored")))
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!(peek.entries[0].class, Some(Class::Cloud));
+    assert_eq!(peek.bindings.len(), 1);
+    assert_eq!(
+        peek.bindings[0].name, "A",
+        "the name is the one given to set"
+    );
+    let again = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(again.bindings(), peek.bindings.as_slice());
+
+    // Replacing the value forgets the class but keeps the rules; removing the
+    // secret drops the rules.
+    let mut v = again;
+    v.set("A", b"fake-two", Kind::Env, Tier::Session).unwrap();
+    assert_eq!(v.entries()[0].class, None);
+    assert_eq!(v.bindings().len(), 1);
+    v.set_bindings("A", None).unwrap();
+    assert!(v.bindings().is_empty());
+    v.set_bindings("A", Some(sample_binding("A"))).unwrap();
+    v.remove("A").unwrap();
+    assert!(v.bindings().is_empty());
+}
+
+#[test]
+fn an_empty_or_malformed_binding_is_not_stored() {
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    let empty = Binding {
+        name: "A".into(),
+        allow: vec![],
+        deny: vec![],
+    };
+    v.set_bindings("A", Some(empty)).unwrap();
+    assert!(v.bindings().is_empty());
+
+    let mut bad = sample_binding("A");
+    bad.allow[0].program = crate::Program::Group("@network".into());
+    assert!(matches!(
+        v.set_bindings("A", Some(bad)),
+        Err(Error::Corrupt(_))
+    ));
+    assert!(matches!(
+        v.set_bindings("NOPE", Some(sample_binding("NOPE"))),
+        Err(Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn the_signature_covers_the_bindings() {
+    let t = t();
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.set_bindings("A", Some(sample_binding("A"))).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+
+    // Flip one byte inside the stored path of the allow rule.
+    let mut bytes = std::fs::read(&t.path).unwrap();
+    let needle = b"/opt/x/tool";
+    let at = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("the path is in the plaintext body");
+    bytes[at + 5] ^= 1;
+    assert!(matches!(
+        Vault::peek_bytes(&bytes),
+        Err(Error::BadSignature)
+    ));
+
+    // A binding for a secret that does not exist is refused even when signed.
+    let (v, _) = {
+        let v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+        (v, ())
+    };
+    let mut m = model(&v);
+    m.bindings.push(sample_binding("GHOST"));
+    let key = owner_key(&v);
+    let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
+    assert!(matches!(Vault::peek_bytes(&bytes), Err(Error::Corrupt(_))));
+}
+
+#[test]
+fn a_runner_cannot_edit_bindings() {
+    let t = t();
+    let (_, [_, _, (_, run, run_k)]) = built(&t);
+    let mut v = Vault::open_as_recipient(&t.path, &run, &run_k, &t.store).unwrap();
+    assert!(v.set_bindings("A", Some(sample_binding("A"))).is_err());
+}

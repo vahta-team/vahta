@@ -29,7 +29,9 @@ use ed25519_dalek::SigningKey;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, KdfParams};
-use crate::format::current::{self, Actor, Entry, Kind, Recipient, RecipientKind, Role, Tier};
+use crate::format::current::{
+    self, Actor, Binding, Class, Entry, Kind, Recipient, RecipientKind, Role, Tier,
+};
 use crate::format::upgrade::{self, AnyUnlocked};
 use crate::format::{self, CURRENT, Loaded, OwnerAccess, OwnerState};
 use crate::session::SessionKeys;
@@ -124,6 +126,8 @@ pub struct Peek {
     pub owner_sign_pk: [u8; 32],
     pub signer: Actor,
     pub entries: Vec<Entry>,
+    /// The approved command rules, covered by the owner's signature.
+    pub bindings: Vec<Binding>,
     pub recipient_count: usize,
 }
 
@@ -225,6 +229,7 @@ fn peek_of(loaded: &Loaded) -> Peek {
         owner_sign_pk: m.owner.sign_pk,
         signer: loaded.signer(),
         entries: m.index.clone(),
+        bindings: m.bindings.clone(),
         recipient_count: m.recipients.len(),
     }
 }
@@ -362,6 +367,7 @@ impl Vault {
                 tier: Tier::Session,
                 updated: now(),
                 changed_by: Actor::Owner,
+                class: None,
             });
         }
         u.model.header.generation = 1;
@@ -661,6 +667,9 @@ impl Vault {
                 e.tier = tier;
                 e.updated = now();
                 e.changed_by = actor;
+                // A new value may be another kind of key; the caller sets the
+                // class again from what it was given.
+                e.class = None;
             }
             None => {
                 let sid = crypto::random::<16>()?;
@@ -687,6 +696,7 @@ impl Vault {
                     tier,
                     updated: now(),
                     changed_by: actor,
+                    class: None,
                 });
             }
         }
@@ -696,9 +706,58 @@ impl Vault {
     pub fn remove(&mut self, name: &str) -> Result<(), Error> {
         let w = self.writer()?;
         let i = w.index_of(name)?;
+        let name = w.model.index[i].name.clone();
         w.model.index.remove(i);
         w.model.secrets.remove(i);
+        w.model.bindings.retain(|b| b.name != name);
         Ok(())
+    }
+
+    /// Record what `name` guards (or forget it with `None`).
+    pub fn set_class(&mut self, name: &str, class: Option<Class>) -> Result<(), Error> {
+        let w = self.writer()?;
+        let i = w.index_of(name)?;
+        if w.dek(i)?.is_none() {
+            return Err(Error::NoAccess);
+        }
+        let actor = w.actor;
+        let e = &mut w.model.index[i];
+        e.class = class;
+        e.updated = now();
+        e.changed_by = actor;
+        Ok(())
+    }
+
+    /// Replace the approved command rules of `name`, or remove them with
+    /// `None`. A binding with no rules is the same as none. Goes through the
+    /// writer like every edit, so it needs the opening to be able to sign.
+    pub fn set_bindings(&mut self, name: &str, binding: Option<Binding>) -> Result<(), Error> {
+        let w = self.writer()?;
+        let i = w.index_of(name)?;
+        if w.dek(i)?.is_none() {
+            return Err(Error::NoAccess);
+        }
+        w.model.bindings.retain(|b| b.name != name);
+        if let Some(mut b) = binding
+            && !(b.allow.is_empty() && b.deny.is_empty())
+        {
+            b.name = name.to_string();
+            // Same checks a reader applies, so a bad binding is refused here
+            // and not by the next open.
+            let probe = [b.clone()];
+            current::check_binding_shapes(&probe)?;
+            w.model.bindings.push(b);
+        }
+        let actor = w.actor;
+        let e = &mut w.model.index[i];
+        e.updated = now();
+        e.changed_by = actor;
+        Ok(())
+    }
+
+    /// The approved command rules of every bound secret.
+    pub fn bindings(&self) -> &[Binding] {
+        &self.model().bindings
     }
 
     pub fn set_tier(&mut self, name: &str, tier: Tier) -> Result<(), Error> {

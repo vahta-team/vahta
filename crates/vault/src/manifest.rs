@@ -10,14 +10,19 @@
 //! ```
 //!
 //! `required` defaults to true, `description` to empty and `env` to the name.
-//! It never holds a value, a tier or anything else security-relevant: it is in
-//! the repository, so anyone who can push can edit it, and so nothing in it
-//! may change what the vault does. Unknown keys are refused rather than
-//! ignored, so a typo such as `requried` cannot silently turn a check off.
+//! It never holds a value or a tier. It may hold `allow` and `deny` lists of
+//! command rules (see [`crate::rules`]), but those are a **proposal**: the
+//! file is in the repository, so anyone who can push can edit it. What the
+//! daemon enforces is the approved copy in the signed vault, which changes
+//! only when the person approves it in a window with the password. So the
+//! invariant holds: nothing in this file changes what the vault does.
+//! Unknown keys are refused rather than ignored, so a typo such as
+//! `requried` cannot silently turn a check off.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::rules::{self, ParsedRule};
 use crate::{Error, valid_name};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +31,10 @@ pub struct SecretEntry {
     pub required: bool,
     pub description: String,
     pub env: String,
+    /// Proposed `allow` rules, in file order. Not enforced until approved.
+    pub allow: Vec<ParsedRule>,
+    /// Proposed `deny` rules, in file order. Not enforced until approved.
+    pub deny: Vec<ParsedRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,12 +86,25 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                 required: true,
                 description: String::new(),
                 env: name.clone(),
+                allow: Vec::new(),
+                deny: Vec::new(),
             };
             for (k, v) in body {
                 match (k.as_str(), v) {
                     ("required", toml::Value::Boolean(b)) => entry.required = *b,
                     ("description", toml::Value::String(s)) => entry.description = s.clone(),
                     ("env", toml::Value::String(s)) if !s.is_empty() => entry.env = s.clone(),
+                    ("allow", toml::Value::Array(items)) => {
+                        entry.allow = rule_list(items, name, "allow", true).map_err(&bad)?;
+                    }
+                    ("deny", toml::Value::Array(items)) => {
+                        entry.deny = rule_list(items, name, "deny", false).map_err(&bad)?;
+                    }
+                    ("allow" | "deny", _) => {
+                        return Err(bad(format!(
+                            "[secrets.{name}].{k} must be a list of strings"
+                        )));
+                    }
                     ("required", _) => {
                         return Err(bad(format!("[secrets.{name}].required must be a boolean")));
                     }
@@ -108,6 +130,27 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
         path: path.to_path_buf(),
         secrets,
     })
+}
+
+fn rule_list(
+    items: &[toml::Value],
+    name: &str,
+    key: &str,
+    allow: bool,
+) -> Result<Vec<ParsedRule>, String> {
+    if items.len() > 64 {
+        return Err(format!("[secrets.{name}].{key} has too many rules"));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let toml::Value::String(text) = item else {
+            return Err(format!("[secrets.{name}].{key} must be a list of strings"));
+        };
+        let rule =
+            rules::parse_rule(text, allow).map_err(|e| format!("[secrets.{name}].{key}: {e}"))?;
+        out.push(rule);
+    }
+    Ok(out)
 }
 
 /// The outcome of comparing a manifest with the names in a vault.
@@ -168,12 +211,31 @@ mod tests {
     }
 
     #[test]
+    fn reads_allow_and_deny() {
+        let m = p(
+            "[secrets.A]\nallow = [\"stripe\", \"git push\"]\ndeny = [\"@network\", \"@shells\"]\n",
+        )
+        .unwrap();
+        let a = &m.secrets["A"];
+        assert_eq!(a.allow.len(), 2);
+        assert_eq!(a.allow[1].args, vec!["push"]);
+        assert_eq!(a.deny[0].text, "@network");
+        assert!(p("[secrets.B]\n").unwrap().secrets["B"].allow.is_empty());
+    }
+
+    #[test]
     fn refuses_what_it_cannot_trust() {
         for bad in [
             "[secrets.A]\nrequried = false\n",
             "[secrets.A]\nrequired = \"yes\"\n",
             "[secrets.\"not a name\"]\n",
             "[secrets.A]\nenv = \"\"\n",
+            "[secrets.A]\nallow = \"curl\"\n",
+            "[secrets.A]\nallow = [3]\n",
+            "[secrets.A]\nallow = [\"@shells\"]\n",
+            "[secrets.A]\ndeny = [\"@nope\"]\n",
+            "[secrets.A]\nallow = [\"\"]\n",
+            "[secrets.A]\nallow = [\"git 'push'\"]\n",
             "secrets = 3\n",
             "[other]\n",
             "= broken",

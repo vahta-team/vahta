@@ -18,6 +18,7 @@ pub mod format;
 pub mod ka;
 pub mod manifest;
 pub mod project;
+pub mod rules;
 pub mod session;
 pub mod store;
 mod vault;
@@ -30,7 +31,9 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 pub use crypto::KdfParams;
-pub use format::current::{Actor, Entry, Kind, Recipient, RecipientKind, Role, Tier};
+pub use format::current::{
+    Actor, ApprovedRule, Binding, Class, Entry, Kind, Program, Recipient, RecipientKind, Role, Tier,
+};
 pub use session::SessionKeys;
 pub use vault::{Peek, RecipientSecret, Vault, Verification, read_file};
 

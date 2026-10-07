@@ -120,6 +120,26 @@ fn every_released_format_upgrades_to_current() {
             );
         }
 
+        // The class and the approved rules ride in the signed body.
+        let alpha = v.entries().iter().find(|e| e.name == "ALPHA").unwrap();
+        assert_eq!(alpha.class, Some(vahta_vault::Class::Payment), "{name}");
+        assert_eq!(v.bindings().len(), 1, "{name}");
+        let b = &v.bindings()[0];
+        assert_eq!(b.name, "BETA", "{name}");
+        assert_eq!(b.allow[0].text, "beta-tool push", "{name}");
+        assert_eq!(
+            b.allow[0].program,
+            vahta_vault::Program::Path("/opt/fixture/beta-tool".into()),
+            "{name}"
+        );
+        assert_eq!(b.allow[0].args, vec!["push"], "{name}");
+        assert_eq!(
+            b.deny[0].program,
+            vahta_vault::Program::Group("@network".into()),
+            "{name}"
+        );
+        assert_eq!(peek.bindings, v.bindings(), "{name}");
+
         // Save: the file is now current, the generation went up by one, and
         // an older fixture's original sits beside it, byte for byte.
         let generation = peek.generation;
