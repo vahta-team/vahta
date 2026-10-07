@@ -25,7 +25,8 @@ nothing was done.
 | Command | What it does | Password |
 |---|---|---|
 | `vahta init` | Create `.vahta/` and the vault here. The recovery key is shown once, in the window. | new password, twice |
-| `vahta set NAME [--tier session\|each-use] [--file FILENAME]` | Store or replace a secret. The value is typed in the window, hidden, twice. | yes |
+| `vahta add NAME [--tier session\|each-use] [--file FILENAME]` | Store a new secret. The value is typed in the window, hidden, twice. A name the vault already has is refused (exit 3). | yes |
+| `vahta reset NAME [--tier session\|each-use] [--file FILENAME]` | Replace the value of a secret the vault has, as when rotating it. It keeps its tier and kind unless the flags say otherwise. A name the vault does not have is refused (exit 3). | yes |
 | `vahta remove NAME` | Remove a secret. | yes |
 | `vahta import --ka PATH` / `--dotenv PATH` | Add the secrets of a ka vault or a `.env` file. The daemon reads the file itself. A name the vault already has refuses the whole import. | yes (and the ka password for `--ka`) |
 | `vahta reveal NAME` | Show the value in the window until a key is pressed or 60 seconds pass. | yes |
@@ -41,6 +42,13 @@ nothing was done.
 
 None of these takes a secret or the password as an argument or on standard input.
 There is no flag for it, on purpose.
+
+There is no `vahta set`: one command that adds or overwrites lets a mistyped
+name replace a secret, or a rotation quietly create a second one. `vahta set`
+says which of the two to use.
+
+`vh` is the short name of `vahta`: the same program, so `vh run -- …` is
+`vahta run -- …`.
 
 ### Exit codes
 

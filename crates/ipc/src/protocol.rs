@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -217,12 +217,22 @@ pub enum ClientRequest {
     Init {
         cwd: String,
     },
-    /// Add or replace a secret; its value is typed in the window.
-    Set {
+    /// Add a new secret; its value is typed in the window. Refused if the
+    /// name is already in the vault.
+    Add {
         cwd: String,
         name: String,
         tier: Tier,
         /// A file name hint: the secret is a file, not an environment variable.
+        file: Option<String>,
+    },
+    /// Replace the value of a secret the vault has; the new value is typed in
+    /// the window. Refused if the name is not there. `None` keeps the tier
+    /// or the kind the secret has.
+    Reset {
+        cwd: String,
+        name: String,
+        tier: Option<Tier>,
         file: Option<String>,
     },
     Remove {
@@ -770,18 +780,34 @@ mod tests {
 
     #[test]
     fn no_vault_request_has_a_place_for_a_value_or_a_password() {
-        let good = r#"{"op":"set","cwd":"/p","name":"A","tier":"Session","file":null}"#;
-        let ok: Result<Option<ClientRequest>, _> =
-            read_frame(&mut Cursor::new(frame(good.as_bytes())));
-        assert!(matches!(ok, Ok(Some(ClientRequest::Set { .. }))));
-        for extra in ["value", "secret", "password", "typed", "plaintext"] {
-            let bad = format!(
-                r#"{{"op":"set","cwd":"/p","name":"A","tier":"Session","file":null,"{extra}":"fake-one"}}"#
+        for op in ["add", "reset"] {
+            let good =
+                format!(r#"{{"op":"{op}","cwd":"/p","name":"A","tier":"Session","file":null}}"#);
+            let ok: Result<Option<ClientRequest>, _> =
+                read_frame(&mut Cursor::new(frame(good.as_bytes())));
+            assert!(
+                matches!(
+                    ok,
+                    Ok(Some(
+                        ClientRequest::Add { .. } | ClientRequest::Reset { .. }
+                    ))
+                ),
+                "{op}"
             );
-            let r: Result<Option<ClientRequest>, _> =
-                read_frame(&mut Cursor::new(frame(bad.as_bytes())));
-            assert!(r.is_err(), "{extra} was accepted");
+            for extra in ["value", "secret", "password", "typed", "plaintext"] {
+                let bad = format!(
+                    r#"{{"op":"{op}","cwd":"/p","name":"A","tier":"Session","file":null,"{extra}":"fake-one"}}"#
+                );
+                let r: Result<Option<ClientRequest>, _> =
+                    read_frame(&mut Cursor::new(frame(bad.as_bytes())));
+                assert!(r.is_err(), "{op}: {extra} was accepted");
+            }
         }
+        // The old `set` is gone: a client that sends it is told so, not obeyed.
+        let old = r#"{"op":"set","cwd":"/p","name":"A","tier":"Session","file":null}"#;
+        let r: Result<Option<ClientRequest>, _> =
+            read_frame(&mut Cursor::new(frame(old.as_bytes())));
+        assert!(r.is_err());
         // Nor does any reply: a reply has no field that could carry one.
         let reply = r#"{"reply":"done","message":"saved","value":"fake-one"}"#;
         let r: Result<Option<ClientReply>, _> =

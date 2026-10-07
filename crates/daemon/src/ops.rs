@@ -1,4 +1,4 @@
-//! The vault operations a client can ask for: `init`, `set`, `remove`,
+//! The vault operations a client can ask for: `init`, `add`, `reset`, `remove`,
 //! `import`, `reveal` and `copy`.
 //!
 //! Every one needs a fresh password, typed in the prompt window, and never
@@ -260,36 +260,100 @@ pub(crate) fn init(ctx: &Ctx<'_>, cwd: &str) -> Flow<ClientReply> {
     })
 }
 
-// --- set / remove ---------------------------------------------------------------------
+// --- add / reset / remove ------------------------------------------------------------
 
-pub(crate) fn set(
-    ctx: &Ctx<'_>,
-    cwd: &str,
-    name: &str,
-    tier: Tier,
-    file: Option<&str>,
-) -> Flow<ClientReply> {
-    check_name(name)?;
-    let (project, vault_path) = find_vault(cwd)?;
-    let kind = match file {
-        Some(f) => Kind::File {
-            file_name: f.to_string(),
-        },
-        None => Kind::Env,
-    };
-    let tier_text = match tier {
+/// Whether a write makes a new secret or replaces the value of one there is.
+/// Two commands, not one that does either: an agent that means to add a
+/// secret must not overwrite one by a mistyped name, and one that means to
+/// rotate a value must not quietly create a second secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreMode {
+    Add,
+    Reset,
+}
+
+/// What `add` and `reset` were asked to store, besides the value.
+pub(crate) struct Store<'a> {
+    pub name: &'a str,
+    /// `None` on a reset keeps the tier the secret has.
+    pub tier: Option<Tier>,
+    /// `None` on a reset keeps the secret's kind; on an add it is a variable.
+    pub file: Option<&'a str>,
+}
+
+fn tier_text(tier: Tier) -> &'static str {
+    match tier {
         Tier::Session => "session",
         Tier::EachUse => "each-use",
+    }
+}
+
+pub(crate) fn store(
+    ctx: &Ctx<'_>,
+    cwd: &str,
+    mode: StoreMode,
+    what: Store<'_>,
+) -> Flow<ClientReply> {
+    let name = what.name;
+    check_name(name)?;
+    let (project, vault_path) = find_vault(cwd)?;
+    // The plain index says whether the name is there, so the wrong command is
+    // refused before a window opens and costs the person nothing.
+    let peek = Vault::peek(&vault_path).map_err(from_vault)?;
+    let existing = peek.entries.iter().find(|e| e.name == name);
+    match (mode, existing) {
+        (StoreMode::Add, Some(_)) => {
+            return Err(refused_names(
+                RefusalKind::Exists,
+                format!(
+                    "the vault already has {name}; use `vahta reset {name}` to replace its value"
+                ),
+                vec![NameIssue {
+                    name: name.to_string(),
+                    why: RefusalKind::Exists,
+                }],
+            ));
+        }
+        (StoreMode::Reset, None) => {
+            let mut reply = unknown_name(name);
+            if let ClientReply::Refused(r) = &mut reply {
+                r.message = format!(
+                    "no secret named {name} in this vault; use `vahta add {name}` to create it"
+                );
+            }
+            return Err(reply);
+        }
+        _ => {}
+    }
+    let kind = match (what.file, existing) {
+        (Some(f), _) => Kind::File {
+            file_name: f.to_string(),
+        },
+        (None, Some(e)) => e.kind.clone(),
+        (None, None) => Kind::Env,
     };
-    let mut window = ctx.window("Store a secret")?;
+    let tier = what
+        .tier
+        .or(existing.map(|e| e.tier))
+        .unwrap_or(Tier::Session);
+    let (title, event, done) = match mode {
+        StoreMode::Add => ("Add a secret", "add", "saved"),
+        StoreMode::Reset => ("Replace a secret's value", "reset", "replaced"),
+    };
+    let mut window = ctx.window(title)?;
     let mut lines = lines_for(&project, &vault_path);
-    lines.push(format!("Name: {name} (tier {tier_text})"));
-    let mut panel = ctx.panel("Store a secret", lines);
+    lines.push(format!("Name: {name} (tier {})", tier_text(tier)));
+    if mode == StoreMode::Reset {
+        lines.push("This replaces the value it has now.".to_string());
+    }
+    let panel = ctx.panel(title, lines);
     let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
-    if vault.entries().iter().any(|e| e.name == name) {
-        panel
-            .lines
-            .push("This replaces the value it has now.".to_string());
+    // The file may have changed between the peek and the unlock.
+    let there = vault.entries().iter().any(|e| e.name == name);
+    if there != (mode == StoreMode::Reset) {
+        return Err(error(
+            "the vault changed while the window was open; nothing was done",
+        ));
     }
     let typed = window
         .ask_value(&panel, &format!("Value of {name}"), true)
@@ -303,14 +367,18 @@ pub(crate) fn set(
         .map_err(from_vault)?;
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     ctx.journal(
-        Entry::new("set")
+        Entry::new(event)
             .vault(&vault.vault_id())
             .names(&[name.to_string()])
             .result("ok", None),
     );
-    window.close(Some(&format!("Saved {name}.")));
+    let capitalised = match mode {
+        StoreMode::Add => "Saved",
+        StoreMode::Reset => "Replaced",
+    };
+    window.close(Some(&format!("{capitalised} {name}.")));
     Ok(ClientReply::Done {
-        message: format!("saved {name}"),
+        message: format!("{done} {name}"),
     })
 }
 

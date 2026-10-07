@@ -83,7 +83,7 @@ scripts/install-local.sh --prefix DIR     # or somewhere else
 scripts/install-local.sh --uninstall      # remove both binaries again
 ```
 
-It builds with `cargo build --release --locked`, installs `vahta-hook` and then `vahta` by copying to a temp file and renaming over the target (a harness running the hook at that moment is not disturbed), runs a smoke check on both, and warns if the prefix is not on your `PATH`. Harness hooks follow the new copy: the script runs `vahta setup --refresh`, which repoints every harness that already has our entries and leaves the rest alone (`--no-setup` skips that). `--uninstall` refuses while a harness config still points into the prefix; run `vahta setup --all --uninstall` first, or pass `--force`. Linux and macOS; Windows is not covered yet.
+It builds with `cargo build --release --locked`, installs `vahta-hook` and then `vahta` and `vh` (its short name) by copying to a temp file and renaming over the target (a harness running the hook at that moment is not disturbed), runs a smoke check on both, and warns if the prefix is not on your `PATH`. Harness hooks follow the new copy: the script runs `vahta setup --refresh`, which repoints every harness that already has our entries and leaves the rest alone (`--no-setup` skips that). `--uninstall` refuses while a harness config still points into the prefix; run `vahta setup --all --uninstall` first, or pass `--force`. Linux and macOS; Windows is not covered yet.
 
 ### Agent bootstrap
 
