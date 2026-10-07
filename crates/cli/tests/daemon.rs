@@ -1286,7 +1286,10 @@ fn a_session_ends_when_its_anchor_process_is_gone() {
     wait_until("the session to end with its anchor", 10, || {
         s.sessions().is_empty()
     });
-    assert!(s.journal().contains("anchor_exited"));
+    // The sweep drops the session first and writes the journal line after.
+    wait_until("the journal to say why", 10, || {
+        s.journal().contains("anchor_exited")
+    });
 }
 
 #[test]
