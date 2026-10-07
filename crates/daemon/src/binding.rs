@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use vahta_vault::rules::{in_group, normalize_program_name};
+use vahta_vault::rules::{LAUNCHERS, in_group, normalize_program_name};
 use vahta_vault::{ApprovedRule, Binding, Program};
 
 /// What the rules say about one command.
@@ -45,13 +45,27 @@ fn args_match(rule: &ApprovedRule, argv: &[String]) -> bool {
 }
 
 /// The names deny matching looks at: what the caller typed and what it
-/// resolved to.
+/// resolved to. When that is a launcher (`env curl …`, `timeout 5 curl …`),
+/// also every later word that is not an option or a `NAME=value`, since one of
+/// them is the program it starts. That can deny on an argument that only
+/// looks like a program name, which is the safe side for a deny list.
 fn names_of(resolved: Option<&Path>, argv: &[String]) -> Vec<String> {
     let mut names = vec![normalize_program_name(base_name(&argv[0]))];
     if let Some(name) = resolved.and_then(|p| p.file_name()) {
         let n = normalize_program_name(&name.to_string_lossy());
         if !names.contains(&n) {
             names.push(n);
+        }
+    }
+    if names.iter().any(|n| LAUNCHERS.contains(&n.as_str())) {
+        for word in &argv[1..] {
+            if word.starts_with('-') || word.contains('=') || word.is_empty() {
+                continue;
+            }
+            let n = normalize_program_name(base_name(word));
+            if !names.contains(&n) {
+                names.push(n);
+            }
         }
     }
     names
@@ -261,6 +275,54 @@ mod tests {
             check(&b, Some(Path::new("/bin/sh")), &argv(&["sh", "-c", "x"])),
             Verdict::Denied { .. }
         ));
+    }
+
+    #[test]
+    fn deny_looks_past_a_launcher_to_the_program_it_starts() {
+        let b = binding(
+            vec![
+                allow("env", "/usr/bin/env"),
+                allow("timeout", "/usr/bin/timeout"),
+            ],
+            vec![deny("@network")],
+        );
+        let env = Path::new("/usr/bin/env");
+        for words in [
+            &["env", "curl", "-d", "x", "http://h"][..],
+            &["env", "-i", "A=1", "/usr/bin/curl", "http://h"][..],
+            &["env", "env", "wget", "http://h"][..],
+        ] {
+            assert!(
+                matches!(check(&b, Some(env), &argv(words)), Verdict::Denied { .. }),
+                "{words:?}"
+            );
+        }
+        assert!(matches!(
+            check(
+                &b,
+                Some(Path::new("/usr/bin/timeout")),
+                &argv(&["timeout", "5", "nc", "h", "1"])
+            ),
+            Verdict::Denied { .. }
+        ));
+        // A launcher running an allowed, undenied program still runs.
+        assert_eq!(
+            check(&b, Some(env), &argv(&["env", "A=1", "printenv", "A"])),
+            Verdict::Allowed
+        );
+        // Not a launcher: its arguments are only arguments.
+        let p = binding(
+            vec![allow("printenv", "/usr/bin/printenv")],
+            vec![deny("@network")],
+        );
+        assert_eq!(
+            check(
+                &p,
+                Some(Path::new("/usr/bin/printenv")),
+                &argv(&["printenv", "curl"])
+            ),
+            Verdict::Allowed
+        );
     }
 
     #[test]

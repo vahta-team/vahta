@@ -2371,6 +2371,21 @@ fn the_window_warns_when_the_program_is_inside_the_project() {
         "{choice}"
     );
     assert_eq!(choice["options"][2], "Add `./deploy.sh` to the list");
+
+    // A launcher is flagged: allowing `env` allows whatever it starts.
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&[
+        "run", "--ask", "--secret", "ZETA", "--", "env", "printenv", "ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(4));
+    let choice = s.last_ask("choose");
+    assert!(
+        choice["panel"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("runs other programs"),
+        "{choice}"
+    );
 }
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).

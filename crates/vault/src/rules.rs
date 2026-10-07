@@ -71,6 +71,22 @@ pub const INTERPRETERS: &[&str] = &[
     "osascript",
 ];
 
+/// Programs that run another program named in their arguments (`env curl …`,
+/// `sudo curl …`). Not a deny group: allowing one of them allows whatever it
+/// starts, so the windows warn, and deny matching looks past them to the
+/// program they run.
+pub const LAUNCHERS: &[&str] = &[
+    "env", "sudo", "doas", "xargs", "nohup", "timeout", "nice", "ionice", "time", "exec",
+    "command", "setsid", "stdbuf", "chrt", "taskset", "unbuffer", "watch", "flock", "npx", "pnpx",
+    "bunx", "uvx", "pipx", "runuser", "su",
+];
+
+/// Whether a normalised program name runs other programs: a shell, an
+/// interpreter or a launcher. Allowing one gives the secret to anything.
+pub fn runs_anything(name: &str) -> bool {
+    SHELLS.contains(&name) || INTERPRETERS.contains(&name) || LAUNCHERS.contains(&name)
+}
+
 /// The program names of a group (`@network`), or `None` for an unknown group.
 pub fn group_members(group: &str) -> Option<&'static [&'static str]> {
     match group {

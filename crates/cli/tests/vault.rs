@@ -437,6 +437,9 @@ fn check_reports_rules_the_vault_has_not_approved_and_unknown_groups() {
         said.contains("Rules not approved: ZETA") && said.contains("vahta bind"),
         "{said}"
     );
+    // One verdict, at the end: never an OK before the FAIL.
+    assert_eq!(said.trim_end().lines().last(), Some("FAIL"), "{said}");
+    assert!(!said.lines().any(|l| l == "OK"), "{said}");
     let json = s.run(&["check", "--json"]);
     assert_eq!(json.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();

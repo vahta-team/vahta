@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use vahta_vault::project::Project;
-use vahta_vault::rules::parse_rule;
+use vahta_vault::rules::{normalize_program_name, parse_rule, runs_anything};
 use vahta_vault::{ApprovedRule, Binding, Peek, manifest};
 
 use crate::binding::{self, Verdict};
@@ -126,6 +126,16 @@ pub(crate) fn ask(
         && let Some(w) = binding::agent_writable(p, &project.root)
     {
         warnings.push(w);
+    }
+    let file = program
+        .and_then(|p| p.file_name())
+        .map(|n| normalize_program_name(&n.to_string_lossy()))
+        .unwrap_or_default();
+    if runs_anything(&file) {
+        warnings.push(
+            "This program runs other programs (a shell, interpreter or launcher): allowing it \
+             lets the agent run anything with the secret.",
+        );
     }
     if !warnings.is_empty() {
         panel.warning = Some(warnings.join(" "));

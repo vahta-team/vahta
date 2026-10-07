@@ -154,13 +154,10 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
                 .file_name()
                 .map(|n| rules::normalize_program_name(&n.to_string_lossy()))
                 .unwrap_or_default();
-            if ["@shells", "@interpreters"]
-                .iter()
-                .any(|g| rules::in_group(g, &file))
-            {
+            if rules::runs_anything(&file) {
                 warnings.push(format!(
-                    "`{text}` is a shell or interpreter: allowing it lets the agent run anything \
-                     with this secret"
+                    "`{text}` runs other programs (a shell, interpreter or launcher): allowing \
+                     it lets the agent run anything with this secret"
                 ));
             }
         }

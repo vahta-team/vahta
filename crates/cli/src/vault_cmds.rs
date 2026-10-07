@@ -207,7 +207,9 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
             let kind_width = kinds.iter().map(String::len).max().unwrap_or(0);
             // Columns that say nothing for any secret are left out.
             let show_class = entries.iter().any(|e| e.class.is_some());
-            let show_rules = !peek.bindings.is_empty() || !pending.is_empty();
+            // A secret with a class was written by a Vahta that knows rules, so
+            // its "any command" is worth saying.
+            let show_rules = show_class || !peek.bindings.is_empty() || !pending.is_empty();
             for (e, kind) in entries.iter().zip(&kinds) {
                 let mut line = format!(
                     "{:<width$}  {:<kind_width$}  {:<8}",
@@ -415,19 +417,15 @@ pub fn run_check(
         }
         if result.required.is_empty() {
             lines.push("No required secrets declared.".to_string());
-            lines.push("OK".to_string());
         } else if names.is_none() {
             lines.push(format!("Required: {}", result.required.len()));
-            lines.push("OK".to_string());
         } else {
             lines.push(format!("Required: {}", result.required.len()));
             lines.push(format!("Present:  {}", result.present.len()));
             if result.missing.is_empty() {
                 lines.push("Missing:  (none)".to_string());
-                lines.push("OK".to_string());
             } else {
                 lines.push(format!("Missing:  {}", result.missing.join(", ")));
-                lines.push("FAIL".to_string());
             }
             if !result.optional_absent.is_empty() {
                 lines.push(format!(
@@ -442,10 +440,10 @@ pub fn run_check(
                  not approved; `vahta bind` shows and approves them)",
                 pending.join(", ")
             ));
-            if result.ok {
-                lines.push("FAIL".to_string());
-            }
         }
+        // One verdict, last, for everything above.
+        let ok = result.ok && pending.is_empty();
+        lines.push(if ok { "OK" } else { "FAIL" }.to_string());
         let text = lines.join("\n");
         if result.ok && pending.is_empty() {
             let _ = writeln!(stdout, "{text}");

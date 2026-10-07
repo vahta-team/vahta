@@ -258,6 +258,11 @@ arguments), `run_allowed_once` and `binding_added`.
 - **`allow` is the guard; `deny` is a speed bump.** A program in no group, or a
   renamed copy of one under a name the caller does not type, gets past a deny
   list. Prefer allowing exactly what is needed.
+- **Allowing a program that runs other programs allows everything.** Shells,
+  interpreters and launchers (`env`, `sudo`, `xargs`, `timeout`, `nohup`, `npx`…)
+  start whatever their arguments name, and both windows warn about them. A deny
+  rule looks past a launcher (`env curl …` is denied by `@network`), but not into
+  a shell string or a script.
 - **An allowed script inside the project can be edited by the agent.** The rule
   names the file, not its contents. The window warns when the program is in the
   project or a temp directory.

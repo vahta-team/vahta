@@ -102,10 +102,19 @@ pub(crate) fn vault_tier(tier: protocol::Tier) -> Tier {
 }
 
 impl Ctx<'_> {
+    /// Who is asking, as the person should read it: the agent the request
+    /// comes from (the anchor `unlock` would choose, e.g. `claude`), and the
+    /// process that connected (usually `vahta` itself) when it is another.
     pub(crate) fn requested_by(&self) -> String {
-        match &self.exe {
+        let caller = match &self.exe {
             Some(exe) => format!("{exe} (pid {})", self.pid),
             None => format!("pid {}", self.pid),
+        };
+        match crate::output::anchor_of(self) {
+            Some((id, exe)) if id.pid != self.pid => {
+                format!("{exe} (pid {}), through {caller}", id.pid)
+            }
+            _ => caller,
         }
     }
 
