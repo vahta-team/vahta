@@ -34,6 +34,7 @@ use crate::ops::{
 };
 use crate::pathfind;
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
+use crate::run_ask;
 use crate::session::{DelegateRefusal, Role, Session, Sessions, ask_time, info_of};
 use crate::session_ops::duration_of;
 use crate::surface::sanitize_label;
@@ -187,15 +188,30 @@ fn issue_list(names: &[String], why: RefusalKind) -> Vec<NameIssue> {
         .collect()
 }
 
-pub(crate) fn prepare(
-    ctx: &Ctx<'_>,
-    cwd: &str,
-    argv: Vec<String>,
-    client_env: Vec<(String, String)>,
-    names: Option<Vec<String>>,
-    renames: Vec<(String, String)>,
-    label: Option<String>,
-) -> Flow<Prepared> {
+/// What a `Run` request asked for.
+pub(crate) struct RunArgs {
+    pub cwd: String,
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub names: Option<Vec<String>>,
+    pub renames: Vec<(String, String)>,
+    pub label: Option<String>,
+    pub ask: bool,
+    pub reason: Option<String>,
+}
+
+pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
+    let RunArgs {
+        cwd,
+        argv,
+        env: client_env,
+        names,
+        renames,
+        label,
+        ask,
+        reason,
+    } = args;
+    let cwd = cwd.as_str();
     if argv.is_empty() || argv[0].is_empty() {
         return Err(error("no command to run"));
     }
@@ -222,6 +238,19 @@ pub(crate) fn prepare(
         .cloned()
         .collect();
 
+    // The caller's session, if any: the deepest one whose anchor is among its
+    // ancestors, or under which one of them was launched.
+    let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
+    let found = {
+        let sessions = ctx
+            .shared
+            .sessions
+            .lock()
+            .map_err(|_| error("the session table is unusable"))?;
+        sessions
+            .find(&chain, &peek.vault_id)
+            .map(|s| (s.id.clone(), s.scope.clone(), s.parent.is_some()))
+    };
     // The program, found once. Its canonical path is what the command rules
     // are checked against and what is executed.
     let client_path: Option<OsString> = client_env
@@ -245,13 +274,39 @@ pub(crate) fn prepare(
         .filter(|(_, v)| *v != Verdict::Allowed)
         .collect();
     if !failures.is_empty() {
-        return Err(not_allowed(
+        if !ask {
+            return Err(not_allowed(
+                ctx,
+                &peek,
+                &project,
+                program.as_deref(),
+                &failures,
+            ));
+        }
+        let shown: Vec<String> = pairs
+            .iter()
+            .map(|(n, v)| {
+                if n == v {
+                    n.clone()
+                } else {
+                    format!("{n} as {v}")
+                }
+            })
+            .collect();
+        let delegated = found.as_ref().is_some_and(|(_, _, d)| *d);
+        run_ask::ask(
             ctx,
-            &peek,
             &project,
+            &vault_path,
+            &peek,
+            &argv,
             program.as_deref(),
             &failures,
-        ));
+            format!("Secrets: {}", shown.join(", ")),
+            format!("Command: {}", command_text(&argv)),
+            reason.as_deref(),
+            delegated,
+        )?;
     }
     let Some(program) = program else {
         return Err(error(format!(
@@ -260,19 +315,6 @@ pub(crate) fn prepare(
         )));
     };
 
-    // The caller's session, if any: the deepest one whose anchor is among its
-    // ancestors, or under which one of them was launched.
-    let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
-    let found = {
-        let sessions = ctx
-            .shared
-            .sessions
-            .lock()
-            .map_err(|_| error("the session table is unusable"))?;
-        sessions
-            .find(&chain, &peek.vault_id)
-            .map(|s| (s.id.clone(), s.scope.clone(), s.parent.is_some()))
-    };
     let mut via: Option<String> = None;
     let mut keys = None;
     if let Some((id, scope, delegated)) = found {
@@ -461,7 +503,9 @@ fn not_allowed(
     }
     if denied {
         message.push_str(
-            " A denied command cannot be approved from a run; tell the person what you need.",
+            " If the command is legitimate, run it again with `vahta run --ask --reason \"WHY\" \
+             -- COMMAND`: the person can allow it once, but a denied command cannot be added to \
+             the list. `deny` only slows an agent down; the person's window is the check.",
         );
     } else {
         message.push_str(

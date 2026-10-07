@@ -547,10 +547,24 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 names,
                 renames,
                 label,
+                ask,
+                reason,
             } => {
                 // A run is the one request that goes on after its reply: the
                 // connection then carries the command's input and output.
-                match run_ops::prepare(&ctx, &cwd, argv, env, names, renames, label) {
+                match run_ops::prepare(
+                    &ctx,
+                    run_ops::RunArgs {
+                        cwd,
+                        argv,
+                        env,
+                        names,
+                        renames,
+                        label,
+                        ask,
+                        reason,
+                    },
+                ) {
                     Ok(prepared) => {
                         if write_frame(stream, &ClientReply::RunStarted {}).is_ok() {
                             run::execute(shared, stream, prepared, (ctx.exe.clone(), ctx.pid));

@@ -288,6 +288,11 @@ pub enum ClientRequest {
         /// `(NAME, VARIABLE)`: put NAME in this variable instead.
         renames: Vec<(String, String)>,
         label: Option<String>,
+        /// `--ask`: if a secret's command rules do not allow this command,
+        /// ask the person (a window) instead of refusing.
+        ask: bool,
+        /// `--reason`: why, for that window; shown marked as unverified.
+        reason: Option<String>,
     },
     /// The hook, after a tool ran and before its output reaches the model:
     /// `texts` are the strings of that output (every one, in order), and

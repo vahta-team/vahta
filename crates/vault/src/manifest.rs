@@ -153,6 +153,113 @@ fn rule_list(
     Ok(out)
 }
 
+// --- Editing the file ------------------------------------------------------------------
+
+fn edit_error(path: &Path, why: impl std::fmt::Display) -> Error {
+    Error::Manifest(format!("cannot update {}: {why}", path.display()))
+}
+
+fn parse_doc(text: &str) -> Result<toml_edit::DocumentMut, String> {
+    text.parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("invalid TOML ({})", e.message()))
+}
+
+/// `[secrets.NAME]` of `doc`, created (as a table with the header only on
+/// itself, not on `[secrets]`) when it is not there.
+fn secret_table<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    name: &str,
+) -> Result<&'a mut toml_edit::Table, String> {
+    use toml_edit::{Item, Table};
+    let secrets = doc
+        .entry("secrets")
+        .or_insert_with(|| {
+            let mut t = Table::new();
+            t.set_implicit(true);
+            Item::Table(t)
+        })
+        .as_table_mut()
+        .ok_or("`secrets` is not a table")?;
+    secrets
+        .entry(name)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("[secrets.{name}] is not a table"))
+}
+
+fn rules_key(allow: bool) -> &'static str {
+    if allow { "allow" } else { "deny" }
+}
+
+/// `text` (the contents of `vahta.toml`, possibly empty) with `rule` appended
+/// to `[secrets.NAME].allow` or `.deny`. Comments and order are kept; a rule
+/// already there is not repeated.
+pub fn add_rule(text: &str, name: &str, allow: bool, rule: &str) -> Result<String, Error> {
+    let path = Path::new("vahta.toml");
+    let mut doc = parse_doc(text).map_err(|e| edit_error(path, e))?;
+    let table = secret_table(&mut doc, name).map_err(|e| edit_error(path, e))?;
+    let key = rules_key(allow);
+    let item = table
+        .entry(key)
+        .or_insert_with(|| toml_edit::value(toml_edit::Array::new()));
+    let array = item
+        .as_array_mut()
+        .ok_or_else(|| edit_error(path, format!("[secrets.{name}].{key} is not a list")))?;
+    if !array.iter().any(|v| v.as_str() == Some(rule)) {
+        array.push(rule);
+    }
+    Ok(doc.to_string())
+}
+
+/// `text` with `[secrets.NAME]`'s `allow` and `deny` set to exactly these
+/// rules (a key with no rules is removed). Everything else is kept.
+pub fn set_rules(
+    text: &str,
+    name: &str,
+    allow: &[String],
+    deny: &[String],
+) -> Result<String, Error> {
+    let path = Path::new("vahta.toml");
+    let mut doc = parse_doc(text).map_err(|e| edit_error(path, e))?;
+    // Nothing to write and no table to write it in: leave the file alone.
+    if allow.is_empty() && deny.is_empty() && doc.get("secrets").and_then(|s| s.get(name)).is_none()
+    {
+        return Ok(text.to_string());
+    }
+    let table = secret_table(&mut doc, name).map_err(|e| edit_error(path, e))?;
+    for (is_allow, rules) in [(true, allow), (false, deny)] {
+        let key = rules_key(is_allow);
+        if rules.is_empty() {
+            table.remove(key);
+        } else {
+            let array: toml_edit::Array = rules.iter().map(String::as_str).collect();
+            table.insert(key, toml_edit::value(array));
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// Replace the contents of `path` with `text`, through a temporary file in the
+/// same directory and a rename, keeping the file's permissions (it belongs to
+/// the repository, so it is not made private).
+pub fn write_text(path: &Path, text: &str) -> Result<(), Error> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let suffix = crate::hex_encode(&crate::crypto::random::<8>()?);
+    let tmp = dir.join(format!(".vahta.toml.tmp-{suffix}"));
+    let io = |what: &str, e: std::io::Error| edit_error(path, format!("{what}: {e}"));
+    let result = (|| {
+        std::fs::write(&tmp, text).map_err(|e| io("write", e))?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            std::fs::set_permissions(&tmp, meta.permissions()).map_err(|e| io("permissions", e))?;
+        }
+        std::fs::rename(&tmp, path).map_err(|e| io("replace", e))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Whether the rules `vahta.toml` proposes for `entry` are the ones the vault
 /// has approved: the same texts, in the same order, in both lists. No rules on
 /// either side is a match.
@@ -239,6 +346,41 @@ mod tests {
         assert_eq!(a.allow[1].args, vec!["push"]);
         assert_eq!(a.deny[0].text, "@network");
         assert!(p("[secrets.B]\n").unwrap().secrets["B"].allow.is_empty());
+    }
+
+    #[test]
+    fn adding_a_rule_keeps_comments_and_order() {
+        let text = "# project secrets\n[secrets.A]\n# the key\ndescription = \"d\"\nallow = [\"x\"]\n\n[secrets.B]\n";
+        let got = add_rule(text, "A", true, "stripe").unwrap();
+        assert!(
+            got.contains("# project secrets") && got.contains("# the key"),
+            "{got}"
+        );
+        assert!(got.contains("\"x\", \"stripe\""), "{got}");
+        assert!(got.find("[secrets.A]").unwrap() < got.find("[secrets.B]").unwrap());
+        // The same rule twice is once.
+        let again = add_rule(&got, "A", true, "stripe").unwrap();
+        assert_eq!(again, got);
+        // It parses back as the proposal.
+        let m = p(&got).unwrap();
+        assert_eq!(m.secrets["A"].allow.len(), 2);
+        // A name the file lacks gets a table, in an empty file too.
+        let new = add_rule("", "K", false, "@network").unwrap();
+        assert_eq!(new, "[secrets.K]\ndeny = [\"@network\"]\n");
+        assert!(add_rule("secrets = 3\n", "K", true, "x").is_err());
+        assert!(add_rule("= broken", "K", true, "x").is_err());
+    }
+
+    #[test]
+    fn setting_rules_replaces_both_lists_and_removes_empty_ones() {
+        let text = "[secrets.A]\nallow = [\"x\"]\ndeny = [\"@shells\"]\nenv = \"E\"\n";
+        let got = set_rules(text, "A", &["y".to_string()], &[]).unwrap();
+        let m = p(&got).unwrap();
+        assert_eq!(m.secrets["A"].allow[0].text, "y");
+        assert!(m.secrets["A"].deny.is_empty());
+        assert_eq!(m.secrets["A"].env, "E");
+        // Clearing a name the file does not have changes nothing.
+        assert_eq!(set_rules("", "Z", &[], &[]).unwrap(), "");
     }
 
     #[test]

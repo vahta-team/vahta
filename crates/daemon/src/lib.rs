@@ -21,6 +21,7 @@ mod ops;
 mod output;
 mod pathfind;
 mod run;
+mod run_ask;
 mod run_ops;
 mod scrub;
 pub mod server;

@@ -2096,8 +2096,8 @@ fn deny_groups_refuse_by_name_and_a_hand_edited_toml_changes_nothing() {
         "{err}"
     );
     assert!(
-        !err.contains("--ask --reason"),
-        "a denied command is not offered --ask: {err}"
+        err.contains("cannot be added to the list"),
+        "a denied command is only ever allowed once: {err}"
     );
     let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -2131,6 +2131,242 @@ fn deny_groups_refuse_by_name_and_a_hand_edited_toml_changes_nothing() {
         "{}",
         text(&out.stderr)
     );
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+impl Sandbox {
+    /// The last question of the kind `ask` the window was shown.
+    fn last_ask(&self, ask: &str) -> Value {
+        self.window_log()
+            .into_iter()
+            .rev()
+            .find(|e| e["ask"] == ask)
+            .unwrap_or_else(|| panic!("no {ask} question was shown"))
+    }
+}
+
+#[cfg(unix)]
+const PW_ANSWER: &str = r#"{"secret":"correct horse"}"#;
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn ask_allow_once_runs_the_command_and_stores_nothing() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    let toml = s.project().join("vahta.toml");
+    fs::write(&toml, "[secrets.ZETA]\nallow = [\"printenv\"]\n").unwrap();
+
+    // Allow once, then the run's own password window.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "run",
+        "--ask",
+        "--reason",
+        "need to see the env\u{1b}[31m",
+        "--secret",
+        "ZETA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ZETA",
+    ]);
+    // `sh` is not on the list, so it was asked about.
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    let choice = s.last_ask("choose");
+    let lines = choice["panel"]["lines"].to_string();
+    let sh = Sandbox::which("sh");
+    assert!(
+        lines.contains(&format!("Program: {}", sh.display())),
+        "{lines}"
+    );
+    assert!(lines.contains("Command: sh -c echo $ZETA"), "{lines}");
+    assert!(lines.contains("allow: printenv"), "{lines}");
+    // The agent's reason is shown as its own, without escape characters.
+    let note = choice["panel"]["agent_note"].as_str().unwrap();
+    assert!(
+        note.contains("need to see the env") && !note.contains('\u{1b}'),
+        "{note}"
+    );
+    assert_eq!(choice["options"].as_array().unwrap().len(), 3);
+    assert_eq!(choice["options"][0], "Allow once");
+
+    // Nothing was stored: the next plain run is refused with no window.
+    let asked = s.asks();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(s.asks(), asked);
+    assert_eq!(
+        fs::read_to_string(&toml).unwrap(),
+        "[secrets.ZETA]\nallow = [\"printenv\"]\n"
+    );
+    assert_eq!(s.open_vault().bindings()[0].allow.len(), 1);
+    let journal = s.journal();
+    assert!(journal.contains("run_allowed_once"), "{journal}");
+    assert!(journal.contains(&format!("program {}", sh.display())));
+    assert!(
+        !journal.contains("echo") && !journal.contains("fake-"),
+        "{journal}"
+    );
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn ask_no_or_a_closed_window_runs_nothing_and_exits_4() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    for answer in [r#"{"choose":1}"#, r#"{"cancel":true}"#] {
+        s.script(&[answer]);
+        let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "true"]);
+        assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+        assert!(text(&out.stderr).contains("nothing was run"));
+        assert!(text(&out.stdout).is_empty());
+    }
+    // Asking about a command that is already allowed opens nothing.
+    let asked = s.asks();
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asked + 1, "only the run's own password window");
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn ask_add_to_the_list_writes_the_toml_and_the_vault_and_the_next_run_passes() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    let toml = s.project().join("vahta.toml");
+    fs::write(
+        &toml,
+        "# keys\n[secrets.ZETA]\n# the main one\nallow = [\"printenv\"]\n\n[secrets.BETA]\n",
+    )
+    .unwrap();
+
+    // Add, the fresh password for the write, then the run's own password.
+    s.script(&[r#"{"choose":2}"#, PW_ANSWER, PW_ANSWER]);
+    let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let options = s.last_ask("choose")["options"].clone();
+    assert_eq!(options[2], "Add `env` to the list");
+
+    // The toml kept its comments and gained the rule; the vault has it too.
+    let written = fs::read_to_string(&toml).unwrap();
+    assert!(
+        written.contains("# keys") && written.contains("# the main one"),
+        "{written}"
+    );
+    assert!(
+        written.contains("allow = [\"printenv\", \"env\"]"),
+        "{written}"
+    );
+    let vault = s.open_vault();
+    let rules: Vec<&str> = vault.bindings()[0]
+        .allow
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect();
+    assert_eq!(rules, ["printenv", "env"]);
+    match &vault.bindings()[0].allow[1].program {
+        vahta_vault::Program::Path(p) => assert_eq!(PathBuf::from(p), Sandbox::which("env")),
+        other => panic!("{other:?}"),
+    }
+
+    // The next plain run passes (one password window, no question).
+    s.script(&[PW_ANSWER]);
+    let before = s.asks();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), before + 1);
+    let journal = s.journal();
+    assert!(journal.contains("binding_added"), "{journal}");
+    assert!(!journal.contains("fake-") && !journal.contains("correct horse"));
+    // The values never reached the window log or any output.
+    let log = fs::read_to_string(s.root.join("surface.log")).unwrap();
+    assert!(!log.contains("fake-"));
+    assert!(!text(&out.stdout).contains("fake-") && !text(&out.stderr).contains("fake-"));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn ask_add_with_a_wrong_password_or_a_changed_vault_changes_nothing() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    let toml = s.project().join("vahta.toml");
+    // Cancelled at the password: no file, no rule.
+    s.script(&[r#"{"choose":2}"#, r#"{"cancel":true}"#]);
+    let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(!toml.exists());
+    assert_eq!(s.open_vault().bindings()[0].allow.len(), 1);
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_denied_command_can_only_be_allowed_once_and_a_delegated_ask_cannot_add() {
+    let s = sandbox_with_secrets();
+    s.script(&[PW_ANSWER]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    s.bind_directly("ZETA", &["printenv"], &["@shells"]);
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "run",
+        "--ask",
+        "--secret",
+        "ZETA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    let choice = s.last_ask("choose");
+    assert_eq!(choice["options"].as_array().unwrap().len(), 2, "{choice}");
+    assert!(
+        choice["panel"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("deny list")
+    );
+
+    // A sub-agent's ask is a question, never an edit of the list.
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "delegate", "--secret", "ZETA", "--", VAHTA, "run", "--ask", "--secret", "ZETA", "--",
+        "env",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.last_ask("choose")["options"].as_array().unwrap().len(), 2);
+}
+
+// A project file the agent can edit is called out in the window.
+#[cfg(unix)]
+#[test]
+fn the_window_warns_when_the_program_is_inside_the_project() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    let script = s.project().join("deploy.sh");
+    fs::write(&script, "#!/bin/sh\ntrue\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "./deploy.sh"]);
+    assert_eq!(out.status.code(), Some(4));
+    let choice = s.last_ask("choose");
+    assert!(
+        choice["panel"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("agent can change"),
+        "{choice}"
+    );
+    assert_eq!(choice["options"][2], "Add `./deploy.sh` to the list");
 }
 
 // --- lock on sleep ---------------------------------------------------------------------------

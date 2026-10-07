@@ -121,7 +121,6 @@ pub(crate) fn rules_text(binding: &Binding) -> String {
 
 /// Why the agent could change the file at `resolved`: it is inside the project
 /// or in a temp directory. `None` for anywhere else.
-#[allow(dead_code)] // used by the `--ask` window
 pub(crate) fn agent_writable(resolved: &Path, project_root: &Path) -> Option<&'static str> {
     let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     if resolved.starts_with(&root) {
