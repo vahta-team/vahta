@@ -170,7 +170,11 @@ jobs:
           } > /tmp/message.txt
           git -c user.name="claude[bot]" -c user.email="41898282+claude[bot]@users.noreply.github.com" \
             commit -q -F /tmp/message.txt
-          git push -q origin "HEAD:$BRANCH"
+          # The Claude step leaves git configured with its own token, revoked
+          # by the time it finishes; push with this workflow's token instead.
+          # An empty extraheader drops whatever header is configured.
+          git -c http.https://github.com/.extraheader= \
+            push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$BRANCH"
           # A push with the workflow token starts no workflow; a dispatch does.
           gh workflow run tests.yml --ref "$BRANCH"
           { echo "CI fixer, attempt $ATTEMPT of $MAX: pushed $(git rev-parse --short HEAD) and started \`tests\` again."; echo; cat "$summary"; } > /tmp/comment.md

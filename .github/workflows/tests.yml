@@ -8,16 +8,31 @@ on:
   # Manual re-run after GitHub Actions infra flakes without a no-op commit.
   # UI: Actions → tests → Run workflow → master
   workflow_dispatch:
+    inputs:
+      macos_python:
+        description: "Also run the Python suite on macOS (75-90 minutes)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+# A new push to a pull request cancels the runs for its older commits, which
+# otherwise hold the few macOS runners for hours. Pushes to master each keep
+# their own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        # macOS takes 75-90 minutes (the real Argon2id, 1 GiB per unlock, is
+        # slow there) and holds the few macOS runners. It runs only when
+        # asked: Actions -> tests -> Run workflow, with "macos_python" ticked.
+        os: ${{ fromJSON(inputs.macos_python && '["windows-latest","ubuntu-latest","macos-latest"]' || '["windows-latest","ubuntu-latest"]') }}
         python-version: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
     # Cap hung runners; macOS pytest often needs 45-75m (historical greens
