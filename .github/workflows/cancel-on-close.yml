@@ -1,0 +1,37 @@
+name: cancel on close
+
+# A merged or closed pull request needs no more test runs, but the ones still
+# going keep holding runners (macOS ones for over an hour) and starve the run
+# on the branch it was merged into. Cancel them.
+#
+# A `pull_request` from a fork gets a read-only token, so this only acts on
+# branches of this repository, which is where the long runs come from.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.pull_request.head.ref }}
+    steps:
+      - name: Cancel the branch's runs that are still going
+        run: |
+          set -euo pipefail
+          for status in queued in_progress waiting pending requested; do
+            gh run list --branch "$BRANCH" --status "$status" --limit 50 \
+              --json databaseId,workflowName,event \
+              --jq '.[] | select(.workflowName != "cancel on close") | "\(.databaseId) \(.workflowName) \(.event)"'
+          done | sort -u | while read -r id name event; do
+            echo "cancelling $id ($name, $event)"
+            gh run cancel "$id" || echo "  could not cancel $id (already finished?)"
+          done
