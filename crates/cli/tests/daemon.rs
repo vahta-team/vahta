@@ -763,6 +763,65 @@ fn the_real_window_process_connects_back_with_its_token_and_carries_the_answers(
     assert!(!args.contains("daemon.sock"));
 }
 
+// The daemon gives up on a window when its time to answer runs out, but the
+// window may be sitting in a read that only returns on Enter. It must notice the
+// hang-up and close itself, not take a password and do nothing with it.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn the_real_window_closes_itself_when_the_daemon_hangs_up_mid_question() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Sandbox::new();
+    // A kitty-shaped "terminal" whose stdin never answers: a FIFO held open by
+    // a writer that writes nothing. It records the window's exit code.
+    let bin = s.root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let fifo = s.root.join("silent");
+    let status = s.root.join("window-status");
+    let screen = s.root.join("window-screen");
+    let term = bin.join("kitty");
+    fs::write(
+        &term,
+        format!(
+            "#!/bin/sh\nmkfifo {fifo}\nsleep 60 > {fifo} &\n\"$@\" < {fifo} > {screen} 2>&1\necho $? > {status}\nkill $! 2>/dev/null\n",
+            fifo = fifo.display(),
+            screen = screen.display(),
+            status = status.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&term, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let mut cmd = s.command(&s.project());
+    cmd.env_remove("VAHTA_TEST_SURFACE")
+        .env("VAHTA_TEST_KDF", "1")
+        .env("VAHTA_TEST_SURFACE_PLAIN", "1")
+        .env("PATH", &path)
+        .env("DISPLAY", ":fake");
+    let mut init = cmd
+        .args(["init"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // The window is up and asking.
+    wait_until("the window to ask", 20, || {
+        fs::read_to_string(&screen).is_ok_and(|t| !t.is_empty())
+    });
+
+    let out = s.vahta(&["daemon", "stop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Well before the silent writer's 60 seconds.
+    wait_until("the window to close itself", 15, || status.exists());
+    assert_eq!(fs::read_to_string(&status).unwrap().trim(), "5");
+    assert!(
+        fs::read_to_string(&screen)
+            .unwrap()
+            .contains("nothing was done"),
+    );
+    let _ = init.wait();
+    assert!(!s.vault_path().exists());
+}
+
 // --- sessions ---------------------------------------------------------------------------
 
 impl Sandbox {
