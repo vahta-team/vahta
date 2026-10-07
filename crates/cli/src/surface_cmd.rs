@@ -13,6 +13,8 @@
 //! takes.
 
 use std::io::{BufRead, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -266,13 +268,24 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let console = Console::new();
-    loop {
-        let request: SurfaceRequest = match read_frame(&mut stream) {
-            Ok(Some(r)) => r,
-            // The daemon ended the conversation.
-            Ok(None) | Err(_) => break,
-        };
-        match answer_for(&console, &request) {
+    let requests = match watch(&stream) {
+        Some(r) => r,
+        None => return EXIT_DAEMON,
+    };
+    while let Ok(request) = requests.queue.recv() {
+        // Close only prints; the daemon may hang up while it does. Anything
+        // else waits on the person, so a hang-up from here on ends the window.
+        if !matches!(request, SurfaceRequest::Close { .. }) {
+            requests.answering.store(true, Ordering::SeqCst);
+            // The daemon hung up after sending this, before the window got to
+            // it: the reader saw `answering` still false.
+            if requests.closed.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        let answer = answer_for(&console, &request);
+        requests.answering.store(false, Ordering::SeqCst);
+        match answer {
             Some(answer) => {
                 if write_frame(&mut stream, &answer).is_err() {
                     break;
@@ -282,4 +295,66 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     EXIT_CLEAN
+}
+
+/// The daemon's requests, read on their own thread.
+struct Requests {
+    queue: mpsc::Receiver<SurfaceRequest>,
+    /// Set while the window waits on the person.
+    answering: Arc<AtomicBool>,
+    /// Set when the daemon hangs up.
+    closed: Arc<AtomicBool>,
+}
+
+/// Reads the daemon's requests on a thread of their own, so the window learns
+/// at once when the daemon gives up on it. The daemon hangs up when its time to
+/// answer runs out, while this window may sit in a password read that only
+/// returns on Enter: without the watch, the window would stay open, take a
+/// password, and do nothing with it. So when the daemon hangs up while the
+/// person is being asked, the window says so and exits.
+fn watch(stream: &Stream) -> Option<Requests> {
+    let mut reader = stream.try_clone().ok()?;
+    let (tx, queue) = mpsc::channel();
+    let answering = Arc::new(AtomicBool::new(false));
+    let closed = Arc::new(AtomicBool::new(false));
+    let (asking, hung_up) = (Arc::clone(&answering), Arc::clone(&closed));
+    // `main` holds the stdout lock for the whole command, so this thread
+    // writes through a handle of its own.
+    let screen = own_stdout();
+    std::thread::spawn(move || {
+        while let Ok(Some(request)) = read_frame::<SurfaceRequest>(&mut reader) {
+            if tx.send(request).is_err() {
+                return;
+            }
+        }
+        // Either the main thread sees `closed` before it waits on the person,
+        // or this thread sees `answering`: both are SeqCst.
+        hung_up.store(true, Ordering::SeqCst);
+        if asking.load(Ordering::SeqCst) {
+            if let Some(mut screen) = screen {
+                let _ = screen.write_all(
+                    b"\nThe time to answer ran out, or Vahta stopped; nothing was done.\n\
+                      This window closes now.\n",
+                );
+                let _ = screen.flush();
+            }
+            std::thread::sleep(Duration::from_secs(3));
+            std::process::exit(EXIT_DAEMON);
+        }
+    });
+    Some(Requests {
+        queue,
+        answering,
+        closed,
+    })
+}
+
+/// A second handle on standard output, which does not go through the lock
+/// that `main` holds.
+fn own_stdout() -> Option<std::fs::File> {
+    #[cfg(unix)]
+    let handle = std::os::fd::AsFd::as_fd(&std::io::stdout()).try_clone_to_owned();
+    #[cfg(windows)]
+    let handle = std::os::windows::io::AsHandle::as_handle(&std::io::stdout()).try_clone_to_owned();
+    handle.ok().map(std::fs::File::from)
 }
