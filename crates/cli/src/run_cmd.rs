@@ -24,7 +24,8 @@ use crate::session_cmds::parse_duration;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const RUN_USAGE: &str = "\
-usage: vahta run [--secret NAME]... [--as NAME=VAR]... [--label TEXT] [--] COMMAND [ARGS...]
+usage: vahta run [--secret NAME]... [--as NAME=VAR]... [--label TEXT]
+                 [--ask [--reason TEXT]] [--] COMMAND [ARGS...]
 
 Run COMMAND with secrets in its environment. The daemon starts it, so this
 process never holds a value, and its output comes back with every value
@@ -36,6 +37,15 @@ replaced by ***REDACTED(NAME)***.
                     vahta.toml, else NAME itself)
   --label TEXT      a description for the window, shown marked as coming from
                     the agent and not verified
+  --ask             if a secret's command rules (see `vahta bind`) do not allow
+                    COMMAND, ask the person in a window instead of refusing
+                    (exit 3): Allow once, No, or Add to the list. A command a
+                    rule denies can only be allowed once
+  --reason TEXT     why, for that window (with --ask); shown marked as coming
+                    from the agent and not verified
+
+A secret with command rules is only given to commands they allow. The person
+decides which; `allow` is the real guard, `deny` only slows an agent down.
 
 With a session from `vahta unlock` that covers every name, there is no window.
 Otherwise a window asks for the password for this one run and no session is
@@ -63,6 +73,8 @@ struct Parsed {
     renames: Vec<(String, String)>,
     duration: DurationSpec,
     label: Option<String>,
+    ask: bool,
+    reason: Option<String>,
     command: Vec<String>,
 }
 
@@ -78,6 +90,8 @@ fn parse(args: &[String], delegate: bool) -> Args {
         renames: Vec::new(),
         duration: DurationSpec::Default {},
         label: None,
+        ask: false,
+        reason: None,
         command: Vec::new(),
     };
     let mut i = 0;
@@ -114,6 +128,11 @@ fn parse(args: &[String], delegate: bool) -> Args {
                 .and_then(|v| parse_duration(&v))
                 .map(|d| p.duration = d),
             "--label" => value("--label").map(|v| p.label = Some(v)),
+            "--ask" if !delegate => {
+                p.ask = true;
+                Ok(())
+            }
+            "--reason" if !delegate => value("--reason").map(|v| p.reason = Some(v)),
             other => Err(format!("unrecognised option: {other}")),
         };
         if let Err(e) = result {
@@ -122,6 +141,9 @@ fn parse(args: &[String], delegate: bool) -> Args {
     }
     if p.command.is_empty() {
         return Args::Error("no command given".to_string());
+    }
+    if p.reason.is_some() && !p.ask {
+        return Args::Error("--reason is for --ask".to_string());
     }
     Args::Run(Box::new(p))
 }
@@ -249,6 +271,8 @@ pub fn run_run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut 
         names: (!parsed.names.is_empty()).then_some(parsed.names),
         renames: parsed.renames,
         label: parsed.label,
+        ask: parsed.ask,
+        reason: parsed.reason,
     };
     let mut conn = match daemon_cmd::connect(env, "run", stderr) {
         Ok(c) => c,

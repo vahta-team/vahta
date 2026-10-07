@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use crate::pathfind::find_in_path;
+
 /// How an emulator takes the command to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
@@ -272,33 +274,6 @@ pub fn split_command(text: &str) -> Option<Vec<String>> {
         words.push(cur);
     }
     (!words.is_empty()).then_some(words)
-}
-
-/// `name` as an executable on `path`, or itself if it names a path.
-pub fn find_in_path(name: &str, path: Option<&OsString>) -> Option<PathBuf> {
-    let candidate = Path::new(name);
-    if candidate.components().count() > 1 {
-        return is_executable(candidate).then(|| candidate.to_path_buf());
-    }
-    std::env::split_paths(path?)
-        .map(|dir| dir.join(name))
-        .find(|p| is_executable(p))
-}
-
-fn is_executable(p: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(p) else {
-        return false;
-    };
-    if !meta.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    true
 }
 
 /// A configured prefix resolved to an absolute program: `VAHTA_TERMINAL`, then

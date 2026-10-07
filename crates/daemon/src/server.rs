@@ -21,6 +21,7 @@ use vahta_os::ipc::{Address, Listener, Stream};
 use vahta_vault::KdfParams;
 use vahta_vault::store::LocalStore;
 
+use crate::bind_ops;
 use crate::config::Config;
 use crate::journal::Entry as JournalEntry;
 use crate::journal::{Entry, Journal};
@@ -516,6 +517,10 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ClientRequest::Remove { cwd, name } => {
                 (ops::remove(&ctx, &cwd, &name).unwrap_or_else(|r| r), false)
             }
+            ClientRequest::SetTier { cwd, name, tier } => (
+                ops::set_tier(&ctx, &cwd, &name, ops::vault_tier(tier)).unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::Import { cwd, source } => (
                 ops::import(&ctx, &cwd, &source).unwrap_or_else(|r| r),
                 false,
@@ -547,10 +552,24 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 names,
                 renames,
                 label,
+                ask,
+                reason,
             } => {
                 // A run is the one request that goes on after its reply: the
                 // connection then carries the command's input and output.
-                match run_ops::prepare(&ctx, &cwd, argv, env, names, renames, label) {
+                match run_ops::prepare(
+                    &ctx,
+                    run_ops::RunArgs {
+                        cwd,
+                        argv,
+                        env,
+                        names,
+                        renames,
+                        label,
+                        ask,
+                        reason,
+                    },
+                ) {
                     Ok(prepared) => {
                         if write_frame(stream, &ClientReply::RunStarted {}).is_ok() {
                             run::execute(shared, stream, prepared, (ctx.exe.clone(), ctx.pid));
@@ -560,6 +579,30 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     Err(reply) => (reply, false),
                 }
             }
+            ClientRequest::Bind {
+                cwd,
+                name,
+                allow,
+                deny,
+                clear,
+                reason,
+                path,
+            } => (
+                bind_ops::bind(
+                    &ctx,
+                    bind_ops::BindArgs {
+                        cwd,
+                        name,
+                        allow,
+                        deny,
+                        clear,
+                        reason,
+                        path,
+                    },
+                )
+                .unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::Delegate {
                 cwd,
                 names,

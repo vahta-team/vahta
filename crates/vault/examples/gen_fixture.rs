@@ -14,8 +14,9 @@
 
 use std::path::PathBuf;
 
+use vahta_vault::rules::parse_rule;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{KdfParams, Kind, Tier, Vault};
+use vahta_vault::{Binding, Class, KdfParams, Kind, Tier, Vault};
 
 const PHRASE: &str = "correct horse";
 
@@ -47,6 +48,25 @@ fn main() {
     for (n, v, k, t) in &items {
         vault.set(n, v, k.clone(), *t).expect("set");
     }
+    // Format 1 also carries a class and approved command rules. BETA is bound
+    // to an absolute path that need not exist: the vault only stores it.
+    vault
+        .set_class("ALPHA", Some(Class::Payment))
+        .expect("class");
+    let allow = parse_rule("beta-tool push", true)
+        .expect("rule")
+        .to_allow("/opt/fixture/beta-tool".to_string());
+    let deny = parse_rule("@network", false).expect("rule").to_deny();
+    vault
+        .set_bindings(
+            "BETA",
+            Some(Binding {
+                name: "BETA".into(),
+                allow: vec![allow],
+                deny: vec![deny],
+            }),
+        )
+        .expect("bindings");
     vault.save(&saved, &store).expect("save");
     std::fs::copy(&saved, &path).expect("copy the vault into the fixtures");
 
@@ -66,7 +86,8 @@ fn main() {
             "    {{\"name\": \"{n}\", \"value\": \"{value}\", \"kind\": \"{kind}\", \"tier\": \"{tier}\"}}{comma}\n"
         ));
     }
-    json.push_str("  ]\n}\n");
+    json.push_str("  ],\n  \"classes\": {\"ALPHA\": \"payment\"},\n");
+    json.push_str("  \"bindings\": {\"BETA\": {\"allow\": [\"beta-tool push\"], \"deny\": [\"@network\"]}}\n}\n");
     std::fs::write(dir.join(format!("{name}.expected.json")), json).expect("write expected");
     eprintln!("wrote {}", path.display());
 }

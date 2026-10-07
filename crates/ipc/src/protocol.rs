@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -239,6 +239,13 @@ pub enum ClientRequest {
         cwd: String,
         name: String,
     },
+    /// `vahta tier NAME session|each-use`: change only the tier; the value is
+    /// not typed again.
+    SetTier {
+        cwd: String,
+        name: String,
+        tier: Tier,
+    },
     Import {
         cwd: String,
         source: ImportSource,
@@ -288,6 +295,29 @@ pub enum ClientRequest {
         /// `(NAME, VARIABLE)`: put NAME in this variable instead.
         renames: Vec<(String, String)>,
         label: Option<String>,
+        /// `--ask`: if a secret's command rules do not allow this command,
+        /// ask the person (a window) instead of refusing.
+        ask: bool,
+        /// `--reason`: why, for that window; shown marked as unverified.
+        reason: Option<String>,
+    },
+    /// Propose command rules for a secret (or, with no name, approve what
+    /// `vahta.toml` says for every name). Replies `Done`, `Refused` or
+    /// `Cancelled`; nothing changes without a window and the password.
+    Bind {
+        cwd: String,
+        /// `None`: approve `vahta.toml` as written.
+        name: Option<String>,
+        /// Rule texts (see the daemon docs); with `name`, they replace the
+        /// secret's approved rules.
+        allow: Vec<String>,
+        deny: Vec<String>,
+        /// Remove the secret's rules.
+        clear: bool,
+        /// Why, for the window; shown marked as unverified.
+        reason: Option<String>,
+        /// The caller's `PATH`, to resolve the programs of the rules.
+        path: Option<String>,
     },
     /// The hook, after a tool ran and before its output reaches the model:
     /// `texts` are the strings of that output (every one, in order), and
@@ -498,6 +528,9 @@ pub enum RefusalKind {
     /// No tool output is kept under that reference for this agent: it was
     /// never there, its time ran out, or another agent's hook made it.
     UnknownOutput,
+    /// The secret has approved command rules and this command is not allowed by
+    /// them (or is denied by them).
+    CommandNotAllowed,
 }
 
 /// One name in a refusal and why.

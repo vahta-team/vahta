@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Error, Kind, SecretValue, Tier, Vault, valid_name};
+use vahta_vault::{Class, Error, Kind, SecretValue, Tier, Vault, valid_name};
 use zeroize::Zeroizing;
 
 use crate::clipboard;
@@ -102,10 +102,19 @@ pub(crate) fn vault_tier(tier: protocol::Tier) -> Tier {
 }
 
 impl Ctx<'_> {
+    /// Who is asking, as the person should read it: the agent the request
+    /// comes from (the anchor `unlock` would choose, e.g. `claude`), and the
+    /// process that connected (usually `vahta` itself) when it is another.
     pub(crate) fn requested_by(&self) -> String {
-        match &self.exe {
+        let caller = match &self.exe {
             Some(exe) => format!("{exe} (pid {})", self.pid),
             None => format!("pid {}", self.pid),
+        };
+        match crate::output::anchor_of(self) {
+            Some((id, exe)) if id.pid != self.pid => {
+                format!("{exe} (pid {}), through {caller}", id.pid)
+            }
+            _ => caller,
         }
     }
 
@@ -362,15 +371,46 @@ pub(crate) fn store(
     if typed.expose().is_empty() {
         return Err(error("a secret cannot be empty; nothing was done"));
     }
+    // What the value looks like it guards: its vendor prefix first, then the
+    // name. The agent chose the name, so the name may only raise the class
+    // (one more question in this window), never lower it. The agent is told
+    // the class, never the value.
+    let class = match vahta_detect::secret_class(typed.expose()) {
+        Some(vahta_detect::Class::Payment) => Class::Payment,
+        Some(vahta_detect::Class::Cloud) => Class::Cloud,
+        _ => class_by_name(name),
+    };
+    let mut tier = tier;
+    if tier == Tier::Session && matches!(class, Class::Payment | Class::Cloud) {
+        // A key that moves money or opens an account is worth the password
+        // every time; the person decides, here, where the value was typed.
+        let question = format!(
+            "This looks like a {} key. Ask for the password on each use?",
+            class.as_str()
+        );
+        let options = [
+            "Each use (recommended)".to_string(),
+            "Keep session".to_string(),
+        ];
+        let picked = window
+            .choose(&panel, &question, &options)
+            .map_err(from_surface)?
+            .ok_or_else(cancelled)?;
+        if picked == 0 {
+            tier = Tier::EachUse;
+        }
+    }
     vault
         .set(name, typed.expose().as_bytes(), kind, tier)
         .map_err(from_vault)?;
+    vault.set_class(name, Some(class)).map_err(from_vault)?;
+    let bound = vault.bindings().iter().any(|b| b.name == name);
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     ctx.journal(
         Entry::new(event)
             .vault(&vault.vault_id())
             .names(&[name.to_string()])
-            .result("ok", None),
+            .result("ok", Some(class.as_str())),
     );
     let capitalised = match mode {
         StoreMode::Add => "Saved",
@@ -378,8 +418,94 @@ pub(crate) fn store(
     };
     window.close(Some(&format!("{capitalised} {name}.")));
     Ok(ClientReply::Done {
-        message: format!("{done} {name}"),
+        message: done_message(done, name, class, tier, bound),
     })
+}
+
+/// Words in a secret's name that say what it guards. Most cloud and payment
+/// secrets have no vendor prefix (an AWS secret access key, a service-account
+/// JSON, a PayPal secret), so the name is the only hint.
+const PAYMENT_WORDS: &[&str] = &[
+    "STRIPE",
+    "PAYPAL",
+    "ADYEN",
+    "BRAINTREE",
+    "KLARNA",
+    "MOLLIE",
+    "PADDLE",
+    "PLAID",
+    "PAYMENT",
+    "PAYMENTS",
+    "BILLING",
+    "CHECKOUT",
+    "YOOKASSA",
+    "CLOUDPAYMENTS",
+    "TINKOFF",
+    "RAZORPAY",
+];
+const CLOUD_WORDS: &[&str] = &[
+    "AWS",
+    "GCP",
+    "GCLOUD",
+    "AZURE",
+    "DIGITALOCEAN",
+    "CLOUDFLARE",
+    "HETZNER",
+    "LINODE",
+    "VULTR",
+    "SCALEWAY",
+    "OCI",
+    "ALIYUN",
+    "YANDEX",
+    "YC",
+];
+
+/// The class a name suggests, by its words (split on `_`, `-` and `.`, any
+/// case): `AWS_SECRET_ACCESS_KEY` is cloud, `stripe-key` payment.
+fn class_by_name(name: &str) -> Class {
+    let words: Vec<String> = name
+        .split(['_', '-', '.'])
+        .map(|w| w.to_ascii_uppercase())
+        .collect();
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
+    if has(PAYMENT_WORDS) {
+        Class::Payment
+    } else if has(CLOUD_WORDS) {
+        Class::Cloud
+    } else {
+        Class::Other
+    }
+}
+
+/// What the agent is told after an add or reset: what was done, the class (a
+/// word, never the value) and, unless the secret already has rules, how to ask
+/// the person for some.
+fn done_message(done: &str, name: &str, class: Class, tier: Tier, bound: bool) -> String {
+    let mut text = match class {
+        Class::Payment | Class::Cloud => {
+            format!(
+                "{done} {name} ({} key, {})",
+                class.as_str(),
+                tier_text(tier)
+            )
+        }
+        Class::Other => format!("{done} {name}"),
+    };
+    if bound {
+        return text;
+    }
+    match class {
+        Class::Payment | Class::Cloud => text.push_str(&format!(
+            "\n{name} can be used with any command. Ask the person which commands need it and \
+             propose a rule, e.g. `vahta bind {name} --allow PROGRAM`.\n`allow` is the real \
+             guard; `deny` only slows an agent down."
+        )),
+        Class::Other => text.push_str(&format!(
+            "\n{name} can be used with any command; to limit it, propose a rule: `vahta bind \
+             {name} --allow PROGRAM` (the person approves)."
+        )),
+    }
+    text
 }
 
 /// Refuse a name that is not in the vault. The index is plain, so this needs
@@ -391,6 +517,57 @@ fn ensure_known(vault_path: &Path, name: &str) -> Flow<()> {
     } else {
         Err(unknown_name(name))
     }
+}
+
+/// `vahta tier`: move a secret between session and each-use without typing
+/// its value again. Either way needs the password: loosening to session is
+/// exactly what an injected agent would want, and tightening costs nothing.
+pub(crate) fn set_tier(ctx: &Ctx<'_>, cwd: &str, name: &str, tier: Tier) -> Flow<ClientReply> {
+    check_name(name)?;
+    let (project, vault_path) = find_vault(cwd)?;
+    let peek = Vault::peek(&vault_path).map_err(from_vault)?;
+    let Some(entry) = peek.entries.iter().find(|e| e.name == name) else {
+        return Err(unknown_name(name));
+    };
+    if entry.tier == tier {
+        return Err(refused(
+            RefusalKind::NothingToDo,
+            format!("{name} is already {}; nothing was done", tier_text(tier)),
+        ));
+    }
+    let title = "Change a secret's tier";
+    let mut window = ctx.window(title)?;
+    let mut lines = lines_for(&project, &vault_path);
+    lines.push(format!(
+        "{name}: {} -> {}",
+        tier_text(entry.tier),
+        tier_text(tier)
+    ));
+    lines.push(match tier {
+        Tier::Session => "A session may then hold it: `vahta run` uses it with no window while \
+                          one is open."
+            .to_string(),
+        Tier::EachUse => "Every use will then need the password, even in a session.".to_string(),
+    });
+    let panel = ctx.panel(title, lines);
+    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    if vault.vault_id() != peek.vault_id || vault.generation() != peek.generation {
+        return Err(error(
+            "the vault changed while the window was open; nothing was done",
+        ));
+    }
+    vault.set_tier(name, tier).map_err(from_vault)?;
+    vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+    ctx.journal(
+        Entry::new("tier")
+            .vault(&vault.vault_id())
+            .names(&[name.to_string()])
+            .result("ok", Some(tier_text(tier))),
+    );
+    window.close(Some(&format!("{name} is now {}.", tier_text(tier))));
+    Ok(ClientReply::Done {
+        message: format!("{name} is now {}", tier_text(tier)),
+    })
 }
 
 pub(crate) fn remove(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> {
@@ -631,4 +808,23 @@ pub(crate) fn copy(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> {
     Ok(ClientReply::Done {
         message: format!("{name} is on the clipboard for {seconds} seconds"),
     })
+}
+
+#[cfg(test)]
+mod class_by_name_tests {
+    use super::{Class, class_by_name};
+
+    #[test]
+    fn a_name_raises_the_class_by_whole_words_only() {
+        assert_eq!(class_by_name("AWS_SECRET_ACCESS_KEY"), Class::Cloud);
+        assert_eq!(class_by_name("azure-client-secret"), Class::Cloud);
+        assert_eq!(class_by_name("STRIPE_KEY"), Class::Payment);
+        assert_eq!(class_by_name("paypal.secret"), Class::Payment);
+        // Payment wins when both appear.
+        assert_eq!(class_by_name("AWS_BILLING_KEY"), Class::Payment);
+        // Inside a word is not a word: LAWS, OCIO, PAYMENTSX.
+        assert_eq!(class_by_name("LAWS_TOKEN"), Class::Other);
+        assert_eq!(class_by_name("OCIO_KEY"), Class::Other);
+        assert_eq!(class_by_name("GITHUB_TOKEN"), Class::Other);
+    }
 }

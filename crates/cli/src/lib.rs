@@ -32,6 +32,7 @@
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
 
+mod bind_cmd;
 mod daemon_cmd;
 mod output_cmd;
 mod run_cmd;
@@ -100,6 +101,7 @@ commands:
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
   run     run a command with secrets in its environment, output scrubbed
+  bind    say which commands may use a secret (the person approves)
   delegate  narrow your session for a sub-agent and run it
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
@@ -108,6 +110,7 @@ commands:
   init    create this project's vault
   add     store a new secret (typed in a window, never on the command line)
   reset   replace the value of a secret the vault has
+  tier    move a secret between session and each-use (no value typed)
   remove  remove a secret
   import  add the secrets of a ka vault or a .env file
   reveal  show a secret in a window
@@ -398,9 +401,9 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
         Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
         Some("daemon") => daemon_cmd::run(&args[1..], env, stdout, stderr),
-        Some(cmd @ ("init" | "add" | "reset" | "remove" | "import" | "reveal" | "copy")) => {
-            vault_ops::run(cmd, &args[1..], env, stdout, stderr)
-        }
+        Some(
+            cmd @ ("init" | "add" | "reset" | "tier" | "remove" | "import" | "reveal" | "copy"),
+        ) => vault_ops::run(cmd, &args[1..], env, stdout, stderr),
         // `set` did either, and so could overwrite a secret by a mistyped name;
         // it was split in two, and whoever still types it is told which to use.
         Some("set") => {
@@ -410,6 +413,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
             );
             EXIT_USAGE
         }
+        Some("bind") => bind_cmd::run(&args[1..], env, stdout, stderr),
         Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),
         Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),

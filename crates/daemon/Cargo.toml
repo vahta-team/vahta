@@ -29,6 +29,8 @@ hmac = "0.12"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+vahta-detect = { path = "../detect" }
+dunce = "1"
 vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
 vahta-vault = { path = "../vault" }

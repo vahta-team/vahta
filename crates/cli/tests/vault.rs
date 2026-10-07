@@ -351,3 +351,120 @@ fn usage_errors_and_help() {
     let top = s.run(&["--help"]);
     assert!(text(&top.stdout).contains("list") && text(&top.stdout).contains("check"));
 }
+
+// --- classes and command rules ---------------------------------------------------
+
+impl Sandbox {
+    /// Give ZETA a class and approved rules, straight into the vault file.
+    fn bind_zeta(&self, class: vahta_vault::Class, allow: &str) {
+        use vahta_vault::rules::parse_rule;
+        let mut v = Vault::unlock_password(&self.vault_path(), PW, &self.store()).unwrap();
+        v.set_class("ZETA", Some(class)).unwrap();
+        let rule = parse_rule(allow, true)
+            .unwrap()
+            .to_allow("/opt/fake/tool".to_string());
+        v.set_bindings(
+            "ZETA",
+            Some(vahta_vault::Binding {
+                name: "ZETA".into(),
+                allow: vec![rule],
+                deny: vec![],
+            }),
+        )
+        .unwrap();
+        v.save(&self.vault_path(), &self.store()).unwrap();
+    }
+}
+
+#[test]
+fn list_shows_the_class_and_whether_the_rules_are_approved() {
+    let s = Sandbox::new();
+    s.with_vault(&items());
+    // Nothing known and nothing bound: the two columns are not there.
+    let plain = text(&s.run(&["list"]).stdout);
+    assert!(
+        !plain.contains("any command") && !plain.contains("payment"),
+        "{plain}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&s.run(&["list", "--json"]).stdout).unwrap();
+    assert_eq!(v["secrets"][1]["class"], serde_json::Value::Null);
+    assert_eq!(v["secrets"][1]["bound"], false);
+    assert_eq!(v["secrets"][1]["rules_pending"], false);
+
+    s.bind_zeta(vahta_vault::Class::Payment, "tool");
+    let out = text(&s.run(&["list"]).stdout);
+    let zeta = out.lines().find(|l| l.starts_with("ZETA")).unwrap();
+    assert!(
+        zeta.contains("payment") && zeta.trim_end().ends_with("bound"),
+        "{out}"
+    );
+    let alpha = out.lines().find(|l| l.starts_with("ALPHA")).unwrap();
+    assert!(alpha.trim_end().ends_with("any command"), "{out}");
+
+    // The file says the same: in step.
+    s.manifest("[secrets.ZETA]\nallow = [\"tool\"]\n");
+    let out = text(&s.run(&["list"]).stdout);
+    assert!(
+        out.lines()
+            .find(|l| l.starts_with("ZETA"))
+            .unwrap()
+            .trim_end()
+            .ends_with("bound")
+    );
+    // The file proposes something else: shown, and flagged in the JSON.
+    s.manifest("[secrets.ZETA]\nallow = [\"tool\", \"other\"]\n");
+    let out = text(&s.run(&["list"]).stdout);
+    assert!(out.contains("bound (toml differs)"), "{out}");
+    let v: serde_json::Value = serde_json::from_slice(&s.run(&["list", "--json"]).stdout).unwrap();
+    assert_eq!(v["secrets"][1]["class"], "payment");
+    assert_eq!(v["secrets"][1]["bound"], true);
+    assert_eq!(v["secrets"][1]["rules_pending"], true);
+}
+
+#[test]
+fn check_reports_rules_the_vault_has_not_approved_and_unknown_groups() {
+    let s = Sandbox::new();
+    s.with_vault(&items());
+    s.manifest("[secrets.ZETA]\n[secrets.ALPHA]\n");
+    assert_eq!(s.run(&["check"]).status.code(), Some(0));
+
+    // A proposal the vault does not have: exit 1, named, in JSON too.
+    s.manifest("[secrets.ZETA]\nallow = [\"tool\"]\n[secrets.ALPHA]\n");
+    let out = s.run(&["check"]);
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    assert!(
+        said.contains("Rules not approved: ZETA") && said.contains("vahta bind"),
+        "{said}"
+    );
+    // One verdict, at the end: never an OK before the FAIL.
+    assert_eq!(said.trim_end().lines().last(), Some("FAIL"), "{said}");
+    assert!(!said.lines().any(|l| l == "OK"), "{said}");
+    let json = s.run(&["check", "--json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["rules_pending"][0], "ZETA");
+
+    // Once approved, the check passes again.
+    s.bind_zeta(vahta_vault::Class::Other, "tool");
+    assert_eq!(s.run(&["check"]).status.code(), Some(0));
+
+    // An unknown group, or a group in allow, is an error, never ignored.
+    for bad in [
+        "[secrets.ZETA]\ndeny = [\"@nope\"]\n",
+        "[secrets.ZETA]\nallow = [\"@network\"]\n",
+        "[secrets.ZETA]\nallow = [\"git 'push'\"]\n",
+    ] {
+        s.manifest(bad);
+        let out = s.run(&["check"]);
+        assert_eq!(out.status.code(), Some(1), "{bad}");
+        assert!(!text(&out.stderr).is_empty());
+    }
+    // With no vault (CI) the file alone is validated, rules included.
+    let ci = Sandbox::new();
+    ci.manifest("[secrets.A]\nallow = [\"tool\"]\ndeny = [\"@network\"]\n");
+    assert_eq!(ci.run(&["check"]).status.code(), Some(0));
+    ci.manifest("[secrets.A]\ndeny = [\"@nope\"]\n");
+    assert_eq!(ci.run(&["check"]).status.code(), Some(1));
+}

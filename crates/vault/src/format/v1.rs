@@ -253,6 +253,26 @@ pub enum Actor {
     Recipient([u8; 16]),
 }
 
+/// What a secret guards, judged from its typed value when it was added. It
+/// steers advice only (an each-use suggestion); nothing is allowed or refused
+/// because of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Class {
+    Payment,
+    Cloud,
+    Other,
+}
+
+impl Class {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Class::Payment => "payment",
+            Class::Cloud => "cloud",
+            Class::Other => "other",
+        }
+    }
+}
+
 /// One line of the plaintext, signed name index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -262,7 +282,43 @@ pub struct Entry {
     pub tier: Tier,
     pub updated: u64,
     pub changed_by: Actor,
+    /// Set by add and reset from the typed value; `None` when unknown.
+    pub class: Option<Class>,
 }
+
+/// The program of an approved rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Program {
+    /// An `allow` rule: the canonical absolute path it resolved to when the
+    /// person approved it. Checked against the resolved path at run.
+    Path(String),
+    /// A `deny` rule: a program file name, normalised (see `rules`).
+    Name(String),
+    /// A `deny` rule: a named group such as `@network`.
+    Group(String),
+}
+
+/// One approved rule. `text` is what the person saw; `program` and `args` are
+/// what is enforced; `args` is an argv prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedRule {
+    pub text: String,
+    pub program: Program,
+    pub args: Vec<String>,
+}
+
+/// The approved command rules of one secret. The signed copy is the one the
+/// daemon enforces; `vahta.toml` only proposes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub name: String,
+    pub allow: Vec<ApprovedRule>,
+    pub deny: Vec<ApprovedRule>,
+}
+
+const MAX_RULES: usize = 64;
+const MAX_RULE_ARGS: usize = 32;
+const MAX_RULE_TEXT: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerWrap {
@@ -295,6 +351,7 @@ pub struct Body {
     pub recipients: Vec<Recipient>,
     pub index: Vec<Entry>,
     pub secrets: Vec<Sealed>,
+    pub bindings: Vec<Binding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +371,7 @@ pub struct Model {
     pub recipients: Vec<Recipient>,
     pub index: Vec<Entry>,
     pub secrets: Vec<Sealed>,
+    pub bindings: Vec<Binding>,
 }
 
 /// A file that parsed and whose signatures check, not yet unlocked.
@@ -415,6 +473,7 @@ pub(crate) fn decode_as(frame: &Frame<'_>, fmt: u16) -> Result<Decoded, Error> {
     }
     check_recipients(&body.header.vault_id, &body.owner, &body.recipients)?;
     check_index(&body, &body.recipients)?;
+    check_bindings(&body)?;
 
     let signer_pk = match sig_section.signer {
         Actor::Owner => body.owner.sign_pk,
@@ -445,6 +504,7 @@ pub(crate) fn decode_as(frame: &Frame<'_>, fmt: u16) -> Result<Decoded, Error> {
             recipients: body.recipients,
             index: body.index,
             secrets: body.secrets,
+            bindings: body.bindings,
         },
     })
 }
@@ -573,6 +633,60 @@ fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
     Ok(())
 }
 
+fn check_rules(rules: &[ApprovedRule], allow: bool) -> Result<(), Error> {
+    if rules.len() > MAX_RULES {
+        return Err(Error::Corrupt("bindings"));
+    }
+    for r in rules {
+        let program_ok = match (&r.program, allow) {
+            (Program::Path(p), true) => !p.is_empty(),
+            (Program::Name(n), false) => !n.is_empty(),
+            (Program::Group(g), false) => crate::rules::group_members(g).is_some(),
+            _ => false,
+        };
+        let group_has_args = matches!(r.program, Program::Group(_)) && !r.args.is_empty();
+        if !program_ok
+            || group_has_args
+            || r.text.is_empty()
+            || r.text.len() > MAX_RULE_TEXT
+            || r.args.len() > MAX_RULE_ARGS
+            || r.args
+                .iter()
+                .any(|a| a.is_empty() || a.len() > MAX_RULE_TEXT)
+        {
+            return Err(Error::Corrupt("bindings"));
+        }
+    }
+    Ok(())
+}
+
+/// The shape checks of a reader, for bindings a writer is about to store.
+pub fn check_binding_shapes(bindings: &[Binding]) -> Result<(), Error> {
+    for b in bindings {
+        check_rules(&b.allow, true)?;
+        check_rules(&b.deny, false)?;
+    }
+    Ok(())
+}
+
+/// Bindings name secrets that exist, once each, and carry well-formed rules.
+fn check_bindings(body: &Body) -> Result<(), Error> {
+    if body.bindings.len() > MAX_ENTRIES {
+        return Err(Error::Corrupt("bindings"));
+    }
+    for (i, b) in body.bindings.iter().enumerate() {
+        if !body.index.iter().any(|e| e.name == b.name)
+            || body.bindings[..i].iter().any(|o| o.name == b.name)
+            || (b.allow.is_empty() && b.deny.is_empty())
+        {
+            return Err(Error::Corrupt("bindings"));
+        }
+        check_rules(&b.allow, true)?;
+        check_rules(&b.deny, false)?;
+    }
+    Ok(())
+}
+
 // --- Keys -------------------------------------------------------------------------
 
 pub struct OwnerKeys {
@@ -678,6 +792,7 @@ pub fn create(
                 recipients: Vec::new(),
                 index: Vec::new(),
                 secrets: Vec::new(),
+                bindings: Vec::new(),
             },
         },
         recovery,
@@ -930,6 +1045,7 @@ pub fn encode_as(
         recipients: model.recipients.clone(),
         index: model.index.clone(),
         secrets: model.secrets.clone(),
+        bindings: model.bindings.clone(),
     };
     let body_bytes = postcard::to_allocvec(&body).map_err(|_| Error::Corrupt("encode"))?;
     let body_len = u32::try_from(body_bytes.len()).map_err(|_| Error::TooLarge)?;

