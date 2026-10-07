@@ -81,6 +81,19 @@ fn at_word_boundary<U: Unit>(chars: &[U], at: usize) -> bool {
 
 // --- vendor prefixes -------------------------------------------------------
 
+/// What a secret guards, judged from its vendor prefix alone. It only steers
+/// advice (an each-use suggestion for money and cloud keys); detection does
+/// not read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// Moves money: Stripe live keys.
+    Payment,
+    /// Opens a cloud account: AWS access key ids, Google API keys.
+    Cloud,
+    /// Anything else, including every other vendor prefix.
+    Other,
+}
+
 /// Character classes used by the vendor patterns, kept alongside the literal
 /// so one table describes each rule completely.
 #[derive(Clone, Copy)]
@@ -120,6 +133,8 @@ impl TailClass {
 /// `min_tail` characters, with `\b` on both ends.
 struct PrefixRule {
     kind: &'static str,
+    /// What the key guards, for the add window's advice. Not used by detection.
+    class: Class,
     /// Literal openers. `gh[pousr]_` and `xox[baprs]-` expand to several.
     literals: &'static [&'static str],
     tail: TailClass,
@@ -136,6 +151,7 @@ struct PrefixRule {
 const PREFIX_RULES: &[PrefixRule] = &[
     PrefixRule {
         kind: "Anthropic-style key",
+        class: Class::Other,
         literals: &["sk-ant-"],
         tail: TailClass::WordDash,
         min_tail: 20,
@@ -143,6 +159,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "OpenAI-style key",
+        class: Class::Other,
         literals: &["sk-"],
         tail: TailClass::WordDash,
         min_tail: 20,
@@ -150,6 +167,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "AWS access key id",
+        class: Class::Cloud,
         literals: &["AKIA"],
         tail: TailClass::UpperDigit,
         min_tail: 16,
@@ -157,6 +175,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "GitHub fine-grained PAT",
+        class: Class::Other,
         literals: &["github_pat_"],
         tail: TailClass::Word,
         min_tail: 20,
@@ -164,6 +183,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "GitHub PAT",
+        class: Class::Other,
         literals: &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
         tail: TailClass::Word,
         min_tail: 20,
@@ -171,6 +191,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "GitLab PAT",
+        class: Class::Other,
         literals: &["glpat-"],
         tail: TailClass::WordDash,
         min_tail: 20,
@@ -178,6 +199,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "Slack token",
+        class: Class::Other,
         literals: &["xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-"],
         tail: TailClass::AlnumDash,
         min_tail: 20,
@@ -185,6 +207,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "Google API key",
+        class: Class::Cloud,
         literals: &["AIza"],
         tail: TailClass::GoogleTail,
         min_tail: 20,
@@ -192,6 +215,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "Stripe secret key",
+        class: Class::Payment,
         literals: &["sk_live_"],
         tail: TailClass::Alnum,
         min_tail: 20,
@@ -199,6 +223,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "Stripe restricted key",
+        class: Class::Payment,
         literals: &["rk_live_"],
         tail: TailClass::Alnum,
         min_tail: 20,
@@ -206,6 +231,7 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
     PrefixRule {
         kind: "npm token",
+        class: Class::Other,
         literals: &["npm_"],
         tail: TailClass::Alnum,
         min_tail: 20,
@@ -354,6 +380,17 @@ const OPENER_SECOND: [u8; 256] = {
     t[b'p' as usize] = 16;
     t
 };
+
+/// The class of the first vendor-prefixed key in `text` (the same rule
+/// [`find_prefix_kind`] would name), or `None` when no vendor prefix matches.
+/// Additive: it does not change what any other function reports.
+pub fn secret_class(text: &str) -> Option<Class> {
+    let kind = find_prefix_kind(text)?;
+    PREFIX_RULES
+        .iter()
+        .find(|r| r.kind == kind)
+        .map(|r| r.class)
+}
 
 /// Name the vendor whose prefix appears in `text`, if any.
 pub fn find_prefix_kind(text: &str) -> Option<&'static str> {
@@ -1304,6 +1341,37 @@ mod tests {
                     "rule {ri} literal {lit} not reachable from its opening pair"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn secret_class_by_vendor() {
+        // Built at run time so no key-shaped literal sits in the source.
+        let tail = "A1b2".repeat(6);
+        let with = |p: &str| format!("{p}{tail}");
+        assert_eq!(secret_class(&with("sk_live_")), Some(Class::Payment));
+        assert_eq!(secret_class(&with("rk_live_")), Some(Class::Payment));
+        assert_eq!(
+            secret_class(&format!("AKIA{}", "Q7".repeat(8))),
+            Some(Class::Cloud)
+        );
+        assert_eq!(secret_class(&with("AIza")), Some(Class::Cloud));
+        assert_eq!(secret_class(&with("ghp_")), Some(Class::Other));
+        assert_eq!(secret_class(&with("sk-ant-")), Some(Class::Other));
+        assert_eq!(secret_class("plain text, no key"), None);
+        assert_eq!(secret_class(""), None);
+    }
+
+    #[test]
+    fn class_does_not_change_the_kind() {
+        let tail = "A1b2".repeat(6);
+        for (p, kind) in [
+            ("sk_live_", "Stripe secret key"),
+            ("rk_live_", "Stripe restricted key"),
+            ("AIza", "Google API key"),
+            ("ghp_", "GitHub PAT"),
+        ] {
+            assert_eq!(find_prefix_kind(&format!("{p}{tail}")), Some(kind));
         }
     }
 

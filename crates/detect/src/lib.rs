@@ -31,9 +31,9 @@ pub use classify::{
 };
 pub use hits::{HitSet, find_secret_kind, looks_like_json_container, scan_text_hits, scan_texts};
 pub use matchers::{
-    FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_bearer_spans,
+    Class, FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_bearer_spans,
     find_prefix_kind, find_prefix_spans, is_secret_name, iter_assignments, iter_assignments_at,
-    iter_flag_values, iter_flag_values_at,
+    iter_flag_values, iter_flag_values_at, secret_class,
 };
 pub use primitives::{
     CharClass, char_class, entropy, fold_ci, has_vowel, is_digit_python, is_python_space,
