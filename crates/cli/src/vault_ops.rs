@@ -1,4 +1,4 @@
-//! `vahta init`, `add`, `reset`, `remove`, `import`, `reveal` and `copy`: the
+//! `vahta init`, `add`, `reset`, `tier`, `remove`, `import`, `reveal` and `copy`: the
 //! commands that change or show a vault.
 //!
 //! None of them takes a secret, a password or a value as an argument, or reads
@@ -56,6 +56,21 @@ options:
   -h, --help             show this help
 ";
 
+pub const TIER_USAGE: &str = "\
+usage: vahta tier NAME session|each-use [--json]
+
+Change a secret's tier without typing its value again. A window opens for the
+vault password.
+
+  session    a session may hold it, so `vahta run` can use it without a
+             window while one is open
+  each-use   it needs the password every time, even in a session
+
+options:
+  --json                 machine-readable result
+  -h, --help             show this help
+";
+
 pub const REMOVE_USAGE: &str = "\
 usage: vahta remove NAME [--json]
 
@@ -107,6 +122,7 @@ fn usage_of(command: &str) -> &'static str {
         "init" => INIT_USAGE,
         "add" => ADD_USAGE,
         "reset" => RESET_USAGE,
+        "tier" => TIER_USAGE,
         "remove" => REMOVE_USAGE,
         "import" => IMPORT_USAGE,
         "reveal" => REVEAL_USAGE,
@@ -205,11 +221,17 @@ pub fn run(
     };
     let cwd = env.cwd.to_string_lossy().into_owned();
     let wants_name = matches!(command, "add" | "reset" | "remove" | "reveal" | "copy");
-    if parsed.positional.len() != usize::from(wants_name) {
+    let wanted = match command {
+        "tier" => 2,
+        _ => usize::from(wants_name),
+    };
+    if parsed.positional.len() != wanted {
         let _ = write!(
             stderr,
             "vahta {command}: error: {}\n\n{usage}",
-            if wants_name {
+            if command == "tier" {
+                "expected NAME and a tier (session or each-use)"
+            } else if wants_name {
                 "expected exactly one NAME"
             } else {
                 "unexpected argument"
@@ -232,6 +254,20 @@ pub fn run(
             tier: parsed.tier,
             file: parsed.file,
         },
+        "tier" => {
+            let tier = match parsed.positional[1].as_str() {
+                "session" => Tier::Session,
+                "each-use" | "each_use" => Tier::EachUse,
+                other => {
+                    let _ = write!(
+                        stderr,
+                        "vahta tier: error: invalid tier: {other:?} (choose session or each-use)\n\n{usage}"
+                    );
+                    return EXIT_USAGE;
+                }
+            };
+            ClientRequest::SetTier { cwd, name, tier }
+        }
         "remove" => ClientRequest::Remove { cwd, name },
         "reveal" => ClientRequest::Reveal { cwd, name },
         "copy" => ClientRequest::Copy { cwd, name },

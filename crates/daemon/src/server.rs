@@ -517,6 +517,10 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ClientRequest::Remove { cwd, name } => {
                 (ops::remove(&ctx, &cwd, &name).unwrap_or_else(|r| r), false)
             }
+            ClientRequest::SetTier { cwd, name, tier } => (
+                ops::set_tier(&ctx, &cwd, &name, ops::vault_tier(tier)).unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::Import { cwd, source } => (
                 ops::import(&ctx, &cwd, &source).unwrap_or_else(|r| r),
                 false,

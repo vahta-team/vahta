@@ -239,6 +239,13 @@ pub enum ClientRequest {
         cwd: String,
         name: String,
     },
+    /// `vahta tier NAME session|each-use`: change only the tier; the value is
+    /// not typed again.
+    SetTier {
+        cwd: String,
+        name: String,
+        tier: Tier,
+    },
     Import {
         cwd: String,
         source: ImportSource,

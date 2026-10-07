@@ -26,6 +26,7 @@ nothing was done.
 |---|---|---|
 | `vahta init` | Create `.vahta/` and the vault here. The recovery key is shown once, in the window. | new password, twice |
 | `vahta add NAME [--tier session\|each-use] [--file FILENAME]` | Store a new secret. The value is typed in the window, hidden, twice. A name the vault already has is refused (exit 3). | yes |
+| `vahta tier NAME session\|each-use` | Change a secret's tier without typing its value again. Same tier or an unknown name: refused (exit 3). | yes |
 | `vahta reset NAME [--tier session\|each-use] [--file FILENAME]` | Replace the value of a secret the vault has, as when rotating it. It keeps its tier and kind unless the flags say otherwise. A name the vault does not have is refused (exit 3). | yes |
 | `vahta remove NAME` | Remove a secret. | yes |
 | `vahta import --ka PATH` / `--dotenv PATH` | Add the secrets of a ka vault or a `.env` file. The daemon reads the file itself. A name the vault already has refuses the whole import. | yes (and the ka password for `--ka`) |
@@ -159,8 +160,12 @@ secret can carry rules saying which commands may have it.
 **The agent proposes, the person approves.** Vahta does not guess which commands
 a project uses. The agent reads the project, proposes rules, and you approve them
 in a window with the password. `vahta add` tells the agent what class of key it
-stored (payment, cloud or other, from the value's vendor prefix; never the
-value) and how to propose rules.
+stored and how to propose rules. The class (payment, cloud or other) comes from
+the value's vendor prefix (`sk_live_`/`rk_live_` payment, `AKIA`/`AIza` cloud)
+and, for a value with no known prefix, from whole words of the name (`AWS`,
+`AZURE`, `GCP`, `STRIPE`, `PAYPAL`, `BILLING`…). The name can only raise the
+class, never lower it. For a payment or cloud key the add window offers
+each-use; the agent learns the class, never the value.
 
 ### The rules
 

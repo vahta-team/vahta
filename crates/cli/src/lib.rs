@@ -110,6 +110,7 @@ commands:
   init    create this project's vault
   add     store a new secret (typed in a window, never on the command line)
   reset   replace the value of a secret the vault has
+  tier    move a secret between session and each-use (no value typed)
   remove  remove a secret
   import  add the secrets of a ka vault or a .env file
   reveal  show a secret in a window
@@ -400,9 +401,9 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
         Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
         Some("daemon") => daemon_cmd::run(&args[1..], env, stdout, stderr),
-        Some(cmd @ ("init" | "add" | "reset" | "remove" | "import" | "reveal" | "copy")) => {
-            vault_ops::run(cmd, &args[1..], env, stdout, stderr)
-        }
+        Some(
+            cmd @ ("init" | "add" | "reset" | "tier" | "remove" | "import" | "reveal" | "copy"),
+        ) => vault_ops::run(cmd, &args[1..], env, stdout, stderr),
         // `set` did either, and so could overwrite a secret by a mistyped name;
         // it was split in two, and whoever still types it is told which to use.
         Some("set") => {

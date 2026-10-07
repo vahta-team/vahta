@@ -2686,6 +2686,112 @@ fn a_payment_key_gets_the_each_use_offer_and_the_agent_learns_the_class_not_the_
     assert!(!s.open_vault().entries().iter().any(|e| e.name == "NEVER"));
 }
 
+// A value with no vendor prefix still gets the offer when its name says what
+// it guards; the name can only raise the class.
+#[test]
+fn a_name_like_aws_or_paypal_raises_the_class_of_a_plain_value() {
+    let s = Sandbox::new();
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
+    s.script(&[PW_ANSWER, &plain_value(1), r#"{"choose":0}"#]);
+    let out = s.vahta(&["add", "AWS_DEPLOY_TOKEN"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).starts_with("saved AWS_DEPLOY_TOKEN (cloud key, each-use)"),
+        "{}",
+        text(&out.stdout)
+    );
+    s.script(&[PW_ANSWER, &plain_value(2), r#"{"choose":1}"#]);
+    let out = s.vahta(&["add", "PAYPAL_CLIENT"]);
+    assert!(
+        text(&out.stdout).starts_with("saved PAYPAL_CLIENT (payment key, session)"),
+        "{}",
+        text(&out.stdout)
+    );
+    // A word inside another word is not the word.
+    let asked = s.asks();
+    s.script(&[PW_ANSWER, &plain_value(3)]);
+    let out = s.vahta(&["add", "LAWS_TOKEN"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asked + 2, "a password and a value, no offer");
+}
+
+/// The scripted window's answer for a typed value, built at run time.
+fn plain_value(n: u32) -> String {
+    format!(r#"{{"secret":"fake-plain-value-{n}"}}"#)
+}
+
+// --- tier ----------------------------------------------------------------------------------
+
+#[test]
+fn tier_moves_a_secret_between_session_and_each_use_without_its_value() {
+    let s = Sandbox::new();
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
+    s.script(&[PW_ANSWER, &plain_value(4)]);
+    assert_eq!(
+        s.vahta(&["add", "TOKEN", "--tier", "each-use"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let tier_of = |s: &Sandbox| {
+        s.open_vault()
+            .entries()
+            .iter()
+            .find(|e| e.name == "TOKEN")
+            .unwrap()
+            .tier
+    };
+
+    // The password and nothing else: no value is asked for.
+    let asked = s.asks();
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["tier", "TOKEN", "session"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim(), "TOKEN is now session");
+    assert_eq!(s.asks(), asked + 1);
+    assert_eq!(tier_of(&s), Tier::Session);
+    let shown = s.last_ask("password");
+    assert!(
+        shown.to_string().contains("TOKEN: each-use -> session"),
+        "{shown}"
+    );
+
+    // The same tier again, or an unknown name: refused, no window.
+    let asked = s.asks();
+    assert_eq!(
+        s.vahta(&["tier", "TOKEN", "session"]).status.code(),
+        Some(3)
+    );
+    assert_eq!(
+        s.vahta(&["tier", "NOPE", "each-use"]).status.code(),
+        Some(3)
+    );
+    assert_eq!(s.asks(), asked);
+
+    // A cancelled window changes nothing.
+    s.script(&[r#"{"cancel":true}"#]);
+    assert_eq!(
+        s.vahta(&["tier", "TOKEN", "each-use"]).status.code(),
+        Some(4)
+    );
+    assert_eq!(tier_of(&s), Tier::Session);
+    s.script(&[PW_ANSWER]);
+    assert_eq!(
+        s.vahta(&["tier", "TOKEN", "each_use"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(tier_of(&s), Tier::EachUse);
+
+    // Usage errors.
+    assert_eq!(s.vahta(&["tier", "TOKEN"]).status.code(), Some(2));
+    assert_eq!(
+        s.vahta(&["tier", "TOKEN", "forever"]).status.code(),
+        Some(2)
+    );
+}
+
 // --- lock on sleep ---------------------------------------------------------------------------
 
 #[test]
