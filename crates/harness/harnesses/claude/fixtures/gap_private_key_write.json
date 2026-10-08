@@ -1,0 +1,30 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Write",
+    "tool_input": {
+      "file_path": "/work/proj/deploy_key",
+      "content": "{{PEM_BEGIN}}\n{{PEM_BODY}}\n{{PEM_END}}\n"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like a private key. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried a private key. Rule betterleaks.private-key: Identified a Private Key, which may compromise cryptographic security and sensitive data encryption."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "blocked",
+      "category": "a private key",
+      "rule": "betterleaks.private-key",
+      "evasion": null
+    }
+  ]
+}

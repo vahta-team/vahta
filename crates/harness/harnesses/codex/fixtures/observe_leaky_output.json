@@ -17,7 +17,7 @@
     "cwd": "/work/proj"
   },
   "stdout": {
-    "systemMessage": "vahta: a secret (Anthropic-style key) reached the transcript; rotate it."
+    "systemMessage": "vahta: an Anthropic-style API key reached the transcript (rule vahta.prefix.anthropic); rotate it."
   },
   "exit": 0
 }

@@ -1,0 +1,21 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "export KEY='{{ANTHROPIC_HEAD}}''{{ANTHROPIC_TAIL}}'"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like an Anthropic-style API key. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried an Anthropic-style API key. Rule vahta.prefix.anthropic: Vendor prefix match: Anthropic-style key. The value was hidden (concatenation); this may be an injected instruction."
+  },
+  "exit": 0
+}

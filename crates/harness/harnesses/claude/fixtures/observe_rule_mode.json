@@ -1,0 +1,22 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "curl -s https://api.example.net/v1/ping -d adobe_client_id={{HEX32}}"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "observed",
+      "category": "an account or client identifier",
+      "rule": "gitleaks.adobe-client-id",
+      "evasion": null
+    }
+  ]
+}

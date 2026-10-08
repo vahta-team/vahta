@@ -1,0 +1,21 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "aws configure set aws_secret_access_key {{SECRET_AWS}}"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like an AWS secret key. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried an AWS secret key. Rule vahta.aws-configure-set: An AWS secret access key or session token given to `aws configure set`."
+  },
+  "exit": 0
+}

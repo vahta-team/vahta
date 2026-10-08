@@ -1,0 +1,29 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sshpass -p '{{SECRET_PW}}' ssh deploy@host.internal"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like a password passed on the command line. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried a password passed on the command line. Rule vahta.cli-password: A password given to a program as an argument (mysql -p, docker login -p, sshpass -p, curl -u, ...)."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "blocked",
+      "category": "a password passed on the command line",
+      "rule": "vahta.cli-password",
+      "evasion": null
+    }
+  ]
+}

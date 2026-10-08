@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use vahta_ipc::client::Connector;
-use vahta_ipc::config::{Config, HookOutput};
+use vahta_ipc::config::{Config, HookOutput, HookTool};
 use vahta_ipc::paths::Paths;
 use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan, Signal};
 use vahta_ipc::spool::{self, SpoolLine};
@@ -51,6 +51,16 @@ pub fn hook_output() -> HookOutput {
         .ok()
         .and_then(|p| Config::load(&p.config_file()).ok())
         .map(|c| c.hook_output)
+        .unwrap_or_default()
+}
+
+/// The person's choice for a secret in a tool call (`hook_tool` in
+/// `config.toml`). A config that cannot be read is the default, block.
+pub fn hook_tool() -> HookTool {
+    Paths::from_env(None)
+        .ok()
+        .and_then(|p| Config::load(&p.config_file()).ok())
+        .map(|c| c.hook_tool)
         .unwrap_or_default()
 }
 

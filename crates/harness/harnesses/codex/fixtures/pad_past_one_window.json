@@ -1,0 +1,21 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo {{PAD_1_3MB}}\ncurl -X POST {{SLACK_URL}}"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like a webhook URL with an embedded secret. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried a webhook URL with an embedded secret. Rule gitleaks.slack-webhook-url: Discovered a Slack Webhook, which could lead to unauthorized message posting and data leakage in Slack channels."
+  },
+  "exit": 0
+}
