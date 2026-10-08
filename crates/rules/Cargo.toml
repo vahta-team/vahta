@@ -1,0 +1,28 @@
+[package]
+name = "vahta-rules"
+version = "0.0.0"
+description = "Secret-detection rules as data: vendor token shapes, a keyword prefilter, lazily compiled regexes"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+aho-corasick = "1"
+regex = "1"
+# Only for the shared schema enums; the files are read by the build script.
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+regex-syntax = "0.8"
+# The importer reads the upstream rule files.
+toml = "0.8"
