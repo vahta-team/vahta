@@ -36,6 +36,7 @@ use zeroize::Zeroizing;
 use vahta_vault::{Kind, Tier, Vault, valid_name};
 
 use crate::anchor;
+use crate::encoded::{EncodedSet, Form};
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, refused, unlock,
@@ -96,6 +97,9 @@ struct Release {
 
 struct RunValues {
     values: Vec<(String, Zeroizing<Vec<u8>>)>,
+    /// The values in their encoded forms (see `encoded.rs`), rebuilt when a
+    /// run adds some and dropped with them.
+    forms: EncodedSet,
     expires: Instant,
 }
 
@@ -149,6 +153,7 @@ impl Outputs {
     pub fn note_run(&mut self, anchor: ProcessId, values: &[(String, Vec<u8>)], now: Instant) {
         let entry = self.runs.entry(anchor).or_insert_with(|| RunValues {
             values: Vec::new(),
+            forms: EncodedSet::default(),
             expires: now,
         });
         for (name, value) in values {
@@ -160,9 +165,32 @@ impl Outputs {
                 .values
                 .push((name.clone(), Zeroizing::new(value.clone())));
         }
+        entry.forms = EncodedSet::build(entry.values.iter().map(|(n, v)| (n.as_str(), &v[..])));
+        // Build the search tables now, not in the middle of a tool call.
+        let _ = entry.forms.find(b"");
         entry.expires = now + RUN_VALUES_FOR;
     }
 
+    /// Every form of the values runs under `anchor` were given, to look for
+    /// in later output.
+    pub fn run_targets(&self, anchor: &ProcessId) -> Vec<(String, Vec<u8>)> {
+        self.runs
+            .get(anchor)
+            .map(|r| r.forms.targets())
+            .unwrap_or_default()
+    }
+
+    /// The first value (in any form) that a run under `anchor` was given and
+    /// `text` carries: its name and form.
+    pub fn run_find(&self, anchor: &ProcessId, text: &[u8]) -> Option<(String, Form)> {
+        self.runs
+            .get(anchor)?
+            .forms
+            .find(text)
+            .map(|(n, f)| (n.to_string(), f))
+    }
+
+    #[cfg(test)]
     pub fn run_values(&self, anchor: &ProcessId) -> Vec<(String, Vec<u8>)> {
         self.runs
             .get(anchor)
@@ -241,8 +269,10 @@ fn clean_label(raw: &str) -> String {
         .unwrap_or_else(|| "secret".to_string())
 }
 
-/// The values the daemon holds for a caller with this chain and anchor: the
-/// sessions that cover it, and its anchor's recent runs.
+/// The values the daemon holds for a caller with this chain and anchor, each
+/// in every form it might be written in: the sessions that cover it, and its
+/// anchor's recent runs. Read from the caches built when they were opened, so
+/// a scan opens no vault.
 fn values_for(
     ctx: &Ctx<'_>,
     chain: &[ProcessId],
@@ -251,22 +281,12 @@ fn values_for(
     let mut values: Vec<(String, Vec<u8>)> = Vec::new();
     if let Ok(sessions) = ctx.shared.sessions.lock() {
         for s in sessions.covering(chain) {
-            // A file that cannot be read, or a session gone stale, only means
-            // fewer exact matches; the detector still runs.
-            let Ok(bytes) = vahta_vault::read_file(&s.vault_path) else {
-                continue;
-            };
-            for name in &s.scope {
-                if let Ok(v) = s.keys.open(&bytes, name, ctx.store()) {
-                    values.push((name.clone(), v.expose().to_vec()));
-                }
-            }
+            values.extend(s.forms.targets());
         }
     }
     if let (Some(anchor), Ok(outputs)) = (anchor, ctx.shared.outputs.lock()) {
-        values.extend(outputs.run_values(anchor));
+        values.extend(outputs.run_targets(anchor));
     }
-    values.retain(|(_, v)| v.len() >= MIN_EXACT);
     values
 }
 

@@ -42,6 +42,7 @@ matcher = "Bash|apply_patch|mcp__.*"
 tool_name = "tool_name"
 tool_input = "tool_input"
 cwd = "cwd"
+session_id = "session_id"
 
 # No before_read event: Codex has no read tool. Its file reads go through the
 # shell, which before_tool checks for reader commands (cat, grep, ...).
@@ -51,6 +52,7 @@ name = "SessionStart"
 kind = "session_start"
 # Registered from v1 so that a later, outdated setup has a channel to say so.
 cwd = "cwd"
+session_id = "session_id"
 
 [[events]]
 name = "UserPromptSubmit"
@@ -58,6 +60,7 @@ kind = "prompt"
 # Documented as `prompt`; `user_prompt` accepted as a precaution.
 prompt = ["prompt", "user_prompt"]
 cwd = "cwd"
+session_id = "session_id"
 
 [[events]]
 name = "PostToolUse"
@@ -67,6 +70,7 @@ tool_name = "tool_name"
 # Documented as `tool_response`; `tool_output` accepted as a precaution.
 tool_output = ["tool_response", "tool_output"]
 cwd = "cwd"
+session_id = "session_id"
 
 [[tool_groups]]
 group = "mcp"

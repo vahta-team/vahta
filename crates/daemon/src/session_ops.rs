@@ -15,6 +15,7 @@ use vahta_vault::project::Project;
 use vahta_vault::{Peek, Tier, Vault, valid_name};
 
 use crate::anchor::{self, Node};
+use crate::encoded::EncodedSet;
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, check_name, find_vault, from_vault, lines_for, refused, refused_names, unlock,
@@ -228,6 +229,16 @@ pub(crate) fn unlock_session(
         vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     }
     let keys = vault.session_keys(&names).map_err(from_vault)?;
+    // The values in their encoded forms, for the pre-tool check and the output
+    // scan; held as long as the keys are, and not a moment longer.
+    let held: Vec<(String, vahta_vault::SecretValue)> = names
+        .iter()
+        .filter_map(|n| vault.get(n).ok().map(|v| (n.clone(), v)))
+        .collect();
+    let forms = EncodedSet::build(held.iter().map(|(n, v)| (n.as_str(), v.expose())));
+    drop(held);
+    // Build the search tables now, not in the middle of a tool call.
+    let _ = forms.find(b"");
     let vault_id = vault.vault_id();
     // From here on the vault key is gone: the session holds data keys only.
     drop(vault);
@@ -244,6 +255,7 @@ pub(crate) fn unlock_session(
         project: project.root.clone(),
         scope: names.clone(),
         keys,
+        forms,
         role: Role::Runner,
         anchor,
         anchor_exe: anchor_exe.clone(),
@@ -271,6 +283,8 @@ pub(crate) fn unlock_session(
         replaced
     };
     ctx.shared.record_ended(replaced);
+    // Sessions are open again by the person's hand: the alarm is over.
+    ctx.shared.alarm.clear_raised();
     ctx.journal(
         Entry::new("session_start")
             .session(&id, None)
@@ -359,6 +373,7 @@ pub(crate) fn list(ctx: &Ctx<'_>) -> Flow<ClientReply> {
         .map_err(|_| crate::ops::error("the session table is unusable"))?;
     Ok(ClientReply::Sessions {
         sessions: sessions.infos(now),
+        alarm_at: ctx.shared.alarm.raised_at(),
     })
 }
 

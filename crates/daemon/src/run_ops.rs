@@ -640,6 +640,7 @@ pub(crate) fn delegate(
         return Err(refused_names(kind, message, issues));
     }
     let keys = parent.keys.narrowed(&wanted).map_err(from_vault)?;
+    let forms = parent.forms.subset(&wanted);
     let parent_id = parent.id.clone();
     let id = crate::session::new_id().ok_or_else(|| error("the system random generator failed"))?;
     let anchor_exe = ctx.exe.clone().unwrap_or_default();
@@ -651,6 +652,7 @@ pub(crate) fn delegate(
         project: project.root,
         scope: wanted.clone(),
         keys,
+        forms,
         role: Role::Runner,
         // The process that asked: it runs the sub-agent and the session ends
         // with it.

@@ -18,6 +18,8 @@ pub struct Event {
     pub path: Option<String>,
     pub content: Option<String>,
     pub cwd: Option<String>,
+    /// The harness's id for the session, when the payload has one.
+    pub session_id: Option<String>,
     /// after_tool: the tool's output as the harness sent it, structure and
     /// all, so a rewrite can keep its shape (Claude wants the shape back).
     /// `None` when there is no output or it nests past [`OUTPUT_DEPTH`].
@@ -199,6 +201,7 @@ impl Manifest {
         let mut ev = Event {
             kind: Some(kind),
             cwd: text_field(payload, &spec.cwd),
+            session_id: text_field(payload, &spec.session_id),
             ..Event::default()
         };
         match kind {
@@ -256,5 +259,55 @@ impl Manifest {
             }
         }
         Some(ev)
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+
+    fn id_of(harness: &str, kind: Kind, payload: &str) -> Option<String> {
+        let m = crate::manifest(harness).unwrap().unwrap();
+        let payload = vahta_json::parse(payload).unwrap();
+        m.normalise(kind, &payload).and_then(|e| e.session_id)
+    }
+
+    #[test]
+    fn each_harness_names_its_session_its_own_way() {
+        let tool = |key: &str| {
+            format!(
+                r#"{{"{key}":"s-9","tool_name":"Bash","tool_input":{{"command":"ls"}},"cwd":"/p"}}"#
+            )
+        };
+        assert_eq!(
+            id_of("claude", Kind::BeforeTool, &tool("session_id")).as_deref(),
+            Some("s-9")
+        );
+        assert_eq!(
+            id_of("codex", Kind::BeforeTool, &tool("session_id")).as_deref(),
+            Some("s-9")
+        );
+        let cursor = r#"{"conversation_id":"c-7","tool_name":"Shell","tool_input":{"command":"ls"},"cwd":"/p"}"#;
+        assert_eq!(
+            id_of("cursor", Kind::BeforeTool, cursor).as_deref(),
+            Some("c-7")
+        );
+        // Absent, or not text: none.
+        assert_eq!(
+            id_of(
+                "claude",
+                Kind::BeforeTool,
+                r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            id_of(
+                "claude",
+                Kind::BeforeTool,
+                r#"{"session_id":5,"tool_name":"Bash","tool_input":{"command":"ls"}}"#
+            ),
+            None
+        );
     }
 }

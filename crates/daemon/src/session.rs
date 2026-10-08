@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use vahta_os::ProcessId;
 use vahta_vault::SessionKeys;
 
+use crate::encoded::EncodedSet;
 use crate::protocol::SessionInfo;
 
 /// How long a person's "yes" extends a session.
@@ -55,6 +56,9 @@ pub struct Session {
     /// The names the session covers.
     pub scope: Vec<String>,
     pub keys: SessionKeys,
+    /// The scope's values in the forms an agent might write them in (see
+    /// `encoded.rs`): as sensitive as `keys`, and dropped with them.
+    pub forms: EncodedSet,
     pub role: Role,
     pub anchor: ProcessId,
     pub anchor_exe: String,
@@ -238,6 +242,8 @@ impl Sessions {
             if let Some(pos) = self.items.iter().position(|s| &s.id == gone) {
                 let mut session = self.items.remove(pos);
                 session.keys.zeroize();
+                // The forms overwrite themselves when the session drops.
+                drop(std::mem::take(&mut session.forms));
                 ended.push(Ended {
                     session,
                     reason: if n == 0 { reason } else { "parent_ended" },
@@ -456,6 +462,7 @@ mod tests {
             project: PathBuf::from("/p"),
             scope: names.iter().map(|n| n.to_string()).collect(),
             keys: k,
+            forms: EncodedSet::default(),
             role: Role::Runner,
             anchor: pid(anchor),
             anchor_exe: "claude".to_string(),

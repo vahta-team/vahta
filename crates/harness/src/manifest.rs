@@ -185,6 +185,9 @@ pub struct EventSpec {
     pub prompt: Option<OneOrMany>,
     pub tool_output: Option<OneOrMany>,
     pub cwd: Option<OneOrMany>,
+    /// The harness's own id for the session (Cursor: the conversation), which
+    /// the daemon's alarm uses to tell one agent from another.
+    pub session_id: Option<OneOrMany>,
     /// `before_read`: the file's path, and (Cursor only) its content.
     pub file_path: Option<OneOrMany>,
     pub content: Option<OneOrMany>,

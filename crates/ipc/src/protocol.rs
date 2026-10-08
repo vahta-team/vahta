@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 6;
+pub const PROTOCOL: u32 = 7;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -373,6 +373,17 @@ pub enum ClientRequest {
         duration: DurationSpec,
         label: Option<String>,
     },
+    /// The hook asks, before a tool call runs, whether its text carries a
+    /// value the daemon holds for this agent, in any of the forms it knows
+    /// (raw, base64, hex, URL-encoded, reversed). The reply is `Ok` or
+    /// `ToolDeny`. The text is the agent's and travels only to the daemon, on
+    /// this user's socket; the daemon never journals it. `session` is the
+    /// harness's own session id, when its payload has one.
+    ToolCheck {
+        session: Option<String>,
+        cwd: String,
+        text: String,
+    },
 }
 
 /// One value to cut out of a tool's output: `text` is which of the output's
@@ -515,6 +526,9 @@ pub enum Signal {
     AgentGuard { command: String },
     /// A change to a harness's hook settings that would weaken Vahta's hooks.
     HookTamper { file: String, what: String },
+    /// A tool call carried a value Vahta holds, written as `form`. Made by
+    /// the daemon when a `ToolCheck` hits; the hook never sends it.
+    KnownValue { form: String },
 }
 
 impl Signal {
@@ -526,6 +540,7 @@ impl Signal {
             Signal::VahtaFileTouch { .. } => "vahta_file_touch",
             Signal::AgentGuard { .. } => "agent_guard",
             Signal::HookTamper { .. } => "hook_tamper",
+            Signal::KnownValue { .. } => "known_value",
         }
     }
 }
@@ -642,6 +657,10 @@ pub enum ClientReply {
     Session(Box<SessionInfo>),
     Sessions {
         sessions: Vec<SessionInfo>,
+        /// When the injection alarm last went off (Unix seconds), until the
+        /// next unlock.
+        #[serde(default)]
+        alarm_at: Option<u64>,
     },
     /// The request was carried out; `message` is for the person, and never a
     /// value.
@@ -673,6 +692,14 @@ pub enum ClientReply {
     OutputReleased {
         text: String,
     },
+    /// The answer to a `ToolCheck` that found a held value: the tool call
+    /// must be refused. `form` is how the value was written (`base64`,
+    /// `hex`, `raw`...), which the agent may be told; `name` is the secret's
+    /// name, for the person only.
+    ToolDeny {
+        form: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +711,10 @@ pub struct StatusInfo {
     pub connections: usize,
     pub uptime_secs: u64,
     pub runtime_dir: String,
+    /// When the injection alarm last went off (Unix seconds), until the next
+    /// unlock.
+    #[serde(default)]
+    pub alarm_at: Option<u64>,
 }
 
 // --- Surface messages --------------------------------------------------------------------

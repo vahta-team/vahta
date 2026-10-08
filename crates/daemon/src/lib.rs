@@ -11,11 +11,13 @@
 //! the hook), listening on a socket in a private runtime directory, and exits
 //! when it has been idle.
 
+mod alarm;
 mod anchor;
 mod bind_ops;
 mod binding;
 mod clipboard;
 mod dotenv;
+mod encoded;
 pub mod journal;
 mod lock;
 mod ops;
