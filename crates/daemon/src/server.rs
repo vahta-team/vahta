@@ -215,6 +215,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
     let listener =
         Listener::bind(&address).map_err(|e| ServerError::Io("listen on the socket", e))?;
     journal.record(Entry::new("daemon_start").result("ok", Some(&options.version)));
+    crate::report::ingest_spool(&options.paths, &journal);
 
     let registry = Arc::new(SurfaceRegistry::default());
     let surface: Box<dyn PromptSurface> = match options.surface.take() {
@@ -717,6 +718,16 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 possible,
             } => (
                 output::observed(&ctx, &tool, &kinds, likely, possible).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::HookReport {
+                session,
+                harness,
+                cwd: _,
+                signal,
+            } => (
+                crate::report::hook_report(&ctx, session.as_deref(), &harness, &signal)
+                    .unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::OutputAllow { reference, reason } => (

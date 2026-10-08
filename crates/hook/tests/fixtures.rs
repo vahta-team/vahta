@@ -1,7 +1,9 @@
 //! Runs the built `vahta-hook` against every fixture under
 //! `crates/harness/harnesses/<harness>/fixtures/`.
 //!
-//! A fixture is `{event, [args], [env], [files], stdin | stdin_raw, stdout, exit}`.
+//! A fixture is `{event, [args], [env], [files], stdin | stdin_raw, stdout, exit,
+//! [spool]}`. `spool`, when present, is the list of signals the hook must have
+//! spooled for the daemon (no daemon runs here), in order.
 //! Secret-shaped values are never written in the files: `{{SECRET_ANTHROPIC}}`
 //! is replaced here, from pieces. `files` maps a relative path to its content;
 //! the test writes them under a fresh temp directory, which `{{TMP}}` names
@@ -110,6 +112,18 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
     let want_exit = fx["exit"].as_i64().unwrap_or(0) as i32;
     if out.status.code() != Some(want_exit) {
         return Err(format!("exit {:?}, want {want_exit}", out.status.code()));
+    }
+    if let Some(want) = fx.get("spool") {
+        let spooled =
+            std::fs::read_to_string(tmp.0.join("data/hook-spool.jsonl")).unwrap_or_default();
+        let got: Vec<Value> = spooled
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).map(|v| v["signal"].clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        if &Value::Array(got.clone()) != want {
+            return Err(format!("spool\n  want {want}\n  got  {got:?}"));
+        }
     }
     Ok(())
 }

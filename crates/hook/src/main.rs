@@ -18,6 +18,7 @@ mod redact;
 use std::io::{Read, Write};
 
 use vahta_harness::{Decision, Event, Kind, Manifest};
+use vahta_ipc::protocol::Signal;
 use vahta_json::{Limits, ParseError};
 
 const DISABLE_ENV: &str = "VAHTA_HOOK_DISABLE";
@@ -159,7 +160,21 @@ fn deny_read(file: &str, kind: &str) -> Decision {
     }
 }
 
-fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
+/// A refusal of a secret-shaped value in a tool call, as the daemon hears it.
+/// The kind serves as both category and rule until the detector names them
+/// apart.
+fn blocked(decision: &Decision, kind: Option<String>) -> Option<Signal> {
+    let kind = kind.filter(|_| matches!(decision, Decision::Deny { .. }))?;
+    Some(Signal::Blocked {
+        category: kind.clone(),
+        rule: kind,
+        evasion: None,
+    })
+}
+
+/// The answer to the event, and what to tell the daemon about it: each refusal
+/// of something an agent tried is evidence for its alarm.
+fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
     match args.kind {
         Kind::BeforeTool => {
             // Commands for the person only, then Vahta's own files: both are
@@ -168,47 +183,69 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> Decision {
             if ev.group == Some(vahta_harness::Group::Shell)
                 && let Some(invocation) = agentguard::forbidden_command(&ev.text)
             {
-                return deny_vahta_command(&invocation);
+                let signal = Signal::AgentGuard {
+                    command: invocation.clone(),
+                };
+                return (deny_vahta_command(&invocation), Some(signal));
             }
             if let Some(file) = vahta_file_touched(ev) {
-                return deny_vahta_file(&file);
+                let signal = Signal::VahtaFileTouch { path: file.clone() };
+                return (deny_vahta_file(&file), Some(signal));
             }
             let by_text = secret_in(&ev.text, "tool", false);
             if by_text != Decision::Allow || ev.group != Some(vahta_harness::Group::Shell) {
-                return by_text;
+                let signal = blocked(&by_text, vahta_detect::find_secret_kind(&ev.text));
+                return (by_text, signal);
             }
             match readguard::secret_file_in_command(&ev.text, ev.cwd.as_deref()) {
-                Some((file, kind)) => deny_read(&file, &kind),
-                None => Decision::Allow,
+                Some((file, kind)) => (deny_read(&file, &kind), Some(read_signal(&kind))),
+                None => (Decision::Allow, None),
             }
         }
         Kind::BeforeRead => {
             let Some(file) = ev.path.as_deref() else {
-                return Decision::Allow;
+                return (Decision::Allow, None);
             };
             if readguard::is_vahta_path(file, ev.cwd.as_deref()) {
-                return deny_vahta_file(file);
+                let signal = Signal::VahtaFileTouch {
+                    path: file.to_string(),
+                };
+                return (deny_vahta_file(file), Some(signal));
             }
             match readguard::secret_kind_in(file, ev.cwd.as_deref(), ev.content.as_deref()) {
-                Some(kind) => deny_read(file, &kind),
-                None => Decision::Allow,
+                Some(kind) => (deny_read(file, &kind), Some(read_signal(&kind))),
+                None => (Decision::Allow, None),
             }
         }
-        Kind::Prompt => secret_in(&ev.text, "prompt", false),
-        Kind::AfterTool => after_tool(m, ev),
-        Kind::SessionStart => match args.setup {
-            Some(n) if n < m.setup_version => {
-                let line = format!(
-                    "vahta: setup for {} is outdated (v{n} \u{2192} v{}); run `vahta setup --{}`",
-                    m.title, m.setup_version, m.name
-                );
-                Decision::Notice {
-                    agent_message: format!("{line}. Mention this to the user once."),
-                    user_message: line,
-                }
+        // The person typed the prompt: a refusal there is not the agent's doing.
+        Kind::Prompt => (secret_in(&ev.text, "prompt", false), None),
+        Kind::AfterTool => (after_tool(m, ev), None),
+        Kind::SessionStart => (session_start(m, args), None),
+    }
+}
+
+/// Reading a file that holds credentials, as the daemon hears it.
+fn read_signal(kind: &str) -> Signal {
+    Signal::Blocked {
+        category: format!("a file with credentials ({kind})"),
+        rule: "read_guard".to_string(),
+        evasion: None,
+    }
+}
+
+fn session_start(m: &Manifest, args: &Args) -> Decision {
+    match args.setup {
+        Some(n) if n < m.setup_version => {
+            let line = format!(
+                "vahta: setup for {} is outdated (v{n} \u{2192} v{}); run `vahta setup --{}`",
+                m.title, m.setup_version, m.name
+            );
+            Decision::Notice {
+                agent_message: format!("{line}. Mention this to the user once."),
+                user_message: line,
             }
-            _ => Decision::Allow,
-        },
+        }
+        _ => Decision::Allow,
     }
 }
 
@@ -367,7 +404,16 @@ fn run() -> Option<vahta_harness::Output> {
             unbuilt_event(&manifest, args.kind, &raw)?
         }
     };
-    Some(manifest.render(args.kind, &decide(&manifest, &args, &event)))
+    let (decision, signal) = decide(&manifest, &args, &event);
+    if let Some(signal) = signal {
+        daemon::report(
+            &args.harness,
+            None,
+            event.cwd.clone().unwrap_or_default(),
+            signal,
+        );
+    }
+    Some(manifest.render(args.kind, &decision))
 }
 
 fn main() {

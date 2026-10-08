@@ -14,6 +14,7 @@ pub mod config;
 pub mod duration;
 pub mod paths;
 pub mod protocol;
+pub mod spool;
 
 /// This build's version, compared at the handshake. A client and a daemon of
 /// different versions do not talk past the hello. The daemon reports this

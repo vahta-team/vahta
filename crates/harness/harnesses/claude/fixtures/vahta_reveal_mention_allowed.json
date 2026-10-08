@@ -13,5 +13,6 @@
     "cwd": "{{TMP}}/proj"
   },
   "stdout": null,
-  "exit": 0
+  "exit": 0,
+  "spool": []
 }
