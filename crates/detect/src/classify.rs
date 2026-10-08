@@ -137,6 +137,58 @@ fn is_run_of(s: &str, want: char, min: usize) -> bool {
     n >= min
 }
 
+/// Words that mark a value as made up for a test or an example.
+const TEST_MARKERS: [&str; 9] = [
+    "fake",
+    "dummy",
+    "example",
+    "sample",
+    "placeholder",
+    "test",
+    "mock",
+    "stub",
+    "demo",
+];
+const MARKED_WORD_MAX: usize = 12;
+const MARKED_NUMBER_MAX: usize = 4;
+
+/// A value spelled as words and short numbers, one of them a test marker:
+/// `fake-plain-value-1` is a test value, `fake-aB3xQ9mK2pL7vN4wZ8` is not,
+/// because its second part is not a word. Each part between `-`, `_` or `.`
+/// is a word (ASCII letters of one case, with a vowel, at most 12) or a number
+/// of at most 4 digits. A real credential is not spelled that way; a
+/// passphrase is, which is why a marker word is required.
+pub fn is_marked_test_value(value: &str) -> bool {
+    let v = strip_quotes(value);
+    if !v.is_ascii() {
+        return false;
+    }
+    let mut parts = 0usize;
+    let mut marked = false;
+    for part in v.split(['-', '_', '.']) {
+        parts += 1;
+        let b = part.as_bytes();
+        if !b.is_empty() && b.len() <= MARKED_NUMBER_MAX && b.iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let lower = b.iter().all(u8::is_ascii_lowercase);
+        let upper = b.iter().all(u8::is_ascii_uppercase);
+        if b.is_empty() || b.len() > MARKED_WORD_MAX || !(lower || upper) {
+            return false;
+        }
+        if !b.iter().any(|c| {
+            matches!(
+                c.to_ascii_lowercase(),
+                b'a' | b'e' | b'i' | b'o' | b'u' | b'y'
+            )
+        }) {
+            return false;
+        }
+        marked = marked || TEST_MARKERS.iter().any(|m| part.eq_ignore_ascii_case(m));
+    }
+    parts >= 2 && marked
+}
+
 pub fn compact_hex(value: &str) -> String {
     value.replace('-', "")
 }
@@ -300,7 +352,11 @@ pub fn classify_value(value: &str) -> (Confidence, Option<&'static str>) {
     if v.chars().count() < MIN_VALUE_LEN {
         return (Confidence::None, None);
     }
-    if is_placeholder(v) || is_nil_or_all_zero(v) || starts_with_reference(v) {
+    if is_placeholder(v)
+        || is_marked_test_value(v)
+        || is_nil_or_all_zero(v)
+        || starts_with_reference(v)
+    {
         return (Confidence::None, None);
     }
     if is_function_call(v) {
@@ -395,6 +451,39 @@ mod tests {
         ] {
             assert!(!starts_with_reference(&v), "{v}");
         }
+    }
+
+    #[test]
+    fn a_value_marked_as_a_test_value_is_none() {
+        // Built from pieces: the product's own hook reads this file too.
+        let j = |parts: &[&str]| parts.join("-");
+        for v in [
+            j(&["fake", "plain", "value", "1"]),
+            j(&["dummy", "token"]),
+            "TEST_API_KEY_2024".to_string(),
+            "example.secret.value".to_string(),
+        ] {
+            assert!(is_marked_test_value(&v), "{v}");
+            assert_eq!(classify_value(&v).0, Confidence::None, "{v}");
+        }
+        for v in [
+            // A random part is not a word.
+            j(&["fake", "aB3xQ9mK2pL7vN4wZ8"]),
+            j(&["test", "qzx7Kp"]),
+            // No marker: a passphrase stays what it was.
+            j(&["correct", "horse", "battery", "1"]),
+            // A long number, mixed case, one part only, an empty part.
+            j(&["fake", "123456789"]),
+            j(&["Fake", "value"]),
+            "fakevalue1".to_string(),
+            "fake--value".to_string(),
+        ] {
+            assert!(!is_marked_test_value(&v), "{v}");
+        }
+        assert_eq!(
+            classify_value(&j(&["fake", "aB3xQ9mK2pL7vN4wZ8"])).0,
+            Confidence::Likely
+        );
     }
 
     #[test]

@@ -364,6 +364,42 @@ def is_placeholder(value: str) -> bool:
     return False
 
 
+# Words that mark a value as made up for a test or an example.
+_TEST_MARKERS = frozenset(
+    {"fake", "dummy", "example", "sample", "placeholder", "test", "mock", "stub", "demo"}
+)
+_MARKED_WORD_MAX = 12
+_MARKED_NUMBER_MAX = 4
+
+
+def is_marked_test_value(value: str) -> bool:
+    """A value spelled as words and short numbers, one of them a test marker.
+
+    ``fake-plain-value-1`` is a test value; ``fake-aB3xQ9mK2pL7vN4wZ8`` is not,
+    because its second part is not a word. Each part between ``-``, ``_`` or
+    ``.`` is a word (ASCII letters of one case, with a vowel, at most 12) or a
+    number of at most 4 digits. A real credential is not spelled that way;
+    a passphrase is, which is why a marker word is required.
+    """
+    v = value.strip("'\"")
+    if not v.isascii():
+        return False
+    parts = re.split(r"[-_.]", v)
+    if len(parts) < 2:
+        return False
+    marked = False
+    for part in parts:
+        if part.isdigit() and len(part) <= _MARKED_NUMBER_MAX:
+            continue
+        if not (part.isalpha() and (part.islower() or part.isupper())):
+            return False
+        word = part.lower()
+        if len(word) > _MARKED_WORD_MAX or not any(c in "aeiouy" for c in word):
+            return False
+        marked = marked or word in _TEST_MARKERS
+    return marked
+
+
 def is_secret_name(name: str) -> bool:
     """True if a dict/JSON key matches the assignment name vocabulary."""
     return bool(_SECRET_NAME.fullmatch(name.strip().strip("'\"")))
@@ -454,7 +490,12 @@ def classify_value(value: str) -> tuple[Confidence, str | None]:
     v = value.strip("'\"")
     if len(v) < MIN_VALUE_LEN:
         return "none", None
-    if is_placeholder(v) or _is_nil_or_all_zero(v) or starts_with_reference(v):
+    if (
+        is_placeholder(v)
+        or is_marked_test_value(v)
+        or _is_nil_or_all_zero(v)
+        or starts_with_reference(v)
+    ):
         return "none", None
     if _FUNC_CALL.fullmatch(v):
         return "none", NAMED_WEAKENING_FUNCTION_CALL
