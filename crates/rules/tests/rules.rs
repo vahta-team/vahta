@@ -169,12 +169,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let name = e.file_name();
         if p.is_dir() {
             // The rule files hold the regexes (and a few literals) the rules
-            // match, so they match themselves; tests/ and src/ are the legacy
-            // Python ka, which A4 removes, with PEM headers and bearer values
-            // in its test data.
+            // match, so they match themselves; legacy/ is the Python
+            // key-amnesia, with PEM headers and bearer values in its test data.
             let own = p.ends_with("crates/rules/rules");
-            let legacy = p.ends_with("tests") && p.parent().is_some_and(|d| d.ends_with("../.."))
-                || p.ends_with("src/key_amnesia");
+            let legacy = p.ends_with("../../legacy");
             if name == "target" || name == ".git" || name == "node_modules" || own || legacy {
                 continue;
             }

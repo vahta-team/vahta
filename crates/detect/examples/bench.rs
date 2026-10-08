@@ -2,7 +2,7 @@
 //!
 //! Usage: `cargo run --release -p vahta-detect --example bench -- [repo-root] [rounds]`
 //!
-//! Corpus: the repo's own `src/`, `tests/` and `crates/` text files (one blob per
+//! Corpus: the repo's own `crates/`, `docs/` and `scripts/` text files (one blob per
 //! file, as the scanner feeds them) plus generated assignment-heavy text whose
 //! secret-shaped values are assembled at runtime from pieces, so no literal
 //! credential ever sits in the source. Prints MB/s for the whole entry point
@@ -230,7 +230,7 @@ fn main() {
     let root = args.get(1).map(String::as_str).unwrap_or(".");
     let rounds: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
     let mut files = Vec::new();
-    for d in ["src", "tests", "crates"] {
+    for d in ["crates", "docs", "scripts"] {
         collect(&Path::new(root).join(d), &mut files);
     }
     run("repo text", &files, rounds);

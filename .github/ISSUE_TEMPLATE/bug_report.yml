@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in key-amnesia does not work as documented
+description: Something in Vahta does not work as documented
 title: "[bug] "
 labels: ["bug"]
 body:
@@ -15,8 +15,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `ka --version`
-      placeholder: key-amnesia 0.4.5
+      description: Output of `vahta --version`
+      placeholder: vahta 0.0.1
     validations:
       required: true
   - type: dropdown
@@ -35,7 +35,7 @@ body:
     attributes:
       label: Command run
       description: Exact command(s), with secret *values* redacted. Secret *names* are fine.
-      placeholder: ka run --secret NAME --as NAME=ENVVAR -- …
+      placeholder: vahta run --secret NAME --as NAME=ENVVAR -- …
     validations:
       required: true
   - type: textarea

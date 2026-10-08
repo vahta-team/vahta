@@ -28,8 +28,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
                 || name == ".git"
                 || name == "node_modules"
                 || p.ends_with("crates/rules/rules")
-                || p.ends_with("../../src")
-                || p.ends_with("../../tests");
+                || p.ends_with("../../legacy");
             if !skip {
                 walk(&p, out);
             }
