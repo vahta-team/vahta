@@ -1,9 +1,7 @@
 //! Finds plaintext credentials an agent can read.
 //!
-//! A port of `key_amnesia.scan_py`, which remains the specification. The same
-//! rule as the detector applies: this must agree with Python, including where
-//! Python is arguably wrong, and the proof is the existing Python test suite
-//! run against this implementation rather than a corpus written to suit it.
+//! It began as a port of key-amnesia's `scan_py`. Like the detector, this
+//! crate is now the specification, pinned by its own tests.
 //!
 //! **Never carries secret values.** A finding holds a path, a kind, the
 //! *names* of what was found and how many — never what was found.
