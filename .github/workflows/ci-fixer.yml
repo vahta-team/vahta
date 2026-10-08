@@ -160,6 +160,15 @@ jobs:
             gh pr comment "$PR" --body-file /tmp/comment.md
             exit 1
           fi
+          # Someone pushed to the branch while Claude worked (a person fixing
+          # the same failure, say): this fix is for a commit that is no longer
+          # the head. Say so and stop; the new push has its own run.
+          head=$(gh api "repos/${GITHUB_REPOSITORY}/branches/${BRANCH}" --jq .commit.sha)
+          if [ "$head" != "$FAILED_SHA" ]; then
+            { echo "CI fixer, attempt $ATTEMPT of $MAX: not pushed; $BRANCH moved to ${head:0:7} while it worked, and that push has its own run."; echo; cat "$summary"; } > /tmp/comment.md
+            gh pr comment "$PR" --body-file /tmp/comment.md
+            exit 0
+          fi
           title=$(head -n 1 "$summary" | sed 's/^#* *//' | cut -c1-60)
           {
             echo "CI fix: $title"
