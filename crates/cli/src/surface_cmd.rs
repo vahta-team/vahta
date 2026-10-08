@@ -214,11 +214,23 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
             // A number from the list; anything else asks again, and the end
             // of input, or the time running out, cancels.
             let until = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+            // One option is a confirmation: Enter takes it.
+            let single = options.len() == 1;
             for _ in 0..3 {
-                console.say(&format!("Choose 1-{}:", options.len()));
+                if single {
+                    console.say(&format!(
+                        "Press Enter to {}:",
+                        safe(&options[0]).to_lowercase()
+                    ));
+                } else {
+                    console.say(&format!("Choose 1-{}:", options.len()));
+                }
                 let Some(line) = line_until(until) else {
                     return Some(SurfaceAnswer::Cancel {});
                 };
+                if single && matches!(line.trim(), "" | "1") {
+                    return Some(SurfaceAnswer::Choice { index: 0 });
+                }
                 if let Ok(n) = line.trim().parse::<usize>()
                     && (1..=options.len()).contains(&n)
                 {

@@ -716,9 +716,13 @@ fn apply_guard(
         Guard::On => {
             remembered.guard_declines = 0;
             let _ = writeln!(stdout, "Hook watchdog: on.");
+            let mut started_by_autostart = false;
             match autostart::enable(env, &SystemRunner) {
                 Ok(()) => {
                     let _ = writeln!(stdout, "  It starts when you log in.");
+                    // systemd and launchd start it now as well; give them a
+                    // moment, so the one they manage is the one that runs.
+                    started_by_autostart = !cfg!(windows) && guard_cmd::wait_running(cli, 3);
                 }
                 Err(e) => {
                     let _ = writeln!(
@@ -735,7 +739,7 @@ fn apply_guard(
                 .map(|m| m.name.clone())
                 .collect();
             remember_installed(cli, &found);
-            if let Err(e) = guard_cmd::spawn(cli) {
+            if !started_by_autostart && let Err(e) = guard_cmd::spawn(cli) {
                 let _ = writeln!(stderr, "vahta setup: could not start the watchdog now: {e}");
             }
         }

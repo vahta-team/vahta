@@ -433,6 +433,15 @@ fn init_and_add_go_through_the_window_and_nothing_secret_comes_back() {
     let lines = recovery["panel"]["lines"].to_string();
     assert!(lines.contains("Project:") && lines.contains("Requested by:"));
 
+    // The watchdog learns of the project, so it can ask for its password.
+    // Compared without separators: JSON doubles a Windows backslash.
+    let flat = |t: &str| t.replace(['\\', '/'], "");
+    let projects = fs::read_to_string(s.root.join("data/projects.json")).unwrap_or_default();
+    assert!(
+        flat(&projects).contains(&flat(&s.project().to_string_lossy())),
+        "{projects}"
+    );
+
     // A second init is refused, with no window.
     let before = s.asks();
     let out = s.vahta(&["init"]);
