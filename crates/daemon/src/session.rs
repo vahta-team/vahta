@@ -128,6 +128,11 @@ impl Sessions {
         self.items.len()
     }
 
+    /// Every open session.
+    pub fn iter(&self) -> impl Iterator<Item = &Session> {
+        self.items.iter()
+    }
+
     pub fn add(&mut self, session: Session) {
         self.items.push(session);
     }

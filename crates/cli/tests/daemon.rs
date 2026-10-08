@@ -982,6 +982,58 @@ fn sandbox_with_secrets() -> Sandbox {
 }
 
 #[test]
+fn reset_remove_and_tier_name_the_open_sessions_that_hold_the_old_value() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock", "--label", "deploy the site"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
+    // A reset: the session still holds the old ZETA, and both the agent (the
+    // command's answer) and the person (the window) are told which session.
+    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-new"}"#]);
+    let out = s.vahta(&["reset", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(
+        said.contains("1 open session holds the old ZETA")
+            && said.contains("\"deploy the site\"")
+            && said.contains("vahta unlock"),
+        "{said}"
+    );
+    let closed = s
+        .window_log()
+        .into_iter()
+        .rev()
+        .find(|e| e["close"].is_string())
+        .map(|e| e["close"].to_string())
+        .unwrap_or_default();
+    assert!(closed.contains("old ZETA"), "{closed}");
+    assert!(s.journal().contains("\"event\":\"sessions_stale\""));
+    // And the session is refused at its next run, as before.
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+
+    // Moving BETA to each-use takes it out of the session: said so too.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["tier", "BETA", "each-use"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("the old BETA"));
+
+    // ALPHA is each-use: no session holds it, so nothing to say.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["remove", "ALPHA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains("open session"));
+
+    let all = format!(
+        "{}{}",
+        s.journal(),
+        serde_json::to_string(&s.window_log()).unwrap()
+    );
+    assert!(!all.contains("fake-"));
+}
+
+#[test]
 fn unlock_opens_a_session_for_the_session_tier_secrets_and_names_its_anchor() {
     let s = sandbox_with_secrets();
     let asks = s.asks();

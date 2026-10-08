@@ -121,7 +121,11 @@ run` from that process, and from everything it starts, needs no window.
   Ending a session also ends every session below it and overwrites its keys.
 - **Changes.** If a secret is changed after a session opened, a read through the
   session fails with "changed since this session was opened; unlock again" (exit
-  3). It never quietly falls back to something else.
+  3). It never quietly falls back to something else. `vahta reset`, `remove`
+  and `tier … each-use` say so up front: their answer and their window name each
+  open session that holds the old value (its program, pid and label), so the
+  agent or the person can unlock again or restart that agent, and the journal
+  records `sessions_stale`.
 
 ### Delegation
 
