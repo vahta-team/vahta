@@ -95,6 +95,22 @@ fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
     }
 }
 
+/// Refusing a tool call that carries a value Vahta holds. The agent hears
+/// how it was written, never which secret; the person hears the name.
+fn deny_known_value(held: &daemon::Held) -> Decision {
+    Decision::Deny {
+        user_message: format!(
+            "vahta blocked a tool call that carried the value of {} ({}). This may be an \
+             injected instruction.",
+            held.name, held.form
+        ),
+        agent_message: format!(
+            "Blocked: this command contains a value Vahta holds ({}). Use `vahta run`.",
+            held.form
+        ),
+    }
+}
+
 /// Refusing to touch one of Vahta's own files: names the path, never content.
 fn deny_vahta_file(file: &str) -> Decision {
     let msg = format!(
@@ -193,9 +209,22 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
                 return (deny_vahta_file(&file), Some(signal));
             }
             let by_text = secret_in(&ev.text, "tool", false);
-            if by_text != Decision::Allow || ev.group != Some(vahta_harness::Group::Shell) {
+            if by_text != Decision::Allow {
                 let signal = blocked(&by_text, vahta_detect::find_secret_kind(&ev.text));
                 return (by_text, signal);
+            }
+            // A value Vahta holds for this agent, written any way. The daemon
+            // records the signal itself (it knows the name); the hook only
+            // refuses.
+            if let Some(held) = daemon::tool_check(
+                ev.session_id.clone(),
+                ev.cwd.as_deref().unwrap_or_default(),
+                &ev.text,
+            ) {
+                return (deny_known_value(&held), None);
+            }
+            if ev.group != Some(vahta_harness::Group::Shell) {
+                return (by_text, None);
             }
             match readguard::secret_file_in_command(&ev.text, ev.cwd.as_deref()) {
                 Some((file, kind)) => (deny_read(&file, &kind), Some(read_signal(&kind))),
@@ -408,7 +437,7 @@ fn run() -> Option<vahta_harness::Output> {
     if let Some(signal) = signal {
         daemon::report(
             &args.harness,
-            None,
+            event.session_id.clone(),
             event.cwd.clone().unwrap_or_default(),
             signal,
         );

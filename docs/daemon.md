@@ -305,6 +305,7 @@ lock_sources = ["logind", "hyprland"]   # which triggers; unset = all, [] = none
 terminal = "kitty"      # the terminal the window opens in (Linux); empty = detect
 idle_minutes = 10       # the daemon exits after this long with nothing to do
 hook_output = "redact"  # or "observe": the hook only reports secrets in tool output
+alarm = "warn"          # or "lock": what the injection alarm does (see below)
 ```
 
 A misspelt key is an error, not a silent default. On Linux the window opens in
@@ -376,6 +377,69 @@ that new reports are dropped), and the next daemon journals and empties it.
 Refusals of the person's own prompt are not reported. These reports are the
 evidence for the injection alarm.
 
+## Injection alarm
+
+An agent that has been prompt-injected, or has wandered far from its task,
+tends to leave a trail at the hook: a secret-shaped value that is refused and
+then retried base64-encoded, a touch of Vahta's own files, a command meant for
+the person. One of those is a mistake. Several in a few minutes is a pattern,
+and the daemon watches for it.
+
+### Values Vahta holds, in other encodings
+
+When a session is opened (or a `vahta run` is given its values), the daemon
+builds, for each value of at least 8 bytes, the forms an agent might write it
+in: raw; base64 (standard and URL-safe, padded or not, wherever it sits inside
+a longer encoded text); hex in either case; URL-encoded; reversed. They live in
+memory only, in overwritten-on-drop buffers, exactly as long as the keys the
+session already holds, and are dropped with the session or the run. They are as
+sensitive as those keys.
+
+Two things use them:
+
+- **Output.** The hook's output scan and the scrubber of `vahta run` cut a form
+  out as they cut the value, with a label that names the form:
+  `***REDACTED(NAME (base64))***`.
+- **Tool calls.** Before a tool runs, the hook sends its text to the daemon
+  (`ToolCheck`) when one is running, within the hook's usual 300 ms. A hit is
+  refused. The agent is told only the form ("Blocked: this command contains a
+  value Vahta holds (base64). Use `vahta run`."); the secret's name goes to the
+  person, in the hook's message and the journal. With no daemon, nothing is
+  checked. A call over 256 KiB is checked in overlapping pieces, and only its
+  first 2 MiB; a form split across a piece boundary and longer than the 8 KiB
+  overlap is missed.
+
+Not covered: values split by the program's own formatting, compressed,
+encrypted, or carried by any other transformation, and values shorter than 8
+bytes.
+
+### Scoring
+
+Every hook report, live or spooled, and every `ToolCheck` hit counts toward a
+score per agent: the harness's session id when its payload has one, else the
+agent process. Weights: a refused secret 1, one let through in observe mode
+0.5, a refused secret that was hidden (base64, concatenation, hex) 4, a held
+value in a tool call 6, a touch of Vahta's own files 3, a command for the person
+(`reveal`, `copy`) 2, a change to the hook settings 4. The score is the sum over
+the last 10 minutes. At 6 the alarm goes off, at most once per agent per 10
+minutes. A held value in a tool call is enough alone; so are two disguised
+secrets.
+
+### What happens
+
+- `alarm = "warn"` (the default) opens a window, "Suspicious agent behaviour":
+  *This looks like prompt injection or an agent far outside its task: {what was
+  seen, no values}. Lock Vahta sessions now, then stop or restart the agent.*
+  with **Lock all sessions** and **Ignore for this agent session**. With no
+  answer, nothing happens.
+- `alarm = "lock"`, or no way to open a window (headless, cloud), or a window
+  that fails while asking: every session ends at once, and, where a window can
+  be opened, it says what happened.
+
+The journal records `alarm` (who, score, what, and the action taken) and
+`alarm_ignored`. `vahta daemon status` and `vahta sessions` show "alarm raised
+at ..." until the next `vahta unlock`.
+
 ## What this does not protect against
 
 Vahta is built so that an agent cannot *ask* for a secret. It cannot stop everything
@@ -383,9 +447,10 @@ an agent running as you could *do*. Read this before relying on it.
 
 - **The command sees the secret.** The command `vahta run` starts has it in its
   environment, and can print it, send it somewhere, or write it to a file. The
-  scrubber catches a value that appears in the output as it is; it does **not**
-  catch one that is encoded (base64, URL-encoded, split by the program's own
-  formatting). Run commands you trust with secrets you can afford to have used.
+  scrubber catches a value that appears in the output as it is, and in the
+  encodings an agent is likely to try (base64, hex, URL-encoded, reversed; see
+  below); it does **not** catch one that is split by the program's own
+  formatting (line-wrapped base64) or transformed any other way. Run commands you trust with secrets you can afford to have used.
 - **`/proc/<pid>/environ`.** On Linux, a process of the same user can read the
   environment of another of its processes. While a command that was given a secret
   runs, another process running as you (including an agent's other tools) can read

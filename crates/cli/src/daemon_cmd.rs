@@ -77,9 +77,36 @@ pub fn connect(env: &Env, command: &str, stderr: &mut dyn Write) -> Result<Conne
 }
 
 fn status_text(s: &StatusInfo) -> String {
-    format!(
+    let mut text = format!(
         "running: vahta daemon {} (pid {}), {} session(s), {} connection(s), up {}s\nruntime: {}",
         s.version, s.pid, s.sessions, s.connections, s.uptime_secs, s.runtime_dir
+    );
+    if let Some(at) = s.alarm_at {
+        text.push('\n');
+        text.push_str(&alarm_text(at));
+    }
+    text
+}
+
+/// "alarm raised at 2026-10-08 12:34:56 UTC (sessions were locked or the
+/// agent was flagged; unlock again to clear this)".
+pub fn alarm_text(at: u64) -> String {
+    let (days, rest) = (at / 86_400, at % 86_400);
+    // Civil date from days since 1970-01-01 (Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "alarm raised at {year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC; it stays until the next unlock",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
     )
 }
 
@@ -190,6 +217,7 @@ fn status(env: &Env, json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write)
                     "connections": s.connections,
                     "uptime_secs": s.uptime_secs,
                     "runtime_dir": s.runtime_dir,
+                    "alarm_at": s.alarm_at,
                 });
                 let _ = writeln!(
                     stdout,
@@ -346,6 +374,7 @@ pub fn report(
         | ClientReply::Sessions { .. }
         | ClientReply::OutputSpans { .. }
         | ClientReply::OutputReleased { .. }
+        | ClientReply::ToolDeny { .. }
         | ClientReply::RunStarted {} => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
             EXIT_FAILED
@@ -370,5 +399,20 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::NoSession => "no session to narrow; run `vahta unlock` first",
         RefusalKind::UnknownOutput => "no output kept under that reference for this agent",
         RefusalKind::CommandNotAllowed => "this command is not allowed to use this secret",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::alarm_text;
+
+    #[test]
+    fn the_alarm_time_reads_as_utc() {
+        assert_eq!(
+            alarm_text(1_700_000_000),
+            "alarm raised at 2023-11-14 22:13:20 UTC; it stays until the next unlock"
+        );
+        assert!(alarm_text(0).starts_with("alarm raised at 1970-01-01 00:00:00 UTC"));
+        assert!(alarm_text(951_782_400).starts_with("alarm raised at 2000-02-29 00:00:00"));
     }
 }

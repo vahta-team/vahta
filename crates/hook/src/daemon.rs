@@ -136,6 +136,67 @@ pub fn report(harness: &str, session: Option<String>, cwd: String, signal: Signa
     }
 }
 
+/// The shortest text that can carry a held value: the daemon's own floor
+/// (`MIN_EXACT`).
+const MIN_CHECKED: usize = 8;
+/// A tool call larger than this is checked in pieces, each a frame of its own
+/// (a frame is at most 1 MiB, and JSON escaping can double a text).
+const CHECK_CHUNK: usize = 256 * 1024;
+/// How much of one piece the next repeats, so a value across the cut is
+/// still whole in one of them. A value's encoded form longer than this, split
+/// by a cut, is missed.
+const CHECK_OVERLAP: usize = 8 * 1024;
+/// At most this many pieces are sent: a text past 2 MiB is checked in its
+/// first pieces only.
+const CHECK_PIECES: usize = 8;
+
+/// A held value the daemon found in a tool call: how it was written (what the
+/// agent may be told) and its name (for the person only).
+pub struct Held {
+    pub form: String,
+    pub name: String,
+}
+
+/// Ask a running daemon whether `text` carries a value it holds for this
+/// agent, in any form (raw, base64, hex, URL-encoded, reversed). Only when a
+/// daemon of this version runs and answers within [`WAIT`]; anything else is
+/// `None`, and the call goes on to what the hook's own detector decided.
+pub fn tool_check(session: Option<String>, cwd: &str, text: &str) -> Option<Held> {
+    if text.len() < MIN_CHECKED {
+        return None;
+    }
+    let paths = Paths::from_env(None).ok()?;
+    let mut start = 0;
+    for _ in 0..CHECK_PIECES {
+        let mut end = (start + CHECK_CHUNK).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let request = ClientRequest::ToolCheck {
+            session: session.clone(),
+            cwd: cwd.to_string(),
+            text: text[start..end].to_string(),
+        };
+        match deliver(paths.clone(), request) {
+            Delivery::Answered(ClientReply::ToolDeny { form, name }) => {
+                return Some(Held { form, name });
+            }
+            Delivery::Answered(_) => {}
+            // No daemon, or one that did not answer: no check, and no
+            // second try for the next piece.
+            Delivery::NoDaemon | Delivery::Lost => return None,
+        }
+        if end >= text.len() {
+            break;
+        }
+        start = end.saturating_sub(CHECK_OVERLAP);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+    None
+}
+
 pub fn scan(scan: Scan) -> Option<Answer> {
     let request = ClientRequest::OutputScan {
         cwd: scan.cwd,

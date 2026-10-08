@@ -18,10 +18,17 @@
 //! already covered by an earlier one in it. The result is the same whatever the
 //! chunking of the input.
 //!
-//! **Not covered**, by design and in the documentation: a value that appears
-//! transformed (base64, URL-encoded, split by the program's own formatting) is
-//! not recognised, and the few bytes held back because they look like the
-//! start of a value appear late, at the next read or at the end.
+//! **Encodings.** [`Scrubber::with_encodings`] also takes out a value written
+//! as base64 (either alphabet, padded or not, wherever it sits in a longer
+//! encoded text), hex, URL-encoded or reversed, under the label
+//! `NAME (base64)` and so on (see `encoded.rs`). A value shorter than
+//! `MIN_EXACT` is taken out raw only, as it was.
+//!
+//! **Not covered**, by design and in the documentation: a value split by the
+//! program's own formatting (line-wrapped base64, say), or transformed in any
+//! other way (compressed, encrypted, rot13), is not recognised, and the few
+//! bytes held back because they look like the start of a value appear late,
+//! at the next read or at the end.
 
 use zeroize::Zeroizing;
 
@@ -67,6 +74,17 @@ impl Scrubber {
             max_len,
             pending: Zeroizing::new(Vec::new()),
         }
+    }
+
+    /// As [`Scrubber::new`], and each value of at least `MIN_EXACT` bytes in
+    /// its encoded forms too, labelled `NAME (form)`.
+    pub fn with_encodings(values: Vec<(String, Vec<u8>)>) -> Scrubber {
+        let forms = crate::encoded::EncodedSet::build(
+            values.iter().map(|(n, v)| (n.as_str(), v.as_slice())),
+        );
+        let mut all = values;
+        all.extend(forms.encoded_targets());
+        Scrubber::new(all)
     }
 
     /// Feed more output; get back the part that is now certain.
@@ -407,5 +425,33 @@ mod tests {
         assert!(text(&whole).contains("***REDACTED(S)***"));
         assert_eq!(scrub(&[("S", value)], &input, 4096), whole);
         assert_eq!(scrub(&[("S", value)], &input, 7), whole);
+    }
+
+    #[test]
+    fn encoded_values_are_taken_out_with_their_form_in_the_label() {
+        let value = "fake-one-value!";
+        let mut s = Scrubber::with_encodings(values(&[("A", value), ("S", "abc")]));
+        let b64 = {
+            let set = crate::encoded::EncodedSet::build([("A", value.as_bytes())]);
+            let (_, bytes) = set
+                .targets()
+                .into_iter()
+                .find(|(l, _)| l == "A (base64)")
+                .unwrap();
+            String::from_utf8(bytes).unwrap()
+        };
+        let input = format!("raw {value}, b64 {b64}, short abc, tail");
+        let mut out = s.push(input.as_bytes());
+        out.extend(s.finish());
+        let out = text(&out);
+        assert_eq!(
+            out,
+            "raw ***REDACTED(A)***, b64 ***REDACTED(A (base64))***, short ***REDACTED(S)***, tail"
+        );
+        // Short values are taken out raw only: no encoded form of "abc".
+        let mut s = Scrubber::with_encodings(values(&[("S", "abc")]));
+        let mut out = s.push(b"YWJj abc");
+        out.extend(s.finish());
+        assert_eq!(text(&out), "YWJj ***REDACTED(S)***");
     }
 }

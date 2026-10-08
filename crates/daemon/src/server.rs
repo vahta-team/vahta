@@ -115,6 +115,8 @@ pub(crate) struct Shared {
     /// Tool outputs kept for the agent to ask about, and what the person has
     /// let through (see `output.rs`).
     pub(crate) outputs: Mutex<Outputs>,
+    /// What agents have tried, weighed (see `alarm.rs`).
+    pub(crate) alarm: crate::alarm::Alarm,
     started: Instant,
     stop: AtomicBool,
     connections: AtomicUsize,
@@ -159,6 +161,7 @@ impl Shared {
             connections: self.connections.load(Ordering::SeqCst),
             uptime_secs: self.started.elapsed().as_secs(),
             runtime_dir: self.options.paths.runtime.display().to_string(),
+            alarm_at: self.alarm.raised_at(),
         }
     }
 }
@@ -215,7 +218,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
     let listener =
         Listener::bind(&address).map_err(|e| ServerError::Io("listen on the socket", e))?;
     journal.record(Entry::new("daemon_start").result("ok", Some(&options.version)));
-    crate::report::ingest_spool(&options.paths, &journal);
+    let spooled = crate::report::ingest_spool(&options.paths, &journal);
 
     let registry = Arc::new(SurfaceRegistry::default());
     let surface: Box<dyn PromptSurface> = match options.surface.take() {
@@ -250,11 +253,14 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         store,
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
+        alarm: crate::alarm::Alarm::default(),
         started: Instant::now(),
         stop: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
         last_activity: Mutex::new(Instant::now()),
     });
+
+    crate::report::feed_spooled(&shared, spooled);
 
     let idle_shared = shared.clone();
     std::thread::spawn(move || idle_watch(&idle_shared));
@@ -726,7 +732,16 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 cwd: _,
                 signal,
             } => (
-                crate::report::hook_report(&ctx, session.as_deref(), &harness, &signal)
+                crate::report::hook_report(shared, &ctx, session.as_deref(), &harness, &signal)
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::ToolCheck {
+                session,
+                cwd: _,
+                text,
+            } => (
+                crate::report::tool_check(shared, &ctx, session.as_deref(), &text)
                     .unwrap_or_else(|r| r),
                 false,
             ),

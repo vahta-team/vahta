@@ -35,6 +35,7 @@ vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
 vahta-vault = { path = "../vault" }
 zeroize = "1"
+aho-corasick = "1"
 
 # Linux: logind's PrepareForSleep and Lock signals, over the local system bus
 # (a socket in /run, not a network client), to end sessions on suspend and

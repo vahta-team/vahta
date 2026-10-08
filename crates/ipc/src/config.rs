@@ -7,6 +7,7 @@
 //! terminal = "kitty"       # the terminal the prompt window opens in (Linux)
 //! idle_minutes = 10        # the daemon exits after this long with nothing to do
 //! hook_output = "redact"   # or "observe": the hook only reports secrets in tool output
+//! alarm = "warn"           # or "lock": what an agent that looks injected gets
 //! ```
 //!
 //! A missing file is the defaults. A file that does not parse, or carries a key
@@ -34,6 +35,7 @@ pub struct Config {
     pub terminal: String,
     pub idle_minutes: u64,
     pub hook_output: HookOutput,
+    pub alarm: AlarmAction,
 }
 
 /// What the hook does with a secret in a tool's output.
@@ -49,6 +51,19 @@ pub enum HookOutput {
     Observe,
 }
 
+/// What the daemon does when an agent's behaviour scores past the injection
+/// alarm's threshold (see the daemon's `alarm.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlarmAction {
+    /// Ask the person in a window: lock every session, or ignore this agent
+    /// session (the default). With no window to ask in, it locks.
+    #[default]
+    Warn,
+    /// End every session at once, and tell the person.
+    Lock,
+}
+
 impl Default for Config {
     fn default() -> Config {
         Config {
@@ -58,6 +73,7 @@ impl Default for Config {
             terminal: String::new(),
             idle_minutes: 10,
             hook_output: HookOutput::Redact,
+            alarm: AlarmAction::Warn,
         }
     }
 }
@@ -126,6 +142,9 @@ mod tests {
         assert_eq!(c.hook_output, HookOutput::Redact);
         let c = Config::parse("hook_output = \"observe\"\n").unwrap();
         assert_eq!(c.hook_output, HookOutput::Observe);
+        assert_eq!(c.alarm, AlarmAction::Warn);
+        let c = Config::parse("alarm = \"lock\"\n").unwrap();
+        assert_eq!(c.alarm, AlarmAction::Lock);
     }
 
     #[test]
@@ -146,6 +165,7 @@ mod tests {
             "session_minutes = 0\n",
             "idle_minutes = 0\n",
             "hook_output = \"off\"\n",
+            "alarm = \"loud\"\n",
             "= broken",
         ] {
             assert!(Config::parse(bad).is_err(), "{bad}");

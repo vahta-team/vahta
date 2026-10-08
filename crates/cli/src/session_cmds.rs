@@ -288,10 +288,17 @@ pub fn run_sessions(
             return EXIT_DAEMON;
         }
     };
+    let mut alarm_at = None;
     let sessions = match connector.connect_running() {
         Ok(None) => Vec::new(),
         Ok(Some(mut conn)) => match conn.request(&ClientRequest::Sessions {}) {
-            Ok(ClientReply::Sessions { sessions }) => sessions,
+            Ok(ClientReply::Sessions {
+                sessions,
+                alarm_at: at,
+            }) => {
+                alarm_at = at;
+                sessions
+            }
             Ok(_) | Err(_) => {
                 let _ = writeln!(stderr, "vahta sessions: error: the daemon did not answer");
                 return EXIT_FAILED;
@@ -306,10 +313,14 @@ pub fn run_sessions(
         let _ = writeln!(
             stdout,
             "{}",
-            serde_json::to_string_pretty(&json!({"sessions": sessions})).unwrap_or_default()
+            serde_json::to_string_pretty(&json!({"sessions": sessions, "alarm_at": alarm_at}))
+                .unwrap_or_default()
         );
     } else {
         let _ = writeln!(stdout, "{}", list_text(&sessions));
+        if let Some(at) = alarm_at {
+            let _ = writeln!(stdout, "{}", daemon_cmd::alarm_text(at));
+        }
     }
     EXIT_CLEAN
 }

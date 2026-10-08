@@ -212,7 +212,7 @@ pub(crate) fn execute(
         let (w, f, s) = (
             writer.clone(),
             finished.clone(),
-            Scrubber::new(values.clone()),
+            Scrubber::with_encodings(values.clone()),
         );
         pumps.push(std::thread::spawn(move || pump(out, s, w, false, f)));
     }
@@ -220,7 +220,7 @@ pub(crate) fn execute(
         let (w, f, s) = (
             writer.clone(),
             finished.clone(),
-            Scrubber::new(values.clone()),
+            Scrubber::with_encodings(values.clone()),
         );
         pumps.push(std::thread::spawn(move || pump(err, s, w, true, f)));
     }
