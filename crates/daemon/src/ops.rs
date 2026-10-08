@@ -416,10 +416,69 @@ pub(crate) fn store(
         StoreMode::Add => "Saved",
         StoreMode::Reset => "Replaced",
     };
-    window.close(Some(&format!("{capitalised} {name}.")));
+    let note = match mode {
+        StoreMode::Add => None,
+        StoreMode::Reset => stale_sessions_note(ctx, &vault.vault_id(), name),
+    };
+    window.close(Some(&with_note(format!("{capitalised} {name}."), &note)));
     Ok(ClientReply::Done {
-        message: done_message(done, name, class, tier, bound),
+        message: with_note(done_message(done, name, class, tier, bound), &note),
     })
+}
+
+/// After a secret's value, tier or presence changed: the open sessions that
+/// hold the old one. They are refused at their next `run` (their key opens
+/// nothing now), so the person and the agent are told up front which ones,
+/// and the journal records it. `None` when no session holds it.
+pub(crate) fn stale_sessions_note(
+    ctx: &Ctx<'_>,
+    vault_id: &[u8; 16],
+    name: &str,
+) -> Option<String> {
+    let held: Vec<(String, String)> = {
+        let sessions = ctx.shared.sessions.lock().ok()?;
+        sessions
+            .iter()
+            .filter(|s| &s.vault_id == vault_id && s.scope.iter().any(|n| n == name))
+            .map(|s| {
+                let who = match &s.label {
+                    Some(l) => format!("{} pid {}, \"{l}\"", s.anchor_exe, s.anchor.pid),
+                    None => format!("{} pid {}", s.anchor_exe, s.anchor.pid),
+                };
+                (s.id.clone(), who)
+            })
+            .collect()
+    };
+    if held.is_empty() {
+        return None;
+    }
+    let ids: Vec<String> = held.iter().map(|(id, _)| id.clone()).collect();
+    ctx.journal(
+        Entry::new("sessions_stale")
+            .vault(vault_id)
+            .names(&[name.to_string()])
+            .result("stale", Some(&format!("sessions {}", ids.join(", ")))),
+    );
+    let who: Vec<&str> = held.iter().map(|(_, w)| w.as_str()).collect();
+    let n = held.len();
+    let (sessions, they) = if n == 1 {
+        ("open session holds", "It")
+    } else {
+        ("open sessions hold", "They")
+    };
+    Some(format!(
+        "{n} {sessions} the old {name} ({}). {they} will be refused until unlocked again: run \
+         `vahta unlock` again in that agent, or restart the agent.",
+        who.join("; ")
+    ))
+}
+
+/// `message`, with the stale-session note on a line of its own when there is one.
+fn with_note(message: String, note: &Option<String>) -> String {
+    match note {
+        Some(n) => format!("{message}\n{n}"),
+        None => message,
+    }
 }
 
 /// Words in a secret's name that say what it guards. Most cloud and payment
@@ -564,9 +623,18 @@ pub(crate) fn set_tier(ctx: &Ctx<'_>, cwd: &str, name: &str, tier: Tier) -> Flow
             .names(&[name.to_string()])
             .result("ok", Some(tier_text(tier))),
     );
-    window.close(Some(&format!("{name} is now {}.", tier_text(tier))));
+    // Moving to each-use takes it out of every session; moving to session
+    // puts it in none.
+    let note = match tier {
+        Tier::EachUse => stale_sessions_note(ctx, &vault.vault_id(), name),
+        Tier::Session => None,
+    };
+    window.close(Some(&with_note(
+        format!("{name} is now {}.", tier_text(tier)),
+        &note,
+    )));
     Ok(ClientReply::Done {
-        message: format!("{name} is now {}", tier_text(tier)),
+        message: with_note(format!("{name} is now {}", tier_text(tier)), &note),
     })
 }
 
@@ -587,9 +655,10 @@ pub(crate) fn remove(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> 
             .names(&[name.to_string()])
             .result("ok", None),
     );
-    window.close(Some(&format!("Removed {name}.")));
+    let note = stale_sessions_note(ctx, &vault.vault_id(), name);
+    window.close(Some(&with_note(format!("Removed {name}."), &note)));
     Ok(ClientReply::Done {
-        message: format!("removed {name}"),
+        message: with_note(format!("removed {name}"), &note),
     })
 }
 
