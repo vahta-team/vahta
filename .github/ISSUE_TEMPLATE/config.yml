@@ -5,4 +5,4 @@ contact_links:
     about: Questions, ideas, and informal discussion
   - name: Wiki
     url: https://github.com/vahta-team/vahta/wiki
-    about: Command reference, admission, threat-model notes (`ka docs`)
+    about: Command reference, admission, threat-model notes

@@ -2,29 +2,50 @@
 
 ## Setup
 
+Vahta is a Rust workspace (`crates/`). Install [rustup](https://rustup.rs/); the
+toolchain, 1.99, is pinned in `rust-toolchain.toml` and is fetched on the first
+`cargo` command, together with `rustfmt` and `clippy`.
+
 ```bash
-pip install -e ".[dev]"
+git clone https://github.com/vahta-team/vahta.git
+cd vahta
+cargo build --workspace
 ```
 
-Requires Python 3.10+.
+`scripts/install-local.sh` builds and installs the binaries for daily use.
+
+## Checks
+
+CI runs these three on Linux, macOS and Windows; run them before you push:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+A change under `crates/rules/` also runs that crate's rule tests in CI
+(`cargo test -p vahta-rules`).
 
 ## Tests
 
-CI runs the same command on Windows, Ubuntu, and macOS (Python 3.10 and 3.13):
+- **Never write a secret-shaped literal** in a test, a doc or a fixture. Build it
+  from pieces at run time (`["prefix", "_", "..."].concat()`); repository tests
+  fail the build if a committed file reads as a key.
+- **Tests never touch the real HOME.** Point `HOME`, the config, data and runtime
+  directories at a temporary directory. A test must not read or write a real
+  vault, journal or harness settings file.
+- The vault tests run the real KDF and are slow in a debug build; the crypto
+  crates are optimised in the dev profile for that reason.
 
-```bash
-pytest -q
-```
-
-Optional marker: `@pytest.mark.slow` for heavy process-spawning tests. Skip with `pytest -q -m "not slow"` for a faster local loop.
-
-There is no separate linter job in CI today — keep changes consistent with surrounding code.
+`legacy/` is the Python key-amnesia, kept for reference. It is not built or tested
+here; changes to it belong on `master`.
 
 ## Pull requests
 
 - Prefer a focused PR with a short description of *why*.
 - Branch names in this repo usually look like `feat/…`, `fix/…`, `docs/…`, or `chore/…`.
-- Keep the suite green (`pytest -q`).
+- Keep format, clippy and the tests green.
 - Do not paste secret values into issues, PRs, or commit messages.
 - A merged PR's branch is deleted automatically. To keep one, name it
   `keep/...` when you create it, or add the label `keep-branch` to the PR
