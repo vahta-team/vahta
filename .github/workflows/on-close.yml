@@ -1,0 +1,80 @@
+name: on close
+
+# When a pull request closes:
+#
+# - cancel its branch's test runs that are still going. They keep holding
+#   runners (macOS ones for over an hour) and starve the run on the branch
+#   it was merged into.
+# - if it was merged, delete its branch, unless the branch should stay:
+#   its name starts with `keep/` (decided when the branch is made), the pull
+#   request has the label `keep-branch` (decided later), or another open
+#   pull request targets it (deleting it would close that one). `master` and
+#   `release/**` are never deleted.
+#
+# A `pull_request` from a fork gets a read-only token, so this only acts on
+# branches of this repository. A `pull_request` workflow runs from the base
+# branch's copy, so this file lives on `master` and on `release/**` alike.
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cancel:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.pull_request.head.ref }}
+    steps:
+      - name: Cancel the branch's runs that are still going
+        run: |
+          set -euo pipefail
+          for status in queued in_progress waiting pending requested; do
+            gh run list --branch "$BRANCH" --status "$status" --limit 50 \
+              --json databaseId,workflowName,event \
+              --jq '.[] | select(.workflowName != "on close") | "\(.databaseId) \(.workflowName) \(.event)"'
+          done | sort -u | while read -r id name event; do
+            echo "cancelling $id ($name, $event)"
+            gh run cancel "$id" || echo "  could not cancel $id (already finished?)"
+          done
+
+  delete-branch:
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: cancel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.pull_request.head.ref }}
+      KEEP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'keep-branch') }}
+    steps:
+      - name: Delete the merged branch unless it should stay
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in
+            master|release/*) echo "$BRANCH is never deleted"; exit 0 ;;
+            keep/*) echo "$BRANCH starts with keep/; kept"; exit 0 ;;
+          esac
+          if [ "$KEEP_LABEL" = "true" ]; then
+            echo "the pull request has the keep-branch label; $BRANCH kept"; exit 0
+          fi
+          open=$(gh pr list --base "$BRANCH" --state open --json number --jq 'map("#\(.number)") | join(" ")')
+          if [ -n "$open" ]; then
+            echo "open pull requests target $BRANCH ($open); kept"; exit 0
+          fi
+          if gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$BRANCH"; then
+            echo "deleted $BRANCH"
+          else
+            echo "could not delete $BRANCH (already gone?)"
+          fi
