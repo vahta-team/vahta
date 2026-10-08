@@ -913,6 +913,60 @@ impl Sandbox {
     }
 }
 
+#[test]
+fn hook_reports_and_the_spool_reach_the_journal_without_values() {
+    use vahta_ipc::protocol::{Evasion, Signal};
+    use vahta_ipc::spool::{self, SpoolLine};
+
+    let s = Sandbox::new();
+    // A report a hook spooled while no daemon ran.
+    spool::append(
+        &s.paths(),
+        &SpoolLine {
+            time: 1_700_000_000,
+            session: None,
+            harness: "codex".into(),
+            cwd: "/p".into(),
+            signal: Signal::AgentGuard {
+                command: "vahta reveal".into(),
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+    wait_until("the spool to be journalled", 10, || {
+        s.journal().contains("command vahta reveal; spooled")
+    });
+    assert!(!spool::spool_file(&s.paths()).exists());
+
+    // A report from a hook while the daemon runs.
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    let reply = conn
+        .request(&ClientRequest::HookReport {
+            session: Some("agent-1".into()),
+            harness: "claude".into(),
+            cwd: s.project().to_string_lossy().into_owned(),
+            signal: Signal::Blocked {
+                category: "an API token".into(),
+                rule: "test.rule".into(),
+                evasion: Some(Evasion::Base64),
+            },
+        })
+        .unwrap();
+    assert!(matches!(reply, ClientReply::Ok {}));
+    let journal = s.journal();
+    let line = journal
+        .lines()
+        .find(|l| l.contains("\"result\":\"blocked\""))
+        .expect("a blocked report in the journal");
+    let entry: Value = serde_json::from_str(line).unwrap();
+    assert_eq!(entry["event"], "hook_report");
+    assert_eq!(
+        entry["reason"],
+        "claude; an API token; rule test.rule; hidden as base64; agent session agent-1"
+    );
+}
+
 /// A vault with a session-tier ZETA and BETA and an each-use ALPHA.
 fn sandbox_with_secrets() -> Sandbox {
     let s = Sandbox::new();

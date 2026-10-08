@@ -23,5 +23,11 @@
     },
     "systemMessage": "vahta blocked access to `{{TMP}}/proj/.vahta/vault.vht`: it is part of Vahta's own files (a vault, its lock or backups, or Vahta's local store and journal). Do not read, change, move or delete it; use the `vahta` commands, which keep values out of the transcript."
   },
-  "exit": 0
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "vahta_file_touch",
+      "path": "{{TMP}}/proj/.vahta/vault.vht"
+    }
+  ]
 }

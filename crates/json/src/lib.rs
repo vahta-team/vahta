@@ -15,9 +15,9 @@
 //! Python's does. A transcript line Python parses and this does not is a
 //! secret never looked at; one this parses and Python rejects is a finding
 //! Python would not report. Both are bugs, so where `json.loads` is odd, this
-//! is odd the same way. Every rule below is pinned by a test and by
-//! `benchmarks/diff_transcripts.py`, which compares this against the
-//! interpreter on generated input.
+//! is odd the same way. Every rule below is pinned by a test (it was
+//! also compared against the interpreter on generated input while ka was
+//! tested alongside).
 //!
 //! # What Python's parser does that a strict RFC 8259 one does not
 //!
@@ -50,8 +50,8 @@
 //! So each lone surrogate is mapped to its own private-use scalar,
 //! `U+10F800 + (surrogate - U+D800)`: also not a letter, digit, space or word
 //! character, one character, and distinct from every other surrogate. The two
-//! behave identically in the detector, which `diff_transcripts.py` checks
-//! rather than assumes. The one divergence this leaves is a document that
+//! behave identically in the detector, which was checked against the
+//! interpreter rather than assumed. The one divergence this leaves is a document that
 //! contains a **real** character in `U+10F800..=U+10FFFF` alongside a lone
 //! surrogate in the same string, where entropy could differ by one distinct
 //! symbol. Those code points are unassigned private use in supplementary

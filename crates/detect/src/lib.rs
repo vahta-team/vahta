@@ -1,15 +1,11 @@
 //! Secret-shape detector for Vahta.
 //!
-//! A port of `key_amnesia.detect_py`, which remains the specification: the
-//! measured evidence behind every threshold — why the likely-floor sits at
-//! 0.50 rather than 0.60, why hex is an explicit exception instead of a
-//! lowered floor, why length >= 20 was rejected — lives in that module's
-//! docstring and is not restated here.
-//!
-//! The port is proven by running the Python test suite against this
-//! implementation through the extension module, not by a corpus written for
-//! the occasion. Behaviour is frozen: this crate must agree with Python,
-//! including where Python is arguably wrong.
+//! It began as a port of key-amnesia's `detect_py`, whose docstring holds the
+//! measured evidence behind the original thresholds (why the likely-floor
+//! sits at 0.50 rather than 0.60, why hex is an explicit exception instead of
+//! a lowered floor, why length >= 20 was rejected). This crate is now the
+//! specification: it no longer has to agree with Python, and its own tests
+//! pin its behaviour.
 //!
 //! Never returns or logs secret *values*.
 

@@ -21,6 +21,7 @@ mod lock;
 mod ops;
 mod output;
 mod pathfind;
+mod report;
 mod run;
 mod run_ask;
 mod run_ops;

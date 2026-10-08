@@ -2,7 +2,7 @@
 //!
 //! A port of `_deep_candidate_paths`, `iter_agent_transcript_files`,
 //! `_apply_secret_keys`, `_scan_transcript_payload`, `_findings_for_transcript`
-//! and `scan_deep` from `key_amnesia.scan_py`, which remains the specification.
+//! and `scan_deep` from `key_amnesia.scan_py`.
 //!
 //! Nothing here reads the environment or asks who the user is. The caller
 //! supplies the home directory and, for the one Windows-flavoured candidate

@@ -12,9 +12,8 @@
 //! These commands take no secret and no password as an argument: the person
 //! types them in the window. `vahta scan [PATH]` is the project path of `ka scan`, and
 //! with `--deep` the home dotfiles, MCP configs and agent session transcripts
-//! as well. The scan's flags, output and exit codes match the
-//! Python command's, and `src/key_amnesia/scan_py.py` remains the
-//! specification.
+//! as well. The scan's flags, output and exit codes began as those of
+//! the Python command.
 //!
 //! What it does **not** do, deliberately: the interactive import into a vault
 //! (`--yes`), whose format is not settled. It stays in the Python `ka scan`;

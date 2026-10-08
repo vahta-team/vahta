@@ -8,13 +8,7 @@ on:
   pull_request:
     branches: [master, "release/**"]
   # Manual re-run after GitHub Actions infra flakes without a no-op commit.
-  # UI: Actions → tests → Run workflow → master
   workflow_dispatch:
-    inputs:
-      macos_python:
-        description: "Also run ka's Python suite on macOS (75-90 minutes)"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -27,198 +21,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        # macOS Python takes 75-90 minutes (ka's real Argon2id, 1 GiB per
-        # unlock, is slow there) and holds the few macOS runners that the
-        # short Rust job needs. It runs only when asked: Actions -> tests ->
-        # Run workflow, with "macos_python" ticked (once per ka release).
-        os: ${{ fromJSON(inputs.macos_python && '["windows-latest","ubuntu-latest","macos-latest"]' || '["windows-latest","ubuntu-latest"]') }}
-        python-version: ["3.10", "3.13"]
-        impl: [python]
-        include:
-          # The compiled implementation, on one OS and one Python. 3.14 on
-          # purpose: the detector's Unicode tables are read out of CPython
-          # 3.14 (Unicode 16.0), and benchmarks/diff_unicode.py compares them
-          # against the running interpreter, so it only agrees on that version.
-          - os: ubuntu-latest
-            python-version: "3.14"
-            impl: rust
-    runs-on: ${{ matrix.os }}
-    # Cap hung runners; macOS pytest often needs 45-75m (historical greens
-    # on master finished in ~1-2h). 30m cancelled healthy jobs mid-suite.
-    timeout-minutes: 90
-    # No marketplace `uses:` steps: during Actions partial/major outages,
-    # "Set up job" fails while resolving action download info even before
-    # checkout. Prefer toolcache Python + git fetch; install via uv on miss
-    # (macos-latest toolcache currently ships 3.11+ only, not 3.10).
-    # uv-managed Pythons are PEP 668 externally-managed — use a seeded venv.
-    defaults:
-      run:
-        shell: bash
-    # `python` is each dispatcher's default, so the python legs behave exactly
-    # as they did before this variable existed. A missing extension falls back
-    # to Python silently, so the rust leg checks it is really in use below.
-    env:
-      KEY_AMNESIA_DETECT_IMPL: ${{ matrix.impl }}
-      KEY_AMNESIA_SCAN_IMPL: ${{ matrix.impl }}
-    steps:
-      - name: Checkout
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git init
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          git fetch --depth 1 origin "${{ github.sha }}"
-          git checkout --force FETCH_HEAD
-
-      - name: Select Python ${{ matrix.python-version }}
-        id: py
-        run: |
-          set -euo pipefail
-          VER="${{ matrix.python-version }}"
-          case "${{ runner.os }}" in
-            Linux)   BASE="/opt/hostedtoolcache/Python" ;;
-            macOS)   BASE="/Users/runner/hostedtoolcache/Python" ;;
-            Windows) BASE="/c/hostedtoolcache/windows/Python" ;;
-            *) echo "unsupported OS ${{ runner.os }}" >&2; exit 1 ;;
-          esac
-          case "$(uname -m)" in
-            x86_64|amd64) ARCH=x64 ;;
-            arm64|aarch64) ARCH=arm64 ;;
-            *) ARCH=x64 ;;
-          esac
-
-          find_toolcache() {
-            local cand
-            cand=$(ls -d "${BASE}/${VER}".*/${ARCH} 2>/dev/null | sort -V | tail -n 1 || true)
-            if [ -z "${cand}" ]; then
-              cand=$(ls -d "${BASE}/${VER}".*/* 2>/dev/null | sort -V | tail -n 1 || true)
-            fi
-            printf '%s' "${cand}"
-          }
-
-          resolve_bin() {
-            local cand="$1"
-            if [ "${{ runner.os }}" = "Windows" ]; then
-              printf '%s' "${cand}/python.exe"
-            else
-              printf '%s' "${cand}/bin/python"
-            fi
-          }
-
-          CAND=$(find_toolcache)
-          if [ -n "${CAND}" ]; then
-            PY=$(resolve_bin "${CAND}")
-          else
-            # uv-managed interpreters are PEP 668 externally-managed; pip needs a venv.
-            echo "No toolcache Python ${VER} under ${BASE}; installing via uv + venv" >&2
-            ls -la "${BASE}" >&2 || true
-            if ! command -v uv >/dev/null 2>&1; then
-              curl -LsSf https://astral.sh/uv/install.sh | sh
-              export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
-            fi
-            # Windows GitHub bash: uv often lands in USERPROFILE\.local\bin
-            if ! command -v uv >/dev/null 2>&1; then
-              export PATH="${USERPROFILE}/.local/bin:${PATH}"
-            fi
-            command -v uv
-            uv python install "${VER}"
-            VENV="${RUNNER_TEMP}/ka-py${VER}"
-            # --seed installs pip so later `python -m pip` works (uv venvs omit it by default).
-            uv venv --seed --python "${VER}" "${VENV}"
-            if [ "${{ runner.os }}" = "Windows" ]; then
-              PY="${VENV}/Scripts/python.exe"
-            else
-              PY="${VENV}/bin/python"
-            fi
-          fi
-
-          if [ ! -x "${PY}" ] && [ ! -f "${PY}" ]; then
-            echo "Python binary missing: ${PY}" >&2
-            exit 1
-          fi
-          echo "python=${PY}" >> "$GITHUB_OUTPUT"
-          "${PY}" -V
-
-      - name: Install
-        run: |
-          set -euo pipefail
-          PY="${{ steps.py.outputs.python }}"
-          "${PY}" -V
-          "${PY}" -m pip install -U pip
-          "${PY}" -m pip install -e ".[dev]"
-
-      - name: Build the Rust extensions
-        if: matrix.impl == 'rust'
-        run: |
-          set -euo pipefail
-          # Runners ship rustup and a stable cargo. pyo3 needs to know which
-          # interpreter to build against.
-          export PYO3_PYTHON="${{ steps.py.outputs.python }}"
-          cargo --version
-          cargo build --release -p vahta-pyext -p vahta-pyext-scan
-          cp target/release/lib_detect_rs.so src/key_amnesia/_detect_rs.so
-          cp target/release/lib_scan_rs.so src/key_amnesia/_scan_rs.so
-          "${{ steps.py.outputs.python }}" - <<'PY'
-          from key_amnesia import detect, scan
-          assert detect.active_impl == "rust", detect.active_impl
-          assert scan.active_impl == "rust", scan.active_impl
-          print("detect:", sorted(detect.implemented_natively()))
-          print("scan:", sorted(scan.implemented_natively()))
-          PY
-
-      - name: Rust tests and Unicode diff
-        if: matrix.impl == 'rust'
-        run: |
-          set -euo pipefail
-          export PYO3_PYTHON="${{ steps.py.outputs.python }}"
-          cargo test --workspace --release
-          cargo build --release -p vahta-detect --example dump_unicode
-          "${{ steps.py.outputs.python }}" benchmarks/diff_unicode.py
-
-      # The local install script, against a throwaway prefix and HOME so it
-      # cannot touch the runner's own configs. Cargo and rustup keep their real
-      # homes. No setup step: no harness is installed here.
-      - name: Local install script
-        if: matrix.impl == 'rust'
-        run: |
-          set -euo pipefail
-          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-          export HOME="$(mktemp -d)"
-          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --no-setup
-          test -x "$RUNNER_TEMP/vahta-bin/vahta" && test -x "$RUNNER_TEMP/vahta-bin/vh" && test -x "$RUNNER_TEMP/vahta-bin/vahta-hook"
-          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --uninstall
-          test ! -e "$RUNNER_TEMP/vahta-bin/vahta" && test ! -e "$RUNNER_TEMP/vahta-bin/vh" && test ! -e "$RUNNER_TEMP/vahta-bin/vahta-hook"
-
-      # The checkable promise: the open build cannot make a network request,
-      # because nothing in its dependency tree is an HTTP or TLS client.
-      # Dependencies are welcome; network-capable ones are not.
-      - name: No network client in the dependency tree
-        if: matrix.impl == 'rust'
-        run: |
-          set -euo pipefail
-          found=$(cargo tree --workspace --edges normal,build --prefix none \
-            | sed 's/ .*//' | sort -u \
-            | grep -Ex 'reqwest|hyper|hyper-util|ureq|curl|curl-sys|isahc|surf|attohttpc|h2|rustls|native-tls|openssl|openssl-sys' || true)
-          if [ -n "$found" ]; then
-            echo "network-capable crates in the tree:" >&2
-            echo "$found" >&2
-            exit 1
-          fi
-          echo "no network client in the dependency tree"
-
-      - name: Test
-        run: |
-          set -euo pipefail
-          PY="${{ steps.py.outputs.python }}"
-          "${PY}" -m pytest -q
-
-  # The Rust workspace on every OS, without Python: formatting, lints and
-  # tests. The pyo3 extensions are built and tested by the rust leg above.
+  # The Rust workspace on every OS: formatting, lints and tests. Vahta has no
+  # Python part; key-amnesia's Python suite is tested on master only.
   rust:
     strategy:
       fail-fast: false
@@ -240,12 +44,32 @@ jobs:
           git fetch --depth 1 origin "${{ github.sha }}"
           git checkout --force FETCH_HEAD
 
+      # The detector's rule file is tested on its own, and only when it or its
+      # crate changed: hundreds of rule samples need not run on every PR.
+      - name: Did the rules change
+        id: rules
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=false
+          if [ -d crates/rules ]; then
+            if [ -z "${BASE}" ] || [ "${BASE}" = "0000000000000000000000000000000000000000" ] \
+              || ! git fetch --depth 1 origin "${BASE}" 2>/dev/null; then
+              changed=true
+            elif git diff --name-only "${BASE}" HEAD | grep -q '^crates/rules/'; then
+              changed=true
+            fi
+          fi
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+          echo "rules changed: ${changed}"
+
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --exclude vahta-pyext --exclude vahta-pyext-scan -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The vault's cheap test KDF exists so tests need not spend a gigabyte per
       # unlock, and the daemon's `test-surface` feature lets a test drive a real
@@ -268,17 +92,14 @@ jobs:
       # workspace lints). `vahta-os` is the one crate that may contain it, for
       # operating-system calls only, so: every other crate keeps
       # `[lints] workspace = true`, and `unsafe` appears in no source outside
-      # crates/os. The two pyo3 crates are the exception to the first rule: they
-      # are built by the Python legs, and pyo3's macros expand to unsafe code,
-      # so they cannot take the lint (they hold no `unsafe` of their own, which
-      # the second rule still checks).
+      # crates/os.
       - name: Unsafe code only in vahta-os
         run: |
           set -euo pipefail
           bad=0
           for manifest in crates/*/Cargo.toml; do
             case "$(dirname "$manifest")" in
-              crates/os|crates/pyext|crates/pyext-scan) continue ;;
+              crates/os) continue ;;
             esac
             if ! tr -d '\r' < "$manifest" | awk '/^\[lints\]$/ { getline n; if (n == "workspace = true") ok = 1 } END { exit !ok }'; then
               echo "$manifest must contain [lints] workspace = true" >&2
@@ -300,4 +121,43 @@ jobs:
           exit "$bad"
 
       - name: Test
-        run: cargo test --no-fail-fast --workspace --exclude vahta-pyext --exclude vahta-pyext-scan
+        env:
+          RULES: ${{ steps.rules.outputs.changed }}
+        run: |
+          set -euo pipefail
+          if [ -d crates/rules ] && [ "${RULES}" != "true" ]; then
+            cargo test --no-fail-fast --workspace --exclude vahta-rules
+          else
+            cargo test --no-fail-fast --workspace
+          fi
+
+      # The local install script, against a throwaway prefix and HOME so it
+      # cannot touch the runner's own configs. Cargo and rustup keep their real
+      # homes. No setup step: no harness is installed here.
+      - name: Local install script
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export HOME="$(mktemp -d)"
+          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --no-setup
+          test -x "$RUNNER_TEMP/vahta-bin/vahta" && test -x "$RUNNER_TEMP/vahta-bin/vh" && test -x "$RUNNER_TEMP/vahta-bin/vahta-hook"
+          scripts/install-local.sh --prefix "$RUNNER_TEMP/vahta-bin" --uninstall
+          test ! -e "$RUNNER_TEMP/vahta-bin/vahta" && test ! -e "$RUNNER_TEMP/vahta-bin/vh" && test ! -e "$RUNNER_TEMP/vahta-bin/vahta-hook"
+
+      # The checkable promise: the open build cannot make a network request,
+      # because nothing in its dependency tree is an HTTP or TLS client.
+      # Dependencies are welcome; network-capable ones are not.
+      - name: No network client in the dependency tree
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          found=$(cargo tree --workspace --edges normal,build --prefix none \
+            | sed 's/ .*//' | sort -u \
+            | grep -Ex 'reqwest|hyper|hyper-util|ureq|curl|curl-sys|isahc|surf|attohttpc|h2|rustls|native-tls|openssl|openssl-sys' || true)
+          if [ -n "$found" ]; then
+            echo "network-capable crates in the tree:" >&2
+            echo "$found" >&2
+            exit 1
+          fi
+          echo "no network client in the dependency tree"

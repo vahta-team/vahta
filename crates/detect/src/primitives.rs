@@ -1,10 +1,10 @@
 //! Numeric and lexical primitives underneath the tier decision.
 //!
-//! Ported from `key_amnesia.detect_py`, which stays the specification: the
-//! measured evidence for every threshold lives in its module docstring. This
-//! layer must be *behaviourally identical*, not merely similar, so the places
-//! where Python and Rust do not agree by default are called out where they
-//! occur rather than discovered later.
+//! Ported from `key_amnesia.detect_py`, where the measured evidence for every
+//! threshold lives in the module docstring. The port was made behaviourally
+//! identical, so the places where Python and Rust do not agree by default are
+//! called out where they occur. Agreement with Python is no longer required
+//! (see the crate docs).
 
 use crate::pyunicode;
 

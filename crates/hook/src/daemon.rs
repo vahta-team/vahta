@@ -10,6 +10,9 @@
 //!
 //! The person's `hook_output` setting is read here too: `observe` makes the
 //! hook change nothing and only tell the daemon what it saw.
+//!
+//! [`report`] tells the daemon what the hook refused, for its journal and its
+//! alarm, and spools the report when no daemon runs.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -17,7 +20,8 @@ use std::time::Duration;
 use vahta_ipc::client::Connector;
 use vahta_ipc::config::{Config, HookOutput};
 use vahta_ipc::paths::Paths;
-use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan};
+use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan, Signal};
+use vahta_ipc::spool::{self, SpoolLine};
 
 use crate::redact::Cut;
 
@@ -50,10 +54,19 @@ pub fn hook_output() -> HookOutput {
         .unwrap_or_default()
 }
 
+/// How a request to the daemon went.
+enum Delivery {
+    Answered(ClientReply),
+    /// No daemon of this version is running (none at all, another version, or
+    /// one that is not well).
+    NoDaemon,
+    /// A daemon was there but failed or did not answer in time.
+    Lost,
+}
+
 /// Send `request` to a running daemon of this version and read its reply,
-/// waiting at most [`WAIT`]; `None` for anything else.
-fn ask(request: ClientRequest) -> Option<ClientReply> {
-    let paths = Paths::from_env(None).ok()?;
+/// waiting at most [`WAIT`].
+fn deliver(paths: Paths, request: ClientRequest) -> Delivery {
     let connector = Connector {
         paths,
         version: vahta_ipc::VERSION.to_string(),
@@ -63,16 +76,64 @@ fn ask(request: ClientRequest) -> Option<ClientReply> {
     // On a thread, so a daemon that hangs costs the hook `WAIT` and no more;
     // the thread goes with the process.
     std::thread::spawn(move || {
-        let reply = (|| {
-            let mut conn = connector.connect_running().ok()??;
-            if !conn.daemon.ok || conn.daemon.version != connector.version {
-                return None;
+        let delivery = match connector.connect_running() {
+            Ok(Some(mut conn)) => {
+                if !conn.daemon.ok || conn.daemon.version != connector.version {
+                    Delivery::NoDaemon
+                } else {
+                    match conn.request(&request) {
+                        Ok(reply) => Delivery::Answered(reply),
+                        Err(_) => Delivery::Lost,
+                    }
+                }
             }
-            conn.request(&request).ok()
-        })();
-        let _ = tx.send(reply);
+            Ok(None) => Delivery::NoDaemon,
+            Err(_) => Delivery::NoDaemon,
+        };
+        let _ = tx.send(delivery);
     });
-    rx.recv_timeout(WAIT).ok().flatten()
+    rx.recv_timeout(WAIT).unwrap_or(Delivery::Lost)
+}
+
+/// Send `request` to a running daemon of this version and read its reply,
+/// waiting at most [`WAIT`]; `None` for anything else.
+fn ask(request: ClientRequest) -> Option<ClientReply> {
+    let paths = Paths::from_env(None).ok()?;
+    match deliver(paths, request) {
+        Delivery::Answered(reply) => Some(reply),
+        _ => None,
+    }
+}
+
+/// Tell the daemon what the hook refused. With no daemon to hear it, the
+/// report goes to the spool, which the next daemon journals; a daemon that
+/// was there but did not answer is not written twice. Never fails the hook.
+pub fn report(harness: &str, session: Option<String>, cwd: String, signal: Signal) {
+    let Ok(paths) = Paths::from_env(None) else {
+        return;
+    };
+    let request = ClientRequest::HookReport {
+        session: session.clone(),
+        harness: harness.to_string(),
+        cwd: cwd.clone(),
+        signal: signal.clone(),
+    };
+    if let Delivery::NoDaemon = deliver(paths.clone(), request) {
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = spool::append(
+            &paths,
+            &SpoolLine {
+                time,
+                session,
+                harness: harness.to_string(),
+                cwd,
+                signal,
+            },
+        );
+    }
 }
 
 pub fn scan(scan: Scan) -> Option<Answer> {

@@ -367,6 +367,15 @@ it: the detector's likely finds, and, with the daemon running, every value it
 holds for that agent. [hooks.md](hooks.md) says how, and how the agent asks the
 person for what was cut.
 
+Each refusal is also reported to the daemon, which journals it as
+`hook_report`: what kind of thing the agent tried (a secret-shaped value and
+the rule that found it, one of Vahta's files, a command for the person), never
+the value or the command text. With no daemon running, the hook appends the
+report to `<data dir>/vahta/hook-spool.jsonl` (mode 0600, at most 1 MiB; past
+that new reports are dropped), and the next daemon journals and empties it.
+Refusals of the person's own prompt are not reported. These reports are the
+evidence for the injection alarm.
+
 ## What this does not protect against
 
 Vahta is built so that an agent cannot *ask* for a secret. It cannot stop everything

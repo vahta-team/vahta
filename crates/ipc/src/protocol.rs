@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -342,6 +342,19 @@ pub enum ClientRequest {
         likely: usize,
         possible: usize,
     },
+    /// The hook refused (or, in observe mode, would have refused) something an
+    /// agent tried, and tells the daemon what kind of thing it was, for the
+    /// journal and the injection alarm. Fire and forget: the hook does not
+    /// wait for the answer beyond its usual limit, and writes the report to
+    /// the spool (`spool.rs`) when no daemon runs. Never a value, never the
+    /// command text: a category, a rule id, a file path.
+    HookReport {
+        /// The harness's own session id, when its payload has one.
+        session: Option<String>,
+        harness: String,
+        cwd: String,
+        signal: Signal,
+    },
     /// Ask the person to let the agent see what was cut out of a tool's
     /// output kept under `reference`. Only the agent whose hook made the
     /// reference may ask. `reason` is the agent's, shown as unverified.
@@ -475,6 +488,71 @@ pub fn b64_decode(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// What the hook saw an agent try. Each variant is one kind of evidence the
+/// daemon weighs; none carries a value or the text it was found in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "signal", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Signal {
+    /// A secret-shaped value in a tool call, refused. `category` is what the
+    /// agent was told ("an API token"), `rule` the detector rule that fired
+    /// (for the person only), `evasion` how the value was hidden, if it was.
+    Blocked {
+        category: String,
+        rule: String,
+        evasion: Option<Evasion>,
+    },
+    /// The same find in observe mode: the call was let through.
+    Observed {
+        category: String,
+        rule: String,
+        evasion: Option<Evasion>,
+    },
+    /// A tool call that reads, changes or names one of Vahta's own files.
+    VahtaFileTouch { path: String },
+    /// A command for the person only (`vahta reveal`, `copy`, `_surface`).
+    AgentGuard { command: String },
+    /// A change to a harness's hook settings that would weaken Vahta's hooks.
+    HookTamper { file: String, what: String },
+}
+
+impl Signal {
+    /// The variant's name, as the journal records it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Signal::Blocked { .. } => "blocked",
+            Signal::Observed { .. } => "observed",
+            Signal::VahtaFileTouch { .. } => "vahta_file_touch",
+            Signal::AgentGuard { .. } => "agent_guard",
+            Signal::HookTamper { .. } => "hook_tamper",
+        }
+    }
+}
+
+/// How a secret-shaped value was hidden from a plain look at the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Evasion {
+    Base64,
+    /// Joined from string pieces (`'ab''cd'`, `"a" + "b"`).
+    Concat,
+    Hex,
+    Reversed,
+    /// Another encoding (URL-encoding and the like).
+    Encoded,
+}
+
+impl Evasion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Evasion::Base64 => "base64",
+            Evasion::Concat => "concatenation",
+            Evasion::Hex => "hex",
+            Evasion::Reversed => "reversed",
+            Evasion::Encoded => "encoded",
+        }
+    }
 }
 
 /// A session as a client may see it: never a key.
