@@ -312,6 +312,24 @@ pub fn spawn(env: &Env) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Wait up to `secs` seconds for a watchdog to be running (one an autostart
+/// service manager just started). `true` once one runs.
+pub fn wait_running(env: &Env, secs: u64) -> bool {
+    let Ok(paths) = daemon_cmd::paths(env) else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if paths.guard_running() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Ask a running watchdog to end, and wait (up to five seconds) until it has.
 /// `true` when none runs afterwards.
 pub fn stop(env: &Env) -> bool {

@@ -179,7 +179,14 @@ pub(crate) fn unlock(
             .map_err(from_surface)?
             .ok_or_else(cancelled)?;
         match Vault::unlock_password(path, typed.expose().as_bytes(), ctx.store()) {
-            Ok(vault) => return Ok(vault),
+            Ok(vault) => {
+                // The watchdog asks for this project's password later, so it
+                // must know the project (`<root>/.vahta/vault.vht`).
+                if let Some(root) = path.parent().and_then(Path::parent) {
+                    crate::guard_ops::note_project(ctx, root);
+                }
+                return Ok(vault);
+            }
             Err(Error::Unlock) => warning = Some("Wrong password. Try again.".to_string()),
             Err(e) => return Err(from_vault(e)),
         }
@@ -258,6 +265,7 @@ pub(crate) fn init(ctx: &Ctx<'_>, cwd: &str) -> Flow<ClientReply> {
     }
     Project::init(&root).map_err(from_vault)?;
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+    crate::guard_ops::note_project(ctx, &root);
     ctx.journal(
         Entry::new("init")
             .vault(&vault.vault_id())
