@@ -95,10 +95,10 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                     ("description", toml::Value::String(s)) => entry.description = s.clone(),
                     ("env", toml::Value::String(s)) if !s.is_empty() => entry.env = s.clone(),
                     ("allow", toml::Value::Array(items)) => {
-                        entry.allow = rule_list(items, name, "allow", true).map_err(&bad)?;
+                        entry.allow = rule_list(items, name, "allow", true).map_err(bad)?;
                     }
                     ("deny", toml::Value::Array(items)) => {
-                        entry.deny = rule_list(items, name, "deny", false).map_err(&bad)?;
+                        entry.deny = rule_list(items, name, "deny", false).map_err(bad)?;
                     }
                     ("allow" | "deny", _) => {
                         return Err(bad(format!(
