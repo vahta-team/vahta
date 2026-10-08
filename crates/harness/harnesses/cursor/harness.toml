@@ -42,6 +42,7 @@ tool_input = "tool_input"
 # The file Write is about; the hook refuses Vahta's own files.
 file_path = ["tool_input.file_path", "tool_input.path"]
 cwd = "cwd"
+session_id = "conversation_id"
 
 # MCP calls bypass preToolUse in Cursor, so they need their own event. Same
 # payload keys; tool_name is the bare tool, and `mcp_server_name` marks it.
@@ -51,6 +52,7 @@ kind = "before_tool"
 tool_name = "tool_name"
 tool_input = "tool_input"
 cwd = "cwd"
+session_id = "conversation_id"
 
 # A dedicated read event whose payload carries the file's content, so the
 # hook can judge it without opening the file.
@@ -60,6 +62,7 @@ kind = "before_read"
 file_path = "file_path"
 content = "content"
 cwd = "cwd"
+session_id = "conversation_id"
 
 [[events]]
 name = "sessionStart"
@@ -71,6 +74,7 @@ name = "beforeSubmitPrompt"
 kind = "prompt"
 prompt = "prompt"
 cwd = "cwd"
+session_id = "conversation_id"
 
 [[events]]
 name = "postToolUse"
@@ -80,6 +84,7 @@ tool_name = "tool_name"
 # `tool_response` is accepted as a precaution.
 tool_output = ["tool_output", "tool_response"]
 cwd = "cwd"
+session_id = "conversation_id"
 
 [[tool_groups]]
 group = "mcp"

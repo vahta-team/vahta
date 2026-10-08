@@ -61,6 +61,7 @@ tool_input = "tool_input"
 # The file Write and Edit are about; the hook refuses Vahta's own files.
 file_path = ["tool_input.file_path", "tool_input.path"]
 cwd = "cwd"
+session_id = "session_id"
 
 # Same Claude event, different job: reading a file. Claude has no dedicated
 # read event, so reads arrive as PreToolUse on the Read and Grep tools. This is a
@@ -74,12 +75,14 @@ matcher = "Read|Grep"
 tool_name = "tool_name"
 file_path = ["tool_input.file_path", "tool_input.path"]
 cwd = "cwd"
+session_id = "session_id"
 
 [[events]]
 name = "SessionStart"
 kind = "session_start"
 # Registered from v1 so that a later, outdated setup has a channel to say so.
 cwd = "cwd"
+session_id = "session_id"
 
 [[events]]
 name = "UserPromptSubmit"
@@ -88,6 +91,7 @@ kind = "prompt"
 # what Claude sends; `user_prompt` is accepted in case a version spells it so.
 prompt = ["prompt", "user_prompt"]
 cwd = "cwd"
+session_id = "session_id"
 
 [[events]]
 name = "PostToolUse"
@@ -99,6 +103,7 @@ matcher = "Bash|Read|Grep|Glob|mcp__.*"
 tool_name = "tool_name"
 tool_output = ["tool_response", "tool_output"]
 cwd = "cwd"
+session_id = "session_id"
 
 # --- tool groups ------------------------------------------------------------
 # Group order matters: first match wins, MCP first so a server that names a
