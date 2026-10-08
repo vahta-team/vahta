@@ -3461,3 +3461,411 @@ fn no_value_leaks_through_output_redaction() {
         assert!(!window.contains(v), "the window was shown a value");
     }
 }
+
+// --- the injection alarm and values in encoded forms ----------------------------------------
+
+/// Every spelling of `value` a leak check should look for: raw, base64 at the
+/// three offsets (padded), hex in both cases, reversed.
+fn spellings_of(value: &str) -> Vec<String> {
+    let mut out = vec![value.to_string()];
+    for prefix in ["", "k", "ke"] {
+        out.push(vahta_ipc::protocol::b64_encode(
+            format!("{prefix}{value}").as_bytes(),
+        ));
+    }
+    let hex = vahta_vault::hex_encode(value.as_bytes());
+    out.push(hex.to_uppercase());
+    out.push(hex);
+    out.push(value.chars().rev().collect());
+    out
+}
+
+fn assert_no_spelling(place: &str, content: &str, value: &str) {
+    for form in spellings_of(value) {
+        // A padded encoding's core is what the cache holds: look for it
+        // without its last group, which depends on what follows.
+        let core = &form[..form.len().saturating_sub(4).max(8.min(form.len()))];
+        assert!(!content.contains(core), "{place} holds a form of {value:?}");
+    }
+}
+
+fn evaded_report(session: &str) -> ClientRequest {
+    use vahta_ipc::protocol::{Evasion, Signal};
+    ClientRequest::HookReport {
+        session: Some(session.into()),
+        harness: "claude".into(),
+        cwd: "/p".into(),
+        signal: Signal::Blocked {
+            category: "an API token".into(),
+            rule: "test.rule".into(),
+            evasion: Some(Evasion::Base64),
+        },
+    }
+}
+
+fn tool_check(session: &str, text: &str) -> ClientRequest {
+    ClientRequest::ToolCheck {
+        session: Some(session.into()),
+        cwd: "/p".into(),
+        text: text.into(),
+    }
+}
+
+impl Sandbox {
+    fn unlock_session(&self) {
+        self.script(&[r#"{"secret":"correct horse"}"#]);
+        let out = self.vahta(&["unlock"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+
+    fn windows_titled(&self, title: &str) -> usize {
+        self.window_log()
+            .iter()
+            .filter(|e| e["open"] == title)
+            .count()
+    }
+}
+
+#[test]
+fn a_held_value_in_any_encoding_is_refused_by_form_and_the_person_gets_the_name() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    // Each hit rings the alarm; the person ignores it, so the session stays.
+    s.script(&[r#"{"choose":1}"#]);
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+
+    let texts = [
+        // Base64 at each offset the value can sit at, padded or not.
+        (
+            format!("echo {}", vahta_ipc::protocol::b64_encode(b"fake-one")),
+            "base64",
+        ),
+        (
+            format!("echo {}", vahta_ipc::protocol::b64_encode(b"k=fake-one;")),
+            "base64",
+        ),
+        (
+            format!(
+                "echo {}",
+                vahta_ipc::protocol::b64_encode(b"key=fake-one").trim_end_matches('=')
+            ),
+            "base64",
+        ),
+        (
+            format!("echo {}", vahta_vault::hex_encode(b"fake-one")),
+            "hex",
+        ),
+        ("echo fake-one".to_string(), "raw"),
+        (
+            format!("echo {}", "fake-one".chars().rev().collect::<String>()),
+            "reversed",
+        ),
+    ];
+    for (text, form) in &texts {
+        match conn.request(&tool_check("agent-1", text)).unwrap() {
+            ClientReply::ToolDeny { form: f, name } => {
+                assert_eq!((f.as_str(), name.as_str()), (*form, "ZETA"), "{text}");
+            }
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+    // Text with nothing of it, and a value in an each-use secret that no
+    // session holds, pass.
+    for clean in ["echo hello world", "ls -la /tmp", "echo fake-three"] {
+        assert!(matches!(
+            conn.request(&tool_check("agent-1", clean)).unwrap(),
+            ClientReply::Ok {}
+        ));
+    }
+
+    // The journal names the secret for the person and holds no value.
+    let journal = s.journal();
+    let hit = journal
+        .lines()
+        .find(|l| l.contains("\"result\":\"known_value\""))
+        .expect("a known_value entry");
+    assert!(
+        hit.contains("ZETA") && hit.contains("written as base64"),
+        "{hit}"
+    );
+    assert_no_spelling("the journal", &journal, "fake-one");
+}
+
+#[test]
+fn disguised_secrets_raise_the_alarm_and_lock_ends_the_sessions() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    assert_eq!(s.sessions().len(), 1);
+    s.script(&[r#"{"choose":0}"#]);
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    // 4 + 4 crosses the threshold on the second; the third is throttled.
+    for _ in 0..3 {
+        assert!(matches!(
+            conn.request(&evaded_report("agent-2")).unwrap(),
+            ClientReply::Ok {}
+        ));
+    }
+    wait_until("the alarm to lock the sessions", 10, || {
+        s.sessions().is_empty()
+    });
+    assert_eq!(s.windows_titled("Suspicious agent behaviour"), 1);
+    let log = s.window_log();
+    let ask = log
+        .iter()
+        .find(|e| e["ask"] == "choose")
+        .expect("the alarm asked");
+    assert_eq!(
+        ask["options"],
+        serde_json::json!(["Lock all sessions", "Ignore for this agent session"])
+    );
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(lines.contains("prompt injection"), "{lines}");
+    assert!(lines.contains("hidden as base64 x2"), "{lines}");
+    assert!(lines.contains("claude session agent-2"), "{lines}");
+    // The rule id is for the journal, not the window.
+    assert!(!lines.contains("test.rule"));
+
+    let journal = s.journal();
+    assert!(journal.contains("\"event\":\"alarm\""));
+    assert!(
+        journal.contains("\"reason\":\"alarm\""),
+        "sessions end for the alarm"
+    );
+
+    // Status and the list say so, until the next unlock.
+    let out = s.vahta(&["daemon", "status"]);
+    assert!(
+        text(&out.stdout).contains("alarm raised at "),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = s.vahta(&["sessions"]);
+    assert!(
+        text(&out.stdout).contains("alarm raised at "),
+        "{}",
+        text(&out.stdout)
+    );
+    s.unlock_session();
+    let out = s.vahta(&["daemon", "status"]);
+    assert!(
+        !text(&out.stdout).contains("alarm raised"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn ignoring_an_alarm_keeps_the_sessions_and_silences_that_agent() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    s.script(&[r#"{"choose":1}"#]);
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    for _ in 0..2 {
+        conn.request(&evaded_report("agent-3")).unwrap();
+    }
+    wait_until("the alarm to be ignored", 10, || {
+        s.journal().contains("alarm_ignored")
+    });
+    assert_eq!(s.sessions().len(), 1);
+    // Another report from the same agent session raises nothing.
+    for _ in 0..3 {
+        conn.request(&evaded_report("agent-3")).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(s.windows_titled("Suspicious agent behaviour"), 1);
+    assert_eq!(s.sessions().len(), 1);
+}
+
+#[test]
+fn with_alarm_lock_the_sessions_end_without_a_question() {
+    let s = sandbox_with_secrets();
+    fs::write(s.root.join("config/config.toml"), "alarm = \"lock\"\n").unwrap();
+    assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+    s.unlock_session();
+    assert_eq!(s.sessions().len(), 1);
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    // A held value is enough on its own.
+    let reply = conn
+        .request(&tool_check(
+            "agent-4",
+            &format!("echo {}", vahta_vault::hex_encode(b"fake-one")),
+        ))
+        .unwrap();
+    assert!(matches!(reply, ClientReply::ToolDeny { .. }));
+    wait_until("the sessions to be locked", 10, || s.sessions().is_empty());
+    // It told the person after the fact, and asked nothing.
+    wait_until("the window to say what happened", 10, || {
+        s.window_log().iter().any(|e| {
+            e["close"]
+                .as_str()
+                .is_some_and(|m| m.contains("locked 1 session(s)") || m.contains("Vahta locked 1"))
+        })
+    });
+    assert!(s.window_log().iter().all(|e| e["ask"] != "choose"));
+    let journal = s.journal();
+    assert!(
+        journal.contains("\"result\":\"lock\"") && journal.contains("the alarm is set to lock")
+    );
+}
+
+#[test]
+fn with_no_window_to_ask_in_the_alarm_locks() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    // The script has no answer left: the question cannot be asked.
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    for _ in 0..2 {
+        conn.request(&evaded_report("agent-5")).unwrap();
+    }
+    wait_until("the headless alarm to lock", 10, || s.sessions().is_empty());
+    assert!(s.journal().contains("the question could not be asked"));
+}
+
+#[test]
+fn spooled_reports_are_weighed_when_the_daemon_starts() {
+    use vahta_ipc::protocol::{Evasion, Signal};
+    use vahta_ipc::spool::{self, SpoolLine};
+
+    let s = Sandbox::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for _ in 0..2 {
+        spool::append(
+            &s.paths(),
+            &SpoolLine {
+                time: now - 30,
+                session: Some("agent-6".into()),
+                harness: "claude".into(),
+                cwd: "/p".into(),
+                signal: Signal::Blocked {
+                    category: "an API token".into(),
+                    rule: "test.rule".into(),
+                    evasion: Some(Evasion::Hex),
+                },
+            },
+        )
+        .unwrap();
+    }
+    // One from long ago does not count.
+    spool::append(
+        &s.paths(),
+        &SpoolLine {
+            time: now - 3600,
+            session: Some("agent-7".into()),
+            harness: "claude".into(),
+            cwd: "/p".into(),
+            signal: Signal::KnownValue { form: "hex".into() },
+        },
+    )
+    .unwrap();
+    assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+    wait_until("the spooled alarm", 10, || {
+        s.journal().contains("\"event\":\"alarm\"")
+    });
+    let journal = s.journal();
+    assert!(journal.contains("agent-6") && !journal.contains("agent-7; score"));
+    assert!(journal.contains("spooled"));
+}
+
+#[test]
+fn the_hook_refuses_a_held_value_in_a_command_and_says_only_the_form() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let command = format!(
+        "echo {} | base64 -d",
+        vahta_ipc::protocol::b64_encode(b"x=fake-one")
+    );
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "cwd": s.project(),
+        "session_id": "sess-9",
+    });
+    let mut child = Command::new(hook_bin())
+        .args(["--harness", "claude", "--event", "before_tool"])
+        .current_dir(s.project())
+        .env("HOME", s.root.join("home"))
+        .env_remove("XDG_RUNTIME_DIR")
+        .env_remove("VAHTA_HOOK_DISABLE")
+        .env("VAHTA_DATA_DIR", s.root.join("data"))
+        .env("VAHTA_RUNTIME_DIR", s.root.join("run"))
+        .env("VAHTA_CONFIG_DIR", s.root.join("config"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run vahta-hook");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        reason,
+        "Blocked: this command contains a value Vahta holds (base64). Use `vahta run`."
+    );
+    // The person is told which secret; the agent is not.
+    assert!(!reason.contains("ZETA"));
+    assert!(reply["systemMessage"].as_str().unwrap().contains("ZETA"));
+    // The daemon journalled it under the agent's session id, with no value.
+    let journal = s.journal();
+    assert!(journal.contains("known_value") && journal.contains("sess-9"));
+    assert_no_spelling("the journal", &journal, "fake-one");
+    assert_no_spelling("the hook's stdout", &text(&out.stdout), "fake-one");
+    assert_no_spelling("the hook's stderr", &text(&out.stderr), "fake-one");
+    // Without a daemon the hook checks nothing and lets it through.
+    assert_eq!(s.vahta(&["daemon", "stop"]).status.code(), Some(0));
+}
+
+#[test]
+fn the_encoded_forms_of_a_run_value_are_cut_from_output_and_nothing_leaks() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let b64 = vahta_ipc::protocol::b64_encode(b"fake-one");
+    let reply = s
+        .hook_after_bash(&format!(
+            "see {b64} and {}",
+            vahta_vault::hex_encode(b"fake-one")
+        ))
+        .expect("the hook answered");
+    let (stdout, _) = redacted(&reply);
+    assert_eq!(
+        stdout,
+        "see ***REDACTED(ZETA (base64))*** and ***REDACTED(ZETA (hex))***"
+    );
+
+    // And `vahta run` scrubs a command's own base64 of the value.
+    let out = s.vahta(&[
+        "run",
+        "--secret",
+        "ZETA",
+        "--",
+        "sh",
+        "-c",
+        "printf %s \"$ZETA\" | base64; printf %s \"$ZETA\" | od -An -tx1 | tr -d ' \\n'",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("***REDACTED(ZETA (base64))***"), "{stdout}");
+    assert_no_spelling("run stdout", &stdout, "fake-one");
+    assert_no_spelling("run stderr", &text(&out.stderr), "fake-one");
+    assert_no_spelling("the journal", &s.journal(), "fake-one");
+    assert_no_spelling(
+        "the window log",
+        &fs::read_to_string(s.root.join("surface.log")).unwrap_or_default(),
+        "fake-one",
+    );
+}
