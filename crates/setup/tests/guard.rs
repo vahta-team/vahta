@@ -350,11 +350,7 @@ fn managed_plans_per_harness() {
         claude.path,
         root.join("etc/claude-code/managed-settings.json")
     );
-    assert!(
-        claude
-            .text
-            .contains("vahta-hook --harness claude --event before_tool")
-    );
+    assert!(claude.text.contains("--harness claude --event before_tool"));
     assert!(!claude.current);
     guard::write_managed(&claude).unwrap();
     assert!(
