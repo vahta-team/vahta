@@ -1581,7 +1581,12 @@ mod tests {
         assert_eq!(out[0].kind, "dotenv");
         assert_eq!(out[0].secret_count, 2);
 
-        let key = d.write("id_rsa", b"-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        let key = d.write(
+            "id_rsa",
+            ["-----BEGIN OPENSSH ", "PRIVATE KEY-----\n"]
+                .concat()
+                .as_bytes(),
+        );
         let out = findings_for_path(&key, Scope::Project);
         assert_eq!(out[0].kind, "ssh_private_key");
         assert_eq!(out[0].reason, "SSH private key file");
