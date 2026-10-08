@@ -95,7 +95,8 @@ run` from that process, and from everything it starts, needs no window.
   `--for 2h` (also `90s`, `1h30m`, a clock such as `1:30:00`) per unlock;
   `--for forever` until revoked.
 - **Extension.** Two minutes before a session ends (halfway, for one shorter than
-  four minutes) a window offers: extend by the session's own length, no, or
+  four minutes) a window offers: extend by the session's last length (what it was opened
+  for, or the last extension chosen), no, or
   another duration typed as `15m`, `1h30m` or `1:30:00` (up to a year, never
   `forever`). While a duration is typed the session is held open for up to two
   minutes. No password, because the keys are still in memory. With no answer the
