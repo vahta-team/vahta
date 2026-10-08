@@ -32,8 +32,8 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 fn corpus() -> Vec<String> {
     let mut files = Vec::new();
     for dir in [
-        "tests/fixtures/scan_corpus",
-        "tests/fixtures/agent_transcripts",
+        "legacy/tests/fixtures/scan_corpus",
+        "legacy/tests/fixtures/agent_transcripts",
         "crates/harness/harnesses",
     ] {
         files_under(&repo().join(dir), &mut files);

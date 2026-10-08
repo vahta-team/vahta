@@ -64,6 +64,4 @@ audit.log
 guard.lock
 
 
-# Built Rust extension: a development and CI artefact, never shipped.
-src/key_amnesia/_detect_rs.so
 /target/
