@@ -337,7 +337,8 @@ fn sweep_sessions(shared: &Arc<Shared>) {
 }
 
 /// Two minutes before a session ends (halfway, for a short one): extend it by
-/// its own length, no, or a duration the person types. No password, because
+/// its last length (opened for, or last extended by), no, or a duration the
+/// person types. No password, because
 /// the keys are still in memory. With no answer the session ends at its
 /// deadline.
 fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
@@ -375,7 +376,7 @@ fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
         "Other duration...".to_string(),
     ];
     let by = match window.choose_within(&panel, "Extend this session?", &options, left) {
-        Ok(Some(0)) => Some((ask.length, format!("{same} (its own length)"))),
+        Ok(Some(0)) => Some((ask.length, format!("{same} (the last length)"))),
         Ok(Some(2)) => other_duration(shared, &ask, window.as_mut(), &mut panel),
         Ok(Some(_)) => {
             record("declined", "the person said no");

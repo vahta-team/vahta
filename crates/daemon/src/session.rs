@@ -61,8 +61,8 @@ pub struct Session {
     pub parent: Option<String>,
     /// `None` lasts until revoked.
     pub deadline: Option<Instant>,
-    /// How long it was opened for: what "extend" offers by default. `None`
-    /// for one that lasts until revoked.
+    /// How long it was opened for, or last extended by: what "extend" offers
+    /// by default. `None` for one that lasts until revoked.
     pub length: Option<Duration>,
     /// When the person is asked about extending.
     pub ask_at: Option<Instant>,
@@ -81,7 +81,8 @@ pub struct Ended {
 pub struct ExtensionAsk {
     pub id: String,
     pub deadline: Instant,
-    /// The session's own length, offered as the extension.
+    /// The session's last length (opened for, or last extended by), offered
+    /// as the extension.
     pub length: Duration,
     pub scope: Vec<String>,
     pub project: PathBuf,
@@ -348,6 +349,8 @@ impl Sessions {
         s.deadline = Some(new);
         s.ask_at = Some(ask_time(now, new));
         s.extension_pending = false;
+        // The next question offers what the person chose this time.
+        s.length = Some(by);
         true
     }
 
@@ -658,6 +661,15 @@ mod tests {
         );
         let again = s.sweep(now + Duration::from_secs(600 + 1800 - 100), &alive);
         assert_eq!(again.ask.len(), 1);
+        // It offers the last extension, not the length it was opened for.
+        assert_eq!(again.ask[0].length, EXTEND_BY);
+        assert!(s.extend(
+            "a",
+            now + Duration::from_secs(600 + 1800 - 100),
+            Duration::from_secs(90)
+        ));
+        let third = s.sweep(now + Duration::from_secs(600 + 1800 + 90 - 10), &alive);
+        assert_eq!(third.ask[0].length, Duration::from_secs(90));
         // A forever session has nothing to extend.
         s.add(session("f", &["A"], 12, None, None));
         assert!(!s.extend("f", now, EXTEND_BY));

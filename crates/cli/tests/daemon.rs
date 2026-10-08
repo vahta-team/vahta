@@ -1199,7 +1199,7 @@ fn extending_by_the_sessions_own_length_keeps_it_alive_past_its_deadline() {
     wait_until("the extension", 10, || {
         s.journal().contains("\"result\":\"extended\"")
     });
-    assert!(s.journal().contains("8s (its own length)"));
+    assert!(s.journal().contains("8s (the last length)"));
     // Past the original end it is still there, with less than eight seconds.
     std::thread::sleep(Duration::from_secs(5));
     let list = s.sessions();
