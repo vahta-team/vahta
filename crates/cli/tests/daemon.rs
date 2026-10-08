@@ -764,8 +764,11 @@ fn copy_puts_the_value_on_the_clipboard_and_takes_it_back() {
     wait_until("the clipboard to be cleared", 10, || {
         fs::read(bin.join("clip")).is_ok_and(|c| c.is_empty())
     });
-    let journal = fs::read_to_string(s.root.join("data/journal.jsonl")).unwrap();
-    assert!(journal.contains("copy_cleared") && !journal.contains("fake-one"));
+    // The clipboard is cleared first and the journal line written after.
+    wait_until("the journal to say it was cleared", 10, || {
+        s.journal().contains("copy_cleared")
+    });
+    assert!(!s.journal().contains("fake-one"));
 }
 
 // Only Linux and the BSDs can lack a display: Windows and macOS always have a
