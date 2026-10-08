@@ -1,0 +1,16 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "psql postgres://app@db.internal:5432/app"
+    },
+    "cwd": "/work/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": null,
+  "exit": 0
+}

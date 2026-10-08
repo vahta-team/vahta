@@ -1,0 +1,7 @@
+Vahta
+Copyright Vahta contributors. Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes secret-detection rules derived from third-party projects:
+gitleaks (MIT), Betterleaks (MIT, via Kingfisher), and Kingfisher and Veles /
+OSV-SCALIBR (Apache-2.0). Their copyright notices and licence texts are in
+crates/rules/NOTICE.

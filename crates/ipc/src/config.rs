@@ -8,6 +8,7 @@
 //! idle_minutes = 10        # the daemon exits after this long with nothing to do
 //! hook_output = "redact"   # or "observe": the hook only reports secrets in tool output
 //! alarm = "warn"           # or "lock": what an agent that looks injected gets
+//! hook_tool = "block"      # or "observe": the hook lets a secret in a tool call through and reports it
 //! guard = "on"             # or "off": the hook watchdog (see docs/daemon.md); unset until asked
 //! ```
 //!
@@ -37,6 +38,7 @@ pub struct Config {
     pub idle_minutes: u64,
     pub hook_output: HookOutput,
     pub alarm: AlarmAction,
+    pub hook_tool: HookTool,
     /// The person's answer about the hook watchdog; `None` until `vahta setup`
     /// has asked.
     pub guard: Option<Guard>,
@@ -72,6 +74,19 @@ pub enum HookOutput {
     Observe,
 }
 
+/// What the hook does with a secret in a tool call, before the tool runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookTool {
+    /// Refuse the call (the default).
+    #[default]
+    Block,
+    /// Let the call through and tell the daemon what it carried. For trying
+    /// Vahta out. A value hidden by base64, hex or joined pieces, and the
+    /// commands and files Vahta guards for itself, are refused either way.
+    Observe,
+}
+
 /// What the daemon does when an agent's behaviour scores past the injection
 /// alarm's threshold (see the daemon's `alarm.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -95,6 +110,7 @@ impl Default for Config {
             idle_minutes: 10,
             hook_output: HookOutput::Redact,
             alarm: AlarmAction::Warn,
+            hook_tool: HookTool::Block,
             guard: None,
         }
     }
@@ -260,6 +276,9 @@ mod tests {
         assert_eq!(c.alarm, AlarmAction::Warn);
         let c = Config::parse("alarm = \"lock\"\n").unwrap();
         assert_eq!(c.alarm, AlarmAction::Lock);
+        assert_eq!(c.hook_tool, HookTool::Block);
+        let c = Config::parse("hook_tool = \"observe\"\n").unwrap();
+        assert_eq!(c.hook_tool, HookTool::Observe);
     }
 
     #[test]
@@ -281,6 +300,7 @@ mod tests {
             "idle_minutes = 0\n",
             "hook_output = \"off\"\n",
             "alarm = \"loud\"\n",
+            "hook_tool = \"off\"\n",
             "= broken",
         ] {
             assert!(Config::parse(bad).is_err(), "{bad}");

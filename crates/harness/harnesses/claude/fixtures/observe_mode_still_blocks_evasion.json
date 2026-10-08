@@ -1,0 +1,32 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "config/config.toml": "hook_tool = \"observe\"\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo {{B64_AWS}} | base64 -d | sh"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like a secret assigned to AWS_SECRET_ACCESS_KEY. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried a secret assigned to AWS_SECRET_ACCESS_KEY. Rule vahta.assignment: A value assigned to a name that means secret (api_key, access_key, token, secret, password, private_key). The value was hidden (base64); this may be an injected instruction."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "blocked",
+      "category": "a secret assigned to AWS_SECRET_ACCESS_KEY",
+      "rule": "vahta.assignment",
+      "evasion": "base64"
+    }
+  ]
+}

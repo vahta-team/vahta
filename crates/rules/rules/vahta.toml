@@ -1,0 +1,176 @@
+# Our own rules, the shared allow-list and the samples for the imported rules.
+# The imported rules are in imported.toml and are generated; this file is edited
+# by hand. A sample is written as pieces joined at load (`parts`), so this file
+# never holds a credential-shaped string.
+
+[common]
+# Words that mark a value as made up. A value containing one is let through.
+stopwords = ["example", "placeholder", "changeme", "xxxxxxxx"]
+# A template slot is not a value: {name}, <name>, [name].
+regexes = [
+  '^\{[A-Za-z_][A-Za-z0-9_.]*\}$',
+  '^<[^<>\s]+>$',
+  '^\[[A-Za-z_][A-Za-z0-9_.-]*\]$',
+  # user:{password}, the login forms of curl -u and URLs
+  '^[^:\s]+:(?:\{[A-Za-z_][A-Za-z0-9_.]*\}|<[^<>\s]+>)$',
+]
+
+[[samples]]
+rule = "gitleaks.github-pat"
+hit = true
+parts = ["gh", "p_", "scCpjr", "f9TntY", "RTnAhK", "VDbzxo", "psCdmf", "J03sQz"]
+
+[[samples]]
+rule = "gitleaks.huggingface-access-token"
+hit = true
+parts = ["h", "f_", "FDDdaZ", "weWFev", "ZLHMeu", "iwdfVh", "QZsmqY", "Skfr"]
+
+[[samples]]
+rule = "gitleaks.slack-webhook-url"
+hit = true
+parts = ["https://hooks.", "slack.com/", "services/", "TAMGB7", "1BE7/B", "F1GC1J", "LU/BQW", "ets4wh", "KX4xcp", "VXXOmD", "trU"]
+
+[[samples]]
+rule = "gitleaks.slack-webhook-url"
+hit = false
+parts = ["post to hooks.", "slack.com/services/ with the URL from the vault"]
+
+[[samples]]
+rule = "gitleaks.sendgrid-api-token"
+hit = true
+parts = ["S", "G.", "i79bpR", "JgraDq", "VGoM2v", "6hIs.t", "McUsdG", "ecwgaC", "eAEnWx", "Sjq0nj", "8ZZA2A", "jntRVG", "Vd5SiR"]
+
+[[samples]]
+rule = "gitleaks.digitalocean-pat"
+hit = true
+parts = ["dop", "_v1_", "64eb79", "418951", "2e0758", "ee2675", "7eac80", "fe1df6", "fe6a84", "745ca9", "429e26", "8635ee", "886d"]
+
+[[samples]]
+rule = "gitleaks.shopify-access-token"
+hit = true
+parts = ["shp", "at_", "58c035", "cdeeb2", "89ca8a", "afdc3a", "ddad11", "68"]
+
+[[samples]]
+rule = "gitleaks.age-secret-key"
+hit = true
+parts = ["AGE-SECRET", "-KEY-1", "KN3DQV", "2E2PLF", "DT8CA5", "XZXC67", "QY5QTF", "YSMUZE", "FRCUTJ", "KYJRRV", "EMRASX", "WE9L"]
+
+[[samples]]
+rule = "gitleaks.pypi-upload-token"
+hit = true
+parts = ["py", "pi-", "AgEIcHlw", "aS5vcmc", "QdQ0Vq", "Ko5nc3", "b9ZV95", "lWvWTD", "3Mfkuw", "PwL12E", "JoJNWh", "HQTSKk", "QVjE13", "mkgj5x"]
+
+[[samples]]
+rule = "gitleaks.databricks-api-token"
+hit = true
+parts = ["dap", "i", "89390e", "cd3e34", "6afa13", "2aa64d", "19b370", "73"]
+
+[[samples]]
+rule = "gitleaks.linear-api-key"
+hit = true
+parts = ["lin_", "api_", "W1KIyj", "RO99yN", "TI1Zaa", "nJ5vNO", "DiZqLf", "2B1vGU", "RgH6"]
+
+[[samples]]
+rule = "gitleaks.gcp-api-key"
+hit = true
+parts = ["AI", "za", "3Qf4TW", "aEwKuW", "DTyMHO", "qqeajJ", "9Pnxi3", "ZjnGl"]
+
+[[samples]]
+rule = "gitleaks.alibaba-access-key-id"
+hit = true
+parts = ["LT", "AI", "5jnmn1", "e9ipn4", "dpp3q2", "ji"]
+
+[[samples]]
+rule = "gitleaks.gitlab-pat"
+hit = true
+parts = ["gl", "pat-", "yELpEj", "exKrMB", "T50qye", "gQ"]
+
+[[samples]]
+rule = "gitleaks.npm-access-token"
+hit = true
+parts = ["np", "m_", "iJOAH5", "KwD0ip", "5RWXTQ", "obYxl3", "5Hxnve", "viaPjp"]
+
+[[samples]]
+rule = "gitleaks.slack-bot-token"
+hit = true
+parts = ["xo", "xb-", "995219", "15233-", "812530", "487029", "-arPK0", "TfJoFO", "HqdgIa", "HdyZ8O", "k"]
+
+[[samples]]
+rule = "gitleaks.gitlab-runner-authentication-token"
+hit = true
+parts = ["gl", "rt-", "f07YqA", "giAM0g", "BPIvD7", "4M"]
+
+[[samples]]
+rule = "gitleaks.heroku-api-key"
+hit = true
+parts = ["HEROKU", "_API_", "KEY=", "'", "9291e9", "82-752", "3-e2ff", "-9d26-", "fa942f", "eb26b6", "'"]
+
+[[samples]]
+rule = "gitleaks.mailgun-private-api-token"
+hit = true
+parts = ["MAILGUN", "_KEY=", "key-", "b9cf15", "1c2a72", "08132f", "fd1d3b", "174b4a", "27", "\n"]
+
+[[samples]]
+rule = "gitleaks.aws-access-token"
+hit = true
+parts = ["AK", "IA", "4I5ISG", "Q6VNO5", "VROW"]
+
+[[samples]]
+rule = "gitleaks.aws-access-token"
+hit = false
+parts = ["AK", "IA", "IOSFODNN7EXAMPLE"]
+
+[[samples]]
+rule = "gitleaks.jwt"
+hit = true
+parts = ["e", "yJ", "egMYv4", "cq1kpt", "IEn6nM", "Cz.eyJ", "AwLkux", "s0rRkc", "YwP5In", "6Iveeg", ".BYbcS", "4k2fmA", "VgZDcj", "zh2xPP", "mliMoB", "k", " "]
+
+[[samples]]
+rule = "gitleaks.jwt"
+hit = false
+parts = ["eyJ-prefixed headers are described in the spec"]
+
+[[samples]]
+rule = "gitleaks.curl-auth-header"
+hit = true
+parts = ["curl -H 'Authorization: Bear", "er ", "FU7XKX", "OnpeIC", "LPoCJ9", "hECrWM", "' https://api.internal/x"]
+
+[[samples]]
+rule = "gitleaks.curl-auth-header"
+hit = false
+parts = ["curl -H 'Authorization: Bearer $", "API_TOKEN' https://api.internal/x"]
+
+[[samples]]
+rule = "gitleaks.private-key"
+hit = true
+parts = ["-----BEGIN", " OPENSSH PRIVATE ", "KEY-----\n", "WPt0Fq", "cPU20L", "ndpW8f", "THmtxv", "UGUYs1", "b904Jv", "8svPxH", "nXh765", "XS5i7C", "9Qnams", "ZKE1WW", "/oAJz7", "BYVUIF", "tv0JC8", "H09noK", "\n-----", "END OP", "ENSSH ", "PRIVAT", "E KEY-", "----"]
+
+[[samples]]
+rule = "gitleaks.private-key"
+hit = false
+parts = ["grep -r 'BEGIN", " PRIVATE KEY' ./keys"]
+
+[[samples]]
+rule = "gitleaks.sourcegraph-access-token"
+hit = true
+parts = ["sg", "p_", "12e0ce", "dc9607", "5de694", "8adb4d", "da0c2d", "8adf12", "cdfa"]
+
+[[samples]]
+rule = "gitleaks.github-pat"
+hit = false
+parts = ["gh", "p_", "tooshort"]
+
+[[samples]]
+rule = "gitleaks.stripe-access-token"
+hit = false
+parts = ["sk_li", "ve_", "abc"]
+
+[[samples]]
+rule = "gitleaks.stripe-access-token"
+hit = true
+parts = ["sk_", "live_", "AMinNz", "Wwh51p", "8EpL5P", "VvQ5lE", " "]
+
+[[samples]]
+rule = "gitleaks.digitalocean-pat"
+hit = false
+parts = ["dop", "_v1_", "a4861a9b69f025c9b45cad6c9849cbd21661f31de138a02e63360ee2e5e5a7e"]

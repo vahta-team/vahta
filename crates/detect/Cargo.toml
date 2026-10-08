@@ -12,5 +12,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+vahta-rules = { path = "../rules" }
 
 [dev-dependencies]

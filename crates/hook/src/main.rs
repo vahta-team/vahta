@@ -18,10 +18,11 @@ mod redact;
 
 use std::io::{Read, Write};
 
+use vahta_detect::Finding;
 use vahta_harness::{Decision, Event, Kind, Manifest};
 use vahta_ipc::config::Config;
 use vahta_ipc::paths::Paths;
-use vahta_ipc::protocol::Signal;
+use vahta_ipc::protocol::{Evasion, Signal};
 use vahta_json::{Limits, ParseError};
 
 const DISABLE_ENV: &str = "VAHTA_HOOK_DISABLE";
@@ -61,25 +62,98 @@ fn parse_args() -> Option<Args> {
     })
 }
 
-fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
-    let Some(secret) = vahta_detect::find_secret_kind(text) else {
+/// What the agent is told when a secret-shaped value is in its tool call: the
+/// category and the fix, never the rule.
+fn agent_blocked(category: &str) -> String {
+    format!(
+        "Blocked: this looks like {category}. Put secrets in Vahta and use `vahta run -- ...`; \
+         never put the value in a command or a file."
+    )
+}
+
+/// What the person is told: the rule, what it looks for, and, if the value was
+/// hidden, that it was.
+fn user_blocked(f: &Finding) -> String {
+    let mut msg = format!(
+        "vahta blocked a tool call that carried {}. Rule {}: {}.",
+        f.category,
+        f.rule,
+        f.description.trim_end_matches('.')
+    );
+    if let Some(how) = f.evasion {
+        msg.push_str(&format!(
+            " The value was hidden ({}); this may be an injected instruction.",
+            how.as_str()
+        ));
+    }
+    msg
+}
+
+fn ipc_evasion(how: vahta_detect::Evasion) -> Evasion {
+    match how {
+        vahta_detect::Evasion::Base64 => Evasion::Base64,
+        vahta_detect::Evasion::Concat => Evasion::Concat,
+        vahta_detect::Evasion::Hex => Evasion::Hex,
+    }
+}
+
+/// A secret-shaped value in a tool call: refused, or in observe mode (the
+/// person's `hook_tool`, or the rule's own `mode`) let through and reported.
+/// A hidden value is refused either way.
+fn tool_secret(ev: &Event) -> (Decision, Option<Signal>) {
+    let detection = vahta_detect::detect(&ev.text);
+    if let Some(why) = detection.truncated {
+        // The rules did not run in full: the journal should say so.
+        daemon::observed(
+            ev.tool.clone(),
+            vec![format!("scan_truncated ({why:?})")],
+            0,
+            0,
+        );
+    }
+    let Some(f) = detection.finding else {
+        return (Decision::Allow, None);
+    };
+    let category = f.category.clone();
+    let rule = f.rule.clone();
+    let evasion = f.evasion.map(ipc_evasion);
+    if f.evasion.is_none()
+        && (f.mode == vahta_detect::Mode::Observe
+            || daemon::hook_tool() == vahta_ipc::config::HookTool::Observe)
+    {
+        let signal = Signal::Observed {
+            category,
+            rule,
+            evasion,
+        };
+        return (Decision::Allow, Some(signal));
+    }
+    let deny = Decision::Deny {
+        user_message: user_blocked(&f),
+        agent_message: agent_blocked(&category),
+    };
+    let signal = Signal::Blocked {
+        category,
+        rule,
+        evasion,
+    };
+    (deny, Some(signal))
+}
+
+/// A secret in what the person typed, or in a tool's output that cannot be
+/// rewritten. A hidden value is not looked for here, and neither is a rule in
+/// observe mode: this is a plain look.
+fn secret_in(text: &str, what: &str) -> Decision {
+    let Some(f) = vahta_detect::find_secret(text)
+        .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block)
+    else {
         return Decision::Allow;
     };
-    match (what, notice) {
-        ("tool", _) => Decision::Deny {
-            user_message: format!(
-                "vahta blocked a tool call that carried a possible secret ({secret})."
-            ),
-            agent_message: format!(
-                "Inline credential-shaped token detected ({secret}). Keep secrets out of \
-                 commands and files: never paste the value into a command, a file or a tool \
-                 argument. Run the command with `vahta run` so the value never appears on \
-                 argv, in files, or in chat."
-            ),
-        },
-        ("prompt", _) => {
+    let (category, rule) = (&f.category, &f.rule);
+    match what {
+        "prompt" => {
             let msg = format!(
-                "vahta blocked this message: it looks like it contains a secret ({secret}). \
+                "vahta blocked this message: it looks like it contains {category} (rule {rule}). \
                  Keep the secret out of the chat, store it instead, and send the message \
                  again without it."
             );
@@ -89,10 +163,13 @@ fn secret_in(text: &str, what: &str, notice: bool) -> Decision {
             }
         }
         _ => Decision::Notice {
-            user_message: format!("vahta: a secret ({secret}) reached the transcript; rotate it."),
+            user_message: format!(
+                "vahta: {category} reached the transcript (rule {rule}); rotate it."
+            ),
             agent_message: format!(
-                "A secret ({secret}) reached the transcript through this tool's output. \
-                 Treat it as exposed: tell the user to rotate it, and do not repeat the value."
+                "{} reached the transcript through this tool's output. \
+                 Treat it as exposed: tell the user to rotate it, and do not repeat the value.",
+                capitalise(category)
             ),
         },
     }
@@ -112,6 +189,13 @@ fn deny_known_value(held: &daemon::Held) -> Decision {
             held.form
         ),
     }
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 /// Refusing to touch one of Vahta's own files: names the path, never content.
@@ -193,18 +277,6 @@ fn deny_read(file: &str, kind: &str) -> Decision {
     }
 }
 
-/// A refusal of a secret-shaped value in a tool call, as the daemon hears it.
-/// The kind serves as both category and rule until the detector names them
-/// apart.
-fn blocked(decision: &Decision, kind: Option<String>) -> Option<Signal> {
-    let kind = kind.filter(|_| matches!(decision, Decision::Deny { .. }))?;
-    Some(Signal::Blocked {
-        category: kind.clone(),
-        rule: kind,
-        evasion: None,
-    })
-}
-
 /// The answer to the event, and what to tell the daemon about it: each refusal
 /// of something an agent tried is evidence for its alarm.
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
@@ -232,10 +304,9 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
                 };
                 return (deny_hook_tamper(&t), Some(signal));
             }
-            let by_text = secret_in(&ev.text, "tool", false);
+            let (by_text, text_signal) = tool_secret(ev);
             if by_text != Decision::Allow {
-                let signal = blocked(&by_text, vahta_detect::find_secret_kind(&ev.text));
-                return (by_text, signal);
+                return (by_text, text_signal);
             }
             // A value Vahta holds for this agent, written any way. The daemon
             // records the signal itself (it knows the name); the hook only
@@ -248,11 +319,12 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
                 return (deny_known_value(&held), None);
             }
             if ev.group != Some(vahta_harness::Group::Shell) {
-                return (by_text, None);
+                return (by_text, text_signal);
             }
+            // Observed in the text, but a file a command reads is refused still.
             match readguard::secret_file_in_command(&ev.text, ev.cwd.as_deref()) {
                 Some((file, kind)) => (deny_read(&file, &kind), Some(read_signal(&kind))),
-                None => (Decision::Allow, None),
+                None => (Decision::Allow, text_signal),
             }
         }
         Kind::BeforeRead => {
@@ -271,7 +343,7 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
             }
         }
         // The person typed the prompt: a refusal there is not the agent's doing.
-        Kind::Prompt => (secret_in(&ev.text, "prompt", false), None),
+        Kind::Prompt => (secret_in(&ev.text, "prompt"), None),
         Kind::AfterTool => (after_tool(m, ev), None),
         Kind::SessionStart => (session_start(m, args), None),
     }
@@ -349,7 +421,7 @@ fn after_tool(m: &Manifest, ev: &Event) -> Decision {
     }
     let mcp = ev.group == Some(vahta_harness::Group::Mcp);
     let Some(output) = ev.output.as_ref().filter(|_| m.can_redact(mcp)) else {
-        return secret_in(&ev.text, "output", true);
+        return secret_in(&ev.text, "output");
     };
     let texts = redact::texts_of(output);
     let (found, possible) = redact::detector_cuts(&texts);
@@ -395,7 +467,7 @@ fn observe(ev: &Event) -> Decision {
         kinds.dedup();
         daemon::observed(ev.tool.clone(), kinds, likely.len(), possible.len());
     }
-    secret_in(&ev.text, "output", true)
+    secret_in(&ev.text, "output")
 }
 
 /// What the model and the person are told about a redaction. Names labels and

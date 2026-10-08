@@ -19,6 +19,53 @@ fn secret_anthropic() -> String {
     ["sk-", "ant-", &"a".repeat(25)].concat()
 }
 
+// Gap fixtures (2026-10-08). Each value is assembled from pieces so no file
+// in the repository holds a secret-shaped string. High entropy on purpose:
+// the name- and flag-based rules weaken low-transition values.
+fn secret_aws() -> String {
+    [
+        "wJ7r", "Xu9t", "nFEM", "I2Kd", "Mq7Q", "bPxR", "fiCY", "5Zk3", "Ha8L", "tW0s",
+    ]
+    .concat()
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for k in 0..4 {
+            if k <= c.len() {
+                out.push(A[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn secret_pw() -> String {
+    ["x7Kq", "2NvR", "9pLm", "Wd4z"].concat()
+}
+
+fn secret_slack_path() -> String {
+    [
+        "T0", "4KQ7ZXNM", "/B0", "6RJH2PVD", "/", "q8WmT3vZ", "kN5xLr2C", "jY9pHs4D",
+    ]
+    .concat()
+}
+
+fn pem(edge: &str) -> String {
+    ["-----", edge, " OPENSSH ", "PRIVATE KEY", "-----"].concat()
+}
+
 fn harnesses_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../harness/harnesses")
 }
@@ -54,6 +101,40 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
     let tmp_path = tmp.0.to_string_lossy().replace('\\', "/");
     let text = text
         .replace("{{SECRET_ANTHROPIC}}", &secret_anthropic())
+        .replace("{{SECRET_AWS}}", &secret_aws())
+        .replace("{{SECRET_PW}}", &secret_pw())
+        // The same values, hidden: base64 and hex of an assignment, a vendor
+        // key cut in two for joining.
+        .replace(
+            "{{B64_AWS}}",
+            &b64(format!("AWS_SECRET_ACCESS_KEY={}", secret_aws()).as_bytes()),
+        )
+        .replace("{{B64_ANTHROPIC}}", &b64(secret_anthropic().as_bytes()))
+        .replace(
+            "{{HEX_AWS}}",
+            &hex(format!("AWS_SECRET_ACCESS_KEY={}", secret_aws()).as_bytes()),
+        )
+        .replace("{{PAD_1_3MB}}", &"x ".repeat(650_000))
+        .replace(
+            "{{SLACK_URL}}",
+            &format!("https://hooks.slack.com/services/{}", secret_slack_path()),
+        )
+        .replace(
+            "{{HEX32}}",
+            &[
+                "3f9a", "c07e", "5b21", "d84a", "96e0", "71bc", "2a58", "f4d3",
+            ]
+            .concat(),
+        )
+        .replace("{{ANTHROPIC_HEAD}}", &secret_anthropic()[..9])
+        .replace("{{ANTHROPIC_TAIL}}", &secret_anthropic()[9..])
+        .replace("{{SECRET_SLACK_PATH}}", &secret_slack_path())
+        .replace("{{PEM_BEGIN}}", &pem("BEGIN"))
+        .replace("{{PEM_END}}", &pem("END"))
+        .replace(
+            "{{PEM_BODY}}",
+            &["b3BlbnNzaC1rZXkt", "djEAAAAABG5vbmUA", "AAAEbm9uZQAAAAAA"].concat(),
+        )
         .replace("{{TMP}}", &tmp_path);
     let fx: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     if let Some(files) = fx["files"].as_object() {
@@ -106,6 +187,9 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         v => format!("{}\n", serde_json::to_string(v).map_err(|e| e.to_string())?),
     };
     let got = String::from_utf8_lossy(&out.stdout);
+    if got != want_stdout && std::env::var_os("UPDATE_FIXTURES").is_some() {
+        return update_fixture(path, &got, &tmp, &tmp_path);
+    }
     if got != want_stdout {
         return Err(format!("stdout\n  want {want_stdout:?}\n  got  {got:?}"));
     }
@@ -121,11 +205,42 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
             .map(|l| serde_json::from_str::<Value>(l).map(|v| v["signal"].clone()))
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
+        if &Value::Array(got.clone()) != want && std::env::var_os("UPDATE_FIXTURES").is_some() {
+            return update_fixture(path, &String::from_utf8_lossy(&out.stdout), &tmp, &tmp_path);
+        }
         if &Value::Array(got.clone()) != want {
             return Err(format!("spool\n  want {want}\n  got  {got:?}"));
         }
     }
     Ok(())
+}
+
+/// `UPDATE_FIXTURES=1 cargo test -p vahta-hook --test fixtures` rewrites each
+/// fixture's `stdout` (and `spool`, where it has one) with what the hook did.
+/// Read the diff: a fixture is a claim about the hook, not a snapshot.
+fn update_fixture(path: &PathBuf, got: &str, tmp: &Tmp, tmp_path: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut fx: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let got = got.replace(tmp_path, "{{TMP}}");
+    fx["stdout"] = if got.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(got.trim()).map_err(|e| e.to_string())?
+    };
+    if fx.get("spool").is_some() {
+        let spooled =
+            std::fs::read_to_string(tmp.0.join("data/hook-spool.jsonl")).unwrap_or_default();
+        let signals: Vec<Value> = spooled
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .map(|v| v["signal"].clone())
+            .collect();
+        fx["spool"] = Value::Array(signals);
+    }
+    let pretty = serde_json::to_string_pretty(&fx).map_err(|e| e.to_string())?;
+    // Keep the file's own ending.
+    let end = if text.ends_with('\n') { "\n" } else { "" };
+    std::fs::write(path, pretty + end).map_err(|e| e.to_string())
 }
 
 #[test]
@@ -150,7 +265,7 @@ fn every_fixture_matches() {
             }
         }
     }
-    assert!(count >= 65, "only {count} fixtures found");
+    assert!(count >= 259, "only {count} fixtures found");
     assert!(
         failures.is_empty(),
         "{} of {count} failed:\n{}",

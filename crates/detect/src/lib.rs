@@ -10,12 +10,15 @@
 //! Never returns or logs secret *values*.
 
 pub mod classify;
+pub mod evasion;
+pub mod finding;
 pub mod hits;
 pub mod matchers;
 pub mod primitives;
 #[rustfmt::skip]
 mod pyunicode;
 pub mod spans;
+pub mod structural;
 
 pub use classify::{
     Confidence, HEX_LIKELY_MIN_LEN, LIKELY_TRANSITION_FLOOR, MIN_VALUE_LEN,
@@ -25,6 +28,7 @@ pub use classify::{
     SHANNON_POSSIBLE_FLOOR, STRIPPED_UUID_LEN, assignment_is_secret, classify_value,
     is_placeholder, uuid_or_stripped_hex,
 };
+pub use finding::{Detection, Evasion, Finding, Mode, Truncated, detect, find_secret};
 pub use hits::{HitSet, find_secret_kind, looks_like_json_container, scan_text_hits, scan_texts};
 pub use matchers::{
     Class, FLAG_FORM_FIRE_TIERS, REASON_FLAG_FORM, classify_bearer_capture, find_bearer_spans,

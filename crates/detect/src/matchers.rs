@@ -239,6 +239,21 @@ const PREFIX_RULES: &[PrefixRule] = &[
     },
 ];
 
+/// The kinds the vendor-prefix matcher reports, in its order.
+pub const PREFIX_KINDS: [&str; 11] = [
+    "Anthropic-style key",
+    "OpenAI-style key",
+    "AWS access key id",
+    "GitHub fine-grained PAT",
+    "GitHub PAT",
+    "GitLab PAT",
+    "Slack token",
+    "Google API key",
+    "Stripe secret key",
+    "Stripe restricted key",
+    "npm token",
+];
+
 /// `\b` at byte offset `at` of `text` (a char boundary). Same predicate as
 /// [`at_word_boundary`], read straight off the UTF-8 instead of a `Vec<char>`.
 #[inline]
@@ -556,7 +571,10 @@ pub fn classify_bearer_capture(text: &str) -> Confidence {
 
 // --- the secret-name vocabulary --------------------------------------------
 
-/// `(?i)^(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password|passwd|private[_-]?key)$`
+/// `(?i)^(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|token|secret|password|passwd|private[_-]?key)$`
+///
+/// `access_key` is how `AWS_SECRET_ACCESS_KEY` ends: the AWS secret is named by
+/// it, and the older vocabulary missed it.
 pub fn is_secret_name(name: &str) -> bool {
     // `name.strip().strip("'\"")`, with Python's whitespace; then `(?i)`
     // folding, which is one character to one character, so positions hold.
@@ -589,7 +607,7 @@ fn keyword_matches_exactly(rest: &[char]) -> bool {
     if matches!(s.as_str(), "token" | "secret" | "password" | "passwd") {
         return true;
     }
-    for (head, tail) in [("api", "key"), ("private", "key")] {
+    for (head, tail) in [("api", "key"), ("access", "key"), ("private", "key")] {
         if let Some(after) = s.strip_prefix(head) {
             let after = match after.strip_prefix(['_', '-']) {
                 Some(rest) => rest,
@@ -627,11 +645,12 @@ fn fold_byte(c: char) -> u8 {
 
 /// Screen tables for [`find_assign_keywords`]: bit 0 = `a` then `p` (api),
 /// bit 1 = `p` then `r` (private), bit 2 = `p` then `a` (passw...), bit 3 =
-/// `t` then `o` (token), bit 4 = `s` then `e` (secret). A pair passes when the
-/// first letter's bits and the second letter's bits overlap.
+/// `t` then `o` (token), bit 4 = `s` then `e` (secret), bit 5 = `a` then `c`
+/// (access key). A pair passes when the first letter's bits and the second
+/// letter's bits overlap.
 const KW_FIRST: [u8; 256] = {
     let mut t = [0u8; 256];
-    t[b'a' as usize] = 1;
+    t[b'a' as usize] = 1 | 32;
     t[b'p' as usize] = 2 | 4;
     t[b't' as usize] = 8;
     t[b's' as usize] = 16;
@@ -642,6 +661,7 @@ const KW_SECOND: [u8; 256] = {
     t[b'p' as usize] = 1;
     t[b'r' as usize] = 2;
     t[b'a' as usize] = 4;
+    t[b'c' as usize] = 32;
     t[b'o' as usize] = 8;
     t[b'e' as usize] = 16;
     t
@@ -660,11 +680,11 @@ fn find_assign_keywords<U: Unit>(chars: &[U]) -> Vec<(usize, usize)> {
         // on keyword-dense text such as source files.
         //
         // The first letter also says which keyword can possibly match here
-        // (`a`: api_key; `p`: private_key, password, passwd; `t`: token; `s`:
+        // (`a`: api_key, access_key; `p`: private_key, password, passwd; `t`: token; `s`:
         // secret), so only those are tried. The original order is kept; the
         // candidates it skips are the ones that already fail on this letter.
         //
-        // Before that, a two-letter screen: every keyword opens `ap`, `pr`,
+        // Before that, a two-letter screen: every keyword opens `ap`, `ac`, `pr`,
         // `pa`, `to` or `se` (case-folded), which is rare even though the first
         // letters are among the commonest in English and in identifiers.
         // Two table lookups and an AND keep the hot loop free of the branch
@@ -678,7 +698,8 @@ fn find_assign_keywords<U: Unit>(chars: &[U]) -> Vec<(usize, usize)> {
             continue;
         }
         let found = match crate::primitives::fold_ci(chars[i].ch()) {
-            'a' => match_optional_sep_pair(chars, i, "api", "key"),
+            'a' => match_optional_sep_pair(chars, i, "api", "key")
+                .or_else(|| match_optional_sep_pair(chars, i, "access", "key")),
             't' => match_literal_ci(chars, i, "token"),
             's' => match_literal_ci(chars, i, "secret"),
             'p' => match_optional_sep_pair(chars, i, "private", "key")
@@ -1115,6 +1136,12 @@ fn flag_values_in<U: Unit>(chars: &[U]) -> Vec<(String, String, (usize, usize))>
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_published_kinds_are_the_rules_kinds() {
+        let kinds: Vec<&str> = PREFIX_RULES.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, PREFIX_KINDS);
+    }
+
     // --- fast paths against their reference implementations ----------------
 
     /// The pre-optimisation prefix matcher, over `Vec<char>`, kept as the
@@ -1293,7 +1320,7 @@ mod tests {
             let mut out = Vec::new();
             let mut i = 0;
             'o: while i < chars.len() {
-                for (head, tail) in [("api", "key"), ("private", "key")] {
+                for (head, tail) in [("api", "key"), ("access", "key"), ("private", "key")] {
                     if let Some(end) = match_optional_sep_pair(chars, i, head, tail) {
                         out.push((i, end));
                         i = end;

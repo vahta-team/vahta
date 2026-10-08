@@ -79,6 +79,11 @@ counts). Use it to see what redaction would do before turning it on, or when
 another hook of yours also rewrites tool output. A config the hook cannot read
 counts as `redact`.
 
+`hook_tool = "observe"` is the same for a secret in a tool call before it runs
+(default `"block"`): the call goes through and the daemon is told. See "Detector
+rules" in [daemon.md](daemon.md) for what is looked for and what is never let
+through.
+
 ## Other hooks that rewrite output
 
 If another of your hooks also rewrites tool output on the same event, which
