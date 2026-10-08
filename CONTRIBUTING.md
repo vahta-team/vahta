@@ -26,6 +26,9 @@ There is no separate linter job in CI today — keep changes consistent with sur
 - Branch names in this repo usually look like `feat/…`, `fix/…`, `docs/…`, or `chore/…`.
 - Keep the suite green (`pytest -q`).
 - Do not paste secret values into issues, PRs, or commit messages.
+- A merged PR's branch is deleted automatically. To keep one, name it
+  `keep/...` when you create it, or add the label `keep-branch` to the PR
+  before it merges. A branch that another open PR targets is always kept.
 
 ## Security issues
 
