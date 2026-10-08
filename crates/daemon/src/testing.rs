@@ -24,6 +24,56 @@ pub fn scripted_from_env() -> Option<Box<dyn PromptSurface>> {
     }
 }
 
+/// In a test build, how often the hook watchdog looks at its files
+/// (`VAHTA_TEST_GUARD_POLL_MS`); the shipped build polls every two seconds.
+pub fn guard_poll() -> Option<std::time::Duration> {
+    #[cfg(feature = "test-surface")]
+    {
+        std::env::var("VAHTA_TEST_GUARD_POLL_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
+/// Where the commands of a login autostart (`systemctl`, `launchctl`, `reg`)
+/// go instead of being run. `None` in the shipped build: they are run. In a
+/// test build they are never run: they are appended, one line each, to the
+/// file `VAHTA_TEST_SERVICE_LOG` names, or dropped when it is not set.
+pub fn service_log() -> Option<Option<std::path::PathBuf>> {
+    #[cfg(feature = "test-surface")]
+    {
+        Some(std::env::var_os("VAHTA_TEST_SERVICE_LOG").map(std::path::PathBuf::from))
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
+/// The directory the administrator-policy paths (`/etc/claude-code/...`) are
+/// re-rooted under. `None` in the shipped build. A test build always has one,
+/// so it can never write the real system paths: `VAHTA_TEST_MANAGED_ROOT`, or
+/// a directory in the temp dir.
+pub fn managed_root() -> Option<std::path::PathBuf> {
+    #[cfg(feature = "test-surface")]
+    {
+        Some(
+            std::env::var_os("VAHTA_TEST_MANAGED_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("vahta-test-managed-root")),
+        )
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
 /// In a test build, stand in for logind: when the file named by
 /// `VAHTA_TEST_SLEEP_TRIGGER` appears, the machine "went to sleep". The same
 /// path as the real signal, so a test can show the sessions end.

@@ -41,7 +41,7 @@ fn gated_kind(findings: &[vahta_scan::Finding]) -> Option<String> {
 
 /// `given` made absolute against `cwd` (or the process's directory), with a
 /// leading `~/` expanded.
-fn resolve(given: &str, cwd: Option<&str>) -> PathBuf {
+pub(crate) fn resolve(given: &str, cwd: Option<&str>) -> PathBuf {
     let p = if let Some(rest) = given.strip_prefix("~/") {
         match std::env::var_os("HOME") {
             Some(h) => Path::new(&h).join(rest),
@@ -267,7 +267,7 @@ pub fn secret_file_in_command(cmd: &str, cwd: Option<&str>) -> Option<(String, S
 
 /// Programs that change files, besides the readers: `rm`, `mv`, `cp` and the
 /// like. Their arguments are checked against Vahta's own files.
-const MUTATORS: &[&str] = &[
+pub(crate) const MUTATORS: &[&str] = &[
     "rm", "mv", "cp", "ln", "tee", "dd", "truncate", "shred", "install", "rsync", "touch", "chmod",
     "chown", "unlink", "rmdir", "scp", "ed", "ex", "vi", "vim", "nano", "emacs",
 ];
@@ -287,7 +287,7 @@ fn data_root() -> Option<PathBuf> {
 
 /// `path` without `.` and `..`, made lexically (no file system), so a path that
 /// does not exist can still be placed.
-fn normalise(path: &Path) -> PathBuf {
+pub(crate) fn normalise(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for c in path.components() {
@@ -306,7 +306,7 @@ fn normalise(path: &Path) -> PathBuf {
 
 /// `path` with the part that exists resolved through symlinks, so a link into a
 /// protected place is seen for what it points at.
-fn resolved(path: &Path) -> PathBuf {
+pub(crate) fn resolved(path: &Path) -> PathBuf {
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     let mut base = path.to_path_buf();
     loop {
@@ -335,7 +335,7 @@ fn component_is_vault_dir(path: &Path) -> bool {
     })
 }
 
-fn inside(path: &Path, root: &Path) -> bool {
+pub(crate) fn inside(path: &Path, root: &Path) -> bool {
     let (a, b) = (normalise(path), normalise(root));
     a.starts_with(&b)
         || a.to_string_lossy()

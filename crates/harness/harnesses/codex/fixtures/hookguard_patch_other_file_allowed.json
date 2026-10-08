@@ -1,0 +1,23 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.codex/hooks.json": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash|apply_patch\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/opt/vahta/vahta-hook --harness codex --event before_tool --setup 1\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+    "home/.codex/config.toml": "[features]\nhooks = true\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "apply_patch",
+    "tool_input": {
+      "command": "*** Begin Patch\n*** Update File: src/main.rs\n-fn main() {}\n+fn main() { println!(\"hooks\"); }\n*** End Patch"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "spool": []
+}

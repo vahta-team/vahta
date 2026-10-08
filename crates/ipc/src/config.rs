@@ -8,6 +8,7 @@
 //! idle_minutes = 10        # the daemon exits after this long with nothing to do
 //! hook_output = "redact"   # or "observe": the hook only reports secrets in tool output
 //! alarm = "warn"           # or "lock": what an agent that looks injected gets
+//! guard = "on"             # or "off": the hook watchdog (see docs/daemon.md); unset until asked
 //! ```
 //!
 //! A missing file is the defaults. A file that does not parse, or carries a key
@@ -36,6 +37,26 @@ pub struct Config {
     pub idle_minutes: u64,
     pub hook_output: HookOutput,
     pub alarm: AlarmAction,
+    /// The person's answer about the hook watchdog; `None` until `vahta setup`
+    /// has asked.
+    pub guard: Option<Guard>,
+}
+
+/// Whether the hook watchdog runs, and starts at login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Guard {
+    On,
+    Off,
+}
+
+impl Guard {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Guard::On => "on",
+            Guard::Off => "off",
+        }
+    }
 }
 
 /// What the hook does with a secret in a tool's output.
@@ -74,8 +95,102 @@ impl Default for Config {
             idle_minutes: 10,
             hook_output: HookOutput::Redact,
             alarm: AlarmAction::Warn,
+            guard: None,
         }
     }
+}
+
+/// Write `guard = "<g>"` into the config file, keeping everything else in it
+/// (comments included): an existing `guard` line is replaced, else a line is
+/// added. Atomic; creates the file and its directory if need be.
+pub fn set_guard(path: &Path, g: Guard) -> std::io::Result<()> {
+    let old = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let line = format!("guard = \"{}\"", g.as_str());
+    let mut out = String::new();
+    let mut done = false;
+    let mut top_level = true;
+    for l in old.split_inclusive('\n') {
+        let bare = l.trim_start();
+        if bare.starts_with('[') {
+            top_level = false;
+        }
+        let is_guard = top_level
+            && bare
+                .strip_prefix("guard")
+                .is_some_and(|r| r.trim_start().starts_with('='));
+        if is_guard && !done {
+            out.push_str(&line);
+            out.push('\n');
+            done = true;
+        } else if !is_guard {
+            out.push_str(l);
+        }
+    }
+    if !done {
+        // Top-level keys must come before any table.
+        let first_table = out
+            .lines()
+            .scan(0usize, |pos, l| {
+                let at = *pos;
+                *pos += l.len() + 1;
+                Some((at, l))
+            })
+            .find(|(_, l)| l.trim_start().starts_with('['))
+            .map(|(at, _)| at);
+        match first_table {
+            Some(at) => out.insert_str(at, &format!("{line}\n")),
+            None => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Remove the `guard` line, so the next `vahta setup` asks again.
+pub fn clear_guard(path: &Path) -> std::io::Result<()> {
+    let old = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut top_level = true;
+    let kept: String = old
+        .split_inclusive('\n')
+        .filter(|l| {
+            let bare = l.trim_start();
+            if bare.starts_with('[') {
+                top_level = false;
+            }
+            !(top_level
+                && bare
+                    .strip_prefix("guard")
+                    .is_some_and(|r| r.trim_start().starts_with('=')))
+        })
+        .collect();
+    if kept == old {
+        return Ok(());
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, kept)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 #[derive(Debug)]
@@ -170,6 +285,30 @@ mod tests {
         ] {
             assert!(Config::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn guard_is_unset_until_asked_and_set_guard_keeps_the_rest() {
+        assert_eq!(Config::parse("").unwrap().guard, None);
+        assert_eq!(
+            Config::parse("guard = \"on\"\n").unwrap().guard,
+            Some(Guard::On)
+        );
+        assert!(Config::parse("guard = \"maybe\"\n").is_err());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("c/config.toml");
+        set_guard(&path, Guard::On).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "guard = \"on\"\n");
+        std::fs::write(&path, "# mine\nterminal = \"foot\"\n[x]\na = 1\n").unwrap();
+        set_guard(&path, Guard::Off).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\nterminal = \"foot\"\nguard = \"off\"\n[x]\na = 1\n"
+        );
+        set_guard(&path, Guard::On).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("guard").count(), 1);
+        assert!(text.contains("guard = \"on\""));
     }
 
     #[test]

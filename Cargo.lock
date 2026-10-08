@@ -1421,8 +1421,10 @@ dependencies = [
  "sha2",
  "tempfile",
  "vahta-detect",
+ "vahta-harness",
  "vahta-ipc",
  "vahta-os",
+ "vahta-setup",
  "vahta-vault",
  "zbus",
  "zeroize",
@@ -1454,6 +1456,7 @@ dependencies = [
  "vahta-ipc",
  "vahta-json",
  "vahta-scan",
+ "vahta-setup",
 ]
 
 [[package]]

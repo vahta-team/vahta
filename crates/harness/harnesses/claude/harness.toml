@@ -39,6 +39,16 @@ linux = ["~/.claude/settings.json"]
 macos = ["~/.claude/settings.json"]
 windows = ["~/.claude/settings.json"]
 
+# The administrator policy users cannot override, for `vahta setup --managed`.
+# Docs: https://code.claude.com/docs/en/managed-settings (read 2026-10-08)
+[config.managed]
+format = "json_settings"
+
+[config.managed.path]
+linux = ["/etc/claude-code/managed-settings.json"]
+macos = ["/Library/Application Support/ClaudeCode/managed-settings.json"]
+windows = ["C:\\Program Files\\ClaudeCode\\managed-settings.json"]
+
 # --- detection --------------------------------------------------------------
 # Used by `vahta setup`. Found when any rule matches. The config directory is
 # what Claude Code creates on first run; the binary covers a fresh install.

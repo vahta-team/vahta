@@ -12,12 +12,15 @@
 
 mod agentguard;
 mod daemon;
+mod hookguard;
 mod readguard;
 mod redact;
 
 use std::io::{Read, Write};
 
 use vahta_harness::{Decision, Event, Kind, Manifest};
+use vahta_ipc::config::Config;
+use vahta_ipc::paths::Paths;
 use vahta_ipc::protocol::Signal;
 use vahta_json::{Limits, ParseError};
 
@@ -143,6 +146,20 @@ fn vahta_file_touched(ev: &Event) -> Option<String> {
     }
 }
 
+/// Refusing a change that would weaken Vahta's hooks: the agent is told to ask.
+fn deny_hook_tamper(t: &hookguard::Tampering) -> Decision {
+    let msg = format!(
+        "vahta blocked a change to `{}`: it {}, and Vahta's hooks are what watch what agents do. \
+         Changing hook settings goes through Vahta: ask the person with \
+         `vahta hooks pause --for 1h --reason \"...\"`.",
+        t.file, t.what
+    );
+    Decision::Deny {
+        user_message: msg.clone(),
+        agent_message: msg,
+    }
+}
+
 /// Refusing a Vahta command that is for the person only.
 fn deny_vahta_command(invocation: &str) -> Decision {
     let msg = if invocation.ends_with("_surface") {
@@ -207,6 +224,13 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
             if let Some(file) = vahta_file_touched(ev) {
                 let signal = Signal::VahtaFileTouch { path: file.clone() };
                 return (deny_vahta_file(&file), Some(signal));
+            }
+            if let Some(t) = hookguard::tampering(ev) {
+                let signal = Signal::HookTamper {
+                    file: t.file.clone(),
+                    what: t.what.clone(),
+                };
+                return (deny_hook_tamper(&t), Some(signal));
             }
             let by_text = secret_in(&ev.text, "tool", false);
             if by_text != Decision::Allow {
@@ -274,7 +298,40 @@ fn session_start(m: &Manifest, args: &Args) -> Decision {
                 user_message: line,
             }
         }
-        _ => Decision::Allow,
+        _ => guard_reminder(),
+    }
+}
+
+/// When the person turned the hook watchdog off, a reminder at the start of a
+/// session: weekly, and monthly after three declines. Only the answer "off"
+/// is reminded; one not given yet is for `vahta setup` and `vahta check` to
+/// say. Writes the time of the reminder, and reads two small files.
+fn guard_reminder() -> Decision {
+    use vahta_ipc::config::Guard;
+    let Ok(paths) = Paths::from_env(None) else {
+        return Decision::Allow;
+    };
+    if Config::load(&paths.config_file())
+        .ok()
+        .and_then(|c| c.guard)
+        != Some(Guard::Off)
+    {
+        return Decision::Allow;
+    }
+    let file = vahta_ipc::state::state_file(&paths);
+    let mut state = vahta_ipc::state::State::load(&file);
+    let now = vahta_ipc::state::now();
+    if !state.reminder_due(now) {
+        return Decision::Allow;
+    }
+    state.guard_reminded_at = now;
+    let _ = state.save(&file);
+    let line = "vahta: the hook watchdog is off, so nothing notices if an agent removes Vahta's \
+                hooks; `vahta setup --guard on` turns it on"
+        .to_string();
+    Decision::Notice {
+        agent_message: format!("{line}. Mention this to the user once."),
+        user_message: line,
     }
 }
 

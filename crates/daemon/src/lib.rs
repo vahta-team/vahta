@@ -18,6 +18,7 @@ mod binding;
 mod clipboard;
 mod dotenv;
 mod encoded;
+mod guard_ops;
 pub mod journal;
 mod lock;
 mod ops;

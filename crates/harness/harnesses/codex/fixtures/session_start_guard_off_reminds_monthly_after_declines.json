@@ -1,0 +1,22 @@
+{
+  "event": "session_start",
+  "args": [
+    "--setup",
+    "1"
+  ],
+  "env": {},
+  "files": {
+    "config/config.toml": "guard = \"off\"\n",
+    "data/state.json": "{\"guard_declines\": 3, \"guard_reminded_at\": 1}\n"
+  },
+  "stdin": {
+    "hook_event_name": "SessionStart",
+    "session_id": "s1",
+    "source": "startup",
+    "cwd": "{{TMP}}"
+  },
+  "stdout": {
+    "systemMessage": "vahta: the hook watchdog is off, so nothing notices if an agent removes Vahta's hooks; `vahta setup --guard on` turns it on"
+  },
+  "exit": 0
+}

@@ -1,0 +1,24 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.cursor/hooks.json": "{\"version\":1,\"hooks\":{\"preToolUse\":[{\"command\":\"/opt/vahta/vahta-hook --harness cursor --event before_tool --setup 1\",\"matcher\":\"Shell|Write\"}]}}",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "ls ~/.cursor"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": null,
+  "exit": 0,
+  "spool": []
+}

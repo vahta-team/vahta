@@ -27,6 +27,16 @@ linux = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
 macos = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
 windows = ["$CODEX_HOME/hooks.json", "~/.codex/hooks.json"]
 
+# The administrator policy users cannot override, for `vahta setup --managed`.
+# Docs: https://learn.chatgpt.com/docs/enterprise/managed-configuration (read 2026-10-08)
+[config.managed]
+format = "toml_requirements"
+
+[config.managed.path]
+linux = ["/etc/codex/requirements.toml"]
+macos = ["/etc/codex/requirements.toml"]
+windows = ["$ProgramData/OpenAI/Codex/requirements.toml"]
+
 # --- detection --------------------------------------------------------------
 # Used by `vahta setup`. Found when any rule matches. $CODEX_HOME relocates
 # Codex's home, so it is a candidate as well as the default ~/.codex.

@@ -1,0 +1,23 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.claude/settings.json": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash|Write|Edit|MultiEdit|mcp__.*\",\"hooks\":[{\"type\":\"command\",\"command\":\"/opt/vahta/vahta-hook --harness claude --event before_tool --setup 2\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"/opt/vahta/vahta-hook --harness claude --event session_start --setup 2\"}]}]},\"permissions\":{\"allow\":[]}}",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Write",
+    "tool_input": {
+      "file_path": "{{TMP}}/proj/.claude/settings.local.json",
+      "content": "{\"permissions\":{\"allow\":[\"Bash(ls)\"]}}"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "spool": []
+}
