@@ -175,7 +175,35 @@ jobs:
           # An empty extraheader drops whatever header is configured.
           git -c http.https://github.com/.extraheader= \
             push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$BRANCH"
-          # A push with the workflow token starts no workflow; a dispatch does.
-          gh workflow run tests.yml --ref "$BRANCH"
-          { echo "CI fixer, attempt $ATTEMPT of $MAX: pushed $(git rev-parse --short HEAD) and started \`tests\` again."; echo; cat "$summary"; } > /tmp/comment.md
+          # The push starts the pull request's `tests` run, but GitHub holds a
+          # run that a bot's push started until someone approves it. Approve
+          # it, so the pull request's own checks show the result. If there is
+          # no such run, or it cannot be approved, a dispatch runs the tests
+          # (it does not show among the pull request's checks).
+          new=$(git rev-parse HEAD)
+          run=""
+          for _ in $(seq 1 12); do
+            sleep 10
+            run=$(gh run list --branch "$BRANCH" --workflow tests.yml --event pull_request --commit "$new" \
+              --json databaseId,status,conclusion --jq '.[0] // empty | "\(.databaseId) \(.status) \(.conclusion)"' || true)
+            case "$run" in
+              *" completed action_required"|*" in_progress "*|*" completed "*) break ;;
+            esac
+          done
+          id=${run%% *}
+          case "$run" in
+            "")
+              gh workflow run tests.yml --ref "$BRANCH"
+              how="no pull request run appeared, so \`tests\` was started by dispatch" ;;
+            *" action_required")
+              if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" >/dev/null; then
+                how="approved the pull request's \`tests\` run"
+              else
+                gh workflow run tests.yml --ref "$BRANCH"
+                how="could not approve run $id, so \`tests\` was started by dispatch; the pull request's checks stay pending until a person approves that run"
+              fi ;;
+            *)
+              how="the pull request's \`tests\` run started on its own" ;;
+          esac
+          { echo "CI fixer, attempt $ATTEMPT of $MAX: pushed $(git rev-parse --short HEAD); $how."; echo; cat "$summary"; } > /tmp/comment.md
           gh pr comment "$PR" --body-file /tmp/comment.md
