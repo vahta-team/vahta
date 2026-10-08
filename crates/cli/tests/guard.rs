@@ -170,6 +170,7 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+#[cfg(unix)]
 fn wait_until(what: &str, secs: u64, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
