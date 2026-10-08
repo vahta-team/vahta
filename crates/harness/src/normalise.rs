@@ -20,6 +20,9 @@ pub struct Event {
     pub cwd: Option<String>,
     /// The harness's id for the session, when the payload has one.
     pub session_id: Option<String>,
+    /// before_tool, write tools: the `(old, new)` text pairs of an edit
+    /// (Claude's Edit and MultiEdit), in order. Empty for a whole-file write.
+    pub edits: Vec<(String, String)>,
     /// after_tool: the tool's output as the harness sent it, structure and
     /// all, so a rewrite can keep its shape (Claude wants the shape back).
     /// `None` when there is no output or it nests past [`OUTPUT_DEPTH`].
@@ -189,6 +192,20 @@ fn call_text(tool_input: Option<&Value>, text_fields: &[String]) -> String {
     }
 }
 
+/// The `(old_string, new_string)` pairs of an Edit (the input itself) or a
+/// MultiEdit (its `edits` list).
+fn edit_pairs(input: &Value) -> Vec<(String, String)> {
+    let pair = |v: &Value| match (get(v, "old_string"), get(v, "new_string")) {
+        (Some(Value::Str(old)), Some(Value::Str(new))) => Some((old.clone(), new.clone())),
+        _ => None,
+    };
+    let mut out: Vec<(String, String)> = pair(input).into_iter().collect();
+    if let Some(Value::Array(items)) = get(input, "edits") {
+        out.extend(items.iter().filter_map(pair));
+    }
+    out
+}
+
 impl Manifest {
     /// Read `payload` as an event of `kind`. `None` means "nothing to judge":
     /// not an object, an event this manifest does not know, a tool outside the
@@ -223,6 +240,9 @@ impl Manifest {
                 // the hook uses it to protect Vahta's own files.
                 ev.path = text_field(payload, &spec.file_path);
                 let input = field(payload, &spec.tool_input);
+                if group.group == Group::Write {
+                    ev.edits = input.map(edit_pairs).unwrap_or_default();
+                }
                 ev.text = if group.group == Group::Mcp {
                     match input {
                         Some(v @ Value::Object(_)) => joined_strings(v),

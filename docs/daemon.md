@@ -306,6 +306,8 @@ terminal = "kitty"      # the terminal the window opens in (Linux); empty = dete
 idle_minutes = 10       # the daemon exits after this long with nothing to do
 hook_output = "redact"  # or "observe": the hook only reports secrets in tool output
 alarm = "warn"          # or "lock": what the injection alarm does (see below)
+
+guard = "on"            # or "off": the hook watchdog (below); unset until `vahta setup` asked
 ```
 
 A misspelt key is an error, not a silent default. On Linux the window opens in
@@ -439,6 +441,126 @@ secrets.
 The journal records `alarm` (who, score, what, and the action taken) and
 `alarm_ignored`. `vahta daemon status` and `vahta sessions` show "alarm raised
 at ..." until the next `vahta unlock`.
+
+## Hook watchdog
+
+The hook is only as good as its entry in the agent's settings. An agent that can
+edit `~/.claude/settings.json` can delete the hook that watches it, or set
+`"disableAllHooks": true`. Three layers answer that, from the cheapest to the
+strongest.
+
+### 1. The hook refuses the edit
+
+Before the tool runs, `vahta-hook` refuses what would weaken its own entries:
+
+- **Edit, MultiEdit, Write and Codex's `apply_patch`** on a file that holds hooks
+  or the switches that turn them off: each harness's hook config
+  (`~/.claude/settings.json`, `~/.codex/hooks.json` or `$CODEX_HOME`,
+  `~/.cursor/hooks.json`), any Claude Code project's `.claude/settings.json` and
+  `settings.local.json`, Codex's `config.toml`, Vahta's own `config.toml` (its
+  `guard` line) and the administrator-policy paths. The edit is judged by what the
+  file would become: one that keeps our entries (a new permission, say) is allowed;
+  one that removes them, leaves the file unreadable, sets `disableAllHooks` or
+  `hooks = false` is refused.
+- **Shell commands** that write, remove, move or copy onto such a file: `sed -i`,
+  `rm`, `mv`, `cp`, `tee`, `truncate`, a `>` redirect (`jq ... > file`), and
+  `python -c` / `node -e` and the like that name one. Reading is not touched.
+
+The agent is told: *Changing hook settings goes through Vahta: ask the person with
+`vahta hooks pause --for 1h --reason "..."`.* Each refusal is reported as a
+`hook_tamper` signal. This is best effort, in the way of the file-read guard: a path
+built by a script, a glob or a command substitution is not followed.
+
+### 2. `vahta hooks pause`
+
+`vahta hooks pause [--for DURATION] [--reason TEXT] [--harness NAME]...` is the
+one door. A window shows the person the harnesses, the time (at most 8 hours),
+*while paused, Vahta does not see what the agent does*, and the agent's reason,
+marked unverified; it needs the vault password (the vault of the caller's
+project, else of a project the daemon has seen). With no vault known there is no
+password, so the request is refused (exit 3) and the person is told to run
+`vahta setup --uninstall` or `vahta setup --guard off` in their own terminal. On approval the hooks are taken out of those harnesses and
+`pause.json` is written to the data directory, which the hook already keeps agents
+out of. `vahta hooks resume` puts them back now and needs no password (it only
+restores protection). `vahta hooks status` lists the pauses. Journal:
+`hooks_paused`, `hooks_resumed`, and `hooks_restored` when the time is up.
+
+### 3. `vahta _guard`: the watchdog
+
+A small process, separate from the daemon and outliving it, that **only watches
+the hook settings** of the three harnesses. It holds no vault key (it never opens a
+vault), opens no network socket and reads only the files it watches: the harness
+hook configs, Claude Code settings of the projects the daemon has seen
+(`projects.json` in the data directory, added to on `run` and `unlock`), and
+Codex's `config.toml`. One runs per user (`guard.lock` in the runtime directory).
+Every two seconds it looks at the files' modification times, and re-reads those
+that changed.
+
+It calls it tampering when a harness that had Vahta's hooks loses some or all of
+them (the set is remembered in `guard-state.json`), when the hook program they
+point to is gone, when `disableAllHooks` is `true` in a Claude Code settings file,
+or when `[features] hooks = false` appears in Codex's `config.toml`. It does *not*
+call it tampering when an entry merely differs from what this vahta would write, or
+points to another `vahta-hook` that exists. A harness with an unexpired pause is
+not watched.
+
+On tampering it asks the daemon (starting it if need be), whose window says what
+was found and offers **Restore**, **Keep off for 1 h (password)** and **Turn off
+protection (password)** (with no vault known only **Restore**, and a line saying
+that to keep them off the person runs `vahta setup --guard off` in their own
+terminal). With no answer in two minutes, or if it cannot ask, it
+restores. Restoring is `vahta setup`'s own install (the backup and the atomic
+write are reused); for `disableAllHooks` it removes the key. Journal:
+`hook_tamper`, then `hook_restored`, `hook_tamper_kept` or `guard_off`.
+
+Choosing *Keep off* writes a one-hour pause; the watchdog puts the hooks back when
+it ends.
+
+### Consent, autostart and reminders
+
+The watchdog runs only if the person said yes. After an install, `vahta setup` on
+a terminal explains it and asks:
+
+> A small background process that only watches the hook settings of Claude Code,
+> Codex and Cursor. It holds no keys, never connects to the internet, does not
+> watch you or your files. If an agent or a tool removes Vahta's hooks, it asks
+> you before putting them back.
+
+`vahta setup --guard on|off` answers without a terminal. The answer is `guard =
+"on" | "off"` in `config.toml`. With `on`, setup writes a login autostart (Linux:
+the systemd user unit `~/.config/systemd/user/vahta-guard.service`, enabled with
+`systemctl --user enable --now`; macOS: the launch agent
+`~/Library/LaunchAgents/dev.vahta.guard.plist`; Windows: the `VahtaGuard` value
+under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and starts the
+watchdog now; the daemon also starts it whenever it starts. With `off`, setup stops
+it and removes the autostart. `vahta setup --uninstall` stops the watchdog and
+removes the autostart *before* it removes the hooks (and, when no harness keeps
+Vahta's hooks, forgets the answer so the next install asks again).
+
+When the answer is `off`, the SessionStart hook says so at most once a week, and
+once a month after three declines (`guard_declines` and `guard_reminded_at` in
+`<data dir>/state.json`). `vahta setup` (the status table) and `vahta check` (on
+stderr, text mode) always say where the watchdog stands.
+
+### Administrator policy (`vahta setup --managed`)
+
+Hooks in a policy that an administrator owns cannot be switched off by the user's
+or a project's settings. `vahta setup --claude|--codex|--cursor|--all --managed`
+writes Vahta's hooks there, `--dry-run` shows the content without writing. It
+never escalates by itself: when it cannot write the file it prints the content and
+the `sudo ... tee` command to run (on Windows, to put the content in the file from
+an administrator prompt) and exits 1. Paths and sources (read 2026-10-08):
+
+| Harness | File | Notes |
+|---|---|---|
+| Claude Code | Linux/WSL `/etc/claude-code/managed-settings.json`; macOS `/Library/Application Support/ClaudeCode/managed-settings.json`; Windows `C:\Program Files\ClaudeCode\managed-settings.json` | The hooks are the same JSON as in `settings.json`. Managed settings sit above every user, project and local setting, `--settings` included. Claude Code does not read the older `C:\ProgramData\ClaudeCode` path. <https://code.claude.com/docs/en/managed-settings> |
+| Codex | Linux/macOS `/etc/codex/requirements.toml`; Windows `%ProgramData%\OpenAI\Codex\requirements.toml` | Admin-enforced requirements users cannot override; hooks are `[[hooks.<Event>]]` tables, and `[features] hooks = true` pins hooks on. Appended to an existing file, never rewritten. <https://learn.chatgpt.com/docs/enterprise/managed-configuration> |
+| Cursor | Linux/WSL `/etc/cursor/hooks.json`; macOS `/Library/Application Support/Cursor/hooks.json`; Windows `C:\ProgramData\Cursor\hooks.json` | Enterprise hooks, the highest source ("Enterprise, Team, Project, User"). Cursor's page does not say in so many words that users cannot disable them. <https://cursor.com/docs/agent/hooks> |
+
+Not done: the watchdog does not watch the managed files (changing them needs
+administrator rights, and it could not restore them), and Cursor has no known
+switch that turns user hooks off, so there is nothing for the watchdog to check
+beyond the entries themselves.
 
 ## What this does not protect against
 

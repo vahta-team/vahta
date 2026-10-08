@@ -1,0 +1,36 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.codex/hooks.json": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash|apply_patch\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/opt/vahta/vahta-hook --harness codex --event before_tool --setup 1\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+    "home/.codex/config.toml": "[features]\nhooks = true\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sed -i '/vahta-hook/d' ~/.codex/hooks.json"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "vahta blocked a change to `~/.codex/hooks.json`: it is a `sed` command that would edit a file that holds hooks in place, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+    },
+    "systemMessage": "vahta blocked a change to `~/.codex/hooks.json`: it is a `sed` command that would edit a file that holds hooks in place, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "hook_tamper",
+      "file": "~/.codex/hooks.json",
+      "what": "is a `sed` command that would edit a file that holds hooks in place"
+    }
+  ]
+}

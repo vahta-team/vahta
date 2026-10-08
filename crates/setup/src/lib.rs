@@ -34,6 +34,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 use vahta_harness::{Manifest, Shape};
 
+pub mod guard;
+
 /// The three operating systems the manifests have paths for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
@@ -66,6 +68,21 @@ pub struct Env {
     pub os: Os,
     /// The `vahta-hook` binary setup would register (it need not exist).
     pub hook: PathBuf,
+}
+
+impl Env {
+    /// The environment of this process, for a given home and hook binary.
+    pub fn from_process(home: PathBuf, hook: PathBuf) -> Env {
+        Env {
+            home,
+            vars: std::env::vars().collect(),
+            path: std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).collect())
+                .unwrap_or_default(),
+            os: Os::current(),
+            hook,
+        }
+    }
 }
 
 // --- paths and detection ------------------------------------------------------
@@ -103,6 +120,17 @@ pub fn config_path(m: &Manifest, env: &Env) -> Option<PathBuf> {
         Os::Windows => &m.config.path.windows,
     };
     candidates.iter().find_map(|t| expand(t, env))
+}
+
+/// Every user-scope config candidate whose variables are set, in order: where
+/// the harness might read its hooks from, not only the first.
+pub fn config_paths(m: &Manifest, env: &Env) -> Vec<PathBuf> {
+    let candidates = match env.os {
+        Os::Linux => &m.config.path.linux,
+        Os::Macos => &m.config.path.macos,
+        Os::Windows => &m.config.path.windows,
+    };
+    candidates.iter().filter_map(|t| expand(t, env)).collect()
 }
 
 /// Whether the harness looks installed, and what said so.
@@ -979,6 +1007,13 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
         state,
         problems,
     }
+}
+
+/// How many hook commands of ours `text` (a config file's content) holds, and
+/// whether it parses as a config at all.
+pub fn ours_in_text(text: &str, m: &Manifest, os: Os) -> Result<usize, Refusal> {
+    let doc = parse(Some(text))?;
+    Ok(installed(&doc, m.config.shape, os).len())
 }
 
 pub fn status(m: &Manifest, env: &Env) -> Status {

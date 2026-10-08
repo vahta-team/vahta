@@ -31,8 +31,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vahta-detect = { path = "../detect" }
 dunce = "1"
+vahta-harness = { path = "../harness" }
 vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
+# Taking Vahta's hook entries out for a pause and putting them back.
+vahta-setup = { path = "../setup" }
 vahta-vault = { path = "../vault" }
 zeroize = "1"
 aho-corasick = "1"

@@ -1,0 +1,35 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.claude/settings.json": "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash|Write|Edit|MultiEdit|mcp__.*\",\"hooks\":[{\"type\":\"command\",\"command\":\"/opt/vahta/vahta-hook --harness claude --event before_tool --setup 2\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"/opt/vahta/vahta-hook --harness claude --event session_start --setup 2\"}]}]},\"permissions\":{\"allow\":[]}}",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "jq 'del(.hooks)' ~/.claude/settings.json > ~/.claude/settings.json"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "vahta blocked a change to `~/.claude/settings.json`: it is a shell command that would write to a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+    },
+    "systemMessage": "vahta blocked a change to `~/.claude/settings.json`: it is a shell command that would write to a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "hook_tamper",
+      "file": "~/.claude/settings.json",
+      "what": "is a shell command that would write to a file that holds hooks"
+    }
+  ]
+}

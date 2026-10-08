@@ -25,6 +25,16 @@ linux = ["~/.cursor/hooks.json"]
 macos = ["~/.cursor/hooks.json"]
 windows = ["~/.cursor/hooks.json"]
 
+# The administrator policy users cannot override, for `vahta setup --managed`.
+# Docs: https://cursor.com/docs/agent/hooks, "Enterprise hooks" (read 2026-10-08)
+[config.managed]
+format = "json_settings"
+
+[config.managed.path]
+linux = ["/etc/cursor/hooks.json"]
+macos = ["/Library/Application Support/Cursor/hooks.json"]
+windows = ["C:\\ProgramData\\Cursor\\hooks.json"]
+
 # --- detection --------------------------------------------------------------
 # Used by `vahta setup`. Found when any rule matches. `cursor-agent` is the
 # command-line agent, `cursor` the editor's launcher; either one has hooks.

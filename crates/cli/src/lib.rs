@@ -31,8 +31,11 @@
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
 
+mod autostart;
 mod bind_cmd;
 mod daemon_cmd;
+mod guard_cmd;
+mod hooks_cmd;
 mod output_cmd;
 mod run_cmd;
 mod session_cmds;
@@ -105,6 +108,7 @@ commands:
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
   sessions  list sessions, or `kill ID` one (no password)
+  hooks   `hooks pause` turns Vahta's hooks off for a while (the person approves)
   output  `output allow REF`: ask to see what was cut from a tool's output
   init    create this project's vault
   add     store a new secret (typed in a window, never on the command line)
@@ -395,10 +399,15 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         setup::stale_notice(setup_env, stderr);
     }
     match args.first().map(String::as_str) {
-        Some("setup") => setup::run(&args[1..], env.setup.as_ref(), stdout, stderr),
+        Some("setup") => setup::run(&args[1..], env, stdout, stderr),
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
         Some("list") => vault_cmds::run_list(&args[1..], env, stdout, stderr),
-        Some("check") => vault_cmds::run_check(&args[1..], env, stdout, stderr),
+        Some("check") => {
+            // First, so the result stays the last thing on stderr.
+            guard_cmd::note_check(&args[1..], env, stderr);
+            vault_cmds::run_check(&args[1..], env, stdout, stderr)
+        }
+        Some("hooks") => hooks_cmd::run(&args[1..], env, stdout, stderr),
         Some("daemon") => daemon_cmd::run(&args[1..], env, stdout, stderr),
         Some(
             cmd @ ("init" | "add" | "reset" | "tier" | "remove" | "import" | "reveal" | "copy"),
@@ -421,6 +430,8 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("output") => output_cmd::run(&args[1..], env, stdout, stderr),
         // The prompt window, started by the daemon; not listed in the help.
         Some("_surface") => surface_cmd::run(&args[1..]),
+        // The hook watchdog, started by the daemon or at login; not listed either.
+        Some("_guard") => guard_cmd::run(env, stderr),
         Some("-h") | Some("--help") => {
             let _ = stdout.write_all(TOP_USAGE.as_bytes());
             EXIT_CLEAN

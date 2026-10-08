@@ -267,6 +267,8 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
     let sweep_shared = shared.clone();
     std::thread::spawn(move || sweep_sessions(&sweep_shared));
     crate::lock::start(&shared);
+    let guard_shared = shared.clone();
+    std::thread::spawn(move || crate::guard_ops::keep_guard(&guard_shared));
 
     while !shared.stopping() {
         match listener.accept() {
@@ -304,6 +306,7 @@ fn idle_watch(shared: &Arc<Shared>) {
         if shared.connections.load(Ordering::SeqCst) == 0
             && shared.live_sessions() == 0
             && shared.idle_for() >= shared.options.idle
+            && !crate::guard_ops::pause_pending(shared)
         {
             shared
                 .journal
@@ -747,6 +750,37 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ),
             ClientRequest::OutputAllow { reference, reason } => (
                 output::allow(&ctx, &reference, reason).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::HooksPause {
+                cwd,
+                harnesses,
+                secs,
+                reason,
+            } => (
+                crate::guard_ops::hooks_pause(&ctx, &cwd, &harnesses, secs, reason)
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::HooksResume { harnesses } => (
+                crate::guard_ops::hooks_resume(&ctx, &harnesses).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::GuardAsk {
+                harness,
+                file,
+                what,
+            } => (
+                crate::guard_ops::guard_ask(shared, &ctx, &harness, &file, &what)
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::GuardNote {
+                harness,
+                file,
+                event,
+            } => (
+                crate::guard_ops::guard_note(&ctx, &harness, &file, event),
                 false,
             ),
             ClientRequest::Sessions {} => (session_ops::list(&ctx).unwrap_or_else(|r| r), false),

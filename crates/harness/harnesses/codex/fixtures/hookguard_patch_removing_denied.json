@@ -1,0 +1,36 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.codex/hooks.json": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash|apply_patch\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/opt/vahta/vahta-hook --harness codex --event before_tool --setup 1\"\n          }\n        ]\n      }\n    ]\n  }\n}",
+    "home/.codex/config.toml": "[features]\nhooks = true\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "apply_patch",
+    "tool_input": {
+      "command": "*** Begin Patch\n*** Update File: {{TMP}}/home/.codex/hooks.json\n-          \"command\": \"/opt/vahta/vahta-hook --harness codex --event before_tool --setup 1\"\n+          \"command\": \"true\"\n*** End Patch"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "vahta blocked a change to `{{TMP}}/home/.codex/hooks.json`: it would remove Vahta's hook entries, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+    },
+    "systemMessage": "vahta blocked a change to `{{TMP}}/home/.codex/hooks.json`: it would remove Vahta's hook entries, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "hook_tamper",
+      "file": "{{TMP}}/home/.codex/hooks.json",
+      "what": "would remove Vahta's hook entries"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "event": "before_tool",
+  "env": {
+    "HOME": "{{TMP}}/home",
+    "USERPROFILE": "{{TMP}}/home"
+  },
+  "files": {
+    "home/.cursor/hooks.json": "{\"version\":1,\"hooks\":{\"preToolUse\":[{\"command\":\"/opt/vahta/vahta-hook --harness cursor --event before_tool --setup 1\",\"matcher\":\"Shell|Write\"}]}}",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "rm ~/.cursor/hooks.json"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": {
+    "permission": "deny",
+    "user_message": "vahta blocked a change to `~/.cursor/hooks.json`: it is a `rm` command that would change or remove a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`.",
+    "agent_message": "vahta blocked a change to `~/.cursor/hooks.json`: it is a `rm` command that would change or remove a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "hook_tamper",
+      "file": "~/.cursor/hooks.json",
+      "what": "is a `rm` command that would change or remove a file that holds hooks"
+    }
+  ]
+}

@@ -111,6 +111,27 @@ impl Paths {
         self.runtime.join("daemon.lock")
     }
 
+    /// Held by the hook watchdog (`vahta _guard`) for as long as it runs.
+    pub fn guard_lock_file(&self) -> PathBuf {
+        self.runtime.join("guard.lock")
+    }
+
+    /// Created to ask the watchdog to end (see `guard_cmd.rs`).
+    pub fn guard_stop_file(&self) -> PathBuf {
+        self.runtime.join("guard.stop")
+    }
+
+    /// Whether a watchdog is running: its lock is held.
+    pub fn guard_running(&self) -> bool {
+        match fs::OpenOptions::new()
+            .read(true)
+            .open(self.guard_lock_file())
+        {
+            Ok(f) => matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)),
+            Err(_) => false,
+        }
+    }
+
     pub fn journal_file(&self) -> PathBuf {
         self.data.join("journal.jsonl")
     }

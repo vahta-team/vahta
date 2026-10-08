@@ -1,0 +1,20 @@
+{
+  "event": "session_start",
+  "args": [
+    "--setup",
+    "2"
+  ],
+  "env": {},
+  "files": {
+    "config/config.toml": "guard = \"off\"\n",
+    "data/state.json": "{\"guard_declines\": 1, \"guard_reminded_at\": 99999999999}\n"
+  },
+  "stdin": {
+    "hook_event_name": "SessionStart",
+    "session_id": "s1",
+    "source": "startup",
+    "cwd": "{{TMP}}"
+  },
+  "stdout": null,
+  "exit": 0
+}

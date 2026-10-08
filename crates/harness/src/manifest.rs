@@ -119,6 +119,27 @@ pub struct Config {
     /// Command rules the harness itself enforces, written next to the hooks: a
     /// second layer for what the hook already refuses.
     pub deny: Option<DenyRules>,
+    /// Where an administrator's (system-wide) policy lives, when the harness
+    /// has one that users cannot override. Used by `vahta setup --managed`.
+    pub managed: Option<Managed>,
+}
+
+/// What a harness's administrator policy file looks like.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Managed {
+    pub path: Paths,
+    pub format: ManagedFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedFormat {
+    /// The same JSON document as the user config, hooks and all (Claude's
+    /// `managed-settings.json`, Cursor's enterprise `hooks.json`).
+    JsonSettings,
+    /// Codex's `requirements.toml`, with a `[hooks]` table.
+    TomlRequirements,
 }
 
 /// A list of strings in the config that the harness reads as commands to

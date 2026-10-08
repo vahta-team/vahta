@@ -172,6 +172,7 @@ pub(crate) fn unlock_session(
     label: Option<String>,
 ) -> Flow<ClientReply> {
     let (project, vault_path) = find_vault(cwd)?;
+    crate::guard_ops::note_project(ctx, &project.root);
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     // A swapped owner or a rolled-back file is refused here, before a window.
     peek.verified(ctx.store()).map_err(from_vault)?;

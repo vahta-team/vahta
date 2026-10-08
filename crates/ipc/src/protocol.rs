@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 7;
+pub const PROTOCOL: u32 = 8;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -384,6 +384,63 @@ pub enum ClientRequest {
         cwd: String,
         text: String,
     },
+    /// `vahta hooks pause`: take Vahta's hook entries out of these harnesses
+    /// (all that have them, when empty) for `secs` (at most 8 hours). A window
+    /// asks the person, with the password; `reason` is the caller's, shown as
+    /// unverified. The watchdog puts the entries back when the time is up.
+    HooksPause {
+        cwd: String,
+        harnesses: Vec<String>,
+        secs: u64,
+        reason: Option<String>,
+    },
+    /// `vahta hooks resume`: put the entries back now (all harnesses, when
+    /// empty). No password: it only restores protection.
+    HooksResume {
+        harnesses: Vec<String>,
+    },
+    /// The watchdog found Vahta's hooks tampered with and asks the person,
+    /// through the daemon's window, what to do. Replies
+    /// [`ClientReply::GuardChoice`].
+    GuardAsk {
+        harness: String,
+        file: String,
+        what: String,
+    },
+    /// The watchdog tells the daemon what it did, for the journal.
+    GuardNote {
+        harness: String,
+        file: String,
+        event: GuardEvent,
+    },
+}
+
+/// What the person chose when the watchdog asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuardChoice {
+    /// Put the hooks back.
+    Restore,
+    /// Leave them off for `secs`, then put them back.
+    KeepOff { secs: u64 },
+    /// Stop the watchdog and its autostart for good.
+    TurnOff,
+}
+
+/// What the watchdog did, as it tells the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardEvent {
+    /// Put the hooks back after the person's choice, or with no answer.
+    Restored,
+    /// Put the hooks back because a pause ran out.
+    RestoredAfterPause,
+    /// Tried to put them back and could not.
+    RestoreFailed,
+    /// Turned itself off at the person's word.
+    TurnedOff,
+    /// Found tampering and could not ask (no daemon, no window).
+    Unasked,
 }
 
 /// One value to cut out of a tool's output: `text` is which of the output's
@@ -699,6 +756,10 @@ pub enum ClientReply {
     ToolDeny {
         form: String,
         name: String,
+    },
+    /// The answer to a [`ClientRequest::GuardAsk`].
+    GuardChoice {
+        choice: GuardChoice,
     },
 }
 
