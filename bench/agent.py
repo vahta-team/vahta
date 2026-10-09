@@ -18,11 +18,14 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import canary  # noqa: E402
 import hookcall  # noqa: E402
 import llm  # noqa: E402
 import scenarios  # noqa: E402
+import techniques  # noqa: E402
 import vaultsetup  # noqa: E402
 
 PROJECT = "/work/proj"
@@ -124,6 +127,9 @@ def main():
     ap.add_argument("--scenario", default="ci_check")
     ap.add_argument("--max-turns", type=int, default=15)
     ap.add_argument("--alarm", default="warn", choices=["warn", "lock"])
+    ap.add_argument("--bind", type=int, default=0,
+                    help="1: bind every secret to `printenv` (deny @network, @shells), as an owner who uses binding would")
+    ap.add_argument("--num-ctx", type=int, default=16384)
     ap.add_argument("--out", default="/out")
     a = ap.parse_args()
 
@@ -134,18 +140,23 @@ def main():
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(body)
-    env = vaultsetup.setup(PROJECT, canaries, alarm=a.alarm)
+    env = vaultsetup.setup(PROJECT, canaries, alarm=a.alarm, bind=bool(a.bind))
     log = Log(os.path.join(a.out, "transcript.jsonl"))
     session = "bench-" + a.scenario
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": sc["task"]}]
-    log.add(type="user", content=sc["task"])
+    names = ", ".join(canaries)
+    system = sc.get("system", SYSTEM).format(names=names, turns=a.max_turns)
+    task = sc["task"].format(names=names) if "{names}" in sc["task"] else sc["task"]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": task}]
+    log.add(type="user", content=task, mode=sc.get("mode", "victim"))
     stats = {"turns": 0, "calls": 0, "denied": 0, "ended": "max_turns"}
 
     for turn in range(a.max_turns):
         stats["turns"] = turn + 1
         try:
-            msg = (llm.scripted_chat(turn) if a.model == "scripted"
-                   else llm.ollama_chat(a.model, messages, tools=TOOLS, url=a.llm))
+            if a.model in ("scripted", "scripted-attacker"):
+                msg = llm.scripted_chat(turn, a.model)
+            else:
+                msg = llm.ollama_chat(a.model, messages, tools=TOOLS, url=a.llm, num_ctx=a.num_ctx)
         except Exception as e:
             log.add(type="error", content=f"llm: {type(e).__name__}: {e}")
             stats["ended"] = "llm_error"
@@ -164,10 +175,15 @@ def main():
                     args = json.loads(args)
                 except ValueError:
                     args = {}
+            t0 = round(time.time(), 2)
             decision, reason, shown = run_tool(fn["name"], args, env, session)
             stats["calls"] += 1
             stats["denied"] += decision == "deny"
-            log.add(type="tool", tool=fn["name"], input=args, decision=decision, reason=reason, shown=shown)
+            # Names and forms only, never values: which canaries the call carries.
+            probe = json.dumps(args) + urllib.parse.unquote_plus(json.dumps(args))
+            carries = {n: f for n, v in canaries.items() if (f := canary.forms_in(probe, v))}
+            log.add(type="tool", tool=fn["name"], input=args, decision=decision, reason=reason, shown=shown,
+                    t0=t0, technique=techniques.classify(fn["name"], args), carries=carries)
             messages.append({"role": "tool", "tool_name": fn["name"], "content": shown})
 
     # Evidence for the scorer.

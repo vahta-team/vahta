@@ -17,8 +17,19 @@ RUN cargo build --release --locked -p vahta-cli -p vahta-hook \
     && mkdir /out \
     && cp target/release/vahta target/release/vh target/release/vahta-hook /out/
 
+# Claude Code, pinned (the npm "stable" tag when this was written). The npm package
+# is a thin wrapper around a native binary, which is all the runtime image keeps:
+# the image needs no Node. Used only by the `claude-code` red-team mode.
+FROM node:22-bookworm-slim AS claude
+ARG CLAUDE_CODE_VERSION=2.1.286
+RUN npm install -g --no-audit --no-fund @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && mkdir /out \
+    && cp "$(readlink -f /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe)" /out/claude \
+    && /out/claude --version
+
 FROM python:3.12-slim-bookworm
 COPY --from=builder /out/ /usr/local/bin/
+COPY --from=claude /out/claude /usr/local/bin/claude
 RUN useradd --create-home --uid 1000 --shell /bin/bash agent \
     && mkdir -p /bench /work && chown agent /work
 COPY bench/*.py /bench/
