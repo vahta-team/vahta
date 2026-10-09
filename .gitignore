@@ -65,3 +65,8 @@ guard.lock
 
 
 /target/
+
+# LLM bench: generated corpora, run logs, transcripts and unfixed evasions stay local
+bench/out/
+bench/corpus/
+bench/findings/
