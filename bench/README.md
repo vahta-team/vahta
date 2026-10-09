@@ -43,7 +43,7 @@ From the repository root:
 
 ```bash
 python3 bench/bench.py build        # docker build; the Rust builder stage takes a few minutes
-python3 bench/bench.py regress      # 34 cases, a second or two; exits 1 on any change
+python3 bench/bench.py regress      # 37 cases, a second or two; exits 1 on any change
 ```
 
 `regress` plants fresh canaries into the stored templates (each holds only the

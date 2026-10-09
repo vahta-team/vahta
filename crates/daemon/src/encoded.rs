@@ -21,9 +21,15 @@
 //! * **reversed** bytes.
 //!
 //! Forms that come out identical (a value with no `+` or `/` encodes the same
-//! in both base64 alphabets) are kept once. Split values (`'ab' + 'cd'`) and
-//! other transformations are the hook's detector's business, not this
-//! cache's.
+//! in both base64 alphabets) are kept once.
+//!
+//! Two forms are not precomputed but undone in the text that is checked
+//! ([`EncodedSet::find_text`]): **percent-encoding** of any bytes, in any mix
+//! of upper and lower case (`%41%42`, with some characters left plain), is
+//! decoded once and the raw values are looked for in what comes out; and
+//! **joined literals** (`'ab''cd'`, `"ab" + "cd"`) are folded by the
+//! detector's own pass ([`vahta_detect::evasion::folded_windows`]) and the
+//! raw values looked for in those. Both are bounded by the text itself.
 //!
 //! **Sensitivity.** The cache is exactly as sensitive as the keys a session
 //! already holds: with it, anyone who can read the daemon's memory has every
@@ -50,6 +56,8 @@ pub enum Form {
     Hex,
     UrlEncoded,
     Reversed,
+    /// Pieces of the value in adjacent or added string literals.
+    Concat,
 }
 
 impl Form {
@@ -61,6 +69,7 @@ impl Form {
             Form::Hex => "hex",
             Form::UrlEncoded => "URL-encoded",
             Form::Reversed => "reversed",
+            Form::Concat => "concatenation",
         }
     }
 }
@@ -160,6 +169,47 @@ fn percent(bytes: &[u8], upper: bool) -> Vec<u8> {
     out
 }
 
+/// Every byte of `bytes` as `%XX`.
+fn percent_all(bytes: &[u8], upper: bool) -> Vec<u8> {
+    let digits: &[u8; 16] = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let mut out = Vec::with_capacity(bytes.len() * 3);
+    for &b in bytes {
+        out.push(b'%');
+        out.push(digits[usize::from(b >> 4)]);
+        out.push(digits[usize::from(b & 15)]);
+    }
+    out
+}
+
+/// `text` with each `%XX` run decoded, or `None` when it has none. Never
+/// longer than `text`.
+fn percent_decoded(text: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    let hexval = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Zeroizing::new(Vec::with_capacity(text.len()));
+    let mut any = false;
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                text.get(i + 1).copied().and_then(hexval),
+                text.get(i + 2).copied().and_then(hexval),
+            )
+        {
+            out.push(h << 4 | l);
+            any = true;
+            i += 3;
+            continue;
+        }
+        out.push(text[i]);
+        i += 1;
+    }
+    any.then_some(out)
+}
+
 /// Every form of `value`, each at least [`MIN_EXACT`] bytes, none twice.
 fn forms_of(value: &[u8]) -> Vec<(Form, Zeroizing<Vec<u8>>)> {
     let mut out: Vec<(Form, Zeroizing<Vec<u8>>)> = Vec::new();
@@ -181,6 +231,10 @@ fn forms_of(value: &[u8]) -> Vec<(Form, Zeroizing<Vec<u8>>)> {
     add(Form::Hex, hex(value, true));
     add(Form::UrlEncoded, percent(value, true));
     add(Form::UrlEncoded, percent(value, false));
+    // Every byte encoded, which an output redaction needs as a pattern;
+    // `find_text` reaches it in a tool call by decoding.
+    add(Form::UrlEncoded, percent_all(value, true));
+    add(Form::UrlEncoded, percent_all(value, false));
     add(Form::Reversed, value.iter().rev().copied().collect());
     out
 }
@@ -249,6 +303,43 @@ impl EncodedSet {
         let m = matcher.find(text)?;
         let e = &self.entries[m.pattern().as_usize()];
         Some((&e.name, e.form))
+    }
+
+    /// [`find`](Self::find) in the text of a tool call: as it is, then with
+    /// its `%XX` runs decoded (a raw value found there was URL-encoded), then
+    /// with its joined string literals folded (it was concatenated).
+    pub fn find_text(&self, text: &str) -> Option<(&str, Form)> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        if let Some(hit) = self.find(text.as_bytes()) {
+            return Some(hit);
+        }
+        if let Some(decoded) = percent_decoded(text.as_bytes())
+            && let Some((name, form)) = self.find(&decoded)
+        {
+            return Some((
+                name,
+                if form == Form::Raw {
+                    Form::UrlEncoded
+                } else {
+                    form
+                },
+            ));
+        }
+        for window in vahta_detect::evasion::folded_windows(text) {
+            if let Some((name, form)) = self.find(window.as_bytes()) {
+                return Some((
+                    name,
+                    if form == Form::Raw {
+                        Form::Concat
+                    } else {
+                        form
+                    },
+                ));
+            }
+        }
+        None
     }
 
     /// Everything to look for in an output, as the scrubber takes it: the raw
@@ -339,6 +430,53 @@ mod tests {
     }
 
     #[test]
+    fn a_fully_percent_encoded_value_is_found_in_either_case_and_in_a_sentence() {
+        let set = one(b"fake-one-value!");
+        let enc = |upper: bool| String::from_utf8(percent_all(b"fake-one-value!", upper)).unwrap();
+        for e in [enc(true), enc(false)] {
+            for text in [
+                e.clone(),
+                format!("the token is {e}, ok"),
+                format!("http://h/?k={e}&x=1"),
+            ] {
+                assert_eq!(
+                    set.find_text(&text),
+                    Some(("NAME", Form::UrlEncoded)),
+                    "{text}"
+                );
+            }
+        }
+        // Mixed case and a partial mix of plain and encoded characters.
+        assert_eq!(
+            set.find_text("%66%41ke-one%2dvalue%21").map(|h| h.1),
+            None,
+            "a changed letter is another value"
+        );
+        assert_eq!(
+            set.find_text("%66ake%2done-%76alue%21").map(|h| h.1),
+            Some(Form::UrlEncoded)
+        );
+        // Not a hit: a lone percent, an invalid escape, a decoded text without it.
+        assert!(set.find_text("100% sure %zz %4").is_none());
+        assert!(set.find_text("%68%65%6c%6c%6f").is_none());
+    }
+
+    #[test]
+    fn a_value_cut_by_quotes_is_found_by_the_folded_text() {
+        let set = one(b"fake-one-value!");
+        for text in [
+            "echo 'fake-on''e-value!'",
+            "echo \"fake-\"'one-value!'",
+            "echo 'fake-one'\"-value!\"",
+            "k = \"fake-one\" + \"-value!\"",
+            "python -c \"k = 'fake-' + 'one-value!'\"",
+        ] {
+            assert_eq!(set.find_text(text), Some(("NAME", Form::Concat)), "{text}");
+        }
+        assert!(set.find_text("echo 'fake-' 'other'").is_none());
+    }
+
+    #[test]
     fn short_values_and_other_text_have_nothing() {
         assert!(one(b"short").is_empty());
         let set = one(VALUE);
@@ -350,12 +488,18 @@ mod tests {
     #[test]
     fn identical_forms_are_kept_once_and_labelled() {
         let set = one(b"abcdefgh");
-        // Plain letters: percent-encoding (both cases) and the URL-safe
-        // alphabet add nothing the raw value and standard base64 lack.
+        // Plain letters: the standard percent-encoding and the URL-safe
+        // alphabet add nothing the raw value and standard base64 lack (the
+        // every-byte percent-encoding does).
         let labels: Vec<String> = set.targets().into_iter().map(|(l, _)| l).collect();
         assert_eq!(labels[0], "NAME");
         assert!(labels.contains(&"NAME (base64)".to_string()));
-        assert!(!labels.contains(&"NAME (URL-encoded)".to_string()));
+        let plain = String::from_utf8(percent(b"abcdefgh", true)).unwrap();
+        assert!(
+            !set.targets()
+                .iter()
+                .any(|(l, b)| l.contains("URL") && b == plain.as_bytes())
+        );
         let mut seen = set.targets();
         seen.sort_by(|a, b| a.1.cmp(&b.1));
         seen.dedup_by(|a, b| a.1 == b.1);

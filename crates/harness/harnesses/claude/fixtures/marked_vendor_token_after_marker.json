@@ -1,0 +1,29 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "export AUTH_TOKEN=fake-{{SECRET_GITHUB}} && npm test"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like a GitHub access token. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried a GitHub access token. Rule vahta.prefix.github-pat: Vendor prefix match: GitHub PAT."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "blocked",
+      "category": "a GitHub access token",
+      "rule": "vahta.prefix.github-pat",
+      "evasion": null
+    }
+  ]
+}

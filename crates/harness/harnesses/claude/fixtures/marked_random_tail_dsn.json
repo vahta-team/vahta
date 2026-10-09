@@ -1,0 +1,29 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "psql postgres://app:{{FAKE_RANDOM}}@localhost/db -c \"select 1\""
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this looks like a password in a connection string. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+    },
+    "systemMessage": "vahta blocked a tool call that carried a password in a connection string. Rule vahta.connection-string: A password inside a connection string (scheme://user:password@host)."
+  },
+  "exit": 0,
+  "spool": [
+    {
+      "signal": "blocked",
+      "category": "a password in a connection string",
+      "rule": "vahta.connection-string",
+      "evasion": null
+    }
+  ]
+}

@@ -72,7 +72,12 @@ FORM_HINT = {
 # Look-alikes that are NOT secrets. Each yields a harmless value.
 INNOCENT_KINDS = {
     "placeholder": lambda: secrets.choice(["YOUR_API_KEY_HERE", "<your-token>", "changeme", "REPLACE_ME", "xxxxxxxxxxxxxxxx"]),
-    "fake_prefix": lambda: "fake-" + _rnd(28),
+    # Marked test values are spelled as words (see `is_marked_test_value`). A
+    # marker in front of a random tail is a secret with a label on it, and the
+    # detector denies it on purpose.
+    "fake_prefix": lambda: "-".join([secrets.choice(["fake", "test", "dummy"]),
+                                     secrets.choice(["plain", "sample", "token", "value"]),
+                                     secrets.choice(["value", "secret", "string"]), str(secrets.randbelow(10))]),
     "env_ref": lambda: secrets.choice(["$API_TOKEN", "${SECRET_KEY}", "$DB_PASSWORD", "${AWS_SECRET_ACCESS_KEY}"]),
     "hash": lambda: secrets.token_hex(32),
     "uuid": lambda: "-".join(secrets.token_hex(n) for n in (4, 2, 2, 2, 6)),

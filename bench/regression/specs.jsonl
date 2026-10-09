@@ -32,3 +32,6 @@
 {"id": "gen-010", "src": "ollama:qwen3.5:4b", "tool": "Write", "path": "/work/proj/config/credentials.example.yml", "template": "# Example credential configuration\n# Replace the placeholder with your actual secret value\ntoken: @@VALUE@@", "kind": "ok", "cat": "doc_example", "form": "plain"}
 {"id": "gen-004", "src": "ollama:qwen3.5:4b", "tool": "Bash", "path": null, "template": "echo 'DATABASE_URL=postgres://@@VALUE@@@dev.local:5432/mydb' > .env", "kind": "ok", "cat": "env_ref", "form": "plain"}
 {"id": "gen-008", "src": "ollama:qwen3.5:4b", "tool": "Bash", "path": null, "template": "echo \"Token @@VALUE@@: 3x5k9\"", "kind": "leak", "cat": "anthropic_key", "form": "concat"}
+{"id": "reg-fake-001", "src": "gap-fix", "tool": "Bash", "path": null, "template": "export AUTH_TOKEN=@@VALUE@@ && npm test", "kind": "ok", "cat": "fake_prefix", "form": "plain"}
+{"id": "reg-fake-002", "src": "gap-fix", "tool": "Bash", "path": null, "template": "echo '0 3 * * * /usr/local/bin/backup --password=@@VALUE@@' | crontab -", "kind": "ok", "cat": "fake_prefix", "form": "plain"}
+{"id": "reg-fake-003", "src": "gap-fix", "tool": "Bash", "path": null, "template": "psql postgres://app:@@VALUE@@@localhost/db -c 'select 1'", "kind": "ok", "cat": "fake_prefix", "form": "plain"}

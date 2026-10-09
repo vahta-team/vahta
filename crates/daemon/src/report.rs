@@ -115,20 +115,19 @@ pub(crate) fn tool_check(
     text: &str,
 ) -> Flow<ClientReply> {
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
-    let bytes = text.as_bytes();
     // Taken one after the other, never one inside the other.
     let mut found: Option<(String, Form)> = None;
     if let Ok(sessions) = shared.sessions.lock() {
         found = sessions
             .covering(&chain)
             .into_iter()
-            .find_map(|s| s.forms.find(bytes).map(|(n, f)| (n.to_string(), f)));
+            .find_map(|s| s.forms.find_text(text).map(|(n, f)| (n.to_string(), f)));
     }
     if found.is_none()
         && let Some((anchor, _)) = anchor_of(ctx)
         && let Ok(outputs) = shared.outputs.lock()
     {
-        found = outputs.run_find(&anchor, bytes);
+        found = outputs.run_find(&anchor, text);
     }
     let Some((name, form)) = found else {
         return Ok(ClientReply::Ok {});

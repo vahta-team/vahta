@@ -1,0 +1,14 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "export AUTH_TOKEN=fake-plain-value-1 && npm test"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}
