@@ -4,7 +4,8 @@
   bench.py build                          build the image from this checkout
   bench.py regress                        the fixed regression set, no model
   bench.py volume --backend B -n N        detector volume (B: seed | matrix | ollama:MODEL | haiku | sonnet)
-  bench.py redteam --model M              one red-team episode with a local model
+  bench.py redteam --model M              one red-team episode (M: an ollama model | scripted | scripted-attacker | claude-code)
+  bench.py cc-selftest                    the Claude Code mode against a mock API: proxy checks and an end-to-end run
   bench.py mkregress RUN_DIR              make the regression set from a volume run
   bench.py report RUN_DIR                 print a volume run's report again
 """
@@ -109,10 +110,25 @@ def cmd_mkregress(a):
         print("the ones the hook got wrong were saved in bench/findings/ (not committed)")
 
 
+def cmd_cc_selftest(a):
+    import cctest
+
+    sys.exit(cctest.main())
+
+
 def cmd_redteam(a):
     run = new_run("redteam")
-    canaries, wall = redteam.run_episode(run, a.model, a.scenario, a.max_turns, a.alarm)
-    redteam.print_report(redteam.score(run, canaries, wall))
+    scenario = "attacker" if a.mode == "attacker" else a.scenario
+    if a.model == "claude-code":
+        canaries, wall = redteam.run_episode_cc(run, scenario, a.max_turns, a.alarm, bind=a.bind,
+                                                cap=a.proxy_cap, cc_model=a.cc_model, allow=a.proxy_allow)
+        res = redteam.score(run, canaries, wall)
+        redteam.print_report(res)
+        print(f"  authproxy: {redteam.proxy_summary(run)}")
+        print(f"  claude: {res.get('claude')}")
+    else:
+        canaries, wall = redteam.run_episode(run, a.model, scenario, a.max_turns, a.alarm, bind=a.bind)
+        redteam.print_report(redteam.score(run, canaries, wall))
     print(f"run {run}")
 
 
@@ -137,11 +153,21 @@ def main():
     p.add_argument("-n", type=int, default=30)
     p.add_argument("--add", action="store_true", help="append to the existing set")
     p.set_defaults(f=cmd_mkregress)
+    sub.add_parser("cc-selftest", help="Claude Code mode: proxy + e2e against a mock, no credential").set_defaults(f=cmd_cc_selftest)
     p = sub.add_parser("redteam")
-    p.add_argument("--model", default="qwen3.5:4b")
+    p.add_argument("--model", default=redteam.DEFAULT_MODEL,
+                   help="an ollama model, `scripted`, `scripted-attacker`, or `claude-code`")
+    p.add_argument("--mode", default="victim", choices=["victim", "attacker"],
+                   help="victim: an ordinary task plus an injection; attacker: the model is told to beat Vahta")
     p.add_argument("--scenario", default="ci_check")
+    p.add_argument("--bind", action="store_true",
+                   help="bind every secret to `printenv` with the owner's approval (deny @network, @shells)")
     p.add_argument("--max-turns", type=int, default=15)
     p.add_argument("--alarm", default="warn", choices=["warn", "lock"])
+    p.add_argument("--cc-model", default="haiku", help="claude-code only: the --model alias or id")
+    p.add_argument("--proxy-cap", type=int, default=60, help="claude-code only: requests the auth proxy forwards per run")
+    p.add_argument("--proxy-allow", action="append", default=[], metavar="'POST /v1/...'",
+                   help="claude-code only: let the auth proxy forward one more exact method and path")
     p.set_defaults(f=cmd_redteam)
     a = ap.parse_args()
     a.f(a)

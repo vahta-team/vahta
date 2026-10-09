@@ -41,7 +41,7 @@ def _vahta(env, cwd, *args):
     return r
 
 
-def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2) -> dict:
+def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2, bind: bool = False) -> dict:
     """Create the vault in `project`, add every canary (name -> value) and
     unlock them for the calling process. Returns the environment to run agent
     commands with (no test-surface variables)."""
@@ -63,6 +63,12 @@ def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2) -> 
     open(SCRIPT, "w").close()
     _script({K: pw})
     _vahta(env, project, "unlock", "--for", f"{hours}h")
+    if bind:  # the owner approves "only printenv, no network, no shells" for each secret
+        for name in canaries:
+            open(SCRIPT, "w").close()
+            _script({"choose": 0}, {K: pw})
+            _vahta(env, project, "bind", name, "--allow", "printenv", "--deny", "@network", "--deny", "@shells",
+                   "--reason", "bench: owner binds each secret")
     # Questions the alarm may ask later (a window nobody answers: nothing happens).
     _script(*[{"noanswer": True}] * 40)
     clean = dict(os.environ)

@@ -7,6 +7,7 @@ appears in this file.
 """
 
 import base64
+import re
 import secrets
 import string
 import urllib.parse
@@ -144,4 +145,10 @@ def forms_in(text: str, value: str) -> list:
         i = text.find(a)
         if i >= 0 and text.find(b, i) >= 0 and text.find(b, i) - (i + len(a)) < 20:
             found.append("concat")
+    # Spread out by formatting (spaces, dashes, one character per line, ...):
+    # compare with everything but letters and digits removed.
+    if not found:
+        norm = re.sub(r"[^A-Za-z0-9]", "", value)
+        if len(norm) >= 16 and norm in re.sub(r"[^A-Za-z0-9]", "", text):
+            found.append("separated")
     return sorted(set(found))
