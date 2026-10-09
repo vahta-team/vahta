@@ -182,11 +182,11 @@ impl Outputs {
 
     /// The first value (in any form) that a run under `anchor` was given and
     /// `text` carries: its name and form.
-    pub fn run_find(&self, anchor: &ProcessId, text: &[u8]) -> Option<(String, Form)> {
+    pub fn run_find(&self, anchor: &ProcessId, text: &str) -> Option<(String, Form)> {
         self.runs
             .get(anchor)?
             .forms
-            .find(text)
+            .find_text(text)
             .map(|(n, f)| (n.to_string(), f))
     }
 

@@ -283,6 +283,13 @@ fn joins(gap: &str) -> Option<&str> {
     (gap.bytes().all(is_word_byte)).then_some(gap)
 }
 
+/// The text of each chain of joined literals, put back in its context, for a
+/// caller that looks for values it knows (the daemon's held values) and not
+/// for shapes. At most [`MAX_CHAINS`] per reading of the quotes.
+pub fn folded_windows(text: &str) -> Vec<String> {
+    concat_windows(text).into_iter().map(|(f, _)| f).collect()
+}
+
 /// Each chain of two or more literals, joined and put back in its context.
 ///
 /// Read three ways, because quotes nest in a shell command: both kinds at once
@@ -395,6 +402,13 @@ mod tests {
         assert!(w.iter().any(|(s, _)| s.contains("abcd")), "{w:?}");
         assert!(w.iter().any(|(s, _)| s.contains("efgh")), "{w:?}");
         assert!(w.iter().any(|(s, _)| s.contains("ijkl")), "{w:?}");
+    }
+
+    #[test]
+    fn folded_windows_hold_the_joined_text() {
+        let w = folded_windows("curl -d 'tok=ab'\"cd\"'ef' x");
+        assert!(w.iter().any(|s| s.contains("tok=abcdef")), "{w:?}");
+        assert!(folded_windows("echo hello").is_empty());
     }
 
     #[test]

@@ -29,6 +29,22 @@ fn secret_aws() -> String {
     .concat()
 }
 
+// A test marker in front of a random tail, and one in front of a vendor token:
+// neither is spelled as words, so neither is a marked test value.
+fn fake_random() -> String {
+    [
+        "fake-", "aB3x", "Q9mK", "2pL7", "vN4w", "Z8rT", "5yUc", "H6jD",
+    ]
+    .concat()
+}
+
+fn secret_github() -> String {
+    [
+        "gh", "p_", "R4kT", "9xWm", "2LpQ", "7vZn", "B3yH", "5cJd", "8FsA", "1eUo", "X6gK",
+    ]
+    .concat()
+}
+
 fn b64(bytes: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -103,6 +119,8 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         .replace("{{SECRET_ANTHROPIC}}", &secret_anthropic())
         .replace("{{SECRET_AWS}}", &secret_aws())
         .replace("{{SECRET_PW}}", &secret_pw())
+        .replace("{{FAKE_RANDOM}}", &fake_random())
+        .replace("{{SECRET_GITHUB}}", &secret_github())
         // The same values, hidden: base64 and hex of an assignment, a vendor
         // key cut in two for joining.
         .replace(
@@ -265,7 +283,7 @@ fn every_fixture_matches() {
             }
         }
     }
-    assert!(count >= 259, "only {count} fixtures found");
+    assert!(count >= 266, "only {count} fixtures found");
     assert!(
         failures.is_empty(),
         "{} of {count} failed:\n{}",

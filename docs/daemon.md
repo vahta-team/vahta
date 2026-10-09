@@ -397,7 +397,8 @@ and the daemon watches for it.
 When a session is opened (or a `vahta run` is given its values), the daemon
 builds, for each value of at least 8 bytes, the forms an agent might write it
 in: raw; base64 (standard and URL-safe, padded or not, wherever it sits inside
-a longer encoded text); hex in either case; URL-encoded; reversed. They live in
+a longer encoded text); hex in either case; URL-encoded (the usual encoding,
+and every byte as `%XX`); reversed. They live in
 memory only, in overwritten-on-drop buffers, exactly as long as the keys the
 session already holds, and are dropped with the session or the run. They are as
 sensitive as those keys.
@@ -412,11 +413,18 @@ Two things use them:
   refused. The agent is told only the form ("Blocked: this command contains a
   value Vahta holds (base64). Use `vahta run`."); the secret's name goes to the
   person, in the hook's message and the journal. With no daemon, nothing is
-  checked. A call over 256 KiB is checked in overlapping pieces, and only its
+  checked. A tool call's text is also looked at with its `%XX` runs decoded
+  (so a value encoded in full, in either case, in part or in a mix, is found
+  inside a sentence or a URL; reported as URL-encoded) and with the string
+  literals the detector would join folded (`'ab''cd'`, `"ab" + "cd"`; reported
+  as concatenation). Both are bounded by the text's own size. Output redaction
+  uses the precomputed forms only, which include the every-byte percent
+  encoding but not the folded or partly decoded ones. A call over 256 KiB is checked in overlapping pieces, and only its
   first 2 MiB; a form split across a piece boundary and longer than the 8 KiB
   overlap is missed.
 
-Not covered: values split by the program's own formatting, compressed,
+Not covered: values split by the program's own formatting (other than literals
+joined as above), compressed,
 encrypted, or carried by any other transformation, and values shorter than 8
 bytes.
 
@@ -589,7 +597,11 @@ for, in this order, the first hit deciding:
    -pVALUE`, `docker login -p`, `sshpass -p`, `htpasswd -b`, `smbclient -U
    user%pass`, `curl -u user:pass`, `wget --password`, `PGPASSWORD=`, `aws
    configure set`), and a PEM or PGP private-key header, even without a body.
-   `${VAR}`, placeholders and marked test values (`fake-plain-value-1`) pass.
+   `${VAR}`, placeholders and marked test values (`fake-plain-value-1`) pass. A
+   marked test value is spelled as words and short numbers with a marker word
+   among them; a marker in front of a random tail (`fake-` and 28 random
+   characters) is not one, and is refused like any other secret there, in a
+   connection string, an assignment or a `--password=` alike.
 4. **Names that mean secret**: `API_KEY=`, `AWS_SECRET_ACCESS_KEY=`, `--token
    VALUE`, and a Bearer value.
 5. **Hidden values**, only when nothing above hit: runs of base64 (24 or more
