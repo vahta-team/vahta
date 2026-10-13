@@ -37,6 +37,25 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
    `vahta run --ask` asks the person about one command that the rules do not
    allow.
 7. If the hook cut something out of a tool's output that is needed,
+6. To get a secret's allowed commands set, propose rules with `vahta bind NAME
+   --allow PROGRAM --reason "..."`. The person approves. `vahta run --ask` asks
+   the person about one command that the rules do not allow.
+7. To call an API with a key, use `vahta http` instead of `vahta run -- curl`:
+
+   ```bash
+   vahta http --secret STRIPE_KEY -H 'Authorization: Bearer {STRIPE_KEY}' https://api.stripe.com/v1/balance
+   vahta http --secret MAPS_KEY --query key={MAPS_KEY} --json 'https://maps.example.com/geocode?q=Oslo'
+   ```
+
+   The key goes only where `{NAME}` stands in a header or `--query` value; the
+   URL path and the body never carry it (use `-d '{"q":1}'` for a body that has
+   no secret). The secret must be bound to the host: if the answer is `refused:
+   ... not approved for HOST` or `... not bound to any host`, propose it with
+   `vahta bind NAME --net hosts:api.stripe.com --reason "..."` and wait for the
+   person. https only; redirects to another host are not followed. The response
+   comes back with the key replaced by `***REDACTED(NAME)***`. Exit 0 is a
+   response below 400; 1 is 400 or more.
+8. If the hook cut something out of a tool's output that is needed,
    `vahta output allow REF --reason "..."` asks the person to show it
    ([hooks.md](hooks.md)).
 

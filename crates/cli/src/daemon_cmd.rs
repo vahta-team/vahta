@@ -376,6 +376,7 @@ pub fn report(
         | ClientReply::OutputReleased { .. }
         | ClientReply::ToolDeny { .. }
         | ClientReply::GuardChoice { .. }
+        | ClientReply::HttpResponse { .. }
         | ClientReply::RunStarted {} => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");
             EXIT_FAILED
@@ -401,6 +402,7 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::UnknownOutput => "no output kept under that reference for this agent",
         RefusalKind::CommandNotAllowed => "this command is not allowed to use this secret",
         RefusalKind::NoRules => "no approved rules yet; propose them with `vahta bind`",
+        RefusalKind::HostNotAllowed => "not approved for this host",
     }
 }
 

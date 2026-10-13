@@ -20,6 +20,7 @@ mod clipboard;
 mod dotenv;
 mod encoded;
 mod guard_ops;
+mod http_ops;
 pub mod journal;
 mod lock;
 mod ops;

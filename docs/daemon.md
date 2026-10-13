@@ -36,6 +36,7 @@ nothing was done.
 | `vahta lock [--all]` | End this project's sessions, or all of them. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
 | `vahta run [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
+| `vahta http --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
 | `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--clear] [--reason TEXT]` | Propose which commands may use a secret, or approve the rules in `vahta.toml`. The person approves in the window. | yes |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
@@ -175,6 +176,68 @@ vahta run --secret API_KEY --as API_KEY=SERVICE_TOKEN -- ./deploy.sh
   started uses the same session.
 
 ## Rule sets and categories
+## `vahta http`
+
+```
+vahta http --secret STRIPE_KEY -H 'Authorization: Bearer {STRIPE_KEY}' https://api.stripe.com/v1/balance
+vahta http --secret MAPS_KEY --query key={MAPS_KEY} --json https://maps.example.com/geocode?q=Oslo
+```
+
+The daemon makes the request, so the command and the agent never hold the value,
+and the response comes back with every value taken out. It is the one operation
+in Vahta that opens a network connection.
+
+- **Where a value goes.** Only where `{NAME}` stands in a header value or a
+  `--query` value. Never in the URL path (paths end up in every server, proxy
+  and CDN log), never in a header or query *name*, and never in the body: servers
+  echo bodies back (validation errors, debug pages), and the scrubber should not
+  be the first line of defence. A `{NAME}` in the URL, a name or the body is
+  refused, not sent, and so is a `--secret` that no header or query value uses.
+  A provider that needs its key in a JSON body is a later decision.
+  A `{...}` that is not a declared name is sent as written. Query values are
+  percent-encoded by Vahta; pass them raw.
+- **Host binding.** A secret may only be sent to hosts its approved rule set
+  lists (`Network::Hosts`): the URL's host equals a rule's host, or lies beneath
+  it when the rule has `subdomains`; the port equals the rule's, or any port when
+  the rule has none (the URL's port is 443 unless it says otherwise). Everything
+  else is refused (exit 3) before any window or connection, naming the secret and
+  the fix: no rule set, `Network::None`, and `Network::App` (the application's own
+  network use, which is what a command-only binding approves) are refused with
+  `vahta bind NAME --net hosts:HOST` as the proposal. All secrets of a request
+  must pass. The person's approval is the check; the agent can only propose.
+- **Values.** The same as `vahta run`: a session that covers the names, else a
+  window asks for the password for this one request (it shows the secrets and
+  `METHOD host`); each-use secrets always ask; a delegated session cannot ask for
+  more.
+- **The client.** https only (`http://` is refused), certificates checked
+  against the Mozilla roots with rustls (ring), no cookies, no proxy (the
+  `HTTPS_PROXY` family is not read), connect timeout 10 s and 30 s in all
+  (`--timeout`, at most 120), response kept up to 4 MiB (`--max-bytes`, at most
+  8 MiB; the cut is reported). Redirects are never followed by the library; at
+  most 3 are followed by Vahta, **only on the same host and port**, with the
+  same headers. A redirect elsewhere is not followed: the redirect itself is
+  returned, `vahta http` exits 1 and says where it pointed (host only). The URL
+  is strict ASCII with no user name, backslash or fragment; an IP address or a
+  name in odd forms (`0x7f.1`) is refused, and an IP literal needs a certificate
+  for it.
+- **The response.** The body and the header values pass through the scrubber
+  with the values of this request, in the encoded forms `vahta run` uses
+  (base64, hex, URL-encoded, reversed). Set-Cookie and headers whose names say
+  authorization, token, secret, api-key or session are dropped. Without `--json`
+  the body goes to standard output, a status of 400 or more is noted on standard
+  error, and the exit code is 0 below 400 and 1 otherwise. With `--json`, one
+  object: `status`, `headers`, `body`, `truncated`, `redirect_stopped`.
+- **The journal** gets `http_request` (or `http_refused`): the names, the
+  method, the host (and port when not 443), the status and the size of the body.
+  Never the path, the query or a value.
+- **A build without it.** The client is the `http` feature of `vahta-daemon` and
+  `vahta-cli` (on by default, `crates/net`). With `--no-default-features` the
+  binary contains no HTTP or TLS client, and `vahta http` says so. CI checks that
+  no network crate is reachable from any crate but `vahta-net`. The promise is
+  therefore: the open build makes a network request only for an operation you
+  bound a secret to.
+
+## Binding secrets to commands
 
 **Every secret has rules.** A secret with none is refused (`vahta run` exits 3
 with `no_rules` and no window): nothing may use it until a rule set is approved.

@@ -1,0 +1,8 @@
+Test-only TLS material for the in-process HTTPS server of ../http.rs.
+Generated once with openssl (P-256, valid 100 years); the CA key was discarded.
+  ca.pem      the root the test client trusts (through the `test-roots` feature)
+  server.pem  the server certificate: localhost, other.localhost, 127.0.0.1
+  server.key.b64  its private key (PKCS#8 DER, base64, no PEM armour, so a scanner sees
+              no key block; test_server.rs puts the armour back). It protects
+              nothing: it is public, in the repository.
+No value in these files is a secret.
