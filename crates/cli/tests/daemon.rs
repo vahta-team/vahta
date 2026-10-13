@@ -4592,6 +4592,7 @@ impl Sandbox {
             .count()
     }
 
+    #[cfg(unix)]
     fn phone_log(&self) -> String {
         fs::read_to_string(self.root.join("phones/log")).unwrap_or_default()
     }
@@ -4618,6 +4619,7 @@ impl Sandbox {
         vahta_vault::hex_decode(&hex).unwrap().try_into().unwrap()
     }
 
+    #[cfg(unix)]
     fn device_slot_params(&self) -> Vec<u8> {
         Vault::peek(&self.vault_path())
             .unwrap()
@@ -4884,9 +4886,9 @@ fn a_lost_phone_is_revoked_and_the_vault_rekeyed_so_an_old_copy_is_no_use() {
 
     // The kept tablet opens the new vault.
     s.phone(&["approve"]);
-    let asks = s.asks();
     #[cfg(unix)]
     {
+        let asks = s.asks();
         assert_eq!(s.run_each_use().status.code(), Some(0));
         assert_eq!(s.asks(), asks);
     }
