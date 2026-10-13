@@ -14,19 +14,19 @@
 //! daemon checks at run time.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use vahta_vault::manifest;
 use vahta_vault::project::Project;
-use vahta_vault::rules::{self, ParsedRule, ProgramSpec};
-use vahta_vault::{ApprovedRule, Network, Peek, RuleSet, Vault, manifest};
+use vahta_vault::{Network, Peek, RuleSet, Vault};
 
 use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, error, find_vault, from_surface, from_vault, lines_for, refused,
-    unknown_name, unlock,
+    Ctx, Flow, check_name, class_by_name, error, find_vault, from_surface, from_vault, lines_for,
+    refused, unknown_name, unlock,
 };
-use crate::pathfind;
+use crate::proposal::{self, Args, Built};
 use crate::protocol::{ClientReply, RefusalKind};
 use crate::surface::sanitize_label;
 
@@ -37,6 +37,9 @@ pub(crate) struct BindArgs {
     pub name: Option<String>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
+    pub category: Option<String>,
+    pub dirs: Vec<String>,
+    pub net: Option<String>,
     pub clear: bool,
     pub reason: Option<String>,
     pub path: Option<String>,
@@ -49,89 +52,71 @@ struct Change {
     old: Option<RuleSet>,
     new: Option<RuleSet>,
     resolved: Vec<(String, PathBuf)>,
-    /// The proposed texts, to write into `vahta.toml` (not used when the file
-    /// is the source).
-    allow_texts: Vec<String>,
-    deny_texts: Vec<String>,
+    warnings: Vec<String>,
+    /// The loud line when the category is below the detected one.
+    downgrade: Option<String>,
 }
 
-fn rules_or_any(b: &Option<RuleSet>) -> String {
+fn rules_or_none(b: &Option<RuleSet>) -> String {
     match b {
-        Some(b) => binding::rules_text(b),
-        None => "any command".to_string(),
+        Some(b) => match binding::rules_text(b) {
+            t if t.is_empty() => "no restrictions".to_string(),
+            t => t,
+        },
+        None => "no rules (nothing may use it)".to_string(),
     }
 }
 
-/// `new` with everything the manifest does not propose (category, directories,
-/// network) carried over from the rule set it replaces.
-fn merged(old: Option<&RuleSet>, new: Option<RuleSet>) -> Option<RuleSet> {
-    match (old, new) {
-        (Some(old), Some(mut new)) => {
-            new.category = old.category.clone();
-            new.downgraded_from = old.downgraded_from.clone();
-            new.dirs = old.dirs.clone();
-            new.network = old.network.clone();
-            Some(new)
-        }
-        (_, new) => new,
-    }
+/// The detected category of a secret: the class its value showed when it was
+/// stored, else the one its name suggests.
+fn detected_for(peek: &Peek, name: &str) -> &'static vahta_policy::Category {
+    let class = peek
+        .entries
+        .iter()
+        .find(|e| e.name == name)
+        .and_then(|e| e.class)
+        .unwrap_or_else(|| class_by_name(name));
+    vahta_policy::suggest(Some(class), name)
 }
 
-/// The rules of one secret and the programs they resolved to.
-type Built = (Option<RuleSet>, Vec<(String, PathBuf)>);
-
-/// Resolve `rules` into a binding for `name`; `None` when there are none.
-fn build(
-    name: &str,
-    allow: &[ParsedRule],
-    deny: &[ParsedRule],
-    path: Option<&OsString>,
-    root: &Path,
-) -> Result<Built, String> {
-    let mut resolved = Vec::new();
-    let mut approved: Vec<ApprovedRule> = Vec::new();
-    for rule in allow {
-        let word = match &rule.program {
-            ProgramSpec::Bare(w) | ProgramSpec::Path(w) => w,
-            ProgramSpec::Group(g) => return Err(format!("`{g}` is a group; groups are for deny")),
-        };
-        let Some(found) = pathfind::locate(word, path, root) else {
-            return Err(format!(
-                "cannot find the program of the rule `{}` (bare names are looked up in your PATH, \
-                 paths are relative to the project root)",
-                rule.text
-            ));
-        };
-        resolved.push((rule.text.clone(), found.clone()));
-        approved.push(rule.to_allow(found.to_string_lossy().into_owned()));
-    }
-    let denied: Vec<ApprovedRule> = deny.iter().map(ParsedRule::to_deny).collect();
-    if approved.is_empty() && denied.is_empty() {
-        return Ok((None, resolved));
-    }
-    Ok((
-        Some(RuleSet {
+/// A change for `name` from a built proposal, with the downgrade marked.
+fn change_of(name: &str, peek: &Peek, built: Option<Built>, who: &str) -> Change {
+    let old = peek.bindings.iter().find(|b| b.name == name).cloned();
+    let Some(mut built) = built else {
+        return Change {
             name: name.to_string(),
-            allow: approved,
-            deny: denied,
-            // Commands are all `vahta.toml` proposes; the rest of a rule set
-            // is kept from the approved one when it is replaced (see `merged`).
-            network: Network::App,
-            ..RuleSet::default()
-        }),
-        resolved,
-    ))
-}
-
-fn parse_all(texts: &[String], allow: bool) -> Result<Vec<ParsedRule>, String> {
-    if texts.len() > 64 {
-        return Err("too many rules".to_string());
+            old,
+            new: None,
+            resolved: Vec::new(),
+            warnings: Vec::new(),
+            downgrade: None,
+        };
+    };
+    let detected = detected_for(peek, name);
+    let mut downgrade = None;
+    if let Some(chosen) = built
+        .rule_set
+        .category
+        .as_deref()
+        .and_then(vahta_policy::category)
+        && vahta_policy::is_downgrade(chosen, detected)
+    {
+        built.rule_set.downgraded_from = Some(detected.id.to_string());
+        downgrade = Some(proposal::downgrade_line(
+            chosen,
+            detected,
+            who,
+            "this secret",
+        ));
     }
-    texts.iter().map(|t| rules::parse_rule(t, allow)).collect()
-}
-
-fn texts(rules: &[ParsedRule]) -> Vec<String> {
-    rules.iter().map(|r| r.text.clone()).collect()
+    Change {
+        name: name.to_string(),
+        old,
+        new: Some(built.rule_set),
+        resolved: built.resolved,
+        warnings: built.warnings,
+        downgrade,
+    }
 }
 
 pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
@@ -159,29 +144,22 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
     let mut warnings: Vec<String> = Vec::new();
     for c in &changes {
         lines.push(format!("{}:", c.name));
-        lines.push(format!("  now:  {}", rules_or_any(&c.old)));
-        lines.push(format!("  new:  {}", rules_or_any(&c.new)));
+        lines.push(format!("  now:  {}", rules_or_none(&c.old)));
+        lines.push(format!("  new:  {}", rules_or_none(&c.new)));
         for (text, program) in &c.resolved {
             lines.push(format!("  `{text}` is {}", program.display()));
-            if let Some(w) = binding::agent_writable(program, &project.root) {
-                let w = format!("{}: {w}", program.display());
-                if !warnings.contains(&w) {
-                    warnings.push(w);
-                }
-            }
-            let file = program
-                .file_name()
-                .map(|n| rules::normalize_program_name(&n.to_string_lossy()))
-                .unwrap_or_default();
-            if rules::runs_anything(&file) {
-                warnings.push(format!(
-                    "`{text}` runs other programs (a shell, interpreter or launcher): allowing \
-                     it lets the agent run anything with this secret"
-                ));
-            }
         }
         if c.new.is_none() {
-            lines.push("  (any command may use it again)".to_string());
+            lines.push("  (no command may use it until rules are approved)".to_string());
+        }
+        // Loud first.
+        if let Some(d) = &c.downgrade {
+            warnings.insert(0, d.clone());
+        }
+        for w in &c.warnings {
+            if !warnings.contains(w) {
+                warnings.push(w.clone());
+            }
         }
     }
     let mut panel = ctx.panel(title, lines);
@@ -220,7 +198,7 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
     }
     for c in &changes {
         vault
-            .set_bindings(&c.name, merged(c.old.as_ref(), c.new.clone()))
+            .set_bindings(&c.name, c.new.clone())
             .map_err(from_vault)?;
     }
     vault.save(&vault_path, ctx.store()).map_err(|e| {
@@ -233,9 +211,24 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
         .iter()
         .map(|c| match &c.new {
             Some(b) => format!("{}: {}", c.name, binding::rules_text(b)),
-            None => format!("{}: any command", c.name),
+            None => format!("{}: no rules", c.name),
         })
         .collect();
+    for c in changes.iter().filter(|c| c.downgrade.is_some()) {
+        let detail = c.new.as_ref().map(|n| {
+            format!(
+                "{} -> {}",
+                n.downgraded_from.as_deref().unwrap_or("?"),
+                n.category.as_deref().unwrap_or("?")
+            )
+        });
+        ctx.journal(
+            Entry::new("category_downgraded")
+                .vault(&peek.vault_id)
+                .names(std::slice::from_ref(&c.name))
+                .result("accepted", detail.as_deref()),
+        );
+    }
     ctx.journal(
         Entry::new("bind")
             .vault(&peek.vault_id)
@@ -255,6 +248,20 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
     })
 }
 
+fn net_text(n: &Network) -> String {
+    match n {
+        Network::None => "none".to_string(),
+        Network::App => "app".to_string(),
+        Network::Hosts(h) => format!(
+            "hosts:{}",
+            h.iter()
+                .map(|h| h.text.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
 fn change_for(
     args: &BindArgs,
     name: &str,
@@ -266,35 +273,55 @@ fn change_for(
     if !peek.entries.iter().any(|e| e.name == name) {
         return Err(unknown_name(name));
     }
-    if args.clear && (!args.allow.is_empty() || !args.deny.is_empty()) {
-        return Err(error("--clear takes no --allow or --deny"));
+    let any_rule = !args.allow.is_empty()
+        || !args.deny.is_empty()
+        || args.category.is_some()
+        || !args.dirs.is_empty()
+        || args.net.is_some();
+    if args.clear && any_rule {
+        return Err(error("--clear takes no rule options"));
     }
-    if !args.clear && args.allow.is_empty() && args.deny.is_empty() {
+    if !args.clear && !any_rule {
         return Err(error(
-            "nothing to bind: give --allow RULE, --deny RULE, or --clear",
+            "nothing to bind: give --category, --allow, --deny, --dir, --net or --clear",
         ));
     }
-    let allow = parse_all(&args.allow, true).map_err(error)?;
-    let deny = parse_all(&args.deny, false).map_err(error)?;
-    let (new, resolved) = build(name, &allow, &deny, path, &project.root).map_err(error)?;
-    Ok(Change {
-        name: name.to_string(),
-        old: peek.bindings.iter().find(|b| b.name == name).cloned(),
-        new,
-        resolved,
-        allow_texts: texts(&allow),
-        deny_texts: texts(&deny),
-    })
+    if args.clear {
+        return Ok(change_of(name, peek, None, "the agent"));
+    }
+    let old = peek.bindings.iter().find(|b| b.name == name);
+    let only_commands = args.category.is_none() && args.dirs.is_empty() && args.net.is_none();
+    let mut a = Args {
+        category: args.category.clone(),
+        allow: args.allow.clone(),
+        deny: args.deny.clone(),
+        dirs: args.dirs.clone(),
+        net: args.net.clone(),
+        path: path.cloned(),
+    };
+    let category = match (&args.category, old) {
+        (Some(c), _) => Some(proposal::find_category(c).map_err(error)?),
+        // Only commands given: the rest of the approved rules stays.
+        (None, Some(o)) if only_commands => {
+            a.dirs = o.dirs.iter().map(|d| d.text.clone()).collect();
+            a.net = Some(net_text(&o.network));
+            o.category.as_deref().and_then(vahta_policy::category)
+        }
+        (None, _) => Some(detected_for(peek, name)),
+    };
+    let built = proposal::build(name, category, &a, &project.root).map_err(error)?;
+    Ok(change_of(name, peek, Some(built), "the agent"))
 }
 
-/// Every name whose `vahta.toml` rules differ from the vault's.
+/// Every name whose `vahta.toml` rules differ from the vault's. A name the
+/// file proposes nothing for is left alone.
 fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) -> Flow<Vec<Change>> {
     let manifest_path = project.manifest_path();
     if !manifest_path.is_file() {
         return Err(refused(
             RefusalKind::NothingToDo,
-            "there is no vahta.toml here to approve; propose rules with `vahta bind NAME --allow \
-             PROGRAM`",
+            "there is no vahta.toml here to approve; propose rules with `vahta bind NAME \
+             --category CATEGORY --allow PROGRAM`",
         ));
     }
     let manifest = manifest::load(&manifest_path).map_err(from_vault)?;
@@ -305,19 +332,42 @@ fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) ->
         if manifest::rules_in_sync(proposed, approved) {
             continue;
         }
-        let (allow, deny) = proposed
-            .map(|e| (e.allow.clone(), e.deny.clone()))
-            .unwrap_or_default();
-        let (new, resolved) = build(&entry.name, &allow, &deny, path, &project.root)
-            .map_err(|e| error(format!("{}: {e}", entry.name)))?;
-        changes.push(Change {
-            name: entry.name.clone(),
-            old: approved.cloned(),
-            new,
-            resolved,
-            allow_texts: texts(&allow),
-            deny_texts: texts(&deny),
-        });
+        let fail = |e: String| error(format!("{}: {e}", entry.name));
+        let built = match proposed {
+            Some(e)
+                if !(e.allow.is_empty()
+                    && e.deny.is_empty()
+                    && e.category.is_none()
+                    && e.dirs.is_empty()
+                    && e.network.is_none()) =>
+            {
+                let category = match &e.category {
+                    Some(c) => Some(proposal::find_category(c).map_err(fail)?),
+                    None => None,
+                };
+                let a = Args {
+                    category: e.category.clone(),
+                    allow: e.allow.iter().map(|r| r.text.clone()).collect(),
+                    deny: e.deny.iter().map(|r| r.text.clone()).collect(),
+                    dirs: e.dirs.clone(),
+                    net: match e.network.as_deref() {
+                        Some("hosts") => Some(format!(
+                            "hosts:{}",
+                            e.hosts
+                                .iter()
+                                .map(|h| h.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )),
+                        other => other.map(str::to_string),
+                    },
+                    path: path.cloned(),
+                };
+                Some(proposal::build(&entry.name, category, &a, &project.root).map_err(fail)?)
+            }
+            _ => None,
+        };
+        changes.push(change_of(&entry.name, peek, built, "vahta.toml"));
     }
     Ok(changes)
 }
@@ -338,11 +388,25 @@ fn write_file(project: &Project, changes: &[Change]) -> Flow<()> {
     };
     let mut updated = current.clone();
     for c in changes {
-        updated = manifest::set_rules(&updated, &c.name, &c.allow_texts, &c.deny_texts)
-            .map_err(from_vault)?;
+        let texts = c.new.as_ref().map(proposal::texts_of).unwrap_or_default();
+        updated = manifest::set_rules(&updated, &c.name, &texts).map_err(from_vault)?;
     }
     if updated != current {
         manifest::write_text(&manifest_path, &updated).map_err(from_vault)?;
     }
     Ok(())
+}
+
+/// Write one secret's rules into `vahta.toml` (see [`write_file`]); used by
+/// `add`, which stores the rules with the secret.
+pub(crate) fn write_rules(project: &Project, name: &str, rules: &RuleSet) -> Flow<()> {
+    let change = Change {
+        name: name.to_string(),
+        old: None,
+        new: Some(rules.clone()),
+        resolved: Vec::new(),
+        warnings: Vec::new(),
+        downgrade: None,
+    };
+    write_file(project, &[change])
 }

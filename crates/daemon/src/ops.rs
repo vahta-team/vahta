@@ -14,12 +14,13 @@ use std::time::Duration;
 
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Class, Error, Kind, SecretValue, Tier, Vault, valid_name};
+use vahta_vault::{Class, Error, Kind, RuleSet, SecretValue, Tier, Vault, valid_name};
 use zeroize::Zeroizing;
 
 use crate::clipboard;
 use crate::dotenv;
 use crate::journal::Entry;
+use crate::proposal;
 use crate::protocol::{
     self, ClientReply, ImportSource, NameIssue, Panel, Refusal, RefusalKind, Secret,
 };
@@ -293,8 +294,11 @@ pub(crate) enum StoreMode {
 /// What `add` and `reset` were asked to store, besides the value.
 pub(crate) struct Store<'a> {
     pub name: &'a str,
-    /// `None` on a reset keeps the tier the secret has.
+    /// `None` on a reset keeps the tier the secret has; on an add it is the
+    /// category's tier.
     pub tier: Option<Tier>,
+    /// The rules proposed with an add (a reset keeps the rules it has).
+    pub rules: Option<crate::protocol::RuleArgs>,
     /// `None` on a reset keeps the secret's kind; on an add it is a variable.
     pub file: Option<&'a str>,
 }
@@ -350,6 +354,46 @@ pub(crate) fn store(
         (None, Some(e)) => e.kind.clone(),
         (None, None) => Kind::Env,
     };
+    // A proposal that cannot be right is refused before any window opens.
+    let proposal_args = what.rules.as_ref().map(|r| proposal::Args {
+        category: r.category.clone(),
+        allow: r.allow.clone(),
+        deny: r.deny.clone(),
+        dirs: r.dirs.clone(),
+        net: r.net.clone(),
+        path: r.path.as_deref().map(std::ffi::OsString::from),
+    });
+    if mode == StoreMode::Add
+        && let Some(a) = &proposal_args
+        && let Some(id) = &a.category
+    {
+        let cat = proposal::find_category(id).map_err(error)?;
+        proposal::build(name, Some(cat), a, &project.root).map_err(error)?;
+    } else if mode == StoreMode::Add
+        && let Some(a) = &proposal_args
+        && !a.is_bare()
+    {
+        // No category: it is suggested after the value. Syntax errors now.
+        proposal::build(name, None, a, &project.root).map_err(error)?;
+    }
+    if mode == StoreMode::Add {
+        // Nothing but a name: the category the name suggests must be
+        // buildable, so the person does not type a value for nothing.
+        let default_args = proposal::Args::default();
+        let a = proposal_args.as_ref().unwrap_or(&default_args);
+        if a.category.is_none() && a.is_bare() {
+            let cat = vahta_policy::suggest(Some(class_by_name(name)), name);
+            if let Err(proposal::DefaultErr::Other(e)) =
+                proposal::default_set(name, cat, a, None, &project.root)
+            {
+                return Err(error(format!(
+                    "{e}. Propose the rules with the add: `vahta add {name} --category {} \
+                     --allow PROGRAM ...`",
+                    cat.id
+                )));
+            }
+        }
+    }
     let tier = what
         .tier
         .or(existing.map(|e| e.tier))
@@ -360,7 +404,11 @@ pub(crate) fn store(
     };
     let mut window = ctx.window(title)?;
     let mut lines = lines_for(&project, &vault_path);
-    lines.push(format!("Name: {name} (tier {})", tier_text(tier)));
+    if mode == StoreMode::Add && what.tier.is_none() {
+        lines.push(format!("Name: {name}"));
+    } else {
+        lines.push(format!("Name: {name} (tier {})", tier_text(tier)));
+    }
     if mode == StoreMode::Reset {
         lines.push("This replaces the value it has now.".to_string());
     }
@@ -404,7 +452,24 @@ pub(crate) fn store(
         _ => class_by_name(name),
     };
     let mut tier = tier;
-    if tier == Tier::Session && matches!(class, Class::Payment | Class::Cloud) {
+    let mut offered: Option<RuleSet> = None;
+    if mode == StoreMode::Add {
+        let default_args = proposal::Args::default();
+        let o = crate::add_rules::offer(
+            window.as_mut(),
+            &panel,
+            &crate::add_rules::Inputs {
+                name,
+                class,
+                tier: what.tier,
+                args: proposal_args.as_ref().unwrap_or(&default_args),
+                reason: what.rules.as_ref().and_then(|r| r.reason.as_deref()),
+                root: &project.root,
+            },
+        )?;
+        tier = o.tier;
+        offered = Some(o.rule_set);
+    } else if tier == Tier::Session && matches!(class, Class::Payment | Class::Cloud) {
         // A key that moves money or opens an account is worth the password
         // every time; the person decides, here, where the value was typed.
         let question = format!(
@@ -423,12 +488,39 @@ pub(crate) fn store(
             tier = Tier::EachUse;
         }
     }
+    if let Some(rs) = &offered {
+        // The file first, so the repository shows what is enforced; a failure
+        // here leaves the vault as it was.
+        crate::bind_ops::write_rules(&project, name, rs)?;
+    }
     vault
         .set(name, typed.expose().as_bytes(), kind, tier)
         .map_err(from_vault)?;
     vault.set_class(name, Some(class)).map_err(from_vault)?;
+    if let Some(rs) = &offered {
+        vault
+            .set_bindings(name, Some(rs.clone()))
+            .map_err(from_vault)?;
+    }
     let bound = vault.bindings().iter().any(|b| b.name == name);
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+    if let Some(from) = offered.as_ref().and_then(|r| r.downgraded_from.as_deref()) {
+        ctx.journal(
+            Entry::new("category_downgraded")
+                .vault(&vault.vault_id())
+                .names(&[name.to_string()])
+                .result(
+                    "accepted",
+                    Some(&format!(
+                        "{from} -> {}",
+                        offered
+                            .as_ref()
+                            .and_then(|r| r.category.as_deref())
+                            .unwrap_or("?")
+                    )),
+                ),
+        );
+    }
     ctx.journal(
         Entry::new(event)
             .vault(&vault.vault_id())
@@ -445,7 +537,10 @@ pub(crate) fn store(
     };
     window.close(Some(&with_note(format!("{capitalised} {name}."), &note)));
     Ok(ClientReply::Done {
-        message: with_note(done_message(done, name, class, tier, bound), &note),
+        message: with_note(
+            done_message(done, name, class, tier, bound, offered.as_ref()),
+            &note,
+        ),
     })
 }
 
@@ -610,7 +705,7 @@ const CLOUD_WORDS: &[&str] = &[
 
 /// The class a name suggests, by its words (split on `_`, `-` and `.`, any
 /// case): `AWS_SECRET_ACCESS_KEY` is cloud, `stripe-key` payment.
-fn class_by_name(name: &str) -> Class {
+pub(crate) fn class_by_name(name: &str) -> Class {
     let words: Vec<String> = name
         .split(['_', '-', '.'])
         .map(|w| w.to_ascii_uppercase())
@@ -626,9 +721,16 @@ fn class_by_name(name: &str) -> Class {
 }
 
 /// What the agent is told after an add or reset: what was done, the class (a
-/// word, never the value) and, unless the secret already has rules, how to ask
-/// the person for some.
-fn done_message(done: &str, name: &str, class: Class, tier: Tier, bound: bool) -> String {
+/// word, never the value) and the rules. On an add the rules came with it;
+/// otherwise a secret that has none is told how to get some, once, up front.
+fn done_message(
+    done: &str,
+    name: &str,
+    class: Class,
+    tier: Tier,
+    bound: bool,
+    rules: Option<&RuleSet>,
+) -> String {
     let mut text = match class {
         Class::Payment | Class::Cloud => {
             format!(
@@ -639,19 +741,39 @@ fn done_message(done: &str, name: &str, class: Class, tier: Tier, bound: bool) -
         }
         Class::Other => format!("{done} {name}"),
     };
+    if let Some(rs) = rules {
+        let cat = rs.category.as_deref().and_then(vahta_policy::category);
+        text.push_str(&format!(
+            "\nRules approved with it: {}.\nUse it as `vahta run --secret {name} -- COMMAND` \
+             with a command inside those rules; anything else is refused (or asked with \
+             `--ask --reason`). Work freely inside the rules; to widen them, design the change \
+             once and propose it with `vahta bind {name} ...` so the person is asked as rarely as \
+             possible.",
+            crate::binding::rules_text(rs)
+        ));
+        if let Some(c) = cat {
+            text.push_str("\nCheck once that a prompt injection could not misuse it:");
+            for item in c.checklist {
+                text.push_str(&format!("\n- {item}"));
+            }
+        }
+        return text;
+    }
     if bound {
         return text;
     }
-    match class {
-        Class::Payment | Class::Cloud => text.push_str(&format!(
-            "\n{name} can be used with any command. Ask the person which commands need it and \
-             propose a rule, e.g. `vahta bind {name} --allow PROGRAM`.\n`allow` is the real \
-             guard; `deny` only slows an agent down."
-        )),
-        Class::Other => text.push_str(&format!(
-            "\n{name} can be used with any command; to limit it, propose a rule: `vahta bind \
-             {name} --allow PROGRAM` (the person approves)."
-        )),
+    let cat = vahta_policy::suggest(Some(class), name);
+    text.push_str(&format!(
+        "\n{name} has no rules, so nothing may use it yet. Design them once, up front, so the \
+         person approves once and is rarely asked later: `vahta bind {name} --category {} \
+         --allow PROGRAM [--net ...] --reason \"WHY\"`. Give the agent as much freedom as the \
+         work needs inside the rules, and close the paths a prompt injection would take \
+         (network tools, interpreters, shells, writing the value to a file, sending it to \
+         another host):",
+        cat.id
+    ));
+    for item in cat.checklist {
+        text.push_str(&format!("\n- {item}"));
     }
     text
 }

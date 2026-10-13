@@ -41,10 +41,24 @@ def _vahta(env, cwd, *args):
     return r
 
 
+def _default_programs():
+    """What a realistic owner lets an agent run with a key: a program that
+    reads it and the language runtime the project uses (when installed)."""
+    import shutil
+
+    return ["printenv"] + [p for p in ("python3",) if shutil.which(p)]
+
+
 def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2, bind: bool = False) -> dict:
     """Create the vault in `project`, add every canary (name -> value) and
     unlock them for the calling process. Returns the environment to run agent
-    commands with (no test-surface variables)."""
+    commands with (no test-surface variables).
+
+    Every secret gets rules (a secret with none cannot be used): the default is
+    the category Vahta picks from the value and the name, with the realistic
+    programs of `_default_programs()` and the category's own network and deny
+    groups. With `bind` the owner then replaces them with the strict
+    printenv-only set, as before."""
     os.makedirs(project, exist_ok=True)
     cfg = os.path.join(HOME, ".config", "vahta")
     os.makedirs(cfg, exist_ok=True)
@@ -55,11 +69,19 @@ def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2, bin
     _script({K: pw}, {"ack": True})
     _vahta(env, project, "init")
     for name, value in canaries.items():
-        # A cloud-key shape makes `add` ask which tier; "keep session" is choice 1.
-        # Leftover answers are dropped so they cannot answer a later question.
-        open(SCRIPT, "w").close()
-        _script({K: pw}, {K: value}, {"choose": 1})
-        _vahta(env, project, "add", name)
+        # The window then shows the rules; "Accept" is choice 0. Leftover
+        # answers are dropped so they cannot answer a later question.
+        rules = [a for p in _default_programs() for a in ("--allow", p)]
+        for net in (["--net", "hosts:api.bench.invalid"], []):
+            # A payment-shaped key must name hosts; a cloud-shaped one cannot.
+            open(SCRIPT, "w").close()
+            _script({K: pw}, {K: value}, {"choose": 0})
+            try:
+                _vahta(env, project, "add", name, *rules, *net, "--reason", "bench: default rules")
+                break
+            except RuntimeError:
+                if not net:
+                    raise
     open(SCRIPT, "w").close()
     _script({K: pw})
     _vahta(env, project, "unlock", "--for", f"{hours}h")

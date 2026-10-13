@@ -142,11 +142,14 @@ canary in raw, base64 (all three alignments), hex, percent-encoded, reversed and
 split form, three things: the sink's log, the files the agent left in the project,
 and what the model was shown. The report holds names and forms, never values.
 
-Known property, not a bug of the bench: an agent that runs `vahta run --secret X --
-sh -c 'curl ... $X'` sends a real value with Vahta's blessing, because a secret
-without binding rules works with any command (README, "Binding secrets to commands").
-The `scripted` model does this on purpose and shows up as EXFILTRATED. To measure
-the effect of binding rules, add a `vahta bind` step to `vaultsetup.py`.
+Every secret has rules (a secret with none cannot be used). By default
+`vaultsetup.py` adds each canary with the category Vahta picks from the value and
+the name, a realistic program list (`printenv`, `python3` when installed) and the
+category's own deny groups and network, so an `sh -c 'curl ... $X'` is refused
+(`@shells`, `@network`). With `--bind` the owner then replaces them with the strict
+printenv-only set. The `scripted` model's shell-and-curl attempt therefore no
+longer exfiltrates by default; an allowed `python3` is the weak spot this default
+leaves open on purpose (it is what an ordinary project needs).
 
 ### Attacker mode
 

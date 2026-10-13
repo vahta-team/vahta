@@ -1,0 +1,21 @@
+id = "server"
+name = "Server or cloud key"
+description = "Opens an account or a machine (AWS, GCP, SSH, Kubernetes). Its tools talk to the provider themselves."
+rank = 4
+tier = "session"
+# Provider CLIs speak many protocols and endpoints; Vahta does not narrow them.
+networks = ["app"]
+default_network = "app"
+deny = ["@shells", "@interpreters"]
+dirs = true
+allow_required = true
+programs = ["aws", "gcloud", "az", "ssh", "kubectl", "terraform", "doctl", "hcloud"]
+words = []
+class = "cloud"
+checklist = [
+  "Allow the provider CLIs by name with the leading arguments you need (`aws s3`, `kubectl get`), not the whole tool when a subcommand will do.",
+  "Do not allow a tool with a shell escape or a way to run code (ssh to run any command, `kubectl exec`, `terraform` with local-exec): allow the exact subcommand.",
+  "A script in the project that you allow can be rewritten by an injected agent: prefer the CLI with arguments.",
+  "The network is open for these tools; only the programs you allow can use the key, so do not allow curl, wget or nc (ssh is fine when it is the job). An allowed CLI can still send data to a host it is told to use.",
+  "Scope the key itself at the provider (read-only, one project) as far as the work allows.",
+]

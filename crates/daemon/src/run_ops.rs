@@ -10,8 +10,10 @@
 //! * if the session is a delegated one and does not cover a name, the request
 //!   is refused outright, with no window: a sub-agent cannot ask the person for
 //!   more than it was given;
-//! * if a secret has approved command rules (see `binding`), the command must
-//!   pass them first, before any session or window is looked at;
+//! * every secret must have approved rules (see `vahta_policy`): one with none
+//!   is refused (`NoRules`) with the command that proposes some, and the
+//!   command must pass the rules first, before any session or window is looked
+//!   at;
 //! * otherwise a window asks for the password for this one run, and no session
 //!   is created. An each-use secret always asks, even inside a session.
 //!
@@ -26,7 +28,9 @@ use std::time::Instant;
 use vahta_vault::manifest;
 use vahta_vault::{Error, Peek, SecretValue, Tier, Vault, valid_name};
 
-use crate::binding::{self, Verdict};
+use vahta_policy::Verdict;
+
+use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, check_name, error, find_vault, from_vault, lines_for, refused, refused_names,
@@ -237,21 +241,55 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         .find(|(k, _)| k == "PATH")
         .map(|(_, v)| OsString::from(v));
     let program = pathfind::locate(&argv[0], client_path.as_ref(), &cwd_path);
+    let missing: Vec<String> = names
+        .iter()
+        .filter(|n| !peek.bindings.iter().any(|b| &b.name == *n))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(no_rules(ctx, &peek, &missing));
+    }
     let bound: Vec<&vahta_vault::RuleSet> = names
         .iter()
         .filter_map(|n| peek.bindings.iter().find(|b| &b.name == n))
         .collect();
-    if bound.is_empty() && program.is_none() {
-        return Err(error(format!(
-            "cannot start {}: no such program (looked in the caller's PATH)",
-            sanitize_for_message(&argv[0])
-        )));
-    }
-    let failures: Vec<(&vahta_vault::RuleSet, Verdict)> = bound
+    let canonical_cwd = pathfind::canonical(&cwd_path).unwrap_or_else(|| cwd_path.clone());
+    let isolation = vahta_os::network_isolation_available();
+    let verdicts: Vec<(&vahta_vault::RuleSet, Verdict)> = bound
         .iter()
-        .map(|b| (*b, binding::check(b, program.as_deref(), &argv)))
-        .filter(|(_, v)| *v != Verdict::Allowed)
+        .map(|b| {
+            let v = vahta_policy::evaluate(
+                b,
+                &vahta_policy::Ctx {
+                    program: program.as_deref(),
+                    argv: &argv,
+                    cwd: &canonical_cwd,
+                    project_root: &project.root,
+                    network_isolation: isolation,
+                },
+            );
+            (*b, v)
+        })
         .collect();
+    let failures: Vec<(&vahta_vault::RuleSet, Verdict)> = verdicts
+        .iter()
+        .filter(|(_, v)| !v.is_allowed())
+        .cloned()
+        .collect();
+    // Any secret that wants no network cuts it for the whole run.
+    let isolate_network = verdicts.iter().any(|(_, v)| {
+        matches!(
+            v,
+            Verdict::Allowed {
+                isolate_network: true,
+                ..
+            }
+        )
+    });
+    let unisolated_note = verdicts.iter().find_map(|(_, v)| match v {
+        Verdict::Allowed { note: Some(n), .. } => Some(n.clone()),
+        _ => None,
+    });
     if !failures.is_empty() {
         if !ask {
             return Err(not_allowed(
@@ -350,9 +388,15 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             .names(&names)
             .result(
                 "started",
-                Some(&match &via {
-                    Some(id) => format!("session {id}"),
-                    None => "password".to_string(),
+                Some(&{
+                    let how = match &via {
+                        Some(id) => format!("session {id}"),
+                        None => "password".to_string(),
+                    };
+                    match &unisolated_note {
+                        Some(_) => format!("{how}; network not cut (not available here)"),
+                        None => how,
+                    }
                 }),
             ),
     );
@@ -367,7 +411,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         session: via,
         names,
         program,
-        isolate_network: false,
+        isolate_network,
     })
 }
 
@@ -560,7 +604,8 @@ fn not_allowed(
                 b.name,
                 binding::rules_text(b)
             )),
-            Verdict::Allowed => {}
+            Verdict::Refused { why } => lines.push(format!("{}: {why}", b.name)),
+            Verdict::Allowed { .. } => {}
         }
     }
     let mut message = format!("{}. Nothing was run.", lines.join("; "));
@@ -602,6 +647,60 @@ fn not_allowed(
         RefusalKind::CommandNotAllowed,
         message,
         issue_list(&names, RefusalKind::CommandNotAllowed),
+    )
+}
+
+/// The refusal for a secret that has no approved rules: it says how to
+/// propose some.
+fn no_rules(ctx: &Ctx<'_>, peek: &Peek, missing: &[String]) -> ClientReply {
+    let mut hints = Vec::new();
+    for n in missing {
+        let class = peek
+            .entries
+            .iter()
+            .find(|e| &e.name == n)
+            .and_then(|e| e.class);
+        let cat = vahta_policy::suggest(class, n);
+        hints.push(format!(
+            "{n}: `vahta bind {n} --category {} --allow PROGRAM[ ARGS] [--deny RULE] [--dir PATH] \
+             [--net none|app|hosts:HOST] --reason \"WHY\"`",
+            cat.id
+        ));
+    }
+    ctx.journal(
+        Entry::new("run_refused")
+            .vault(&peek.vault_id)
+            .names(missing)
+            .result("refused", Some("no_rules")),
+    );
+    let class = peek
+        .entries
+        .iter()
+        .find(|e| e.name == missing[0])
+        .and_then(|e| e.class);
+    let checklist: String = vahta_policy::suggest(class, &missing[0])
+        .checklist
+        .iter()
+        .map(|c| format!("\n- {c}"))
+        .collect();
+    refused_names(
+        RefusalKind::NoRules,
+        format!(
+            "{} no approved rules, so nothing may use {} yet. Design the rules once, up front \
+             (see docs/agent-usage.md: the program(s), folders, network, and how a prompt \
+             injection could misuse the secret); the person approves them in one window. \
+             Propose with: {}. Nothing was run.\nBefore you propose, \
+             close the paths a prompt injection would take (network tools, interpreters, shells, \
+             writing the value to a file, sending it to another host):{checklist}",
+            if missing.len() == 1 {
+                "It has"
+            } else {
+                "They have"
+            },
+            missing.join(", "),
+            hints.join("; ")
+        ),
+        issue_list(missing, RefusalKind::NoRules),
     )
 }
 

@@ -123,10 +123,11 @@ fn list_prints_sorted_names_kinds_and_tiers_and_never_a_value() {
     assert!(
         lines[0].starts_with("ALPHA")
             && lines[0].contains("file:alpha.pem")
-            && lines[0].ends_with("each_use")
+            && lines[0].contains("each_use")
+            && lines[0].ends_with("NO RULES")
     );
     assert!(
-        lines[1].starts_with("ZETA") && lines[1].contains("env") && lines[1].ends_with("session")
+        lines[1].starts_with("ZETA") && lines[1].contains("env") && lines[1].contains("session")
     );
     assert!(!stdout.contains("fake-") && !text(&out.stderr).contains("fake-"));
     // The saving machine pinned the vault: no "unverified" note.
@@ -369,6 +370,7 @@ impl Sandbox {
                 name: "ZETA".into(),
                 allow: vec![rule],
                 deny: vec![],
+                network: vahta_vault::Network::App,
                 ..Default::default()
             }),
         )
@@ -381,10 +383,10 @@ impl Sandbox {
 fn list_shows_the_class_and_whether_the_rules_are_approved() {
     let s = Sandbox::new();
     s.with_vault(&items());
-    // Nothing known and nothing bound: the two columns are not there.
+    // Nothing known and nothing bound: no class, and the rules say so.
     let plain = text(&s.run(&["list"]).stdout);
     assert!(
-        !plain.contains("any command") && !plain.contains("payment"),
+        plain.contains("NO RULES") && !plain.contains("payment"),
         "{plain}"
     );
     let v: serde_json::Value = serde_json::from_slice(&s.run(&["list", "--json"]).stdout).unwrap();
@@ -396,11 +398,11 @@ fn list_shows_the_class_and_whether_the_rules_are_approved() {
     let out = text(&s.run(&["list"]).stdout);
     let zeta = out.lines().find(|l| l.starts_with("ZETA")).unwrap();
     assert!(
-        zeta.contains("payment") && zeta.trim_end().ends_with("bound"),
+        zeta.contains("payment") && zeta.trim_end().ends_with("custom, app"),
         "{out}"
     );
     let alpha = out.lines().find(|l| l.starts_with("ALPHA")).unwrap();
-    assert!(alpha.trim_end().ends_with("any command"), "{out}");
+    assert!(alpha.trim_end().ends_with("NO RULES"), "{out}");
 
     // The file says the same: in step.
     s.manifest("[secrets.ZETA]\nallow = [\"tool\"]\n");
@@ -410,12 +412,12 @@ fn list_shows_the_class_and_whether_the_rules_are_approved() {
             .find(|l| l.starts_with("ZETA"))
             .unwrap()
             .trim_end()
-            .ends_with("bound")
+            .ends_with("custom, app")
     );
     // The file proposes something else: shown, and flagged in the JSON.
     s.manifest("[secrets.ZETA]\nallow = [\"tool\", \"other\"]\n");
     let out = text(&s.run(&["list"]).stdout);
-    assert!(out.contains("bound (toml differs)"), "{out}");
+    assert!(out.contains("custom, app (toml differs)"), "{out}");
     let v: serde_json::Value = serde_json::from_slice(&s.run(&["list", "--json"]).stdout).unwrap();
     assert_eq!(v["secrets"][1]["class"], "payment");
     assert_eq!(v["secrets"][1]["bound"], true);

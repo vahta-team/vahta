@@ -38,6 +38,7 @@ dunce = "1"
 vahta-harness = { path = "../harness" }
 vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
+vahta-policy = { path = "../policy" }
 # The strict URL parser always; the client only with the `http` feature.
 vahta-net = { path = "../net" }
 # Taking Vahta's hook entries out for a pause and putting them back.

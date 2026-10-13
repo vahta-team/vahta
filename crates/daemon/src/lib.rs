@@ -11,6 +11,7 @@
 //! the hook), listening on a socket in a private runtime directory, and exits
 //! when it has been idle.
 
+mod add_rules;
 mod alarm;
 mod anchor;
 mod bind_ops;
@@ -25,6 +26,7 @@ mod lock;
 mod ops;
 mod output;
 mod pathfind;
+mod proposal;
 mod report;
 mod run;
 mod run_ask;

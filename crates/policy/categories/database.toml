@@ -1,0 +1,23 @@
+id = "database"
+name = "Database credential"
+description = "A password or connection string for a database. A client holding it can read or change all the data it reaches."
+rank = 3
+tier = "session"
+# Database clients are not HTTP: `vahta http` cannot carry them, and cutting the
+# network would stop them. So the network is the application's own, and the
+# protection is in what may run: named clients, no shell, no interpreter, no
+# network tool.
+networks = ["app"]
+default_network = "app"
+deny = ["@shells", "@interpreters", "@network"]
+dirs = true
+allow_required = true
+programs = ["psql", "mysql", "pg_dump", "pg_restore", "redis-cli", "mongosh", "sqlite3"]
+words = ["DATABASE", "DB", "POSTGRES", "POSTGRESQL", "PG", "MYSQL", "MARIADB", "MONGO", "MONGODB", "REDIS", "DSN", "SQL"]
+checklist = [
+  "Name the client and the arguments you need (`psql -f migrations/`, `pg_dump`); the key is then usable only that way.",
+  "psql has a shell escape (`\\!`) and COPY ... TO PROGRAM; prefer `-f FILE` with a reviewed file and a read-only database role.",
+  "The client reaches the database host over the network, so Vahta cannot limit the host: use a role that can do only what the work needs.",
+  "A migration tool in the project is code the agent can rewrite; allow it only with the exact subcommand.",
+  "Do not allow a client that can write a file somewhere readable (`pg_dump -f`) unless the destination is fixed by the person.",
+]
