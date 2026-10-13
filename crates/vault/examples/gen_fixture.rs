@@ -16,7 +16,10 @@ use std::path::PathBuf;
 
 use vahta_vault::rules::parse_rule;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Binding, Class, KdfParams, Kind, Tier, Vault};
+use vahta_vault::{
+    Class, Device, DirRule, HostRule, KdfParams, Kind, Network, NewSlot, RuleSet, Tier, Vault,
+    seal_vault_key,
+};
 
 const PHRASE: &str = "correct horse";
 
@@ -60,13 +63,53 @@ fn main() {
     vault
         .set_bindings(
             "BETA",
-            Some(Binding {
+            Some(RuleSet {
                 name: "BETA".into(),
                 allow: vec![allow],
                 deny: vec![deny],
+                category: Some("package-manager".into()),
+                dirs: vec![DirRule {
+                    text: "/opt/fixture/work (read-write)".into(),
+                    path: "/opt/fixture/work".into(),
+                    write: true,
+                }],
+                network: Network::Hosts(vec![HostRule {
+                    text: "registry.example.org".into(),
+                    host: "registry.example.org".into(),
+                    subdomains: false,
+                    port: Some(443),
+                }]),
+                ..Default::default()
             }),
         )
         .expect("bindings");
+    // Format 2 also carries a paired device and slots of kinds beyond the two
+    // this build knows: the second is a kind no build has defined, which every
+    // later build must carry through untouched.
+    vault
+        .add_device(Device {
+            device_id: [7; 16],
+            name: "fixture phone".into(),
+            sign_pub: [&[2u8][..], &[1; 32]].concat(),
+            ecdh_pub: [&[3u8][..], &[2; 32]].concat(),
+            paired_at: 1_700_000_000,
+            expires_at: None,
+            transports: vec!["lan".into()],
+        })
+        .expect("device");
+    let kek = [9u8; 32];
+    vault
+        .add_slot(
+            NewSlot {
+                kind: 0x7001,
+                slot_id: Some([7; 16]),
+                label: "fixture future kind".into(),
+                expires_at: None,
+                params: vec![1, 2, 3],
+            },
+            |vk, aad| seal_vault_key(&kek, aad, vk),
+        )
+        .expect("slot");
     vault.save(&saved, &store).expect("save");
     std::fs::copy(&saved, &path).expect("copy the vault into the fixtures");
 

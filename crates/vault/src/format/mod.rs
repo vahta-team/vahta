@@ -11,7 +11,7 @@
 //! before anything else is looked at, so a future file never gets as far as a
 //! misleading "damaged" error.
 //!
-//! Each released format has its own frozen module (`v1.rs`). A file of an older
+//! Each released format has its own frozen module (`v1.rs`, `v2.rs`). A file of an older
 //! format is read by its own module and, on an owner unlock, carried forward by
 //! the chain in `upgrade.rs` to [`current`]. A file of the current format needs
 //! no chain. There is no way to write an older format: only the current module
@@ -19,6 +19,7 @@
 
 pub mod upgrade;
 pub mod v1;
+pub mod v2;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -27,7 +28,7 @@ use crate::{Error, RecoveryKey};
 
 /// The module of the format this build writes. The in-memory vault is made of
 /// its types.
-pub use v1 as current;
+pub use v2 as current;
 
 pub const MAGIC: &[u8; 8] = b"VAHTAVLT";
 /// The format this build writes.
@@ -73,7 +74,7 @@ pub fn read_version(bytes: &[u8]) -> Result<u16, Error> {
 /// is the pseudo-format that exercises the upgrade chain.
 fn is_known(format: u16) -> bool {
     match format {
-        1 => true,
+        1 | 2 => true,
         #[cfg(test)]
         0 => true,
         _ => false,
@@ -108,6 +109,7 @@ pub fn split(bytes: &[u8]) -> Result<Frame<'_>, Error> {
 #[derive(Debug)]
 pub enum Loaded {
     V1(v1::Decoded),
+    V2(v2::Decoded),
     /// The test pseudo-format: the same layout as format 1 under another
     /// number, to prove the chain before a real second format exists.
     #[cfg(test)]
@@ -119,6 +121,7 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, Error> {
     let frame = split(bytes)?;
     match frame.format {
         1 => Ok(Loaded::V1(v1::decode(&frame)?)),
+        2 => Ok(Loaded::V2(v2::decode(&frame)?)),
         #[cfg(test)]
         0 => Ok(Loaded::V0(v1::decode_as(&frame, 0)?)),
         _ => Err(Error::NotAVault),
@@ -129,25 +132,86 @@ impl Loaded {
     pub fn format(&self) -> u16 {
         match self {
             Loaded::V1(_) => 1,
+            Loaded::V2(_) => 2,
             #[cfg(test)]
             Loaded::V0(_) => 0,
         }
     }
 
-    /// The version-independent facts about the file.
-    pub fn model(&self) -> &v1::Model {
+    /// The header, which every format shares.
+    pub fn header(&self) -> &v2::Header {
         match self {
-            Loaded::V1(d) => &d.model,
+            Loaded::V1(d) => &d.model.header,
+            Loaded::V2(d) => &d.model.header,
             #[cfg(test)]
-            Loaded::V0(d) => &d.model,
+            Loaded::V0(d) => &d.model.header,
         }
     }
 
-    pub fn signer(&self) -> v1::Actor {
+    pub fn owner(&self) -> &v2::Owner {
+        match self {
+            Loaded::V1(d) => &d.model.owner,
+            Loaded::V2(d) => &d.model.owner,
+            #[cfg(test)]
+            Loaded::V0(d) => &d.model.owner,
+        }
+    }
+
+    pub fn index(&self) -> &[v2::Entry] {
+        match self {
+            Loaded::V1(d) => &d.model.index,
+            Loaded::V2(d) => &d.model.index,
+            #[cfg(test)]
+            Loaded::V0(d) => &d.model.index,
+        }
+    }
+
+    pub fn recipient_count(&self) -> usize {
+        match self {
+            Loaded::V1(d) => d.model.recipients.len(),
+            Loaded::V2(d) => d.model.recipients.len(),
+            #[cfg(test)]
+            Loaded::V0(d) => d.model.recipients.len(),
+        }
+    }
+
+    /// The approved rules, in the current format's type (an older format's
+    /// bindings read as rule sets with `Network::App`).
+    pub fn rule_sets(&self) -> Vec<v2::RuleSet> {
+        match self {
+            Loaded::V2(d) => d.model.bindings.clone(),
+            Loaded::V1(d) => d.model.bindings.iter().map(v2::RuleSet::from_v1).collect(),
+            #[cfg(test)]
+            Loaded::V0(d) => d.model.bindings.iter().map(v2::RuleSet::from_v1).collect(),
+        }
+    }
+
+    /// The slots, in the current format's type (an older format's are shown
+    /// with their bytes unchanged).
+    pub fn slots(&self) -> Vec<v2::Slot> {
+        let older = |d: &v1::Decoded| v2::Model::from_v1(&d.model).slots;
+        match self {
+            Loaded::V2(d) => d.model.slots.clone(),
+            Loaded::V1(d) => older(d),
+            #[cfg(test)]
+            Loaded::V0(d) => older(d),
+        }
+    }
+
+    pub fn signer(&self) -> v2::Actor {
         match self {
             Loaded::V1(d) => d.signer,
+            Loaded::V2(d) => d.signer,
             #[cfg(test)]
             Loaded::V0(d) => d.signer,
+        }
+    }
+
+    /// The file as the current format, when it is one.
+    pub fn current(&self) -> Option<&v2::Decoded> {
+        match self {
+            Loaded::V2(d) => Some(d),
+            _ => None,
         }
     }
 
@@ -157,9 +221,13 @@ impl Loaded {
 }
 
 /// How an owner proves itself.
+#[derive(Clone, Copy)]
 pub enum OwnerAccess<'a> {
     Password(&'a [u8]),
     Recovery(&'a RecoveryKey),
+    /// A slot of any kind, by id, with the key-encryption key the caller
+    /// derived for it. Only a current-format file has such slots.
+    Slot(&'a [u8; 16], &'a [u8; 32]),
 }
 
 /// An owner-unlocked vault: in the current format, or still in an older one
@@ -184,6 +252,18 @@ pub struct OwnerOpen {
 /// is provided.
 pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpen, Error> {
     let unlocked = match (loaded, &access) {
+        (Loaded::V2(d), _) => {
+            let u = match access {
+                OwnerAccess::Password(pw) => v2::unlock_password(d, pw)?,
+                OwnerAccess::Recovery(k) => v2::unlock_recovery(d, k)?,
+                OwnerAccess::Slot(id, kek) => v2::unlock_slot(d, id, kek)?,
+            };
+            return Ok(OwnerOpen {
+                state: OwnerState::Current(u),
+                from: None,
+            });
+        }
+        (_, OwnerAccess::Slot(..)) => return Err(Error::Unlock),
         (Loaded::V1(d), OwnerAccess::Password(pw)) => {
             upgrade::AnyUnlocked::V1(v1::unlock_password(d, pw)?)
         }
@@ -199,10 +279,11 @@ pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpe
             upgrade::AnyUnlocked::V0(v1::unlock_recovery(d, k)?)
         }
     };
-    let from = (loaded.format() != CURRENT).then(|| loaded.format());
+    let from = Some(loaded.format());
     let (typed, recovery) = match access {
         OwnerAccess::Password(pw) => (Some(pw), None),
         OwnerAccess::Recovery(k) => (None, Some(k)),
+        OwnerAccess::Slot(..) => (None, None),
     };
     let state = match upgrade::to_current(&unlocked, typed, recovery) {
         Ok(u) => OwnerState::Current(u),
@@ -213,11 +294,12 @@ pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpe
 }
 
 /// A recipient's opening of the file: its entry and the file's model, in
-/// whatever format the file has. A recipient never upgrades a file.
+/// whatever format the file has (an older one is shown as the current type).
+/// A recipient never upgrades a file.
 pub struct RecipientOpen {
     pub fmt: u16,
-    pub model: v1::Model,
-    pub recipient: v1::Recipient,
+    pub model: current::Model,
+    pub recipient: v2::Recipient,
 }
 
 pub fn unlock_recipient(
@@ -225,17 +307,27 @@ pub fn unlock_recipient(
     recipient_id: &[u8; 16],
     enc_sk: &[u8; 32],
 ) -> Result<RecipientOpen, Error> {
-    // A release build has one format, so this match has one arm.
-    #[allow(clippy::infallible_destructuring_match)]
-    let d = match loaded {
-        Loaded::V1(d) => d,
+    match loaded {
+        Loaded::V2(d) => Ok(RecipientOpen {
+            fmt: d.fmt,
+            model: d.model.clone(),
+            recipient: v2::check_recipient(d, recipient_id, enc_sk)?,
+        }),
+        Loaded::V1(d) => older_recipient(d, recipient_id, enc_sk),
         #[cfg(test)]
-        Loaded::V0(d) => d,
-    };
+        Loaded::V0(d) => older_recipient(d, recipient_id, enc_sk),
+    }
+}
+
+fn older_recipient(
+    d: &v1::Decoded,
+    recipient_id: &[u8; 16],
+    enc_sk: &[u8; 32],
+) -> Result<RecipientOpen, Error> {
     let recipient = v1::check_recipient(d, recipient_id, enc_sk)?;
     Ok(RecipientOpen {
         fmt: d.fmt,
-        model: d.model.clone(),
+        model: v2::Model::from_v1(&d.model),
         recipient,
     })
 }

@@ -151,7 +151,7 @@ fn list_json_has_the_documented_shape() {
     let out = s.run(&["list", "--json"]);
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["format"], 1);
+    assert_eq!(v["format"], 2);
     assert_eq!(v["verified"], true);
     assert_eq!(v["upgrade_pending"], false);
     assert_eq!(v["secrets"][0]["name"], "ALPHA");
@@ -365,10 +365,11 @@ impl Sandbox {
             .to_allow("/opt/fake/tool".to_string());
         v.set_bindings(
             "ZETA",
-            Some(vahta_vault::Binding {
+            Some(vahta_vault::RuleSet {
                 name: "ZETA".into(),
                 allow: vec![rule],
                 deny: vec![],
+                ..Default::default()
             }),
         )
         .unwrap();

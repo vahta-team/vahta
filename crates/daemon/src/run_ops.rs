@@ -262,7 +262,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         .find(|(k, _)| k == "PATH")
         .map(|(_, v)| OsString::from(v));
     let program = pathfind::locate(&argv[0], client_path.as_ref(), &cwd_path);
-    let bound: Vec<&vahta_vault::Binding> = names
+    let bound: Vec<&vahta_vault::RuleSet> = names
         .iter()
         .filter_map(|n| peek.bindings.iter().find(|b| &b.name == n))
         .collect();
@@ -272,7 +272,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             sanitize_for_message(&argv[0])
         )));
     }
-    let failures: Vec<(&vahta_vault::Binding, Verdict)> = bound
+    let failures: Vec<(&vahta_vault::RuleSet, Verdict)> = bound
         .iter()
         .map(|b| (*b, binding::check(b, program.as_deref(), &argv)))
         .filter(|(_, v)| *v != Verdict::Allowed)
@@ -478,7 +478,7 @@ fn not_allowed(
     peek: &Peek,
     project: &vahta_vault::project::Project,
     program: Option<&std::path::Path>,
-    failures: &[(&vahta_vault::Binding, Verdict)],
+    failures: &[(&vahta_vault::RuleSet, Verdict)],
 ) -> ClientReply {
     let names: Vec<String> = failures.iter().map(|(b, _)| b.name.clone()).collect();
     let mut lines = Vec::new();

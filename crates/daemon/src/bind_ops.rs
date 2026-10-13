@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use vahta_vault::project::Project;
 use vahta_vault::rules::{self, ParsedRule, ProgramSpec};
-use vahta_vault::{ApprovedRule, Binding, Peek, Vault, manifest};
+use vahta_vault::{ApprovedRule, Network, Peek, RuleSet, Vault, manifest};
 
 use crate::binding;
 use crate::journal::Entry;
@@ -46,8 +46,8 @@ pub(crate) struct BindArgs {
 /// the program each allow rule resolved to.
 struct Change {
     name: String,
-    old: Option<Binding>,
-    new: Option<Binding>,
+    old: Option<RuleSet>,
+    new: Option<RuleSet>,
     resolved: Vec<(String, PathBuf)>,
     /// The proposed texts, to write into `vahta.toml` (not used when the file
     /// is the source).
@@ -55,15 +55,30 @@ struct Change {
     deny_texts: Vec<String>,
 }
 
-fn rules_or_any(b: &Option<Binding>) -> String {
+fn rules_or_any(b: &Option<RuleSet>) -> String {
     match b {
         Some(b) => binding::rules_text(b),
         None => "any command".to_string(),
     }
 }
 
+/// `new` with everything the manifest does not propose (category, directories,
+/// network) carried over from the rule set it replaces.
+fn merged(old: Option<&RuleSet>, new: Option<RuleSet>) -> Option<RuleSet> {
+    match (old, new) {
+        (Some(old), Some(mut new)) => {
+            new.category = old.category.clone();
+            new.downgraded_from = old.downgraded_from.clone();
+            new.dirs = old.dirs.clone();
+            new.network = old.network.clone();
+            Some(new)
+        }
+        (_, new) => new,
+    }
+}
+
 /// The rules of one secret and the programs they resolved to.
-type Built = (Option<Binding>, Vec<(String, PathBuf)>);
+type Built = (Option<RuleSet>, Vec<(String, PathBuf)>);
 
 /// Resolve `rules` into a binding for `name`; `None` when there are none.
 fn build(
@@ -95,10 +110,14 @@ fn build(
         return Ok((None, resolved));
     }
     Ok((
-        Some(Binding {
+        Some(RuleSet {
             name: name.to_string(),
             allow: approved,
             deny: denied,
+            // Commands are all `vahta.toml` proposes; the rest of a rule set
+            // is kept from the approved one when it is replaced (see `merged`).
+            network: Network::App,
+            ..RuleSet::default()
         }),
         resolved,
     ))
@@ -201,7 +220,7 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
     }
     for c in &changes {
         vault
-            .set_bindings(&c.name, c.new.clone())
+            .set_bindings(&c.name, merged(c.old.as_ref(), c.new.clone()))
             .map_err(from_vault)?;
     }
     vault.save(&vault_path, ctx.store()).map_err(|e| {

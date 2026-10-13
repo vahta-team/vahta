@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use vahta_vault::project::Project;
 use vahta_vault::rules::{normalize_program_name, parse_rule, runs_anything};
-use vahta_vault::{ApprovedRule, Binding, Peek, manifest};
+use vahta_vault::{ApprovedRule, Peek, RuleSet, manifest};
 
 use crate::binding::{self, Verdict};
 use crate::journal::Entry;
@@ -45,7 +45,7 @@ fn proposed_rule(
     argv0: &str,
     program: &Path,
     project_root: &Path,
-    failures: &[(&Binding, Verdict)],
+    failures: &[(&RuleSet, Verdict)],
 ) -> Option<(String, ApprovedRule)> {
     let text = if argv0.contains(['/', '\\']) {
         let root =
@@ -85,7 +85,7 @@ pub(crate) fn ask(
     peek: &Peek,
     argv: &[String],
     program: Option<&Path>,
-    failures: &[(&Binding, Verdict)],
+    failures: &[(&RuleSet, Verdict)],
     secrets_line: String,
     command_line: String,
     reason: Option<&str>,
@@ -206,7 +206,7 @@ fn add_to_list(
     project: &Project,
     vault_path: &Path,
     peek: &Peek,
-    failures: &[(&Binding, Verdict)],
+    failures: &[(&RuleSet, Verdict)],
     text: &str,
     approved: &ApprovedRule,
 ) -> Flow<()> {

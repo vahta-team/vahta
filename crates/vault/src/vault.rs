@@ -30,7 +30,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, KdfParams};
 use crate::format::current::{
-    self, Actor, Binding, Class, Entry, Kind, Recipient, RecipientKind, Role, Tier,
+    self, Actor, Class, Device, Entry, Kind, NewSlot, Recipient, RecipientKind, Role, RuleSet,
+    SlotInfo, Tier,
 };
 use crate::format::upgrade::{self, AnyUnlocked};
 use crate::format::{self, CURRENT, Loaded, OwnerAccess, OwnerState};
@@ -127,7 +128,7 @@ pub struct Peek {
     pub signer: Actor,
     pub entries: Vec<Entry>,
     /// The approved command rules, covered by the owner's signature.
-    pub bindings: Vec<Binding>,
+    pub bindings: Vec<RuleSet>,
     pub recipient_count: usize,
 }
 
@@ -167,6 +168,8 @@ enum Access {
     /// for the paper key. Readable; nothing can be written.
     Blocked {
         old: AnyUnlocked,
+        /// The older structure read as the current types, for reads.
+        view: current::Model,
         typed: Option<Zeroizing<Vec<u8>>>,
     },
     Recipient(RecipientAccess),
@@ -219,18 +222,18 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>, Error> {
 }
 
 fn peek_of(loaded: &Loaded) -> Peek {
-    let m = loaded.model();
+    let header = loaded.header();
     Peek {
-        vault_id: m.header.vault_id,
+        vault_id: header.vault_id,
         format: loaded.format(),
         upgrade_pending: loaded.upgrade_pending(),
-        generation: m.header.generation,
-        updated: m.header.updated,
-        owner_sign_pk: m.owner.sign_pk,
+        generation: header.generation,
+        updated: header.updated,
+        owner_sign_pk: loaded.owner().sign_pk,
         signer: loaded.signer(),
-        entries: m.index.clone(),
-        bindings: m.bindings.clone(),
-        recipient_count: m.recipients.len(),
+        entries: loaded.index().to_vec(),
+        bindings: loaded.rule_sets(),
+        recipient_count: loaded.recipient_count(),
     }
 }
 
@@ -347,7 +350,28 @@ impl Vault {
         pw: &[u8],
         items: &[(&str, &[u8])],
     ) -> Result<RecoveryKey, Error> {
-        let (mut u, key) = format::testing::create_v0(pw)?;
+        Vault::write_old_for_test(0, path, pw, items)
+    }
+
+    /// A vault in the real format 1, written to `path`, for upgrade tests.
+    #[cfg(test)]
+    pub(crate) fn write_v1_for_test(
+        path: &Path,
+        pw: &[u8],
+        items: &[(&str, &[u8])],
+    ) -> Result<RecoveryKey, Error> {
+        Vault::write_old_for_test(1, path, pw, items)
+    }
+
+    #[cfg(test)]
+    fn write_old_for_test(
+        fmt: u16,
+        path: &Path,
+        pw: &[u8],
+        items: &[(&str, &[u8])],
+    ) -> Result<RecoveryKey, Error> {
+        let (mut u, key) = format::v1::create(fmt, pw, KdfParams::TEST, true)?;
+        let key = key.ok_or(Error::Rng)?;
         for (n, (name, value)) in items.iter().enumerate() {
             let mut sid = crypto::random::<16>()?;
             sid[0] = n as u8;
@@ -374,7 +398,7 @@ impl Vault {
         let signer = current::owner_keys(&u.vk).sign;
         write_atomic(
             path,
-            &current::encode_as(0, &u.model, Actor::Owner, &signer)?,
+            &format::v1::encode_as(fmt, &u.model, Actor::Owner, &signer)?,
         )?;
         Ok(key)
     }
@@ -389,13 +413,13 @@ impl Vault {
         let loaded = format::decode(&read_file(path)?)?;
         let typed = match &access {
             OwnerAccess::Password(pw) => Some(Zeroizing::new(pw.to_vec())),
-            OwnerAccess::Recovery(_) => None,
+            OwnerAccess::Recovery(_) | OwnerAccess::Slot(..) => None,
         };
         // A swapped owner is refused before the KDF runs.
         store.check_owner_pin(
-            &loaded.model().header.vault_id,
+            &loaded.header().vault_id,
             StateFile::Owner,
-            &loaded.model().owner.sign_pk,
+            &loaded.owner().sign_pk,
         )?;
         let open = format::unlock_owner(&loaded, access)?;
         let (access, vk) = match open.state {
@@ -405,30 +429,31 @@ impl Vault {
             }
             OwnerState::Blocked(old) => {
                 let vk = old.as_v1().vk.clone();
-                (Access::Blocked { old, typed }, vk)
+                let view = current::Model::from_v1(&old.as_v1().model);
+                (Access::Blocked { old, view, typed }, vk)
             }
         };
-        let model = loaded.model();
+        let (header, owner) = (loaded.header(), loaded.owner());
         // The state is authenticated with a key only an unlock yields, so this
         // runs after the unlock: a tampered state is refused as tampered, not
         // mistaken for a rollback it may have been edited to cause.
         let state_key = StateKey::owner(&vk);
         let checked = store.check(
-            &model.header.vault_id,
+            &header.vault_id,
             &state_key,
-            &model.owner.sign_pk,
-            model.header.generation,
+            &owner.sign_pk,
+            header.generation,
         )?;
         // The unlock proved the vault key derives this owner key: pin it.
         store.record(
-            &model.header.vault_id,
+            &header.vault_id,
             &state_key,
-            &model.owner.sign_pk,
-            model.header.generation,
+            &owner.sign_pk,
+            header.generation,
         )?;
         Ok(Vault {
             access,
-            base_generation: model.header.generation,
+            base_generation: header.generation,
             upgraded_from: open.from,
             state_key,
             first_open: checked.first_open,
@@ -461,13 +486,13 @@ impl Vault {
         store: &LocalStore,
     ) -> Result<Vault, Error> {
         let loaded = format::decode(&read_file(path)?)?;
-        let m = loaded.model();
+        let (header, owner) = (loaded.header(), loaded.owner());
         let state_key = StateKey::recipient(*recipient_id, keys.sign_sk());
         let checked = store.check(
-            &m.header.vault_id,
+            &header.vault_id,
             &state_key,
-            &m.owner.sign_pk,
-            m.header.generation,
+            &owner.sign_pk,
+            header.generation,
         )?;
         let open = format::unlock_recipient(&loaded, recipient_id, keys.enc_sk())?;
         store.record(
@@ -497,7 +522,7 @@ impl Vault {
     fn model(&self) -> &current::Model {
         match &self.access {
             Access::Owner(u) => &u.model,
-            Access::Blocked { old, .. } => &old.as_v1().model,
+            Access::Blocked { view, .. } => view,
             Access::Recipient(r) => &r.model,
         }
     }
@@ -731,23 +756,24 @@ impl Vault {
     /// Replace the approved command rules of `name`, or remove them with
     /// `None`. A binding with no rules is the same as none. Goes through the
     /// writer like every edit, so it needs the opening to be able to sign.
-    pub fn set_bindings(&mut self, name: &str, binding: Option<Binding>) -> Result<(), Error> {
+    pub fn set_bindings(&mut self, name: &str, binding: Option<RuleSet>) -> Result<(), Error> {
         let w = self.writer()?;
         let i = w.index_of(name)?;
         if w.dek(i)?.is_none() {
             return Err(Error::NoAccess);
         }
+        // Same checks a reader applies, so a bad rule set is refused here and
+        // not by the next open, and before anything is changed.
+        let new = match binding {
+            Some(mut b) if !b.is_empty() => {
+                b.name = name.to_string();
+                current::check_binding_shapes(std::slice::from_ref(&b))?;
+                Some(b)
+            }
+            _ => None,
+        };
         w.model.bindings.retain(|b| b.name != name);
-        if let Some(mut b) = binding
-            && !(b.allow.is_empty() && b.deny.is_empty())
-        {
-            b.name = name.to_string();
-            // Same checks a reader applies, so a bad binding is refused here
-            // and not by the next open.
-            let probe = [b.clone()];
-            current::check_binding_shapes(&probe)?;
-            w.model.bindings.push(b);
-        }
+        w.model.bindings.extend(new);
         let actor = w.actor;
         let e = &mut w.model.index[i];
         e.updated = now();
@@ -756,7 +782,7 @@ impl Vault {
     }
 
     /// The approved command rules of every bound secret.
-    pub fn bindings(&self) -> &[Binding] {
+    pub fn bindings(&self) -> &[RuleSet] {
         &self.model().bindings
     }
 
@@ -946,10 +972,125 @@ impl Vault {
             .model
             .slots
             .iter_mut()
-            .find(|s| matches!(s, current::Slot::Password { .. }))
+            .find(|s| s.kind == current::SLOT_PASSWORD)
         {
             Some(existing) => *existing = slot,
             None => u.model.slots.insert(0, slot),
+        }
+        Ok(())
+    }
+
+    // --- Slots and devices (owner only) -----------------------------------------------
+
+    /// The owner's unlocked vault, or why this opening is not one.
+    fn owner_mut(&mut self) -> Result<&mut current::Unlocked, Error> {
+        match &mut self.access {
+            Access::Owner(u) => Ok(u),
+            Access::Blocked { .. } => Err(Error::UpgradeNeedsRecoveryKey),
+            Access::Recipient(_) => Err(Error::NotOwner),
+        }
+    }
+
+    /// Every slot, as metadata: kind, id, label, creation and expiry. Unknown
+    /// kinds are listed like the rest. Nothing secret is returned.
+    pub fn slots(&self) -> Vec<SlotInfo> {
+        self.model().slots.iter().map(current::Slot::info).collect()
+    }
+
+    /// Add a slot of a kind other than password and recovery (those have
+    /// [`Vault::change_password`] and the paper key). `wrap` is given the vault
+    /// key and the slot's AAD and returns the slot's `ct`: build it with
+    /// [`current::seal_vault_key`] under the key-encryption key the kind
+    /// derives, so [`Vault::unlock_with_slot`] can open it with that key.
+    /// Returns the slot's id. Refused at 16 slots, for a taken id or a bad
+    /// label, parameters or size. Takes effect at the next `save`.
+    pub fn add_slot(
+        &mut self,
+        new: NewSlot,
+        wrap: impl FnOnce(&[u8; KEY_LEN], &[u8]) -> Result<Vec<u8>, Error>,
+    ) -> Result<[u8; 16], Error> {
+        let u = self.owner_mut()?;
+        if matches!(new.kind, current::SLOT_PASSWORD | current::SLOT_RECOVERY) {
+            return Err(Error::Invalid("slot kind"));
+        }
+        let slot = current::custom_slot(&u.model.header.vault_id, &u.vk, new, wrap)?;
+        let mut slots = u.model.slots.clone();
+        slots.push(slot.clone());
+        current::check_slots(&slots).map_err(|_| Error::Invalid("slots"))?;
+        u.model.slots = slots;
+        Ok(slot.slot_id)
+    }
+
+    /// Remove a slot by id. The password and recovery slots stay: the first is
+    /// replaced with `change_password`, and without them the owner could be
+    /// left with no way in that does not depend on another device.
+    pub fn remove_slot(&mut self, slot_id: &[u8; 16]) -> Result<(), Error> {
+        let u = self.owner_mut()?;
+        let i = u
+            .model
+            .slots
+            .iter()
+            .position(|s| &s.slot_id == slot_id)
+            .ok_or(Error::UnknownSlot)?;
+        if matches!(
+            u.model.slots[i].kind,
+            current::SLOT_PASSWORD | current::SLOT_RECOVERY
+        ) {
+            return Err(Error::Invalid("slot kind"));
+        }
+        u.model.slots.remove(i);
+        Ok(())
+    }
+
+    /// Open a vault as its owner with a slot of any kind: `kek` is the
+    /// key-encryption key the caller derived for slot `slot_id`. An older
+    /// format has no such slots. An expired slot, an unknown id and a wrong key
+    /// are all [`Error::Unlock`].
+    pub fn unlock_with_slot(
+        path: &Path,
+        slot_id: &[u8; 16],
+        kek: &[u8; KEY_LEN],
+        store: &LocalStore,
+    ) -> Result<Vault, Error> {
+        Vault::open_owner(path, OwnerAccess::Slot(slot_id, kek), store)
+    }
+
+    pub fn devices(&self) -> &[Device] {
+        &self.model().devices
+    }
+
+    /// Record a paired device. The id and the name must be new.
+    pub fn add_device(&mut self, device: Device) -> Result<(), Error> {
+        let u = self.owner_mut()?;
+        let mut devices = u.model.devices.clone();
+        devices.push(device);
+        current::check_devices(&devices).map_err(|_| Error::Invalid("device"))?;
+        u.model.devices = devices;
+        Ok(())
+    }
+
+    /// Replace the record with the same `device_id`.
+    pub fn update_device(&mut self, device: Device) -> Result<(), Error> {
+        let u = self.owner_mut()?;
+        let mut devices = u.model.devices.clone();
+        let slot = devices
+            .iter_mut()
+            .find(|d| d.device_id == device.device_id)
+            .ok_or(Error::UnknownDevice)?;
+        *slot = device;
+        current::check_devices(&devices).map_err(|_| Error::Invalid("device"))?;
+        u.model.devices = devices;
+        Ok(())
+    }
+
+    /// Remove a device record. Its slot, if any, is removed separately with
+    /// [`Vault::remove_slot`].
+    pub fn remove_device(&mut self, device_id: &[u8; 16]) -> Result<(), Error> {
+        let u = self.owner_mut()?;
+        let before = u.model.devices.len();
+        u.model.devices.retain(|d| &d.device_id != device_id);
+        if u.model.devices.len() == before {
+            return Err(Error::UnknownDevice);
         }
         Ok(())
     }
@@ -958,10 +1099,10 @@ impl Vault {
     /// the one that opens the vault's recovery slot, so a wrong one cannot
     /// replace it. Does nothing if the vault is not blocked.
     pub fn provide_recovery_key(&mut self, key: &RecoveryKey) -> Result<(), Error> {
-        let Access::Blocked { old, typed } = &self.access else {
+        let Access::Blocked { old, typed, .. } = &self.access else {
             return Ok(());
         };
-        if !current::recovery_key_matches(&old.as_v1().model, key) {
+        if !format::v1::recovery_key_matches(&old.as_v1().model, key) {
             return Err(Error::Unlock);
         }
         let upgraded = upgrade::to_current(old, typed.as_ref().map(|t| t.as_slice()), Some(key))?;
@@ -1008,10 +1149,10 @@ impl Vault {
         let on_disk = match &existing {
             Some(bytes) => {
                 let loaded = format::decode(bytes)?;
-                if loaded.model().header.vault_id != model.header.vault_id {
+                if loaded.header().vault_id != model.header.vault_id {
                     return Err(Error::Conflict);
                 }
-                loaded.model().header.generation
+                loaded.header().generation
             }
             None => 0,
         };
@@ -1047,10 +1188,10 @@ fn backup_path(path: &Path, from: u16) -> PathBuf {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "vault.vht".to_string());
-    path.with_file_name(format!("{name}.v{from}-backup"))
+    path.with_file_name(format!("{name}.v{from}.bak"))
 }
 
-/// Copy the original bytes to `<vault>.v<N>-backup`, never overwriting one.
+/// Copy the original bytes to `<vault>.v<N>.bak`, never overwriting one.
 fn write_backup(path: &Path, from: u16, bytes: &[u8]) -> Result<(), Error> {
     let target = backup_path(path, from);
     let mut options = OpenOptions::new();

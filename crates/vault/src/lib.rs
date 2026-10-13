@@ -1,4 +1,4 @@
-//! The Vahta vault as a library: `vault.vht` format 1, the crypto under it, the
+//! The Vahta vault as a library: `vault.vht` format 2, the crypto under it, the
 //! local store that remembers what this machine has seen, project discovery,
 //! the `vahta.toml` contract and the import of ka's KAM1/KAM2 vaults.
 //!
@@ -32,7 +32,9 @@ use zeroize::Zeroizing;
 
 pub use crypto::KdfParams;
 pub use format::current::{
-    Actor, ApprovedRule, Binding, Class, Entry, Kind, Program, Recipient, RecipientKind, Role, Tier,
+    Actor, ApprovedRule, Class, Device, DirRule, Entry, HostRule, Kind, Network, NewSlot,
+    PasswordParams, Program, Recipient, RecipientKind, Role, RuleSet, SLOT_PASSWORD, SLOT_RECOVERY,
+    SlotInfo, Tier, open_vault_key, seal_vault_key,
 };
 pub use session::SessionKeys;
 pub use vault::{Peek, RecipientSecret, Vault, Verification, read_file};
@@ -122,6 +124,13 @@ pub enum Error {
     /// The local store's state file does not pass its MAC: edited, or not
     /// written by this opener. Never reset silently.
     StoreTampered,
+    /// The caller's slot, device or other input is not acceptable (a limit, a
+    /// duplicate, a malformed field); says which part.
+    Invalid(&'static str),
+    /// No slot has that id.
+    UnknownSlot,
+    /// No device has that id.
+    UnknownDevice,
     /// A session's read found the vault changed since the session was opened:
     /// a secret re-sealed, removed or moved to another tier, or the file
     /// replaced. The session's keys no longer open it.
@@ -191,6 +200,9 @@ impl fmt::Display for Error {
             Error::StoreTampered => f.write_str(
                 "this machine's record of the vault failed its integrity check; refusing to reset it",
             ),
+            Error::Invalid(what) => write!(f, "not accepted ({what})"),
+            Error::UnknownSlot => f.write_str("no such key slot"),
+            Error::UnknownDevice => f.write_str("no such device"),
             Error::SessionStale => f.write_str(
                 "changed since this session was opened; unlock again",
             ),

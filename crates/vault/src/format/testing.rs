@@ -15,7 +15,6 @@
 use std::cell::Cell;
 
 use super::v1::{self, Unlocked};
-use crate::crypto::KdfParams;
 use crate::{Error, RecoveryKey};
 
 thread_local! {
@@ -33,12 +32,6 @@ pub(crate) fn rewrite_recovery_slot() -> impl Drop {
     }
     REWRITES_RECOVERY.with(|c| c.set(true));
     Reset
-}
-
-/// Format 1's own function for building a vault, aimed at number 0.
-pub(crate) fn create_v0(pw: &[u8]) -> Result<(Unlocked, RecoveryKey), Error> {
-    let (u, key) = v1::create(0, pw, KdfParams::TEST, true)?;
-    Ok((u, key.ok_or(Error::Rng)?))
 }
 
 /// `upgrade_v0_to_v1`: re-seal every secret under the new number; copy the
