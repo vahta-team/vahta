@@ -151,6 +151,35 @@ pub fn detach_session() {
     sys::detach_session();
 }
 
+/// The platform cannot cut a child off from the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unsupported;
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this platform cannot run a command without network access")
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+/// Arrange for `cmd` to start with no network at all: on Linux, in a fresh
+/// network namespace holding only a down loopback, with the caller's uid and
+/// gid unchanged, so it still reads and writes what the caller can. Applies to
+/// any program, whatever its name, and to everything it starts. Fails with
+/// `Unsupported` on macOS and Windows. Check [`network_isolation_available`]
+/// first: on Linux the start itself fails when the kernel refuses.
+pub fn isolate_network(cmd: &mut Command) -> Result<(), Unsupported> {
+    sys::isolate_network(cmd)
+}
+
+/// Whether [`isolate_network`] will work here (Linux with unprivileged user
+/// namespaces allowed). Probed once, in a forked child, and remembered.
+pub fn network_isolation_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(sys::network_isolation_available)
+}
+
 /// Start `cmd` so that it keeps running after this process and its terminal
 /// are gone: no standard streams, its own session or process group, no console
 /// window. Returns once it has been started, not when it ends.
