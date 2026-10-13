@@ -24,7 +24,6 @@
 //! definition, re-exported here; a format that changes one of them copies it.
 
 use std::fmt;
-use std::path::{Component, Path};
 
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -495,15 +494,25 @@ fn valid_category(c: &str) -> bool {
     !c.is_empty() && c.len() <= MAX_CATEGORY_LEN && !c.chars().any(char::is_control)
 }
 
+/// The stored form is the same on every platform, so absoluteness is judged
+/// on the text, not by the running OS: a rooted POSIX path, a drive path, or
+/// a UNC path. (`Path::is_absolute` would reject `/opt/x` on Windows.)
+fn is_absolute_text(p: &str) -> bool {
+    let b = p.as_bytes();
+    p.starts_with('/')
+        || p.starts_with("\\\\")
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
+}
+
 fn valid_dir(d: &DirRule) -> bool {
-    let path = Path::new(&d.path);
     valid_text(&d.text)
         && d.path.len() <= MAX_PATH_LEN
         && !d.path.contains('\0')
-        && path.is_absolute()
-        && path
-            .components()
-            .all(|c| !matches!(c, Component::CurDir | Component::ParentDir))
+        && is_absolute_text(&d.path)
+        && d.path.split(['/', '\\']).all(|c| c != "..")
 }
 
 /// A lowercase DNS name (letters, digits, hyphens, dots; no empty label) or an
