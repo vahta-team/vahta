@@ -9,13 +9,15 @@ use crate::error::AuthError;
 use crate::factor::{Factor, Need};
 use crate::request::Request;
 
+type Hook = Box<dyn FnOnce() + Send>;
+
 /// Tells the approvers that lost the race to stop. An approver that waits on
 /// something it can close (a window) registers a function with
 /// [`Cancel::on_cancel`]; one that polls reads [`Cancel::is_cancelled`].
 #[derive(Clone, Default)]
 pub struct Cancel {
     flag: Arc<AtomicBool>,
-    hooks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>,
+    hooks: Arc<Mutex<Vec<Hook>>>,
 }
 
 impl Cancel {
@@ -204,9 +206,7 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            self.answer
-                .clone()
-                .map_err(|e| AuthError::Unavailable(e.into()))
+            self.answer.map_err(|e| AuthError::Unavailable(e.into()))
         }
     }
 
