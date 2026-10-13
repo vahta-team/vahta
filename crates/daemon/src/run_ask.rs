@@ -21,12 +21,12 @@ use vahta_vault::project::Project;
 use vahta_vault::rules::{normalize_program_name, parse_rule, runs_anything};
 use vahta_vault::{ApprovedRule, Peek, RuleSet, manifest};
 
-use vahta_auth::{Action, Request};
 use crate::binding::{self, Verdict};
 use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, error, from_vault, lines_for, unlock_expecting};
 use crate::protocol::ClientReply;
 use crate::surface::sanitize_label;
+use vahta_auth::{Action, Request};
 
 const ALLOW_ONCE: usize = 0;
 const NO: usize = 1;

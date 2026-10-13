@@ -22,11 +22,11 @@ use vahta_ipc::protocol::{ClientReply, GuardChoice, GuardEvent, Panel, RefusalKi
 use vahta_setup::guard::{self, MAX_PAUSE_SECS, Pause};
 use vahta_vault::project::Project;
 
-use vahta_auth::Action;
 use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, error, refused, unlock_as};
 use crate::server::Shared;
 use crate::surface::{Window, sanitize_label};
+use vahta_auth::Action;
 
 /// How long the person has to answer the watchdog's question before the hooks
 /// are put back on their own.

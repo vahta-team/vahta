@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use vahta_vault::project::Project;
 use vahta_vault::{Peek, Tier, Vault, valid_name};
 
-use vahta_auth::Action;
 use crate::anchor::{self, Node};
 use crate::encoded::EncodedSet;
 use crate::journal::Entry;
@@ -25,6 +24,7 @@ use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
 use crate::server::Shared;
 use crate::session::{self, Ended, Role, Session, ask_time, info_of};
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 /// The most a session may be asked to last, short of `forever`: a year.
 pub(crate) const MAX_SECS: u64 = 366 * 24 * 3600;

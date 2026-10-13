@@ -12,9 +12,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use vahta_auth::Action;
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
-use vahta_auth::Action;
 use vahta_vault::{Class, Error, Kind, Peek, SecretValue, Tier, Vault, valid_name};
 use zeroize::Zeroizing;
 

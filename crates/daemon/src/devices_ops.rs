@@ -51,8 +51,8 @@ fn check_secs(secs: u64) -> Flow<()> {
     Ok(())
 }
 
-/// The device the person means: its name, or the start of its id in hex (at
-/// least four characters, and only one device may match).
+/// The device the person means: its name, the start of its name, or the start
+/// of its id in hex (at least four characters); only one device may match.
 fn resolve(devices: &[Device], text: &str) -> Flow<Device> {
     let text = text.trim();
     let by_name: Vec<&Device> = devices
@@ -63,6 +63,13 @@ fn resolve(devices: &[Device], text: &str) -> Flow<Device> {
         return Ok((*d).clone());
     }
     let lower = text.to_ascii_lowercase();
+    let by_prefix: Vec<&Device> = devices
+        .iter()
+        .filter(|d| d.name.to_ascii_lowercase().starts_with(&lower))
+        .collect();
+    if let [d] = by_prefix.as_slice() {
+        return Ok((*d).clone());
+    }
     let by_id: Vec<&Device> = devices
         .iter()
         .filter(|d| lower.len() >= 4 && hex_encode(&d.device_id).starts_with(&lower))
@@ -89,7 +96,10 @@ fn last_used(journal: &Path, id: &[u8; 16]) -> Option<u64> {
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| {
             v["device"] == want.as_str()
-                && matches!(v["event"].as_str(), Some("device_unlock" | "device_approve"))
+                && matches!(
+                    v["event"].as_str(),
+                    Some("device_unlock" | "device_approve")
+                )
                 && v["result"] == "ok"
         })
         .filter_map(|v| v["time"].as_u64())
@@ -129,7 +139,11 @@ pub(crate) fn pair(ctx: &Ctx<'_>, cwd: &str, name: &str, secs: u64) -> Flow<Clie
     check_secs(secs)?;
     let (project, vault_path) = find_vault(cwd)?;
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
-    if peek.devices.iter().any(|d| d.name.eq_ignore_ascii_case(name)) {
+    if peek
+        .devices
+        .iter()
+        .any(|d| d.name.eq_ignore_ascii_case(name))
+    {
         return Err(refused(
             RefusalKind::Exists,
             format!("a device called {name} is already paired"),
@@ -138,7 +152,10 @@ pub(crate) fn pair(ctx: &Ctx<'_>, cwd: &str, name: &str, secs: u64) -> Flow<Clie
     let mut window = ctx.window("Pair a phone")?;
     let mut lines = lines_for(&project, &vault_path);
     lines.push(format!("Name: {name}"));
-    lines.push(format!("Its access lasts {}.", vahta_ipc::duration::human(secs)));
+    lines.push(format!(
+        "Its access lasts {}.",
+        vahta_ipc::duration::human(secs)
+    ));
     lines.push(
         "A phone is a way in, not a backup: keep the recovery key from when the vault was \
          made."
@@ -206,6 +223,16 @@ pub(crate) fn record_pairing(
 
 // --- extend / revoke ----------------------------------------------------------------------------------
 
+/// A device change in progress: the window, the vault's path, the device, the
+/// open vault and the password that opened it.
+struct Change {
+    window: Box<dyn Window>,
+    vault_path: std::path::PathBuf,
+    device: Device,
+    vault: Vault,
+    typed: Option<zeroize::Zeroizing<Vec<u8>>>,
+}
+
 /// Open the window for a device change and unlock with the master password.
 fn password_for(
     ctx: &Ctx<'_>,
@@ -214,14 +241,17 @@ fn password_for(
     title: &str,
     what: &str,
     extra: Vec<String>,
-) -> Flow<(Box<dyn Window>, std::path::PathBuf, Device, Vault, Option<zeroize::Zeroizing<Vec<u8>>>)>
-{
+) -> Flow<Change> {
     let (project, vault_path) = find_vault(cwd)?;
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     let device = resolve(&peek.devices, id)?;
     let mut window = ctx.window(title)?;
     let mut lines = lines_for(&project, &vault_path);
-    lines.push(format!("Device: {} ({})", device.name, &hex_encode(&device.device_id)[..8]));
+    lines.push(format!(
+        "Device: {} ({})",
+        device.name,
+        &hex_encode(&device.device_id)[..8]
+    ));
     lines.extend(extra);
     let panel = ctx.panel(title, lines);
     let action = Action::Devices {
@@ -236,7 +266,13 @@ fn password_for(
         .find(|d| d.device_id == device.device_id)
         .cloned()
         .ok_or_else(|| error("that device is gone; nothing was done"))?;
-    Ok((window, vault_path, device, vault, typed))
+    Ok(Change {
+        window,
+        vault_path,
+        device,
+        vault,
+        typed,
+    })
 }
 
 pub(crate) fn extend(ctx: &Ctx<'_>, cwd: &str, id: &str, secs: u64) -> Flow<ClientReply> {
@@ -245,8 +281,13 @@ pub(crate) fn extend(ctx: &Ctx<'_>, cwd: &str, id: &str, secs: u64) -> Flow<Clie
         "Access will last {} from now.",
         vahta_ipc::duration::human(secs)
     )];
-    let (window, vault_path, device, mut vault, _) =
-        password_for(ctx, cwd, id, "Extend a device's access", "extend", extra)?;
+    let Change {
+        window,
+        vault_path,
+        device,
+        mut vault,
+        ..
+    } = password_for(ctx, cwd, id, "Extend a device's access", "extend", extra)?;
     let until = now() + secs;
     refresh_device(&mut vault, &device.device_id, Some(until)).map_err(|e| error(e.to_string()))?;
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
@@ -268,8 +309,13 @@ pub(crate) fn extend(ctx: &Ctx<'_>, cwd: &str, id: &str, secs: u64) -> Flow<Clie
 
 pub(crate) fn revoke(ctx: &Ctx<'_>, cwd: &str, id: &str) -> Flow<ClientReply> {
     let extra = vec!["The phone stops opening the vault from the next save.".to_string()];
-    let (window, vault_path, device, mut vault, _) =
-        password_for(ctx, cwd, id, "Revoke a device", "revoke", extra)?;
+    let Change {
+        window,
+        vault_path,
+        device,
+        mut vault,
+        ..
+    } = password_for(ctx, cwd, id, "Revoke a device", "revoke", extra)?;
     match vault.remove_slot(&device.device_id) {
         Ok(()) | Err(vahta_vault::Error::UnknownSlot) => {}
         Err(e) => return Err(from_vault(e)),
@@ -303,8 +349,13 @@ pub(crate) fn lost(ctx: &Ctx<'_>, cwd: &str, id: &str) -> Flow<ClientReply> {
          vault will refuse it until their record of it is cleared."
             .to_string(),
     ];
-    let (mut window, vault_path, device, mut vault, typed) =
-        password_for(ctx, cwd, id, "A device is lost", "lost", extra)?;
+    let Change {
+        mut window,
+        vault_path,
+        device,
+        mut vault,
+        typed,
+    } = password_for(ctx, cwd, id, "A device is lost", "lost", extra)?;
     let typed = typed.ok_or_else(|| error("the password was not asked; nothing was done"))?;
     let kek = vault.password_kek(&typed).map_err(from_vault)?;
     drop(typed);
@@ -312,7 +363,11 @@ pub(crate) fn lost(ctx: &Ctx<'_>, cwd: &str, id: &str) -> Flow<ClientReply> {
     // Every other device keeps working: its slot is wrapped for the new key
     // from its public key alone.
     let mut keep = Vec::new();
-    for other in vault.devices().iter().filter(|d| d.device_id != device.device_id) {
+    for other in vault
+        .devices()
+        .iter()
+        .filter(|d| d.device_id != device.device_id)
+    {
         keep.push(kept_device_slot(other).map_err(|e| error(e.to_string()))?);
     }
     let kept = keep.len();
@@ -332,8 +387,7 @@ pub(crate) fn lost(ctx: &Ctx<'_>, cwd: &str, id: &str) -> Flow<ClientReply> {
         vec![format!("Device removed: {}", device.name)],
     );
     panel.warning = Some(
-        "Write this recovery key down and destroy the old one. It is shown only now."
-            .to_string(),
+        "Write this recovery key down and destroy the old one. It is shown only now.".to_string(),
     );
     if !window
         .show_recovery_key(&panel, &Secret::new(new_key.to_paper()))

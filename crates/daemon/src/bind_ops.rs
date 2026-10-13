@@ -20,7 +20,6 @@ use vahta_vault::project::Project;
 use vahta_vault::rules::{self, ParsedRule, ProgramSpec};
 use vahta_vault::{ApprovedRule, Network, Peek, RuleSet, Vault, manifest};
 
-use vahta_auth::Action;
 use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
@@ -30,6 +29,7 @@ use crate::ops::{
 use crate::pathfind;
 use crate::protocol::{ClientReply, RefusalKind};
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 const APPROVE: usize = 0;
 

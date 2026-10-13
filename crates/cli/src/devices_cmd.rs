@@ -188,7 +188,12 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
                 id: (*id).to_string(),
             },
         ),
-        _ => return usage_error(stderr, "expected pair NAME, extend ID, revoke ID or lost ID"),
+        _ => {
+            return usage_error(
+                stderr,
+                "expected pair NAME, extend ID, revoke ID or lost ID",
+            );
+        }
     };
     if !matches!(request, ClientRequest::DevicesList { .. }) {
         // These need the person at a window; say so before it opens.
@@ -209,8 +214,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::to_string_pretty(&json!({"devices": devices}))
-                        .unwrap_or_default()
+                    serde_json::to_string_pretty(&json!({"devices": devices})).unwrap_or_default()
                 );
             } else if devices.is_empty() {
                 let _ = writeln!(stdout, "no devices are paired with this vault");
@@ -240,7 +244,10 @@ pub fn run_recover(
             return EXIT_CLEAN;
         }
         _ => {
-            let _ = write!(stderr, "vahta recover: error: takes no arguments\n\n{RECOVER_USAGE}");
+            let _ = write!(
+                stderr,
+                "vahta recover: error: takes no arguments\n\n{RECOVER_USAGE}"
+            );
             return EXIT_USAGE;
         }
     }

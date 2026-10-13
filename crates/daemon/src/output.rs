@@ -35,7 +35,6 @@ use zeroize::Zeroizing;
 
 use vahta_vault::{Kind, Tier, Vault, valid_name};
 
-use vahta_auth::Action;
 use crate::anchor;
 use crate::encoded::{EncodedSet, Form};
 use crate::journal::Entry;
@@ -46,6 +45,7 @@ use crate::protocol::{ClientReply, OutputSpan, Panel, RefusalKind};
 use crate::scrub::Scrubber;
 use crate::session_ops::nodes_of;
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 /// How long an original is kept for the agent to ask about.
 pub const HOLD_FOR: Duration = Duration::from_secs(10 * 60);

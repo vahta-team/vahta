@@ -39,12 +39,18 @@ fn unavailable(e: SurfaceError) -> AuthError {
 /// A window as an [`Approver`]. With `verify`, it is a Knowledge approver: it
 /// asks for the master password first (three tries) and only then puts the
 /// question. Without, it is Presence.
+/// Checks a typed password against the vault.
+pub(crate) type Verify<'a> = Box<dyn Fn(&[u8]) -> bool + Send + Sync + 'a>;
+
+/// What an unlock hands back: the vault, how it was opened and the password
+/// typed, when one was.
+pub(crate) type Opened = (Vault, UnlockedBy, Option<Zeroizing<Vec<u8>>>);
+
 pub(crate) struct WindowApprover<'a> {
     window: Mutex<&'a mut dyn Window>,
     panel: &'a Panel,
     question: &'a str,
-    #[allow(clippy::type_complexity)]
-    verify: Option<Box<dyn Fn(&[u8]) -> bool + Send + Sync + 'a>>,
+    verify: Option<Verify<'a>>,
 }
 
 impl<'a> WindowApprover<'a> {
@@ -52,7 +58,7 @@ impl<'a> WindowApprover<'a> {
         window: &'a mut dyn Window,
         panel: &'a Panel,
         question: &'a str,
-        verify: Option<Box<dyn Fn(&[u8]) -> bool + Send + Sync + 'a>>,
+        verify: Option<Verify<'a>>,
     ) -> WindowApprover<'a> {
         WindowApprover {
             window: Mutex::new(window),
@@ -164,15 +170,14 @@ pub(crate) fn approve(
         })
         .collect();
     // The window asks the password itself when a presence yes is not enough.
-    let verify: Option<Box<dyn Fn(&[u8]) -> bool + Send + Sync>> =
-        if need.satisfied_by(Factor::Presence) {
-            None
-        } else {
-            let (path, store) = (vault_path.to_path_buf(), shared.store.clone());
-            Some(Box::new(move |pw| {
-                Vault::unlock_password(&path, pw, &store).is_ok()
-            }))
-        };
+    let verify: Option<Verify<'_>> = if need.satisfied_by(Factor::Presence) {
+        None
+    } else {
+        let (path, store) = (vault_path.to_path_buf(), shared.store.clone());
+        Some(Box::new(move |pw| {
+            Vault::unlock_password(&path, pw, &store).is_ok()
+        }))
+    };
     let win = WindowApprover::new(window, panel, question, verify);
     let mut all: Vec<&dyn Approver> = vec![&win];
     all.extend(phones.iter().map(|p| p as &dyn Approver));
@@ -184,7 +189,10 @@ pub(crate) fn approve(
                     .device(&id)
                     .vault(&request.vault_id)
                     .names(&request.action.names())
-                    .result("ok", Some(&format!("{}: option {}", request.action.key(), d.choice))),
+                    .result(
+                        "ok",
+                        Some(&format!("{}: option {}", request.action.key(), d.choice)),
+                    ),
             );
         }
         d.choice
@@ -305,7 +313,7 @@ pub(crate) fn unlock_keeping_password(
     path: &Path,
     panel: &Panel,
     action: Action,
-) -> Flow<(Vault, UnlockedBy, Option<Zeroizing<Vec<u8>>>)> {
+) -> Flow<Opened> {
     let peek = Vault::peek(path).map_err(from_vault)?;
     let need = need_of(&peek, &action);
     let project = path
@@ -390,19 +398,16 @@ pub(crate) fn unlock_with_recovery(
         typed: None,
         failures: Vec::new(),
     };
-    let result = ctx.shared.unlockers.unlock_with(
-        vahta_vault::SLOT_RECOVERY,
-        path,
-        ctx.store(),
-        &mut wctx,
-    );
+    let result =
+        ctx.shared
+            .unlockers
+            .unlock_with(vahta_vault::SLOT_RECOVERY, path, ctx.store(), &mut wctx);
     let surface = wctx.surface.take();
     match result {
         Ok((vault, _)) => Ok(vault),
-        Err(AuthError::Vault(vahta_vault::Error::Unlock)) => {
-            Err(error("that recovery key does not open this vault; nothing was done"))
-        }
+        Err(AuthError::Vault(vahta_vault::Error::Unlock)) => Err(error(
+            "that recovery key does not open this vault; nothing was done",
+        )),
         Err(e) => Err(reply_for(e, surface)),
     }
 }
-

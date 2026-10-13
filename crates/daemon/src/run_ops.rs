@@ -26,7 +26,6 @@ use std::time::Instant;
 use vahta_vault::manifest;
 use vahta_vault::{Error, Peek, SecretValue, Tier, Vault, valid_name};
 
-use vahta_auth::Action;
 use crate::binding::{self, Verdict};
 use crate::journal::Entry;
 use crate::ops::{
@@ -39,6 +38,7 @@ use crate::run_ask;
 use crate::session::{DelegateRefusal, Role, Session, Sessions, ask_time, info_of};
 use crate::session_ops::duration_of;
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 /// Variables never passed on to a command: the ones that load code into it, and
 /// Vahta's own controls.

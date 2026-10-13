@@ -1565,6 +1565,7 @@ dependencies = [
  "rpassword",
  "serde_json",
  "signal-hook",
+ "vahta-auth",
  "vahta-daemon",
  "vahta-harness",
  "vahta-ipc",

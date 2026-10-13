@@ -43,3 +43,12 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+[profile.dev.package.p256]
+opt-level = 3
+
+[profile.dev.package.primeorder]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3

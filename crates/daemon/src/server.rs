@@ -33,10 +33,10 @@ use crate::protocol::{
     read_frame, write_frame,
 };
 use crate::session::{ExtensionAsk, Sessions};
-use vahta_auth::{Action, Request};
 use crate::session_ops;
 use crate::surface::{PromptSurface, SurfaceRegistry, TerminalSurface};
 use crate::{run, run_ops};
+use vahta_auth::{Action, Request};
 use vahta_ipc::duration::human;
 
 #[derive(Debug)]
