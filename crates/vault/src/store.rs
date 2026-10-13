@@ -244,6 +244,43 @@ impl LocalStore {
         Ok(any.then_some(()))
     }
 
+    /// Move this machine's owner state from `old` (the key of the vault before
+    /// a re-key) to `new`: authenticate the existing state with `old`, then
+    /// write one pinned to `new_owner_sign_pk` under `new`'s MAC. The old
+    /// state must pin `old_owner_sign_pk`, and the generation never goes
+    /// down. A machine with no state yet just records the new one.
+    pub fn repin_owner(
+        &self,
+        vault_id: &[u8; 16],
+        old: &StateKey,
+        old_owner_sign_pk: &[u8; 32],
+        new: &StateKey,
+        new_owner_sign_pk: &[u8; 32],
+        generation: u64,
+    ) -> Result<(), Error> {
+        let seen = match self.load_authenticated(vault_id, old)? {
+            Some(s) => {
+                if &s.pinned_owner_sign_pk != old_owner_sign_pk {
+                    return Err(Error::OwnerChanged);
+                }
+                s.max_generation
+            }
+            None => 0,
+        };
+        let max_generation = seen.max(generation);
+        let mac = new
+            .mac(vault_id, new_owner_sign_pk, max_generation)
+            .finalize()
+            .into_bytes();
+        let text = format!(
+            "pinned_owner_sign_pk = {}\nmax_generation = {}\nmac = {}\n",
+            hex_encode(new_owner_sign_pk),
+            max_generation,
+            hex_encode(&mac)
+        );
+        write::write_atomic(&self.state_path(vault_id, new.file), text.as_bytes())
+    }
+
     /// Remember `generation` (never lowering the stored one) and pin the owner
     /// key if none is pinned yet. Callers pin only once something has proved
     /// the key: an unlock, the owner's own save, or a recipient's first open.
