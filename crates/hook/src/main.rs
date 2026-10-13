@@ -330,27 +330,40 @@ fn before_tool(ev: &Event, explicit: bool) -> (Decision, Option<Signal>) {
     }
 }
 
-/// A call nothing refused. Silence (`Allow`), unless it is one `vahta run` that
-/// the secret's own rules let through: then the harness is told so, and need
+/// A call nothing refused. Silence (`Allow`), unless it is one `vahta run` (or
+/// `vahta http`) that the secret's own rules let through: then the harness is told so, and need
 /// not ask the person. Needs a shell call, a harness that can hear it, and a
 /// daemon that answers in time with a yes.
 fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
-    if !explicit || ev.group != Some(vahta_harness::Group::Shell) {
+    // Leaving the sandbox is the person's to approve, not ours.
+    if !explicit || ev.group != Some(vahta_harness::Group::Shell) || ev.sandbox_off {
         return Decision::Allow;
     }
     let (Some(call), Some(cwd)) = (runallow::parse(&ev.text), ev.cwd.as_deref()) else {
         return Decision::Allow;
     };
-    let whose = match call.names.as_slice() {
+    let (names, allowed, what) = match call {
+        runallow::Call::Run(c) => (
+            c.names.clone(),
+            daemon::run_allowed(cwd, c.argv, c.names),
+            "the command is within",
+        ),
+        runallow::Call::Http(c) => (
+            c.names.clone(),
+            daemon::http_allowed(cwd, c.url, c.names),
+            "the request goes to a host within",
+        ),
+    };
+    if !allowed {
+        return Decision::Allow;
+    }
+    let whose = match names.as_slice() {
         [] => "this project's secrets".to_string(),
         [one] => one.clone(),
         many => many.join(", "),
     };
-    if !daemon::run_allowed(cwd, call.argv, call.names) {
-        return Decision::Allow;
-    }
     Decision::AllowExplicit {
-        reason: format!("Vahta: the command is within {whose}'s approved rules"),
+        reason: format!("Vahta: {what} {whose}'s approved rules"),
     }
 }
 

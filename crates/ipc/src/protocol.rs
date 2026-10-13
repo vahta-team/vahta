@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 9;
+pub const PROTOCOL: u32 = 12;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -327,6 +327,32 @@ pub enum ClientRequest {
         /// `--reason`: why, for that window; shown marked as unverified.
         reason: Option<String>,
     },
+    /// `vahta http`: one HTTPS request with secrets put in headers or query
+    /// values, made by the daemon. The reply is `HttpResponse`, after which
+    /// the connection carries [`RunOutput::Stdout`] frames with the body and
+    /// one [`RunOutput::Exit`] (or [`RunOutput::Failed`] if the body could not
+    /// be sent). The client never holds a value.
+    Http {
+        cwd: String,
+        /// Upper-case; `GET`, `POST`...
+        method: String,
+        /// Must be `https://`, with no `{NAME}` in it.
+        url: String,
+        /// The secrets that may be used (`--secret`); each must appear in a
+        /// header or query value.
+        names: Vec<String>,
+        /// `(name, value template)`: `{NAME}` in a value is replaced by the
+        /// secret.
+        headers: Vec<(String, String)>,
+        /// `(key, value template)`, appended to the URL's query, encoded.
+        query: Vec<(String, String)>,
+        /// The body, base64. Never has a secret put in it.
+        body: Option<String>,
+        /// Cap on the response body kept, in bytes.
+        max_response: Option<u64>,
+        timeout_secs: Option<u32>,
+        label: Option<String>,
+    },
     /// Propose command rules for a secret (or, with no name, approve what
     /// `vahta.toml` says for every name). Replies `Done`, `Refused` or
     /// `Cancelled`; nothing changes without a window and the password.
@@ -432,6 +458,15 @@ pub enum ClientRequest {
         argv: Vec<String>,
         names: Vec<String>,
         path: Option<String>,
+    },
+    /// The same question for a `vahta http`: would a request to `url` with
+    /// these secrets pass their approved host lists? Replies `Allowed` only if
+    /// every name is a session-tier secret whose rule set lists a host that
+    /// matches `url`; anything else is `NoOpinion`. No window, no journal.
+    CheckHttp {
+        cwd: String,
+        url: String,
+        names: Vec<String>,
     },
     /// `vahta hooks pause`: take Vahta's hook entries out of these harnesses
     /// (all that have them, when empty) for `secs` (at most 8 hours). A window
@@ -733,6 +768,9 @@ pub enum RefusalKind {
     /// The secret has no approved rules, so no command may use it until some
     /// are proposed (`vahta bind NAME --category ...`) and approved.
     NoRules,
+    /// `vahta http`: the secret is not bound to the host the request goes to
+    /// (no host list, the app's own network, or another host).
+    HostNotAllowed,
 }
 
 /// One name in a refusal and why.
@@ -771,6 +809,17 @@ pub enum ClientReply {
         #[serde(default)]
         alarm_at: Option<u64>,
     },
+    /// An `Http` request got a response; the body follows as `RunOutput`
+    /// frames. Everything here has had the values taken out.
+    HttpResponse {
+        status: u16,
+        /// Lowercase names; credentials-carrying headers are left out.
+        headers: Vec<(String, String)>,
+        /// The body was cut at the size cap.
+        truncated: bool,
+        /// A redirect was not followed, and why.
+        redirect_stopped: Option<String>,
+    },
     /// The request was carried out; `message` is for the person, and never a
     /// value.
     Done {
@@ -801,10 +850,10 @@ pub enum ClientReply {
     OutputReleased {
         text: String,
     },
-    /// The answer to a `CheckRun`: every named secret exists, is session-tier,
+    /// The answer to a `CheckRun` or `CheckHttp`: every named secret exists, is session-tier,
     /// and its approved rules allow this command.
     Allowed {},
-    /// The answer to a `CheckRun` for anything else.
+    /// The answer to a `CheckRun` or `CheckHttp` for anything else.
     NoOpinion {},
     /// The answer to a `ToolCheck` that found a held value: the tool call
     /// must be refused. `form` is how the value was written (`base64`,

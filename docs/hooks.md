@@ -183,13 +183,22 @@ permission system and auto-mode classifier, Codex's approvals, Cursor's
 auto-review). For a command Vahta has already judged this is noise, so the
 hook can answer the harness's question itself. Only in one case.
 
-**What is allowed.** The Bash command is exactly one `vahta run [options] --
-INNER...` (or `vh`), and the daemon says that INNER passes the approved rules
+**What is allowed.** Two shapes, each exactly one Bash command.
+
+*`vahta http`*: `vahta http --secret NAME... [-H ...] [--query ...] [-X ...] [-d
+TEXT|@FILE] [--json] [--timeout ...] [--max-bytes ...] [--label ...] URL`, and
+the daemon says (`CheckHttp`) that the URL's host passes the host list of every
+secret named, by the same function a request uses, and that none is each-use. A
+`{NAME}` placeholder is fine in a header or query value. `-d @FILE` is read by
+the `vahta` process, not the hook: the body goes only to a host the secret is
+approved for, and never carries a placeholder.
+
+*`vahta run`*: `vahta run [options] -- INNER...` (or `vh`), and the daemon says that INNER passes the approved rules
 of every secret named (`ClientRequest::CheckRun`): the secret exists, is
 session-tier, has approved rules, and the program (found on the caller's
 `PATH`, as a run finds it) and its arguments, the directory and the network
 all pass them. The hook then says "allow" out loud. Nothing else is ever
-allowed by the hook: no other command, no `vahta http`, no each-use secret
+allowed by the hook: no other command, no each-use secret
 (that run opens a window whatever the harness thinks), no secret without rules.
 
 **Why never a blanket rule.** `Bash(vahta run *)` also matches `vahta run --
@@ -205,8 +214,16 @@ is every one of these:
 
 - a second command, a pipe, a redirection, a subshell, `$(...)`, backticks, an
   environment assignment or wrapper before `vahta` (`FOO=1 vahta run ...`,
-  `env`, `sudo`), `&`, a glob, a `~`, a `$VAR`, a backslash, a newline: the words
-  the hook sees would not be the words that run;
+  `env`, `sudo`), `&`, a glob, a `~`, a `$VAR`, a backslash, a newline, brace
+  expansion (a `{NAME}` placeholder is not): the words the hook sees would not be
+  the words that run. Inside single quotes everything is literal (`'a; b | $c'`
+  is one plain word), inside double quotes `$`, backtick, backslash and `!` are
+  not;
+- a call that asks to leave the harness's sandbox (`dangerouslyDisableSandbox`
+  in Claude Code, `sandbox_permissions: require_escalated` in Codex, any like
+  `sandbox`, `escalat` or `permission` flag that is switched on, Cursor's
+  `required_permissions` included): that is for the person to approve, so the
+  harness asks;
 - an option `vahta run` does not know, a missing `--`, `-s` or `--secret=NAME`;
 - `vahta` spelled as a path (`/tmp/x/vahta run ...`): only the bare name;
 - an inner command that is itself `vahta` or `vh`;
@@ -239,7 +256,4 @@ person's own.
 
 **What this does not fix.** The inner program the rules allow can still do what
 it can do with the value (a rule that allows `curl` allows exfiltration through
-`curl`; the network axis and the folders are how to narrow it). And a harness
-can be told to run a command without its sandbox
-(`dangerouslyDisableSandbox`): the hook's allow covers that too, since the
-command is the same one the rules checked.
+`curl`; the network axis and the folders are how to narrow it).

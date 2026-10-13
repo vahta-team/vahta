@@ -40,6 +40,9 @@ impl Sandbox {
         for d in ["project", "home", "run", "data", "config"] {
             fs::create_dir_all(root.join(d)).unwrap();
         }
+        // The certificate authority of the tests' HTTPS server, which a test
+        // daemon (and only a test daemon) also trusts for `vahta http`.
+        fs::write(root.join("ca.pem"), vahta_net::test_server::CA_PEM).unwrap();
         Sandbox { root }
     }
 
@@ -73,6 +76,7 @@ impl Sandbox {
             // tried a real terminal there is no display to open one on.
             .env("VAHTA_TEST_SURFACE", self.root.join("script.jsonl"))
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
+            .env("VAHTA_TEST_HTTP_ROOT", self.root.join("ca.pem"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY");
         cmd
@@ -4615,4 +4619,411 @@ fn check_run_says_allowed_only_for_a_command_the_rules_let_through_and_opens_not
     // A question is not an event: no window, no journal line.
     assert_eq!(s.asks(), asks);
     assert_eq!(s.journal(), journal);
+}
+
+// --- `vahta http` ----------------------------------------------------------------------------
+
+mod http {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use vahta_net::test_server::{Reply, TestServer};
+    use vahta_vault::{HostRule, Network, RuleSet};
+
+    /// The made-up value of ZETA in these tests, assembled at run time.
+    fn zeta() -> String {
+        ["fake-", "http-", "key-1"].concat()
+    }
+
+    fn sandbox() -> Sandbox {
+        let s = Sandbox::new();
+        s.with_vault(&[
+            ("ZETA", &zeta(), "session"),
+            ("BETA", "fake-two", "session"),
+            ("ALPHA", "fake-three", "each-use"),
+        ]);
+        s
+    }
+
+    fn host(h: &str, subdomains: bool, port: Option<u16>) -> HostRule {
+        HostRule {
+            text: h.to_string(),
+            host: h.to_string(),
+            subdomains,
+            port,
+        }
+    }
+
+    /// Approve a network rule for `name` straight into the vault.
+    fn approve(s: &Sandbox, name: &str, network: Network) {
+        let mut vault = s.open_vault();
+        vault
+            .set_bindings(
+                name,
+                Some(RuleSet {
+                    name: name.to_string(),
+                    network,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+            .unwrap();
+    }
+
+    fn pw(s: &Sandbox) {
+        s.script(&[r#"{"secret":"correct horse"}"#]);
+    }
+
+    #[test]
+    fn an_allowed_host_gets_the_value_in_the_header_and_the_query_and_the_window_says_where() {
+        let s = sandbox();
+        let server_saw = Arc::new(AtomicBool::new(false));
+        let flag = server_saw.clone();
+        let want = zeta();
+        let server = TestServer::start(move |seen| {
+            let header = seen.header("x-api-key") == Some(want.as_str());
+            let query = seen.target.starts_with("/v1?x=1&k=") && seen.target.ends_with(&want);
+            flag.store(header && query, Ordering::SeqCst);
+            Reply::ok(b"ok")
+        });
+        approve(
+            &s,
+            "ZETA",
+            Network::Hosts(vec![host("localhost", false, Some(server.port))]),
+        );
+        pw(&s);
+        let url = format!("https://localhost:{}/v1?x=1", server.port);
+        let out = s.vahta(&[
+            "http",
+            "--secret",
+            "ZETA",
+            "-H",
+            "X-Api-Key: {ZETA}",
+            "--query",
+            "k={ZETA}",
+            &url,
+        ]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), "ok");
+        assert!(
+            server_saw.load(Ordering::SeqCst),
+            "header and query carried the value"
+        );
+        let ask = s
+            .window_log()
+            .into_iter()
+            .rev()
+            .find(|e| e["ask"] == "password")
+            .unwrap();
+        let lines = ask["panel"]["lines"].to_string();
+        assert!(
+            lines.contains("Secrets: ZETA")
+                && lines.contains(&format!("Request: GET localhost:{}", server.port)),
+            "{lines}"
+        );
+        assert!(s.sessions().is_empty());
+        let journal = s.journal();
+        assert!(journal.contains("\"event\":\"http_request\""));
+        assert!(journal.contains("\"status\":200") && journal.contains("\"bytes\":2"));
+        assert!(journal.contains(&format!("\"host\":\"localhost:{}\"", server.port)));
+        assert!(!journal.contains("fake-") && !journal.contains("/v1") && !journal.contains("x=1"));
+    }
+
+    #[test]
+    fn a_server_that_echoes_the_value_shows_the_label_in_body_and_headers() {
+        let s = sandbox();
+        let server = TestServer::start(|seen| {
+            let v = seen.header("authorization").unwrap_or("").to_string();
+            Reply {
+                status: 200,
+                headers: vec![
+                    ("X-Echo".into(), v.clone()),
+                    ("Set-Cookie".into(), "sid=abc".into()),
+                ],
+                body: format!("you sent {v}").into_bytes(),
+            }
+        });
+        approve(
+            &s,
+            "ZETA",
+            Network::Hosts(vec![host("localhost", false, None)]),
+        );
+        // A session: no window for the second request.
+        pw(&s);
+        assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+        let asked = s.asks();
+        let url = format!("https://localhost:{}/", server.port);
+        let out = s.vahta(&[
+            "http",
+            "--secret",
+            "ZETA",
+            "-H",
+            "Authorization: Bearer {ZETA}",
+            &url,
+        ]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), "you sent Bearer ***REDACTED(ZETA)***");
+        let out = s.vahta(&[
+            "http",
+            "--json",
+            "--secret",
+            "ZETA",
+            "-H",
+            "Authorization: Bearer {ZETA}",
+            &url,
+        ]);
+        let all = text(&out.stdout);
+        assert!(
+            !all.contains(&zeta()) && !all.to_lowercase().contains("set-cookie"),
+            "{all}"
+        );
+        let doc: Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(doc["status"], 200);
+        assert!(doc["headers"].to_string().contains("***REDACTED(ZETA)***"));
+        assert_eq!(s.asks(), asked, "the session answered both");
+    }
+
+    #[test]
+    fn a_host_that_is_not_approved_is_refused_before_any_window_or_connection() {
+        let s = sandbox();
+        let server = TestServer::start(|_| Reply::ok(b"x"));
+        approve(
+            &s,
+            "ZETA",
+            Network::Hosts(vec![host("localhost", false, Some(server.port))]),
+        );
+        let asked = s.asks();
+        for url in [
+            format!("https://127.0.0.1:{}/", server.port),
+            format!("https://other.localhost:{}/", server.port),
+            "https://localhost:1/".to_string(),
+        ] {
+            let out = s.vahta(&["http", "--secret", "ZETA", "-H", "K: {ZETA}", &url]);
+            assert_eq!(out.status.code(), Some(3), "{url}: {}", text(&out.stderr));
+            assert!(
+                text(&out.stderr).contains("not approved for"),
+                "{}",
+                text(&out.stderr)
+            );
+        }
+        assert_eq!(s.asks(), asked);
+        assert!(server.seen().is_empty());
+        assert!(s.journal().contains("http_refused"));
+    }
+
+    #[test]
+    fn plain_http_and_a_value_in_the_url_or_body_or_nowhere_are_refused() {
+        let s = sandbox();
+        approve(
+            &s,
+            "ZETA",
+            Network::Hosts(vec![host("localhost", true, None)]),
+        );
+        let asked = s.asks();
+        let cases: Vec<(Vec<&str>, &str)> = vec![
+            (vec!["-H", "K: {ZETA}", "http://localhost/"], "https"),
+            (
+                vec!["-H", "K: {ZETA}", "https://localhost/{ZETA}"],
+                "cannot go in the URL",
+            ),
+            (
+                vec![
+                    "-H",
+                    "K: {ZETA}",
+                    "-d",
+                    "{\"k\":\"{ZETA}\"}",
+                    "https://localhost/",
+                ],
+                "not put in the body",
+            ),
+            (
+                vec!["-H", "K: none", "https://localhost/"],
+                "no header or query value",
+            ),
+            (
+                vec!["-H", "{ZETA}: x", "https://localhost/"],
+                "not in a name",
+            ),
+        ];
+        for (args, why) in cases {
+            let mut all = vec!["http", "--secret", "ZETA"];
+            all.extend(args);
+            let out = s.vahta(&all);
+            assert_eq!(out.status.code(), Some(1), "{all:?}: {}", text(&out.stderr));
+            assert!(
+                text(&out.stderr).contains(why),
+                "{all:?}: {}",
+                text(&out.stderr)
+            );
+        }
+        assert_eq!(s.asks(), asked);
+    }
+
+    #[test]
+    fn app_none_and_no_rules_are_refused_with_the_way_to_bind() {
+        let s = sandbox();
+        approve(&s, "ZETA", Network::App);
+        approve(&s, "BETA", Network::None);
+        let asked = s.asks();
+        for name in ["ZETA", "BETA", "ALPHA"] {
+            let out = s.vahta(&[
+                "http",
+                "--secret",
+                name,
+                "-H",
+                &format!("K: {{{name}}}"),
+                "https://localhost:1/",
+            ]);
+            assert_eq!(out.status.code(), Some(3), "{name}");
+            let err = text(&out.stderr);
+            assert!(
+                err.contains(&format!("vahta bind {name} --net hosts:HOST")),
+                "{err}"
+            );
+        }
+        assert_eq!(s.asks(), asked);
+    }
+
+    #[test]
+    fn an_each_use_secret_asks_even_inside_a_session() {
+        let s = sandbox();
+        let server = TestServer::start(|_| Reply::ok(b"ok"));
+        for n in ["ZETA", "ALPHA"] {
+            approve(&s, n, Network::Hosts(vec![host("localhost", false, None)]));
+        }
+        pw(&s);
+        assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+        let url = format!("https://localhost:{}/", server.port);
+        let before = s.asks();
+        let out = s.vahta(&["http", "--secret", "ZETA", "-H", "K: {ZETA}", &url]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(s.asks(), before, "the session covers ZETA");
+        pw(&s);
+        let out = s.vahta(&["http", "--secret", "ALPHA", "-H", "K: {ALPHA}", &url]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(s.asks(), before + 1, "ALPHA is each-use");
+        // A closed window sends nothing.
+        s.script(&[r#"{"cancel":true}"#]);
+        let seen = server.seen().len();
+        let out = s.vahta(&["http", "--secret", "ALPHA", "-H", "K: {ALPHA}", &url]);
+        assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+        assert_eq!(server.seen().len(), seen);
+    }
+
+    #[test]
+    fn a_redirect_to_another_host_is_stopped_and_reported() {
+        let s = sandbox();
+        let server = TestServer::start(|seen| match seen.target.as_str() {
+            "/a" => Reply {
+                status: 302,
+                headers: vec![("Location".into(), "/b".into())],
+                body: Vec::new(),
+            },
+            "/b" => Reply::ok(b"landed"),
+            _ => Reply {
+                status: 302,
+                headers: vec![("Location".into(), "https://other.localhost/steal".into())],
+                body: Vec::new(),
+            },
+        });
+        approve(
+            &s,
+            "ZETA",
+            Network::Hosts(vec![host("localhost", false, None)]),
+        );
+        pw(&s);
+        assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+        let base = format!("https://localhost:{}", server.port);
+        let out = s.vahta(&[
+            "http",
+            "--secret",
+            "ZETA",
+            "-H",
+            "K: {ZETA}",
+            &format!("{base}/a"),
+        ]);
+        assert_eq!(text(&out.stdout), "landed");
+        let out = s.vahta(&[
+            "http",
+            "--secret",
+            "ZETA",
+            "-H",
+            "K: {ZETA}",
+            &format!("{base}/away"),
+        ]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            text(&out.stderr).contains("other.localhost"),
+            "{}",
+            text(&out.stderr)
+        );
+        assert!(server.seen().iter().all(|r| r.target != "/steal"));
+    }
+
+    fn check_http(s: &Sandbox, names: &[&str], url: &str) -> ClientReply {
+        let mut conn = connector(s, false).connect_running().unwrap().unwrap();
+        conn.request(&ClientRequest::CheckHttp {
+            cwd: s.project().to_string_lossy().into_owned(),
+            url: url.to_string(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn check_http_says_allowed_only_for_a_host_every_secret_is_approved_for_and_opens_nothing() {
+        let s = sandbox();
+        approve(
+            &s,
+            "ZETA",
+            Network::Hosts(vec![host("api.example.com", true, None)]),
+        );
+        approve(
+            &s,
+            "BETA",
+            Network::Hosts(vec![host("other.example", false, None)]),
+        );
+        assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+        let (asks, journal) = (s.asks(), s.journal());
+        let allowed = ClientReply::Allowed {};
+        let none = ClientReply::NoOpinion {};
+        assert_eq!(
+            check_http(&s, &["ZETA"], "https://api.example.com/x"),
+            allowed
+        );
+        assert_eq!(
+            check_http(&s, &["ZETA"], "https://eu.api.example.com/x"),
+            allowed
+        );
+        assert_eq!(
+            check_http(&s, &["ZETA"], "https://evil.example.net/x"),
+            none
+        );
+        assert_eq!(
+            check_http(&s, &["ZETA"], "https://notapi.example.com/x"),
+            none
+        );
+        // Every secret must pass; one other host is enough to say no.
+        assert_eq!(
+            check_http(&s, &["ZETA", "BETA"], "https://api.example.com/x"),
+            none
+        );
+        // No http, a secret in the URL, a bad URL, an unknown or each-use name.
+        assert_eq!(check_http(&s, &["ZETA"], "http://api.example.com/x"), none);
+        assert_eq!(
+            check_http(&s, &["ZETA"], "https://api.example.com/{ZETA}"),
+            none
+        );
+        assert_eq!(check_http(&s, &["ZETA"], "not a url"), none);
+        assert_eq!(check_http(&s, &["NOPE"], "https://api.example.com/x"), none);
+        assert_eq!(
+            check_http(&s, &["ALPHA"], "https://api.example.com/x"),
+            none
+        );
+        assert_eq!(check_http(&s, &[], "https://api.example.com/x"), none);
+        assert_eq!(s.asks(), asks);
+        assert_eq!(s.journal(), journal);
+    }
 }

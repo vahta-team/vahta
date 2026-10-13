@@ -222,6 +222,17 @@ pub fn run_allowed(cwd: &str, argv: Vec<String>, names: Vec<String>) -> bool {
     matches!(ask(request), Some(ClientReply::Allowed {}))
 }
 
+/// The same for a `vahta http`: would a request to `url` with `names` pass
+/// their approved host lists? Every other outcome is `false`.
+pub fn http_allowed(cwd: &str, url: String, names: Vec<String>) -> bool {
+    let request = ClientRequest::CheckHttp {
+        cwd: cwd.to_string(),
+        url,
+        names,
+    };
+    matches!(ask(request), Some(ClientReply::Allowed {}))
+}
+
 pub fn scan(scan: Scan) -> Option<Answer> {
     let request = ClientRequest::OutputScan {
         cwd: scan.cwd,

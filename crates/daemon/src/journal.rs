@@ -41,6 +41,16 @@ pub struct Entry {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uses: Option<u64>,
+    /// `vahta http`: the method, the host (and port when not 443), the status
+    /// and the size of the response body. Never the path or the query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 fn now() -> u64 {
@@ -84,6 +94,20 @@ impl Entry {
     pub fn result(mut self, result: &str, reason: Option<&str>) -> Entry {
         self.result = Some(result.to_string());
         self.reason = reason.map(str::to_string);
+        self
+    }
+
+    pub fn http(
+        mut self,
+        method: &str,
+        host: &str,
+        status: Option<u16>,
+        bytes: Option<u64>,
+    ) -> Entry {
+        self.method = Some(method.to_string());
+        self.host = Some(host.to_string());
+        self.status = status;
+        self.bytes = bytes;
         self
     }
 

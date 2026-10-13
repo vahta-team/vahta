@@ -23,6 +23,11 @@ pub struct Event {
     /// before_tool, write tools: the `(old, new)` text pairs of an edit
     /// (Claude's Edit and MultiEdit), in order. Empty for a whole-file write.
     pub edits: Vec<(String, String)>,
+    /// before_tool: the call asks to run outside the harness's sandbox
+    /// (Claude's `dangerouslyDisableSandbox`, Codex's `sandbox_permissions`
+    /// of `require_escalated`, and any like flag). The hook gives such a call
+    /// no explicit allow: leaving the sandbox is the person's to approve.
+    pub sandbox_off: bool,
     /// after_tool: the tool's output as the harness sent it, structure and
     /// all, so a rewrite can keep its shape (Claude wants the shape back).
     /// `None` when there is no output or it nests past [`OUTPUT_DEPTH`].
@@ -99,6 +104,32 @@ fn joined_strings(v: &Value) -> String {
     let mut all = Vec::new();
     collect_strings(v, &mut all);
     all.join("\n")
+}
+
+/// Whether a tool's input asks to leave the sandbox: a member whose name has
+/// `sandbox`, `escalat` or `permission` in it and whose value is on (true, a
+/// non-empty list, or a string other than the defaults). Deliberately wide: a
+/// false positive only means the harness asks the person.
+fn asks_to_leave_sandbox(input: &Value) -> bool {
+    let Value::Object(entries) = input else {
+        return false;
+    };
+    entries.iter().any(|(k, v)| {
+        let k = k.to_ascii_lowercase();
+        if !(k.contains("sandbox") || k.contains("escalat") || k.contains("permission")) {
+            return false;
+        }
+        match v {
+            Value::Bool(b) => *b,
+            Value::Str(s) => !matches!(
+                s.to_ascii_lowercase().as_str(),
+                "" | "false" | "default" | "use_default" | "sandboxed"
+            ),
+            Value::Array(a) => !a.is_empty(),
+            Value::Null => false,
+            _ => true,
+        }
+    })
 }
 
 /// The member `key` of an object.
@@ -240,6 +271,7 @@ impl Manifest {
                 // the hook uses it to protect Vahta's own files.
                 ev.path = text_field(payload, &spec.file_path);
                 let input = field(payload, &spec.tool_input);
+                ev.sandbox_off = input.is_some_and(asks_to_leave_sandbox);
                 if group.group == Group::Write {
                     ev.edits = input.map(edit_pairs).unwrap_or_default();
                 }
@@ -329,5 +361,37 @@ mod session_id_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+
+    fn off(json: &str) -> bool {
+        asks_to_leave_sandbox(
+            &vahta_json::parse_limited(
+                json,
+                vahta_json::Limits {
+                    depth: 50,
+                    nodes: 1000,
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn leaving_the_sandbox_is_seen_however_a_harness_spells_it() {
+        assert!(off(r#"{"command":"x","dangerouslyDisableSandbox":true}"#));
+        assert!(off(
+            r#"{"cmd":"x","sandbox_permissions":"require_escalated"}"#
+        ));
+        assert!(off(r#"{"command":"x","with_escalated_permissions":true}"#));
+        assert!(off(r#"{"command":"x","required_permissions":["all"]}"#));
+        assert!(!off(r#"{"command":"x","dangerouslyDisableSandbox":false}"#));
+        assert!(!off(r#"{"cmd":"x","sandbox_permissions":"use_default"}"#));
+        assert!(!off(r#"{"command":"x","required_permissions":[]}"#));
+        assert!(!off(r#"{"command":"x","description":"a sandbox test"}"#));
     }
 }

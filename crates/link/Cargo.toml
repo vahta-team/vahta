@@ -1,0 +1,31 @@
+[package]
+name = "vahta-link"
+version = "0.0.0"
+description = "How the desktop reaches a paired phone: transports, the Noise channel, pairing and the message set"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+qrcode = { version = "0.14", default-features = false }
+rand_core = { version = "0.9", features = ["os_rng"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
+zeroize = "1"
+mdns-sd = "0.21"
+
+# Linux: BlueZ over the local system bus (a socket in /run, not a network
+# client). Same zbus the daemon already uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+
+[dev-dependencies]
+serde_json = "1"

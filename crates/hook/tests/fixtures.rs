@@ -7,9 +7,10 @@
 //! unless `daemon` is given), in order.
 //!
 //! `daemon` scripts a daemon for the fixture: `{"check_run": "allowed" |
-//! "no_opinion"}` is its answer to a `CheckRun`; it answers `Ok` to every
+//! "no_opinion", "check_http": ...}` is its answer to a `CheckRun` and a
+//! `CheckHttp`; it answers `Ok` to every
 //! other request, and a daemon of another version when `"version"` is given.
-//! `check_run`, when present, is the list of `{cwd, argv, names}` the hook
+//! `check_run`, when present, is the list of `{cwd, argv, names}` (`{cwd, url, names}` for http) the hook
 //! must have asked it, in order.
 //! Secret-shaped values are never written in the files: `{{SECRET_ANTHROPIC}}`
 //! is replaced here, from pieces. `files` maps a relative path to its content;
@@ -110,6 +111,7 @@ impl FakeDaemon {
             vahta_os::ipc::Address::for_runtime_dir(runtime).map_err(|e| e.to_string())?;
         let listener = vahta_os::ipc::Listener::bind(&address).map_err(|e| e.to_string())?;
         let allowed = script["check_run"].as_str() == Some("allowed");
+        let http_allowed = script["check_http"].as_str() == Some("allowed");
         let version = script["version"]
             .as_str()
             .unwrap_or(vahta_ipc::VERSION)
@@ -145,6 +147,18 @@ impl FakeDaemon {
                                     ));
                                 }
                                 if allowed {
+                                    ClientReply::Allowed {}
+                                } else {
+                                    ClientReply::NoOpinion {}
+                                }
+                            }
+                            ClientRequest::CheckHttp { cwd, url, names } => {
+                                if let Ok(mut l) = log.lock() {
+                                    l.push(serde_json::json!(
+                                        {"cwd": cwd, "url": url, "names": names}
+                                    ));
+                                }
+                                if http_allowed {
                                     ClientReply::Allowed {}
                                 } else {
                                     ClientReply::NoOpinion {}
