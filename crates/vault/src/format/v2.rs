@@ -494,25 +494,26 @@ fn valid_category(c: &str) -> bool {
     !c.is_empty() && c.len() <= MAX_CATEGORY_LEN && !c.chars().any(char::is_control)
 }
 
-/// The stored form is the same on every platform, so absoluteness is judged
-/// on the text, not by the running OS: a rooted POSIX path, a drive path, or
-/// a UNC path. (`Path::is_absolute` would reject `/opt/x` on Windows.)
-fn is_absolute_text(p: &str) -> bool {
+/// Whether `p` is absolute in either convention: `/…`, `X:\…` or `X:/…`, or a
+/// UNC path `\\server\share…`. Judged by the text alone, so a file decodes the
+/// same on every OS.
+fn portable_absolute(p: &str) -> bool {
     let b = p.as_bytes();
-    p.starts_with('/')
-        || p.starts_with("\\\\")
-        || (b.len() >= 3
-            && b[0].is_ascii_alphabetic()
-            && b[1] == b':'
-            && matches!(b[2], b'/' | b'\\'))
+    if b.first() == Some(&b'/') {
+        return true;
+    }
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\') {
+        return true;
+    }
+    p.starts_with("\\\\") && p.len() > 2
 }
 
 fn valid_dir(d: &DirRule) -> bool {
     valid_text(&d.text)
         && d.path.len() <= MAX_PATH_LEN
         && !d.path.contains('\0')
-        && is_absolute_text(&d.path)
-        && d.path.split(['/', '\\']).all(|c| c != "..")
+        && portable_absolute(&d.path)
+        && !d.path.split(['/', '\\']).any(|c| c == "." || c == "..")
 }
 
 /// A lowercase DNS name (letters, digits, hyphens, dots; no empty label) or an
