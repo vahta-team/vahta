@@ -136,18 +136,23 @@ fn another_owners_key_in_the_same_vault_is_owner_changed() {
     ));
 }
 
+fn set_password_m_kib(m: &mut Model, m_kib: u32) {
+    let slot = m
+        .slots
+        .iter_mut()
+        .find(|s| s.kind == current::SLOT_PASSWORD)
+        .unwrap();
+    let mut p = current::PasswordParams::decode(&slot.params).unwrap();
+    p.m_kib = m_kib;
+    slot.params = p.encode();
+}
+
 #[test]
 fn a_kdf_below_the_floor_in_the_file_is_refused_before_it_runs() {
     let t = t();
     let (v, _) = built(&t);
     let mut m = model(&v);
-    if let Some(current::Slot::Password { m_kib, .. }) = m
-        .slots
-        .iter_mut()
-        .find(|s| matches!(s, current::Slot::Password { .. }))
-    {
-        *m_kib = 4; // under the (test) floor of 8
-    }
+    set_password_m_kib(&mut m, 4); // under the (test) floor of 8
     let key = owner_key(&v);
     let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
     std::fs::write(&t.path, bytes).unwrap();
@@ -157,13 +162,7 @@ fn a_kdf_below_the_floor_in_the_file_is_refused_before_it_runs() {
     ));
 
     // And a cost over the ceiling is not even a vault.
-    if let Some(current::Slot::Password { m_kib, .. }) = m
-        .slots
-        .iter_mut()
-        .find(|s| matches!(s, current::Slot::Password { .. }))
-    {
-        *m_kib = u32::MAX;
-    }
+    set_password_m_kib(&mut m, u32::MAX);
     let bytes = encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap();
     assert!(matches!(Vault::peek_bytes(&bytes), Err(Error::Corrupt(_))));
 }
@@ -196,9 +195,7 @@ fn the_aead_catches_what_a_resigned_file_hides_from_the_signature() {
 
     // A changed slot ciphertext: the vault will not unlock at all.
     let mut m = model(&v);
-    if let current::Slot::Password { ct, .. } = &mut m.slots[0] {
-        ct[0] ^= 1;
-    }
+    m.slots[0].ct[0] ^= 1;
     std::fs::write(&t.path, resign(&m)).unwrap();
     let store = LocalStore::new(t._dir.path().join("fresh2"));
     assert!(matches!(
@@ -466,7 +463,7 @@ fn a_forged_certificate_is_refused() {
 fn sealed_of(path: &Path, name: &str) -> current::Sealed {
     let bytes = std::fs::read(path).unwrap();
     let loaded = format::decode(&bytes).unwrap();
-    let m = loaded.model();
+    let m = &loaded.current().unwrap().model;
     let i = m.index.iter().position(|e| e.name == name).unwrap();
     m.secrets[i].clone()
 }
@@ -516,9 +513,7 @@ fn an_editors_edits_leave_other_secrets_byte_identical() {
 fn slots_of(path: &Path) -> Vec<current::Slot> {
     format::decode(&std::fs::read(path).unwrap())
         .unwrap()
-        .model()
-        .slots
-        .clone()
+        .slots()
 }
 
 #[test]
@@ -532,7 +527,7 @@ fn slots_are_copied_verbatim_across_an_upgrade_and_need_no_key() {
     assert!(v.upgrade_pending() && !v.blocked_on_recovery_key());
     v.save(&t.path, &t.store).unwrap();
 
-    // Format 1 now, the same two slots byte for byte, and the old recovery
+    // Format 2 now, the same two slots byte for byte, and the old recovery
     // slot still opens the vault.
     assert_eq!(Vault::peek(&t.path).unwrap().format, CURRENT);
     assert_eq!(slots_of(&t.path), before);
@@ -597,8 +592,8 @@ fn unlocking_with_the_recovery_key_is_never_blocked() {
 
 // --- Bindings and class ---------------------------------------------------------
 
-fn sample_binding(name: &str) -> Binding {
-    Binding {
+fn sample_binding(name: &str) -> RuleSet {
+    RuleSet {
         name: name.to_string(),
         allow: vec![
             crate::rules::parse_rule("tool push", true)
@@ -610,6 +605,7 @@ fn sample_binding(name: &str) -> Binding {
                 .unwrap()
                 .to_deny(),
         ],
+        ..Default::default()
     }
 }
 
@@ -650,10 +646,11 @@ fn bindings_and_class_round_trip_and_peek_shows_them() {
 fn an_empty_or_malformed_binding_is_not_stored() {
     let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
     v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
-    let empty = Binding {
+    let empty = RuleSet {
         name: "A".into(),
         allow: vec![],
         deny: vec![],
+        ..Default::default()
     };
     v.set_bindings("A", Some(empty)).unwrap();
     assert!(v.bindings().is_empty());
@@ -709,4 +706,375 @@ fn a_runner_cannot_edit_bindings() {
     let (_, [_, _, (_, run, run_k)]) = built(&t);
     let mut v = Vault::open_as_recipient(&t.path, &run, &run_k, &t.store).unwrap();
     assert!(v.set_bindings("A", Some(sample_binding("A"))).is_err());
+}
+
+// --- Format 1 to 2, generic slots, devices, limits ----------------------------------
+
+const KEK: [u8; 32] = [5; 32];
+
+fn future_slot(label: &str) -> NewSlot {
+    NewSlot {
+        kind: 0x7001,
+        slot_id: None,
+        label: label.into(),
+        expires_at: None,
+        params: vec![1, 2, 3],
+    }
+}
+
+fn add_future(v: &mut Vault, label: &str) -> Result<[u8; 16], Error> {
+    v.add_slot(future_slot(label), |vk, aad| {
+        current::seal_vault_key(&KEK, aad, vk)
+    })
+}
+
+fn device(n: u8) -> Device {
+    Device {
+        device_id: [n; 16],
+        name: format!("phone {n}"),
+        sign_pub: [&[2u8][..], &[n; 32]].concat(),
+        ecdh_pub: [&[4u8][..], &[n; 64]].concat(),
+        paired_at: 100,
+        expires_at: None,
+        transports: vec!["lan".into()],
+    }
+}
+
+#[test]
+fn a_real_v1_vault_upgrades_with_everything_intact_and_a_bak() {
+    let t = t();
+    let key = Vault::write_v1_for_test(&t.path, PW, &V0_ITEMS).unwrap();
+    let original = std::fs::read(&t.path).unwrap();
+    assert_eq!(format::read_version(&original).unwrap(), 1);
+
+    let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert!(v.upgrade_pending() && !v.blocked_on_recovery_key());
+    v.set_class("ALPHA", Some(Class::Payment)).unwrap();
+    v.set_tier("BETA", Tier::EachUse).unwrap();
+    v.set_bindings("BETA", Some(sample_binding("BETA")))
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+
+    assert_eq!(
+        std::fs::read(t.path.with_extension("vht.v1.bak")).unwrap(),
+        original
+    );
+    let v = Vault::unlock_recovery(&t.path, &key, &t.store).unwrap();
+    assert_eq!(v.get("ALPHA").unwrap().expose(), b"fake-one");
+    assert_eq!(v.get("BETA").unwrap().expose(), b"fake two lines\nx");
+    let e = |n: &str| v.entries().iter().find(|e| e.name == n).unwrap().clone();
+    assert_eq!(e("ALPHA").class, Some(Class::Payment));
+    assert_eq!(e("BETA").tier, Tier::EachUse);
+    assert_eq!(v.bindings().len(), 1);
+}
+
+#[test]
+fn an_unknown_slot_kind_survives_read_and_write_and_never_blocks_unlock() {
+    let t = t();
+    let (mut v, key) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    let id = add_future(&mut v, "someone's phone").unwrap();
+    v.save(&t.path, &t.store).unwrap();
+
+    // Pretend this build does not know the kind: edit the stored params and
+    // re-sign. Reading, unlocking and saving must not care what is in it.
+    let mut m = model(&v);
+    let slot = m.slots.iter_mut().find(|s| s.slot_id == id).unwrap();
+    slot.kind = 0xBEEF;
+    slot.params = vec![0xFF; 200];
+    slot.ct = vec![0xAB; 500];
+    let kept = slot.clone();
+    let mut m2 = m.clone();
+    m2.header.generation = 1;
+    let bytes = encode_as(current::FORMAT, &m2, Actor::Owner, &owner_key(&v)).unwrap();
+    std::fs::write(&t.path, bytes).unwrap();
+
+    let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(v.get("A").unwrap().expose(), b"fake-one");
+    assert_eq!(v.slots().len(), 3);
+    v.set("B", b"fake-two", Kind::Env, Tier::Session).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(
+        slots_of(&t.path).into_iter().find(|s| s.slot_id == id),
+        Some(kept)
+    );
+    // Both known ways in still work, and the unknown slot cannot be a way in.
+    Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    Vault::unlock_recovery(&t.path, &key, &t.store).unwrap();
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &id, &KEK, &t.store),
+        Err(Error::Unlock)
+    ));
+}
+
+#[test]
+fn a_slot_added_through_the_api_unlocks_expires_and_can_be_removed() {
+    let t = t();
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    let id = add_future(&mut v, "phone").unwrap();
+    let mut short = future_slot("short");
+    short.expires_at = Some(now() - 1);
+    let expired = v
+        .add_slot(short, |vk, aad| current::seal_vault_key(&KEK, aad, vk))
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+
+    let listed = v.slots();
+    assert_eq!(listed.len(), 4);
+    assert_eq!(
+        listed.iter().find(|s| s.slot_id == id).unwrap().label,
+        "phone"
+    );
+
+    let by_slot = Vault::unlock_with_slot(&t.path, &id, &KEK, &t.store).unwrap();
+    assert_eq!(by_slot.get("A").unwrap().expose(), b"fake-one");
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &id, &[6; 32], &t.store),
+        Err(Error::Unlock)
+    ));
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &expired, &KEK, &t.store),
+        Err(Error::Unlock)
+    ));
+
+    let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    v.remove_slot(&id).unwrap();
+    assert!(matches!(v.remove_slot(&id), Err(Error::UnknownSlot)));
+    let pw_slot = v
+        .slots()
+        .into_iter()
+        .find(|s| s.kind == current::SLOT_PASSWORD)
+        .unwrap();
+    assert!(matches!(
+        v.remove_slot(&pw_slot.slot_id),
+        Err(Error::Invalid(_))
+    ));
+    v.save(&t.path, &t.store).unwrap();
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &id, &KEK, &t.store),
+        Err(Error::Unlock)
+    ));
+}
+
+#[test]
+fn slot_limits_and_one_of_each_known_kind() {
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    // Password and recovery exist; the cap leaves room for 14 more.
+    for n in 0..current::MAX_SLOTS - 2 {
+        add_future(&mut v, &format!("s{n}")).unwrap();
+    }
+    assert!(matches!(
+        add_future(&mut v, "one too many"),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(v.slots().len(), current::MAX_SLOTS);
+
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    for kind in [current::SLOT_PASSWORD, current::SLOT_RECOVERY] {
+        let mut s = future_slot("again");
+        s.kind = kind;
+        let r = v.add_slot(s, |vk, aad| current::seal_vault_key(&KEK, aad, vk));
+        assert!(matches!(r, Err(Error::Invalid(_))));
+    }
+    let mut long = future_slot(&"x".repeat(current::MAX_LABEL + 1));
+    assert!(
+        v.add_slot(long.clone(), |vk, aad| current::seal_vault_key(
+            &KEK, aad, vk
+        ))
+        .is_err()
+    );
+    long.label = "ok".into();
+    long.params = vec![0; 257];
+    assert!(
+        v.add_slot(long, |vk, aad| current::seal_vault_key(&KEK, aad, vk))
+            .is_err()
+    );
+
+    // A file with two password slots, or a repeated id, is not a vault.
+    let (v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    let key = owner_key(&v);
+    let mut m = model(&v);
+    let dup = m.slots[0].clone();
+    m.slots.push(dup);
+    assert!(
+        Vault::peek_bytes(&encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap()).is_err()
+    );
+    let mut m = model(&v);
+    m.slots[1].slot_id = m.slots[0].slot_id;
+    assert!(
+        Vault::peek_bytes(&encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap()).is_err()
+    );
+}
+
+#[test]
+fn a_slot_is_bound_to_its_id_and_kind() {
+    let t = t();
+    let (v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    let key = owner_key(&v);
+    let mut m = model(&v);
+    m.slots[0].slot_id = [9; 16];
+    std::fs::write(
+        &t.path,
+        encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&t.path, PW, &t.store),
+        Err(Error::Unlock)
+    ));
+}
+
+#[test]
+fn devices_are_owner_only_checked_and_signed() {
+    let t = t();
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.add_device(device(1)).unwrap();
+    v.add_device(device(2)).unwrap();
+    assert!(v.add_device(device(1)).is_err());
+    let mut same_name = device(3);
+    same_name.name = "phone 1".into();
+    assert!(v.add_device(same_name).is_err());
+    let mut bad_key = device(3);
+    bad_key.sign_pub = vec![1, 2, 3];
+    assert!(v.add_device(bad_key).is_err());
+    let mut bad_transport = device(3);
+    bad_transport.transports = vec!["a b".into()];
+    assert!(v.add_device(bad_transport).is_err());
+
+    let mut renamed = device(2);
+    renamed.name = "tablet".into();
+    renamed.expires_at = Some(5);
+    v.update_device(renamed.clone()).unwrap();
+    assert!(matches!(
+        v.update_device(device(9)),
+        Err(Error::UnknownDevice)
+    ));
+    v.remove_device(&[1; 16]).unwrap();
+    assert!(matches!(
+        v.remove_device(&[1; 16]),
+        Err(Error::UnknownDevice)
+    ));
+    v.save(&t.path, &t.store).unwrap();
+
+    let again = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(again.devices(), [renamed]);
+
+    // The record is under the signature.
+    let mut m = model(&v);
+    m.devices[0].name = "evil".into();
+    let forged = encode_as(current::FORMAT, &m, Actor::Owner, &owner_key(&v)).unwrap();
+    assert!(Vault::peek_bytes(&forged).is_ok()); // re-signed by the owner: valid
+    let stranger = SigningKey::from_bytes(&[3; 32]);
+    let by_stranger = encode_as(current::FORMAT, &m, Actor::Owner, &stranger).unwrap();
+    assert!(matches!(
+        Vault::peek_bytes(&by_stranger),
+        Err(Error::BadSignature)
+    ));
+
+    // Recipients cannot touch devices.
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    let keys = RecipientSecret::generate().unwrap();
+    let id = v
+        .add_recipient(
+            "ed",
+            RecipientKind::Person,
+            Role::Admin,
+            &keys.public().unwrap(),
+        )
+        .unwrap();
+    v.save(&t.path.with_file_name("other.vht"), &t.store)
+        .unwrap();
+    let mut ed =
+        Vault::open_as_recipient(&t.path.with_file_name("other.vht"), &id, &keys, &t.store)
+            .unwrap();
+    assert!(matches!(ed.add_device(device(1)), Err(Error::NotOwner)));
+    assert!(matches!(
+        ed.add_slot(future_slot("x"), |vk, aad| current::seal_vault_key(
+            &KEK, aad, vk
+        )),
+        Err(Error::NotOwner)
+    ));
+}
+
+#[test]
+fn device_count_is_limited() {
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    for n in 0..current::MAX_DEVICES as u8 {
+        v.add_device(device(n)).unwrap();
+    }
+    assert!(v.add_device(device(200)).is_err());
+}
+
+#[test]
+fn rule_set_shapes_are_checked_on_write_and_read() {
+    use crate::format::current::{DirRule, HostRule, Network};
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    let host = |h: &str, port| HostRule {
+        text: "t".into(),
+        host: h.into(),
+        subdomains: false,
+        port,
+    };
+    let dir = |p: &str| DirRule {
+        text: "t".into(),
+        path: p.into(),
+        write: false,
+    };
+    let with = |f: &dyn Fn(&mut RuleSet)| {
+        let mut r = sample_binding("A");
+        f(&mut r);
+        r
+    };
+    let ok = [
+        with(&|r| r.dirs = vec![dir("/home/me/work")]),
+        with(&|r| r.network = Network::Hosts(vec![host("api.example.com", Some(443))])),
+        with(&|r| r.category = Some("cloud".into())),
+        // Only dirs and a network, no commands: still a rule set.
+        RuleSet {
+            name: "A".into(),
+            dirs: vec![dir("/tmp/x")],
+            network: Network::App,
+            ..Default::default()
+        },
+    ];
+    for r in ok {
+        v.set_bindings("A", Some(r)).unwrap();
+        assert_eq!(v.bindings().len(), 1);
+    }
+    let bad = [
+        with(&|r| r.dirs = vec![dir("relative/path")]),
+        with(&|r| r.dirs = vec![dir("/a/../b")]),
+        with(&|r| r.dirs = vec![dir("")]),
+        with(&|r| {
+            r.dirs = (0..=current::MAX_DIRS)
+                .map(|n| dir(&format!("/d{n}")))
+                .collect()
+        }),
+        with(&|r| r.network = Network::Hosts(vec![])),
+        with(&|r| r.network = Network::Hosts(vec![host("Example.com", None)])),
+        with(&|r| r.network = Network::Hosts(vec![host("a..b", None)])),
+        with(&|r| r.network = Network::Hosts(vec![host("ok.com", Some(0))])),
+        with(&|r| {
+            r.network = Network::Hosts(
+                (0..=current::MAX_HOSTS)
+                    .map(|n| host(&format!("h{n}.com"), None))
+                    .collect(),
+            )
+        }),
+        with(&|r| r.category = Some(String::new())),
+        with(&|r| r.downgraded_from = Some("x\ny".into())),
+    ];
+    for r in bad {
+        assert!(v.set_bindings("A", Some(r)).is_err());
+    }
+
+    // A reader holds a file to the same checks.
+    let key = owner_key(&v);
+    let mut m = model(&v);
+    m.bindings[0].dirs = vec![dir("relative")];
+    assert!(
+        Vault::peek_bytes(&encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap()).is_err()
+    );
 }

@@ -17,13 +17,14 @@
 //!   [`Error::UpgradeNeedsRecoveryKey`]; the caller keeps the vault open in its
 //!   old format, readable, and refuses to save until the key is provided.
 //!
-//! With one released format the chain is empty and `to_current` is the
-//! identity. It exists, dispatched and tested, so format 2 is one function
-//! added here and not a rewrite. Under test, a pseudo-format 0 with the same
-//! layout as format 1 is the first link, so the chain, the backup, the
-//! generation continuity and the recovery-key rule are exercised for real.
+//! Format 1 to 2 changes no slot's crypto: the generic slot keeps the old
+//! bytes and the old slot version, so it needs neither key. It re-seals every
+//! secret (their AADs bind the format number) and turns bindings into rule sets.
+//! Under test, a pseudo-format 0 with the same layout as format 1 is a link
+//! before that, so the chain, the backup, the generation continuity and the
+//! recovery-key rule are exercised for real.
 
-use super::v1;
+use super::{v1, v2};
 use crate::{Error, RecoveryKey};
 
 /// An unlocked vault of any supported format.
@@ -35,9 +36,8 @@ pub enum AnyUnlocked {
 }
 
 impl AnyUnlocked {
-    /// A read-only view for as long as the vault is not upgraded. Every format
-    /// so far shares format 1's in-memory types; a format with its own would
-    /// add an arm that converts what a reader needs.
+    /// The format 1 structure underneath, for as long as the vault is not
+    /// upgraded.
     pub fn as_v1(&self) -> &v1::Unlocked {
         match self {
             AnyUnlocked::V1(u) => u,
@@ -47,15 +47,45 @@ impl AnyUnlocked {
     }
 }
 
+/// Format 1 to 2: slots keep their bytes, bindings become rule sets (with
+/// `Network::App`, no directories, no category), and every secret is re-sealed
+/// under the new format number, for the owner and for each holder.
+pub fn upgrade_v1_to_v2(old: &v1::Unlocked) -> Result<v2::Unlocked, Error> {
+    let vault_id = old.model.header.vault_id;
+    let keys = v1::owner_keys(&old.vk);
+    let mut model = v2::Model::from_v1(&old.model);
+    for sealed in &mut model.secrets {
+        let value = v1::open_value(old.fmt, &vault_id, &keys.enc_sk, sealed)?;
+        let holders: Vec<&v2::Recipient> = sealed
+            .wraps
+            .iter()
+            .filter_map(|w| model.recipients.iter().find(|r| r.id == w.recipient_id))
+            .collect();
+        *sealed = v2::seal_secret(
+            v2::FORMAT,
+            &vault_id,
+            sealed.secret_id,
+            &model.owner.enc_pk,
+            value.expose(),
+            &holders,
+        )?;
+    }
+    Ok(v2::Unlocked {
+        fmt: v2::FORMAT,
+        vk: old.vk.clone(),
+        model,
+    })
+}
+
 /// Run the chain from whatever `unlocked` is to the current format.
 #[cfg_attr(not(test), allow(unused_variables))]
 pub fn to_current(
     unlocked: &AnyUnlocked,
     typed: Option<&[u8]>,
     recovery: Option<&RecoveryKey>,
-) -> Result<v1::Unlocked, Error> {
+) -> Result<v2::Unlocked, Error> {
     match unlocked {
-        AnyUnlocked::V1(u) => Ok(u.clone()),
+        AnyUnlocked::V1(u) => upgrade_v1_to_v2(u),
         #[cfg(test)]
         AnyUnlocked::V0(u) => to_current(
             &AnyUnlocked::V1(super::testing::upgrade_v0_to_v1(u, typed, recovery)?),

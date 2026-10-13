@@ -59,6 +59,30 @@ remembers each vault's owner key and highest generation, so a swapped or rolled-
 file is refused. The approved binding rules live inside the signed vault; `vahta.toml`
 is only a proposal.
 
+Format 2 (current) differs from format 1 in three places, all inside the signed body:
+
+- **Key slots are generic.** A slot is a kind number, an id, a label, creation and
+  optional expiry times, kind-specific `params` and `ct` (the vault key wrapped under
+  the kind's key-encryption key). Password (kind 0, Argon2id salt and cost in `params`)
+  and recovery (kind 1) are kinds; at most one of each, at most 16 slots in all. A kind
+  a build does not know is kept byte for byte on every write and skipped when
+  unlocking, so a slot from a newer Vahta never makes the file unreadable. A slot's AAD
+  binds the vault, the kind and the slot id.
+- **Rule sets** replace bindings: besides `allow`/`deny` command rules a rule set holds
+  an optional category (and the one it was downgraded from), directories (canonical
+  absolute path, read-only or read-write, and the text the person saw) and a network
+  (`None`, a list of host rules, or `App`: not narrowed by Vahta). Directories and
+  network are stored and signed; enforcement comes with the sandbox.
+- **Paired devices** (id, name, P-256 signing and ECDH public keys, pairing and expiry
+  times, transports) are listed in the body. A device's key slot is an ordinary slot.
+
+A format 1 file is read as it is and upgraded by an owner unlock: bindings become rule
+sets with network `App` and no directories, slots keep their bytes (no key needed),
+every secret is re-sealed for the new format number. Nothing is written by opening. The
+first save writes the upgraded file and, before that, the original byte for byte to
+`<vault>.v1.bak` (mode 0600, never overwritten). The generation continues, so the
+rollback check is unaffected.
+
 ## Sessions and anchors
 
 A session is a set of unwrapped secret keys held by the daemon for an **anchor**

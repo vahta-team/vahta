@@ -263,7 +263,7 @@ pub fn write_text(path: &Path, text: &str) -> Result<(), Error> {
 /// Whether the rules `vahta.toml` proposes for `entry` are the ones the vault
 /// has approved: the same texts, in the same order, in both lists. No rules on
 /// either side is a match.
-pub fn rules_in_sync(entry: Option<&SecretEntry>, approved: Option<&crate::Binding>) -> bool {
+pub fn rules_in_sync(entry: Option<&SecretEntry>, approved: Option<&crate::RuleSet>) -> bool {
     let texts = |rules: &[ParsedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
     let approved_texts =
         |rules: &[crate::ApprovedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();

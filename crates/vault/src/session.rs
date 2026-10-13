@@ -125,10 +125,10 @@ impl SessionKeys {
         let loaded = format::decode(bytes)?;
         // A file in an older format has not been upgraded by an unlock of this
         // build; its keys are not these.
-        if loaded.format() != CURRENT {
+        let Some(d) = loaded.current() else {
             return Err(Error::SessionStale);
-        }
-        let m = loaded.model();
+        };
+        let m = &d.model;
         if m.header.vault_id != self.vault_id {
             return Err(Error::SessionStale);
         }

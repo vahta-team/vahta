@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use vahta_vault::rules::{LAUNCHERS, in_group, normalize_program_name};
-use vahta_vault::{ApprovedRule, Binding, Program};
+use vahta_vault::{ApprovedRule, Program, RuleSet};
 
 /// What the rules say about one command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +73,7 @@ fn names_of(resolved: Option<&Path>, argv: &[String]) -> Vec<String> {
 
 /// Check `argv` (whose program resolved to `resolved`, `None` when it could not
 /// be found) against one secret's approved rules.
-pub(crate) fn check(binding: &Binding, resolved: Option<&Path>, argv: &[String]) -> Verdict {
+pub(crate) fn check(binding: &RuleSet, resolved: Option<&Path>, argv: &[String]) -> Verdict {
     if argv.is_empty() {
         return Verdict::NotAllowed {
             why: "there is no command".to_string(),
@@ -115,7 +115,7 @@ pub(crate) fn check(binding: &Binding, resolved: Option<&Path>, argv: &[String])
 }
 
 /// The rules as the person reads them: `allow: a, b; deny: c`.
-pub(crate) fn rules_text(binding: &Binding) -> String {
+pub(crate) fn rules_text(binding: &RuleSet) -> String {
     let list = |rules: &[ApprovedRule]| {
         rules
             .iter()
@@ -176,11 +176,12 @@ mod tests {
         parse_rule(rule, false).unwrap().to_deny()
     }
 
-    fn binding(allow: Vec<ApprovedRule>, deny: Vec<ApprovedRule>) -> Binding {
-        Binding {
+    fn binding(allow: Vec<ApprovedRule>, deny: Vec<ApprovedRule>) -> RuleSet {
+        RuleSet {
             name: "K".into(),
             allow,
             deny,
+            ..RuleSet::default()
         }
     }
 

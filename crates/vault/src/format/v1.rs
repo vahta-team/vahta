@@ -47,7 +47,7 @@ pub const FORMAT: u16 = 1;
 const INFO_OWNER_SIGN: &[u8] = b"vahta/v1/owner-sign";
 const INFO_OWNER_ENC: &[u8] = b"vahta/v1/owner-enc";
 const INFO_DEK_HPKE: &[u8] = b"vahta/v1/dek";
-const INFO_RECOVERY: &[u8] = b"vahta/v1/recovery-kek";
+pub(super) const INFO_RECOVERY: &[u8] = b"vahta/v1/recovery-kek";
 const DOMAIN_MEMBER: &[u8] = b"vahta/v1/member";
 const DOMAIN_SLOT: &[u8] = b"vahta/slot";
 
@@ -58,9 +58,9 @@ pub const SLOT_VERSION: u16 = 1;
 const SLOT_PASSWORD: u8 = 0;
 const SLOT_RECOVERY: u8 = 1;
 
-const MAX_ENTRIES: usize = 100_000;
+pub(super) const MAX_ENTRIES: usize = 100_000;
 const MAX_RECIPIENTS: usize = 4096;
-const WRAPPED_KEY_LEN: usize = KEY_LEN + TAG_LEN;
+pub(super) const WRAPPED_KEY_LEN: usize = KEY_LEN + TAG_LEN;
 
 /// An Ed25519 signature. `serde` has no impl for 64-byte arrays, so this
 /// writes it as a 64-element tuple, which postcard stores as 64 raw bytes.
@@ -318,7 +318,7 @@ pub struct Binding {
 
 const MAX_RULES: usize = 64;
 const MAX_RULE_ARGS: usize = 32;
-const MAX_RULE_TEXT: usize = 1024;
+pub(super) const MAX_RULE_TEXT: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerWrap {
@@ -438,15 +438,18 @@ pub fn valid_file_name(name: &str) -> bool {
         && !name.contains(['/', '\\', '\0'])
 }
 
-fn valid_recipient_name(name: &str) -> bool {
+pub(super) fn valid_recipient_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
 }
 
-fn only<T>(items: &[T], f: impl Fn(&T) -> bool) -> bool {
+pub(super) fn only<T>(items: &[T], f: impl Fn(&T) -> bool) -> bool {
     items.iter().filter(|i| f(i)).count() <= 1
 }
 
-fn exact<'a, T: Deserialize<'a>>(bytes: &'a [u8], what: &'static str) -> Result<T, Error> {
+pub(super) fn exact<'a, T: Deserialize<'a>>(
+    bytes: &'a [u8],
+    what: &'static str,
+) -> Result<T, Error> {
     match postcard::take_from_bytes::<T>(bytes) {
         Ok((value, [])) => Ok(value),
         _ => Err(Error::Corrupt(what)),
@@ -472,7 +475,7 @@ pub(crate) fn decode_as(frame: &Frame<'_>, fmt: u16) -> Result<Decoded, Error> {
         return Err(Error::Corrupt("index"));
     }
     check_recipients(&body.header.vault_id, &body.owner, &body.recipients)?;
-    check_index(&body, &body.recipients)?;
+    check_index(&body.index, &body.secrets, &body.recipients)?;
     check_bindings(&body)?;
 
     let signer_pk = match sig_section.signer {
@@ -553,7 +556,11 @@ fn check_slots(slots: &[Slot]) -> Result<(), Error> {
 /// have issued it: the owner may certify anyone; an Admin the owner added may
 /// certify Editors and Runners. Delegation is one level deep, so an admin added
 /// by an admin certifies nobody and an admin cannot add an admin.
-fn check_recipients(vault_id: &[u8; 16], owner: &Owner, list: &[Recipient]) -> Result<(), Error> {
+pub(super) fn check_recipients(
+    vault_id: &[u8; 16],
+    owner: &Owner,
+    list: &[Recipient],
+) -> Result<(), Error> {
     if list.len() > MAX_RECIPIENTS {
         return Err(Error::Corrupt("recipients"));
     }
@@ -588,8 +595,12 @@ fn check_recipients(vault_id: &[u8; 16], owner: &Owner, list: &[Recipient]) -> R
     Ok(())
 }
 
-fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
-    for (i, e) in body.index.iter().enumerate() {
+pub(super) fn check_index(
+    index: &[Entry],
+    secrets: &[Sealed],
+    recipients: &[Recipient],
+) -> Result<(), Error> {
+    for (i, e) in index.iter().enumerate() {
         if !valid_name(&e.name) {
             return Err(Error::Corrupt("name"));
         }
@@ -598,7 +609,7 @@ fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
         {
             return Err(Error::Corrupt("file name"));
         }
-        if body.index[..i]
+        if index[..i]
             .iter()
             .any(|o| o.name == e.name || o.secret_id == e.secret_id)
         {
@@ -606,7 +617,7 @@ fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
         }
         // The secrets list is in index order, so an entry's secret is found by
         // position. Writers keep this; a file that breaks it is refused.
-        let s = &body.secrets[i];
+        let s = &secrets[i];
         if s.secret_id != e.secret_id {
             return Err(Error::Corrupt("index and secrets disagree"));
         }
@@ -633,7 +644,7 @@ fn check_index(body: &Body, recipients: &[Recipient]) -> Result<(), Error> {
     Ok(())
 }
 
-fn check_rules(rules: &[ApprovedRule], allow: bool) -> Result<(), Error> {
+pub(super) fn check_rules(rules: &[ApprovedRule], allow: bool) -> Result<(), Error> {
     if rules.len() > MAX_RULES {
         return Err(Error::Corrupt("bindings"));
     }

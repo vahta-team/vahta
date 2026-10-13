@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use vahta_json::Value;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Error, Kind, Tier, Vault, format};
+use vahta_vault::{Error, Kind, Network, SLOT_PASSWORD, SLOT_RECOVERY, Tier, Vault, format};
 
 struct Expected {
     phrase: String,
@@ -147,7 +147,7 @@ fn every_released_format_upgrades_to_current() {
         let after = Vault::peek(&path).unwrap();
         assert_eq!(after.format, format::CURRENT, "{name}");
         assert_eq!(after.generation, generation + 1, "{name}");
-        let backup = path.with_file_name(format!("vault.vht.v{n}-backup"));
+        let backup = path.with_file_name(format!("vault.vht.v{n}.bak"));
         if n < format::CURRENT {
             assert_eq!(std::fs::read(&backup).unwrap(), original, "{name}");
         } else {
@@ -207,4 +207,88 @@ fn format_zero_does_not_exist_outside_tests_and_unknown_numbers_are_not_vaults()
     junk.extend_from_slice(&0u16.to_le_bytes());
     junk.extend_from_slice(&[0; 40]);
     assert!(matches!(Vault::peek_bytes(&junk), Err(Error::NotAVault)));
+}
+
+/// What a format 1 binding becomes, and the old file kept beside the new one.
+#[test]
+fn a_v1_fixture_becomes_rule_sets_and_keeps_its_slots() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v1.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(v.upgrade_pending());
+    let b = &v.bindings()[0];
+    assert_eq!(b.network, Network::App);
+    assert!(b.dirs.is_empty() && b.category.is_none() && b.downgraded_from.is_none());
+    assert!(v.devices().is_empty());
+    let slots = v.slots();
+    assert_eq!(
+        slots.iter().map(|s| s.kind).collect::<Vec<_>>(),
+        [SLOT_PASSWORD, SLOT_RECOVERY]
+    );
+    // Opening wrote nothing, not even the copy.
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(!path.with_file_name("vault.vht.v1.bak").exists());
+
+    v.save(&path, &store).unwrap();
+    let bak = path.with_file_name("vault.vht.v1.bak");
+    assert_eq!(std::fs::read(&bak).unwrap(), original);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&bak).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    // The slots came through with the same ids, and the password still opens.
+    let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert_eq!(again.slots(), slots);
+    assert_eq!(again.bindings()[0].network, Network::App);
+}
+
+/// A machine that has seen the upgraded file refuses the old one put back.
+#[test]
+fn rollback_to_the_pre_upgrade_file_is_detected() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v1.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    v.save(&path, &store).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&path, b"correct horse", &store),
+        Err(Error::RolledBack { found: 1, seen: 2 })
+    ));
+}
+
+/// The v2 fixture carries a device, a rule set with directories and hosts,
+/// and a slot of a kind no build defines.
+#[test]
+fn the_v2_fixture_carries_what_format_2_adds() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    std::fs::copy(dir().join("v2.vht"), &path).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(!v.upgrade_pending());
+    let b = &v.bindings()[0];
+    assert_eq!(b.category.as_deref(), Some("package-manager"));
+    assert_eq!(b.dirs[0].path, "/opt/fixture/work");
+    assert!(matches!(&b.network, Network::Hosts(h) if h[0].port == Some(443)));
+    assert_eq!(v.devices()[0].name, "fixture phone");
+    let unknown: Vec<_> = v.slots().into_iter().filter(|s| s.kind == 0x7001).collect();
+    assert_eq!(unknown.len(), 1);
+
+    // Saving again keeps the unknown slot and the password still unlocks.
+    v.save(&path, &store).unwrap();
+    let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert_eq!(again.slots(), v.slots());
 }

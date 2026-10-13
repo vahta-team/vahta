@@ -2285,10 +2285,12 @@ impl Sandbox {
         vault
             .set_bindings(
                 name,
-                Some(vahta_vault::Binding {
+                Some(vahta_vault::RuleSet {
                     name: name.to_string(),
                     allow,
                     deny,
+                    network: vahta_vault::Network::App,
+                    ..Default::default()
                 }),
             )
             .unwrap();
