@@ -1,0 +1,34 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "make"
+    },
+    "tool_response": {
+      "stdout": "",
+      "stderr": "error: {{SECRET_ANTHROPIC}}\n",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolOutput": {
+        "stdout": "",
+        "stderr": "error: ***REDACTED(Anthropic-style key)***\n",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      },
+      "additionalContext": "vahta: 1 secret value was redacted from this tool's output before you saw it (Anthropic-style key); each is shown as ***REDACTED(...)***. The original was not kept, so it cannot be shown to you. Do not try to recover it: to use a secret, run the command that needs it with `vahta run`."
+    },
+    "systemMessage": "vahta redacted 1 secret value (Anthropic-style key) from a tool's output before the model saw it."
+  },
+  "exit": 0
+}

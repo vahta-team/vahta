@@ -6,6 +6,7 @@
   bench.py volume --backend B -n N        detector volume (B: seed | matrix | ollama:MODEL | haiku | sonnet)
   bench.py redteam --model M              one red-team episode (M: an ollama model | scripted | scripted-attacker | claude-code)
   bench.py cc-selftest                    the Claude Code mode against a mock API: proxy checks and an end-to-end run
+  bench.py cc-redact                      real Claude Code + real hooks: is a canary redacted in each tool's result? (mock, no token)
   bench.py mkregress RUN_DIR              make the regression set from a volume run
   bench.py report RUN_DIR                 print a volume run's report again
 """
@@ -116,6 +117,12 @@ def cmd_cc_selftest(a):
     sys.exit(cctest.main())
 
 
+def cmd_cc_redact(a):
+    import cctest
+
+    sys.exit(cctest.main_redact())
+
+
 def cmd_redteam(a):
     run = new_run("redteam")
     scenario = "attacker" if a.mode == "attacker" else a.scenario
@@ -154,6 +161,7 @@ def main():
     p.add_argument("--add", action="store_true", help="append to the existing set")
     p.set_defaults(f=cmd_mkregress)
     sub.add_parser("cc-selftest", help="Claude Code mode: proxy + e2e against a mock, no credential").set_defaults(f=cmd_cc_selftest)
+    sub.add_parser("cc-redact", help="Claude Code: what the model is shown from each tool, against a mock, no credential").set_defaults(f=cmd_cc_redact)
     p = sub.add_parser("redteam")
     p.add_argument("--model", default=redteam.DEFAULT_MODEL,
                    help="an ollama model, `scripted`, `scripted-attacker`, or `claude-code`")

@@ -311,7 +311,7 @@ def start_proxy(net, name, run_dir, cap, env_name, test_upstream=None, egress_ne
 
 
 def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False, cap=60, cc_model="haiku",
-                   test_upstream=None, mock_script=None, probe=None, allow=()):
+                   test_upstream=None, mock_script=None, probe=None, allow=(), agent_cmd=None):
     """One episode with the real Claude Code CLI behind the auth proxy.
 
       internal network (no route out)       egress network (bridge)
@@ -321,6 +321,8 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
 
     `test_upstream` (tests only): a mock container named `mock` replaces api.anthropic.com
     and the proxy gets no egress. `probe(agent_name)` is called in a thread once the agent runs.
+    `agent_cmd` (tests only) replaces the ccagent.py command line run in the agent container;
+    the mock then also records the tool results it is sent (mock/results.jsonl).
     """
     rid = os.path.basename(run_dir)
     net, egr, sink_n, px_n, agent_n, mock_n = (f"vb-{k}-{rid}" for k in ("net", "egr", "sink", "px", "agent", "mock"))
@@ -343,15 +345,17 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
         if test_upstream:
             docker("run", "-d", "--name", mock_n, "--network", net, "--network-alias", "mock",
                    "-e", "MOCK_SCRIPT=" + json.dumps(mock_script or []), "-e", "MOCK_LOG=/out/mock.jsonl",
+                   *(["-e", "MOCK_RESULTS=/out/results.jsonl"] if agent_cmd else []),
                    *mounts((os.path.join(run_dir, "mock"), "/out")), IMAGE, "python3", "/bench/mock_anthropic.py")
             start_proxy(net, px_n, run_dir, cap, env_name, test_upstream="http://mock:9000", allow=allow)
         else:
             docker("network", "create", egr)
             start_proxy(net, px_n, run_dir, cap, env_name, egress_net=egr, allow=allow)
-        cmd = (f"python3 /bench/ccagent.py --scenario {scenario} --max-turns {max_turns} --alarm {alarm} "
+        cmd = agent_cmd or (f"python3 /bench/ccagent.py --scenario {scenario} --max-turns {max_turns} --alarm {alarm} "
                f"--bind {int(bind)} --auth {kind} --cc-model {shlex.quote(cc_model)} --timeout {timeout - 60} --out /out")
         agent = subprocess.Popen(
             ["docker", "run", "--rm", "-i", "--init", "--name", agent_n, "--network", net,
+             *(["-e", "CC_REDACT_CAPTURE=1"] if os.environ.get("CC_REDACT_CAPTURE") and agent_cmd else []),
              "-e", f"ANTHROPIC_BASE_URL=http://authproxy:{PROXY_PORT}",  # a base URL, and no credential at all
              "--memory", "2g", "--cpus", "2", "--pids-limit", "512",
              *mounts((os.path.join(run_dir, "agent"), "/out")), IMAGE, *in_container(cmd)],

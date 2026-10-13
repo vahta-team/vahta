@@ -1,0 +1,37 @@
+{
+  "event": "after_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Grep",
+    "tool_input": {
+      "pattern": "key",
+      "output_mode": "content"
+    },
+    "tool_response": {
+      "mode": "content",
+      "numFiles": 0,
+      "filenames": [],
+      "content": "notes.txt:2:key {{SECRET_ANTHROPIC}}",
+      "numLines": 1,
+      "totalLines": 1
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PostToolUse",
+      "updatedToolOutput": {
+        "mode": "content",
+        "numFiles": 0,
+        "filenames": [],
+        "content": "notes.txt:2:key ***REDACTED(Anthropic-style key)***",
+        "numLines": 1,
+        "totalLines": 1
+      },
+      "additionalContext": "vahta: 1 secret value was redacted from this tool's output before you saw it (Anthropic-style key); each is shown as ***REDACTED(...)***. The original was not kept, so it cannot be shown to you. Do not try to recover it: to use a secret, run the command that needs it with `vahta run`."
+    },
+    "systemMessage": "vahta redacted 1 secret value (Anthropic-style key) from a tool's output before the model saw it."
+  },
+  "exit": 0
+}

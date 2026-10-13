@@ -7,6 +7,9 @@ Environment:
                 [{"name": "Bash", "input": {"command": "ls"}}, ...]
                 Then it answers with a final text. Default: none (just text).
   MOCK_LOG      where to append request records (default /out/mock.jsonl)
+  MOCK_RESULTS  if set: where to append the tool_result blocks each request carries
+                (the newest user message only), as {"id", "is_error", "text"} lines.
+                This is what the model would have been shown.
 
 It answers POST /v1/messages (streaming or not) and /v1/messages/count_tokens;
 every other path gets 404 (and is recorded, which shows what a client asks for).
@@ -19,6 +22,7 @@ import time
 
 LOG = os.environ.get("MOCK_LOG", "/out/mock.jsonl")
 SCRIPT = json.loads(os.environ.get("MOCK_SCRIPT") or "[]")
+RESULTS = os.environ.get("MOCK_RESULTS")
 KEEP = ("cookie", "x-forwarded-for", "authorization", "x-api-key", "anthropic-beta", "anthropic-version", "user-agent", "content-type", "host")
 
 
@@ -28,6 +32,25 @@ def _sse(event, data):
 
 def _blocks(history):
     return [b for m in history for b in (m["content"] if isinstance(m.get("content"), list) else [])]
+
+
+def _text(content):
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") if isinstance(b, dict) and b.get("type") == "text" else json.dumps(b)
+                         for b in content)
+    return str(content or "")
+
+
+def record_results(body):
+    """Append the tool results of the newest user message (each arrives once as new)."""
+    msgs = body.get("messages", [])
+    if not RESULTS or not msgs or msgs[-1].get("role") != "user" or not isinstance(msgs[-1].get("content"), list):
+        return
+    with open(RESULTS, "a") as f:
+        for b in msgs[-1]["content"]:
+            if b.get("type") == "tool_result":
+                f.write(json.dumps({"id": b.get("tool_use_id"), "is_error": bool(b.get("is_error")),
+                                    "text": _text(b.get("content"))}) + "\n")
 
 
 def reply_blocks(body):
@@ -64,6 +87,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if self.command == "POST" and path == "/v1/messages":
             body = json.loads(raw or b"{}")
+            record_results(body)
             blocks, stop = reply_blocks(body)
             self._record(n, {"stream": bool(body.get("stream")), "model": body.get("model"),
                              "has_tools": bool(body.get("tools")), "reply": [b["type"] for b in blocks]})

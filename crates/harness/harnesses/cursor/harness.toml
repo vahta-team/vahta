@@ -144,8 +144,9 @@ body = { additional_context = "{agent_message}" }
 # `updated_mcp_tool_output` rewrites an MCP result (docs read 2026-10-01).
 # Cursor has no such field for its own tools, so there is no `redact` here: a
 # secret in a Shell or Read result gets the notice above instead. The docs do
-# not say whether the field takes a string or an object; the result is given
-# back in the shape it arrived in.
+# type the field as an object (docs read 2026-10-13); the result is given back
+# in the shape it arrived in, so a plain-string MCP result goes out as a string:
+# if Cursor rejects that, the original reaches the model (live check TODO).
 [replies.after_tool.redact_mcp]
 style = "json"
 body = { updated_mcp_tool_output = "{redacted_output}", additional_context = "{agent_message}" }

@@ -107,12 +107,58 @@ the result still matters, use observe mode, or one rewriting hook per event.
 
 | Harness | Rewrites | How |
 |---|---|---|
-| Claude Code | every tool | `updatedToolOutput`, in the tool's own shape; `updatedMCPToolOutput` for MCP tools. The model is told through `additionalContext`. |
+| Claude Code | Bash, Read, Grep, Glob, MCP tools (the PostToolUse matcher) | `updatedToolOutput`, in the tool's own shape; `updatedMCPToolOutput` for MCP tools. The model is told through `additionalContext`. |
 | Cursor | MCP tools only | `updated_mcp_tool_output`. Cursor has no rewrite for its own tools (Shell, Read): there a secret gets the old notice instead. |
-| Codex | every tool | `decision: "block"` with the cut output, then the message for the model, as the reason. |
+| Codex | Bash, apply_patch, MCP tools (the matcher) | `decision: "block"` with the cut output, then the message for the model, as the reason. |
 
-The Cursor and Codex replies follow their documentation but have not yet been
-checked against the running agents; their manifests say so.
+### What was checked, per tool
+
+Claude Code 2.1.286, live, with the real hooks and a mock model (no token):
+`python3 bench/bench.py cc-redact`. A canary held by Vahta is made to appear in
+each tool's output, and the mock records every `tool_result` Claude Code sends
+back to the model.
+
+| Tool | Result |
+|---|---|
+| Bash (`cat`, a script) | redacted by the hook |
+| Bash under `vahta run` | already cut by `vahta run` itself; the hook sees nothing |
+| Read, Grep (content) | redacted by the hook |
+| MCP tool (stdio server) | redacted by the hook (`updatedMCPToolOutput`) |
+| Read, Grep, `cat` of a file holding an inline credential | refused before running (PreToolUse) |
+| Edit, Write | the result carries no file content in this version; not in the matcher |
+| WebFetch, WebSearch, Agent | not in the matcher, so not rewritten, and not tested offline |
+
+The trap: Claude Code ignores, silently, a replacement that does not match the
+built-in tool's output shape, and the original reaches the model. The hook sends
+back the structure Claude sent (`tool_response`) with only its strings changed,
+so the shape is the tool's own. `crates/harness/harnesses/claude/fixtures/shape_*.json`
+pin it for Bash (stdout, stderr), Read, Grep, Glob and MCP (block array, string),
+using the shapes captured from the live run. If a Claude Code release changes a
+tool's shape, `cc-redact` is the check to rerun.
+
+Cursor and Codex have not been run live; their replies follow the documentation
+(Codex: https://learn.chatgpt.com/docs/hooks; Cursor: https://cursor.com/docs/agent/hooks,
+read 2026-10-13). Codex's PostToolUse takes `systemMessage`, `continue`, `stopReason`,
+`decision`, `reason` and `hookSpecificOutput.additionalContext`; `updatedMCPToolOutput`
+and `suppressOutput` are parsed but unsupported, and a hook that emits one is marked
+failed while the original result goes on to the model, so we never emit them (a unit
+test pins the keys). Live checks still to do:
+
+- Codex: `decision: "block"` really replaces the result for Bash, apply_patch and MCP;
+  `additionalContext` is accepted in the notice reply; hooks trusted in `/hooks`.
+- Cursor: `updated_mcp_tool_output` is documented as an object; we give a plain-string
+  MCP result back as a string. If Cursor rejects that the original goes through.
+- Cursor: whether Shell/Read output can be rewritten at all (undocumented; we treat it
+  as impossible and only warn).
+
+## What cannot be done
+
+- A value the model has already seen cannot be taken back. No harness has a hook that
+  edits the conversation so far (compaction hooks cannot rewrite it either), and a
+  provider-side or on-disk transcript copy is out of reach. The person should rotate
+  the key.
+- A tool the harness gives no rewrite for (Cursor's Shell and Read; hosted tools such
+  as web search; tools outside the matcher) leaves the output as it was.
 
 ## What this does not catch
 

@@ -108,18 +108,20 @@ body = { decision = "block", reason = "{user_message}" }
 
 [replies.after_tool.notice]
 style = "json"
-# Codex's PostToolUse output accepts only systemMessage, continue,
-# stopReason, decision and reason. Any other field (e.g. Claude's
-# hookSpecificOutput.additionalContext) marks the hook run as failed and the
-# notice is lost. decision:"block" would replace the whole tool result, which
-# is redaction by another name, used below for that. So: systemMessage only,
-# surfaced to the user as a warning.
-body = { systemMessage = "{user_message}" }
+# Codex's PostToolUse accepts systemMessage (shown to the person as a warning),
+# continue, stopReason, decision, reason and hookSpecificOutput.additionalContext
+# (extra developer context for the model); docs read 2026-10-13,
+# https://learn.chatgpt.com/docs/hooks. updatedMCPToolOutput and suppressOutput
+# are parsed but unsupported: they mark the hook run failed and the ORIGINAL
+# result goes on to the model, so they must never be emitted (fail open).
+# decision:"block" would replace the whole tool result, which is redaction by
+# another name, used below for that.
+body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
 
 # THEORETICAL: not yet verified live; remove this note once checked.
 # Redaction: decision "block" replaces the tool's result with `reason`, so the
 # reason is the result with its secrets cut out, then what the model is told
-# about it (Codex has no additionalContext here). One reply for every tool,
+# about it (decision:block carries no additionalContext). One reply for every tool,
 # MCP included.
 [replies.after_tool.redact]
 style = "json"
