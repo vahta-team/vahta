@@ -677,6 +677,42 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     Err(reply) => (reply, false),
                 }
             }
+            ClientRequest::Http {
+                cwd,
+                method,
+                url,
+                names,
+                headers,
+                query,
+                body,
+                max_response,
+                timeout_secs,
+                label,
+            } => {
+                // Like a run, a request goes on after its reply: the body
+                // follows as output frames.
+                match crate::http_ops::http(
+                    &ctx,
+                    crate::http_ops::HttpArgs {
+                        cwd,
+                        method,
+                        url,
+                        names,
+                        headers,
+                        query,
+                        body,
+                        max_response,
+                        timeout_secs,
+                        label,
+                    },
+                ) {
+                    Ok(answer) => {
+                        send_http(stream, answer);
+                        return;
+                    }
+                    Err(reply) => (reply, false),
+                }
+            }
             ClientRequest::Bind {
                 cwd,
                 name,
@@ -799,4 +835,26 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             return;
         }
     }
+}
+
+/// An answered `vahta http`: the reply, the body in output frames, the end.
+fn send_http(stream: &mut Stream, answer: crate::http_ops::Answer) {
+    use crate::protocol::{RunOutput, b64_encode};
+    if write_frame(stream, &answer.reply).is_err() {
+        return;
+    }
+    for chunk in answer.body.chunks(192 * 1024) {
+        let data = b64_encode(chunk);
+        if write_frame(stream, &RunOutput::Stdout { data }).is_err() {
+            return;
+        }
+    }
+    let _ = write_frame(
+        stream,
+        &RunOutput::Exit {
+            code: 0,
+            signal: None,
+        },
+    );
+    let _ = stream.shutdown();
 }

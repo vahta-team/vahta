@@ -1,0 +1,34 @@
+[package]
+name = "vahta-net"
+version = "0.0.0"
+description = "Vahta's only network code: a strict HTTPS client for `vahta http`, behind the `client` feature"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# The HTTPS client. Off, this crate is URL parsing and nothing that can open a
+# socket, and none of the network crates below is built. The daemon turns it on
+# with its own `http` feature, which the `vahta` binary has by default.
+client = ["dep:ureq"]
+# Lets a test trust one extra root certificate, and builds `test_server`: an
+# in-process HTTPS server with a throwaway certificate (tests/data).
+# Never enabled by any shipped crate; CI fails if `vahta-cli` ever sees it.
+test-roots = ["client", "dep:rustls"]
+
+[dependencies]
+# Server side of the test server only (feature `test-roots`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+# HTTPS client. `rustls` is ureq's own feature for rustls with the `ring`
+# provider and the `webpki-roots` (Mozilla) root store; its other defaults
+# (gzip, cookies, platform verifier, proxy-from-system) stay off.
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+
+[dev-dependencies]
+vahta-net = { path = ".", features = ["test-roots"] }
