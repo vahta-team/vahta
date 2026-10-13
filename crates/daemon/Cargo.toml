@@ -20,7 +20,11 @@ lock-hyprland = []
 # Lets a test drive the daemon without a person and a terminal: a scripted
 # prompt surface, the cheap vault KDF and a few overrides of timing. Never
 # enabled by any shipped crate; CI fails if `vahta-cli` ever sees it.
-test-surface = ["vahta-vault/test-kdf"]
+test-surface = ["vahta-vault/test-kdf", "vahta-net/test-roots"]
+# `vahta http`: the HTTPS client (crates/net). Off, the daemon answers an http
+# request with "this build has no network support" and no network crate is in
+# the build. The `vahta` binary has it by default.
+http = ["vahta-net/client"]
 
 [dependencies]
 # The release list of let-through output values: HMAC-SHA256 under a key
@@ -34,6 +38,8 @@ dunce = "1"
 vahta-harness = { path = "../harness" }
 vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
+# The strict URL parser always; the client only with the `http` feature.
+vahta-net = { path = "../net" }
 # Taking Vahta's hook entries out for a pause and putting them back.
 vahta-setup = { path = "../setup" }
 vahta-vault = { path = "../vault" }

@@ -229,32 +229,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     let pairs = resolve(&peek, &project, names, renames)?;
     let names: Vec<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
 
-    let tier_of = |n: &str| {
-        peek.entries
-            .iter()
-            .find(|e| e.name == n)
-            .map(|e| e.tier)
-            .unwrap_or(Tier::EachUse)
-    };
-    let each_use: Vec<String> = names
-        .iter()
-        .filter(|n| tier_of(n) == Tier::EachUse)
-        .cloned()
-        .collect();
-
-    // The caller's session, if any: the deepest one whose anchor is among its
-    // ancestors, or under which one of them was launched.
-    let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
-    let found = {
-        let sessions = ctx
-            .shared
-            .sessions
-            .lock()
-            .map_err(|_| error("the session table is unusable"))?;
-        sessions
-            .find(&chain, &peek.vault_id)
-            .map(|s| (s.id.clone(), s.scope.clone(), s.parent.is_some()))
-    };
+    let found = find_session(ctx, &peek)?;
     // The program, found once. Its canonical path is what the command rules
     // are checked against and what is executed.
     let client_path: Option<OsString> = client_env
@@ -319,101 +294,35 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         )));
     };
 
-    let mut via: Option<String> = None;
-    let mut keys = None;
-    if let Some((id, scope, delegated)) = found {
-        let uncovered: Vec<String> = names
-            .iter()
-            .filter(|n| !scope.contains(n))
-            .cloned()
-            .collect();
-        if uncovered.is_empty() && each_use.is_empty() {
-            let mut sessions = ctx
-                .shared
-                .sessions
-                .lock()
-                .map_err(|_| error("the session table is unusable"))?;
-            if let Some(s) = sessions.get_mut(&id) {
-                keys = s.keys.narrowed(&names).ok();
-                if keys.is_some() {
-                    s.uses += 1;
-                    via = Some(id);
-                }
-            }
-        } else if delegated {
-            // A sub-agent asks for nothing beyond what it was given, and the
-            // person is not asked on its behalf.
-            let kind = if each_use.is_empty() {
-                RefusalKind::OutOfScope
+    let shown: Vec<String> = pairs
+        .iter()
+        .map(|(n, v)| {
+            if n == v {
+                n.clone()
             } else {
-                RefusalKind::EachUse
-            };
-            let offending: Vec<String> = names
-                .iter()
-                .filter(|n| !scope.contains(n) || each_use.contains(n))
-                .cloned()
-                .collect();
-            ctx.journal(
-                Entry::new("run_refused")
-                    .session(&id, None)
-                    .vault(&peek.vault_id)
-                    .names(&offending)
-                    .result("refused", Some(&format!("{kind:?}"))),
-            );
-            return Err(refused_names(
-                kind,
-                "this delegated session does not cover these secrets, and a delegated session cannot \
-                 ask for more; nothing was run",
-                issue_list(&offending, kind),
-            ));
-        }
-    }
-
-    // The values.
-    let mut values: Vec<(String, SecretValue)> = Vec::with_capacity(names.len());
-    if let Some(keys) = &keys {
-        let bytes = vahta_vault::read_file(&vault_path).map_err(from_vault)?;
-        for n in &names {
-            match keys.open(&bytes, n, ctx.store()) {
-                Ok(v) => values.push((n.clone(), v)),
-                Err(Error::SessionStale) => {
-                    return Err(refused_names(
-                        RefusalKind::Stale,
-                        Error::SessionStale.to_string(),
-                        issue_list(std::slice::from_ref(n), RefusalKind::Stale),
-                    ));
-                }
-                Err(e) => return Err(from_vault(e)),
+                format!("{n} as {v}")
             }
-        }
-    } else {
-        let mut window = ctx.window("Run a command")?;
-        let mut lines = lines_for(&project, &vault_path);
-        let shown: Vec<String> = pairs
-            .iter()
-            .map(|(n, v)| {
-                if n == v {
-                    n.clone()
-                } else {
-                    format!("{n} as {v}")
-                }
-            })
-            .collect();
-        lines.push(format!("Secrets: {}", shown.join(", ")));
-        lines.push(format!("Command: {}", command_text(&argv)));
-        lines.push("This run only; no session is opened.".to_string());
-        let mut panel = ctx.panel("Run a command", lines);
-        panel.agent_note = label.as_deref().and_then(sanitize_label);
-        let vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
-        for n in &names {
-            let v = vault.get(n).map_err(|e| match e {
-                Error::NotFound(_) => unknown_name(n),
-                other => from_vault(other),
-            })?;
-            values.push((n.clone(), v));
-        }
-        window.close(None);
-    }
+        })
+        .collect();
+    let (values, via) = unlock_values(
+        ctx,
+        Unlock {
+            project: &project,
+            vault_path: &vault_path,
+            peek: &peek,
+            names: &names,
+            found,
+            title: "Run a command",
+            lines: vec![
+                format!("Secrets: {}", shown.join(", ")),
+                format!("Command: {}", command_text(&argv)),
+                "This run only; no session is opened.".to_string(),
+            ],
+            label: label.as_deref(),
+            refused_event: "run_refused",
+            nothing: "nothing was run",
+        },
+    )?;
 
     let mut env: Vec<(OsString, OsString)> = filter_env(client_env)
         .into_iter()
@@ -460,6 +369,163 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         program,
         isolate_network: false,
     })
+}
+
+/// The caller's session, if any: the deepest one whose anchor is among its
+/// ancestors, or under which one of them was launched. `(id, scope,
+/// delegated)`.
+pub(crate) fn find_session(
+    ctx: &Ctx<'_>,
+    peek: &Peek,
+) -> Flow<Option<(String, Vec<String>, bool)>> {
+    let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
+    let sessions = ctx
+        .shared
+        .sessions
+        .lock()
+        .map_err(|_| error("the session table is unusable"))?;
+    Ok(sessions
+        .find(&chain, &peek.vault_id)
+        .map(|s| (s.id.clone(), s.scope.clone(), s.parent.is_some())))
+}
+
+/// The values of [`unlock_values`], `(name, value)`, and the id of the session
+/// that served them, if any.
+pub(crate) type Unlocked = (Vec<(String, SecretValue)>, Option<String>);
+
+/// What [`unlock_values`] needs to get the values of `names`.
+pub(crate) struct Unlock<'a> {
+    pub project: &'a vahta_vault::project::Project,
+    pub vault_path: &'a std::path::Path,
+    pub peek: &'a Peek,
+    pub names: &'a [String],
+    pub found: Option<(String, Vec<String>, bool)>,
+    /// The window's title, and what it says after the project lines.
+    pub title: &'a str,
+    pub lines: Vec<String>,
+    pub label: Option<&'a str>,
+    /// The journal event for a delegated session that cannot have them.
+    pub refused_event: &'static str,
+    /// What did not happen, for that refusal: "nothing was run".
+    pub nothing: &'static str,
+}
+
+/// The values of `names` for one use, the way every use of a secret gets them:
+///
+/// * the caller's session covers every name and all are session-tier: the
+///   session's keys open them, no window;
+/// * a delegated session that does not cover a name (or holds an each-use one)
+///   is refused outright: a sub-agent cannot ask the person for more;
+/// * otherwise a window asks for the password for this one use and no session
+///   is created. An each-use secret always asks, even inside a session.
+///
+/// Returns the values and the id of the session that served them, if any.
+pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
+    let Unlock {
+        project,
+        vault_path,
+        peek,
+        names,
+        found,
+        title,
+        lines: extra,
+        label,
+        refused_event,
+        nothing,
+    } = u;
+    let each_use: Vec<String> = names
+        .iter()
+        .filter(|n| {
+            peek.entries
+                .iter()
+                .find(|e| &e.name == *n)
+                .map(|e| e.tier)
+                .unwrap_or(Tier::EachUse)
+                == Tier::EachUse
+        })
+        .cloned()
+        .collect();
+    let mut via: Option<String> = None;
+    let mut keys = None;
+    if let Some((id, scope, delegated)) = found {
+        let uncovered = names.iter().any(|n| !scope.contains(n));
+        if !uncovered && each_use.is_empty() {
+            let mut sessions = ctx
+                .shared
+                .sessions
+                .lock()
+                .map_err(|_| error("the session table is unusable"))?;
+            if let Some(s) = sessions.get_mut(&id) {
+                keys = s.keys.narrowed(names).ok();
+                if keys.is_some() {
+                    s.uses += 1;
+                    via = Some(id);
+                }
+            }
+        } else if delegated {
+            // A sub-agent asks for nothing beyond what it was given, and the
+            // person is not asked on its behalf.
+            let kind = if each_use.is_empty() {
+                RefusalKind::OutOfScope
+            } else {
+                RefusalKind::EachUse
+            };
+            let offending: Vec<String> = names
+                .iter()
+                .filter(|n| !scope.contains(n) || each_use.contains(n))
+                .cloned()
+                .collect();
+            ctx.journal(
+                Entry::new(refused_event)
+                    .session(&id, None)
+                    .vault(&peek.vault_id)
+                    .names(&offending)
+                    .result("refused", Some(&format!("{kind:?}"))),
+            );
+            return Err(refused_names(
+                kind,
+                format!(
+                    "this delegated session does not cover these secrets, and a delegated session \
+                     cannot ask for more; {nothing}"
+                ),
+                issue_list(&offending, kind),
+            ));
+        }
+    }
+
+    let mut values: Vec<(String, SecretValue)> = Vec::with_capacity(names.len());
+    if let Some(keys) = &keys {
+        let bytes = vahta_vault::read_file(vault_path).map_err(from_vault)?;
+        for n in names {
+            match keys.open(&bytes, n, ctx.store()) {
+                Ok(v) => values.push((n.clone(), v)),
+                Err(Error::SessionStale) => {
+                    return Err(refused_names(
+                        RefusalKind::Stale,
+                        Error::SessionStale.to_string(),
+                        issue_list(std::slice::from_ref(n), RefusalKind::Stale),
+                    ));
+                }
+                Err(e) => return Err(from_vault(e)),
+            }
+        }
+    } else {
+        let mut window = ctx.window(title)?;
+        let mut lines = lines_for(project, vault_path);
+        lines.extend(extra);
+        let mut panel = ctx.panel(title, lines);
+        panel.agent_note = label.and_then(sanitize_label);
+        let vault = unlock(ctx, window.as_mut(), vault_path, &panel)?;
+        for n in names {
+            let v = vault.get(n).map_err(|e| match e {
+                Error::NotFound(_) => unknown_name(n),
+                other => from_vault(other),
+            })?;
+            values.push((n.clone(), v));
+        }
+        window.close(None);
+    }
+    Ok((values, via))
 }
 
 /// A program name as a message may carry it: one plain line.

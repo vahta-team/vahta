@@ -28,10 +28,13 @@ name = "vh"
 path = "src/bin/vh.rs"
 
 [features]
-default = ["lock-hyprland"]
+default = ["lock-hyprland", "http"]
 # Forwarded to the daemon: the Hyprland lock source. Build with
 # `--no-default-features` to leave it out.
 lock-hyprland = ["vahta-daemon/lock-hyprland"]
+# `vahta http`: the HTTPS client, the only network code in the build (crates/net).
+# `--no-default-features` leaves it out, and with it every network crate.
+http = ["vahta-daemon/http"]
 
 [dependencies]
 vahta-scan = { path = "../scan" }
@@ -61,3 +64,7 @@ vahta-vault = { path = "../vault", features = ["test-kdf"] }
 # `test-surface` feature (a scripted prompt surface and a few overrides) is
 # switched on for the test build only, like `test-kdf`, and CI checks that.
 vahta-daemon = { path = "../daemon", features = ["test-surface"] }
+# The tests' HTTPS server for `vahta http`, with a throwaway certificate; its
+# `test-roots` feature, like `test-surface`, is checked out of the shipped tree
+# by CI.
+vahta-net = { path = "../net", features = ["test-roots"] }

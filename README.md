@@ -131,6 +131,17 @@ vault, not the file. A command the rules do not allow is refused;
 real limits (an allowed program can itself pass a secret on); they are written
 down in [docs/daemon.md](docs/daemon.md#binding-secrets-to-commands).
 
+## Calling an API without the key
+
+`vahta http --secret NAME -H 'Authorization: Bearer {NAME}' https://api.example.com/...`
+makes the request in the daemon, puts the value only in the header (or a
+`--query` value) you mark, sends it only to hosts the person bound the secret to,
+and returns the response with the value cut out. It is the only operation in
+Vahta that opens a connection: **network only for operations you bind.** All
+network code is one crate (`crates/net`) behind a cargo feature, and CI checks
+that a build without it has no HTTP or TLS client at all. Details in
+[docs/daemon.md](docs/daemon.md#vahta-http).
+
 ## Supported harnesses and platforms
 
 | Harness | Hook installed by `vahta setup` |
