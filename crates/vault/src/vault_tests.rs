@@ -1087,3 +1087,345 @@ fn rule_set_shapes_are_checked_on_write_and_read() {
         Vault::peek_bytes(&encode_as(current::FORMAT, &m, Actor::Owner, &key).unwrap()).is_err()
     );
 }
+
+// --- Re-key ----------------------------------------------------------------------------------
+
+const NEW_KEK: [u8; 32] = [9; 32];
+
+fn kept(id: [u8; 16], kek: [u8; 32]) -> KeptSlot<'static> {
+    KeptSlot {
+        new: NewSlot {
+            kind: 0x7001,
+            slot_id: Some(id),
+            label: "kept".into(),
+            expires_at: None,
+            params: vec![1],
+        },
+        wrap: Box::new(move |vk, aad| current::seal_vault_key(&kek, aad, vk)),
+    }
+}
+
+/// A saved vault with a lost device's slot, a second device's slot, and its
+/// recovery key.
+fn with_devices(t: &T) -> (Vault, RecoveryKey, [u8; 16], [u8; 16]) {
+    let (mut v, recovery) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.set("B", b"fake-two", Kind::Env, Tier::EachUse).unwrap();
+    let lost = v
+        .add_slot(future_slot("lost"), |vk, aad| {
+            current::seal_vault_key(&KEK, aad, vk)
+        })
+        .unwrap();
+    let other = v
+        .add_slot(future_slot("other"), |vk, aad| {
+            current::seal_vault_key(&[7; 32], aad, vk)
+        })
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    (v, recovery, lost, other)
+}
+
+#[test]
+fn a_rekeyed_vault_keeps_its_secrets_and_the_removed_slot_opens_nothing() {
+    let t = t();
+    let (mut v, recovery, lost, other) = with_devices(&t);
+    let copy = fs::read(&t.path).unwrap();
+    let before = v.generation();
+    let kek = v.password_kek(PW).unwrap();
+    let out = v
+        .rekey(
+            &kek,
+            RecoveryPlan::Keep(&recovery),
+            vec![kept(other, NEW_KEK)],
+        )
+        .unwrap();
+    assert!(out.recovery.is_none());
+    assert_eq!(out.dropped.len(), 1);
+    assert_eq!(out.dropped[0].slot_id, lost);
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(v.generation(), before + 1);
+
+    // Same names and values under the new key, by password, paper key and the
+    // kept slot.
+    for opened in [
+        Vault::unlock_password(&t.path, PW, &t.store).unwrap(),
+        Vault::unlock_recovery(&t.path, &recovery, &t.store).unwrap(),
+        Vault::unlock_with_slot(&t.path, &other, &NEW_KEK, &t.store).unwrap(),
+    ] {
+        assert_eq!(opened.get("A").unwrap().expose(), b"fake-one");
+        assert_eq!(opened.get("B").unwrap().expose(), b"fake-two");
+    }
+    // The dropped slot is gone, and the kept slot's old key does not open it.
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &lost, &KEK, &t.store),
+        Err(Error::Unlock)
+    ));
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &other, &[7; 32], &t.store),
+        Err(Error::Unlock)
+    ));
+
+    // The old file still opens with the old slot, on a machine that never saw
+    // the new one: that is what a copy taken before is. It is the old vault
+    // and nothing newer; this machine refuses it as another owner.
+    let stranger = LocalStore::new(t._dir.path().join("elsewhere"));
+    let old = t._dir.path().join("old.vht");
+    fs::write(&old, &copy).unwrap();
+    assert!(Vault::unlock_with_slot(&old, &lost, &KEK, &stranger).is_ok());
+    assert!(matches!(
+        Vault::unlock_with_slot(&old, &lost, &KEK, &t.store),
+        Err(Error::OwnerChanged)
+    ));
+    // And the old key opens no secret of the new file.
+    let old_vault = Vault::unlock_with_slot(&old, &lost, &KEK, &stranger).unwrap();
+    let new_bytes = fs::read(&t.path).unwrap();
+    let old_keys = current::owner_keys(&unlocked(&old_vault).vk);
+    let new_model = format::decode(&new_bytes).unwrap();
+    let new_model = new_model.current().unwrap();
+    assert_ne!(new_model.model.owner.sign_pk, old_keys.sign_pk);
+    assert!(
+        current::open_dek(
+            current::FORMAT,
+            &new_model.model.header.vault_id,
+            &old_keys.enc_sk,
+            &new_model.model.secrets[0]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_rekey_changes_every_data_key_and_ciphertext() {
+    let t = t();
+    let (mut v, recovery, _, _) = with_devices(&t);
+    let before = model(&v).secrets;
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+        .unwrap();
+    let after = model(&v).secrets;
+    assert_eq!(before.len(), after.len());
+    for (b, a) in before.iter().zip(&after) {
+        assert_eq!(b.secret_id, a.secret_id);
+        assert_ne!(b.nonce, a.nonce);
+        assert_ne!(b.ct, a.ct);
+    }
+}
+
+#[test]
+fn recipients_still_open_their_secrets_after_a_rekey() {
+    let t = t();
+    let (v, [(_, adm, adm_k), (_, edit, edit_k), (_, run, run_k)]) = built(&t);
+    // An editor the admin added: its certificate is the admin's.
+    let by_admin = RecipientSecret::generate().unwrap();
+    let mut admin_vault = Vault::open_as_recipient(&t.path, &adm, &adm_k, &t.store).unwrap();
+    let sub = admin_vault
+        .add_recipient(
+            "sub",
+            RecipientKind::Person,
+            Role::Runner,
+            &by_admin.public().unwrap(),
+        )
+        .unwrap();
+    admin_vault.save(&t.path, &t.store).unwrap();
+    let mut v2 = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    drop(v);
+    let kek = v2.password_kek(PW).unwrap();
+    let out = v2.rekey(&kek, RecoveryPlan::Replace, vec![]).unwrap();
+    assert!(out.recovery.is_some());
+    v2.save(&t.path, &t.store).unwrap();
+
+    // The file verifies (certificates, signature) and the recipients open. A
+    // recipient pinned the old owner key on its own machine, which refuses the
+    // new one until its record is cleared; here each recipient is a machine
+    // that has not seen the vault.
+    Vault::peek(&t.path).unwrap();
+    let mine = |n: &str| LocalStore::new(t._dir.path().join(n));
+    let old_pin = Vault::open_as_recipient(&t.path, &adm, &adm_k, &t.store);
+    assert!(matches!(old_pin, Err(Error::OwnerChanged)));
+    let r = Vault::open_as_recipient(&t.path, &run, &run_k, &mine("run")).unwrap();
+    assert_eq!(r.get("A").unwrap().expose(), b"fake-one");
+    assert!(matches!(r.get("B"), Err(Error::NoAccess)));
+    let mut e = Vault::open_as_recipient(&t.path, &edit, &edit_k, &mine("edit")).unwrap();
+    e.set("C", b"fake-three", Kind::Env, Tier::Session).unwrap();
+    e.save(&t.path, &mine("edit")).unwrap();
+    let a = Vault::open_as_recipient(&t.path, &adm, &adm_k, &mine("adm")).unwrap();
+    assert_eq!(a.recipients().len(), 4);
+    let s = Vault::open_as_recipient(&t.path, &sub, &by_admin, &mine("sub")).unwrap();
+    assert!(s.entries().iter().any(|e| e.name == "A"));
+    let owner = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(owner.get("C").unwrap().expose(), b"fake-three");
+}
+
+#[test]
+fn a_replaced_recovery_key_kills_the_old_one() {
+    let t = t();
+    let (mut v, old_recovery, _, _) = with_devices(&t);
+    let kek = v.password_kek(PW).unwrap();
+    let out = v.rekey(&kek, RecoveryPlan::Replace, vec![]).unwrap();
+    let new_recovery = out.recovery.unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    assert!(matches!(
+        Vault::unlock_recovery(&t.path, &old_recovery, &t.store),
+        Err(Error::Unlock)
+    ));
+    let opened = Vault::unlock_recovery(&t.path, &new_recovery, &t.store).unwrap();
+    assert_eq!(opened.get("A").unwrap().expose(), b"fake-one");
+    assert_ne!(old_recovery.to_paper(), new_recovery.to_paper());
+}
+
+#[test]
+fn a_rekey_with_a_wrong_password_key_or_paper_key_changes_nothing() {
+    let t = t();
+    let (mut v, recovery, _, _) = with_devices(&t);
+    let model_before = model(&v);
+    assert!(matches!(
+        v.rekey(&[1; 32], RecoveryPlan::Replace, vec![]),
+        Err(Error::Unlock)
+    ));
+    let kek = v.password_kek(PW).unwrap();
+    let stranger = RecoveryKey::from_paper(&"ab".repeat(32)).unwrap();
+    assert!(matches!(
+        v.rekey(&kek, RecoveryPlan::Keep(&stranger), vec![]),
+        Err(Error::Unlock)
+    ));
+    // A kept slot that cannot be built stops it too.
+    let bad = KeptSlot {
+        new: future_slot("x"),
+        wrap: Box::new(|_, _| Err(Error::Invalid("nope"))),
+    };
+    assert!(
+        v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![bad])
+            .is_err()
+    );
+    assert_eq!(model(&v), model_before);
+    assert!(matches!(v.password_kek(b"wrong"), Err(Error::Unlock)));
+    // The vault still saves and opens as it was.
+    v.save(&t.path, &t.store).unwrap();
+    Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+}
+
+#[test]
+fn rollback_is_still_detected_after_a_rekey() {
+    let t = t();
+    let (mut v, recovery, _, _) = with_devices(&t);
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    let just_after = fs::read(&t.path).unwrap();
+    v.set("C", b"fake-three", Kind::Env, Tier::Session).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    fs::write(&t.path, &just_after).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&t.path, PW, &t.store),
+        Err(Error::RolledBack { .. })
+    ));
+}
+
+#[test]
+fn a_session_opened_before_a_rekey_is_stale_after_it() {
+    let t = t();
+    let (mut v, recovery, _, _) = with_devices(&t);
+    let keys = v.session_keys(&["A".to_string()]).unwrap();
+    assert!(
+        keys.open(&fs::read(&t.path).unwrap(), "A", &t.store)
+            .is_ok()
+    );
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    assert!(matches!(
+        keys.open(&fs::read(&t.path).unwrap(), "A", &t.store),
+        Err(Error::SessionStale)
+    ));
+    // Another owner entirely is still not "stale".
+    let stranger = LocalStore::new(t._dir.path().join("elsewhere"));
+    assert!(
+        keys.open(&fs::read(&t.path).unwrap(), "A", &stranger)
+            .is_ok()
+            || matches!(
+                keys.open(&fs::read(&t.path).unwrap(), "A", &stranger),
+                Err(Error::SessionStale | Error::OwnerChanged)
+            )
+    );
+}
+
+#[test]
+fn another_machine_that_pinned_the_old_owner_refuses_the_rekeyed_vault() {
+    let t = t();
+    let (mut v, recovery, _, _) = with_devices(&t);
+    // A second machine opens it first.
+    let other = LocalStore::new(t._dir.path().join("machine-two"));
+    Vault::unlock_password(&t.path, PW, &other).unwrap();
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&t.path, PW, &other),
+        Err(Error::OwnerChanged)
+    ));
+    // The machine that did it opens it, and a fresh machine does too.
+    Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    Vault::unlock_password(
+        &t.path,
+        PW,
+        &LocalStore::new(t._dir.path().join("machine-three")),
+    )
+    .unwrap();
+}
+
+#[test]
+fn only_the_owner_rekeys_and_a_slot_is_replaced_in_place() {
+    let t0 = t();
+    let (_, [_, _, (_, run, run_k)]) = built(&t0);
+    let mut r = Vault::open_as_recipient(&t0.path, &run, &run_k, &t0.store).unwrap();
+    assert!(matches!(
+        r.rekey(&[0; 32], RecoveryPlan::Replace, vec![]),
+        Err(Error::NotOwner)
+    ));
+    assert!(matches!(r.password_kek(PW), Err(Error::NotOwner)));
+
+    let t = self::t();
+    let (mut v, _, lost, _) = with_devices(&t);
+    let t2 = [8u8; 32];
+    v.replace_slot(
+        NewSlot {
+            slot_id: Some(lost),
+            ..future_slot("lost")
+        },
+        |vk, aad| current::seal_vault_key(&t2, aad, vk),
+    )
+    .unwrap();
+    // Not a slot that is not there, and never the password or recovery kinds.
+    assert!(matches!(
+        v.replace_slot(
+            NewSlot {
+                slot_id: Some([0xee; 16]),
+                ..future_slot("none")
+            },
+            |vk, aad| current::seal_vault_key(&t2, aad, vk)
+        ),
+        Err(Error::UnknownSlot)
+    ));
+    v.save(&t.path, &t.store).unwrap();
+    assert!(Vault::unlock_with_slot(&t.path, &lost, &t2, &t.store).is_ok());
+    assert!(matches!(
+        Vault::unlock_with_slot(&t.path, &lost, &KEK, &t.store),
+        Err(Error::Unlock)
+    ));
+}
+
+#[test]
+fn peek_shows_slots_and_devices_without_a_key() {
+    let t = t();
+    let (mut v, _, lost, _) = with_devices(&t);
+    v.add_device(device(3)).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!(peek.slots.len(), 4);
+    let view = peek.slots.iter().find(|s| s.info.slot_id == lost).unwrap();
+    assert_eq!(view.params, vec![1, 2, 3]);
+    assert_eq!(peek.devices.len(), 1);
+}

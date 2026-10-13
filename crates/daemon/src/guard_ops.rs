@@ -23,9 +23,10 @@ use vahta_setup::guard::{self, MAX_PAUSE_SECS, Pause};
 use vahta_vault::project::Project;
 
 use crate::journal::Entry;
-use crate::ops::{Ctx, Flow, error, refused, unlock};
+use crate::ops::{Ctx, Flow, error, refused, unlock_as};
 use crate::server::Shared;
 use crate::surface::{Window, sanitize_label};
+use vahta_auth::Action;
 
 /// How long the person has to answer the watchdog's question before the hooks
 /// are put back on their own.
@@ -86,14 +87,27 @@ fn approving_vault(shared: &Shared, cwd: Option<&str>) -> Option<PathBuf> {
 /// Ask for the password of an approving vault in `window`. There is no plain
 /// yes: with no vault known nothing can approve, and the answer is a refusal
 /// that points the person to their own terminal. `Ok(true)` is approval.
-fn approve(ctx: &Ctx<'_>, window: &mut dyn Window, panel: &Panel, cwd: Option<&str>) -> Flow<bool> {
+fn approve(
+    ctx: &Ctx<'_>,
+    window: &mut dyn Window,
+    panel: &Panel,
+    cwd: Option<&str>,
+    action: Action,
+) -> Flow<bool> {
     match approving_vault(ctx.shared, cwd) {
         Some(vault) => {
             // The password only approves; the vault is not changed.
-            drop(unlock(ctx, window, &vault, panel)?);
+            drop(unlock_as(ctx, window, &vault, panel, action)?);
             Ok(true)
         }
         None => Err(no_vault()),
+    }
+}
+
+/// The guard's questions are put to the password, as they always were.
+fn guard_action() -> Action {
+    Action::Other {
+        what: "hook guard".to_string(),
     }
 }
 
@@ -199,7 +213,13 @@ pub(crate) fn hooks_pause(
         return Err(no_vault());
     }
     let mut window = ctx.window(title)?;
-    let approved = approve(ctx, window.as_mut(), &panel, Some(cwd));
+    let approved = approve(
+        ctx,
+        window.as_mut(),
+        &panel,
+        Some(cwd),
+        Action::HooksPause { secs },
+    );
     match approved {
         Ok(true) => {}
         Ok(false) => {
@@ -389,7 +409,7 @@ pub(crate) fn guard_ask(
     }
     let choice = window.choose_within(&panel, "What should Vahta do?", &options, ASK_WAIT);
     let reply = match choice {
-        Ok(Some(1)) => match approve(ctx, window.as_mut(), &panel, None) {
+        Ok(Some(1)) => match approve(ctx, window.as_mut(), &panel, None, guard_action()) {
             Ok(true) => {
                 let mut pauses = guard::read_pauses(&ctx.shared.options.paths.data);
                 pauses.retain(|p| p.harness != h);
@@ -412,7 +432,7 @@ pub(crate) fn guard_ask(
                 GuardChoice::Restore
             }
         },
-        Ok(Some(2)) => match approve(ctx, window.as_mut(), &panel, None) {
+        Ok(Some(2)) => match approve(ctx, window.as_mut(), &panel, None, guard_action()) {
             Ok(true) => {
                 let cfg = ctx.shared.options.paths.config_file();
                 let _ = vahta_ipc::config::set_guard(&cfg, Guard::Off);

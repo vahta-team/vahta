@@ -64,6 +64,8 @@ vahta-vault = { path = "../vault", features = ["test-kdf"] }
 # `test-surface` feature (a scripted prompt surface and a few overrides) is
 # switched on for the test build only, like `test-kdf`, and CI checks that.
 vahta-daemon = { path = "../daemon", features = ["test-surface"] }
+# The device tests read the software phone's keys and write device records.
+vahta-auth = { path = "../auth", features = ["test-surface"] }
 # The tests' HTTPS server for `vahta http`, with a throwaway certificate; its
 # `test-roots` feature, like `test-surface`, is checked out of the shipped tree
 # by CI.

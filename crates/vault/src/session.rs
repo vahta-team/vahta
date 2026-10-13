@@ -133,7 +133,17 @@ impl SessionKeys {
             return Err(Error::SessionStale);
         }
         if m.owner.sign_pk != self.pinned_owner_sign_pk {
-            return Err(Error::OwnerChanged);
+            // A vault this machine re-keyed (`Vault::rekey`) has pinned its new
+            // owner key here; the session's keys are of the old one, so it is
+            // stale, not a swap. Any other owner is refused as before.
+            return match store.check_owner_pin(
+                &self.vault_id,
+                crate::store::StateFile::Owner,
+                &m.owner.sign_pk,
+            ) {
+                Ok(()) => Err(Error::SessionStale),
+                Err(e) => Err(e),
+            };
         }
         if m.header.generation < self.generation {
             return Err(Error::RolledBack {

@@ -41,6 +41,9 @@ pub struct Entry {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uses: Option<u64>,
+    /// A paired device's id in hex (never a key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// `vahta http`: the method, the host (and port when not 443), the status
     /// and the size of the response body. Never the path or the query.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +97,11 @@ impl Entry {
     pub fn result(mut self, result: &str, reason: Option<&str>) -> Entry {
         self.result = Some(result.to_string());
         self.reason = reason.map(str::to_string);
+        self
+    }
+
+    pub fn device(mut self, device_id: &[u8; 16]) -> Entry {
+        self.device = Some(vahta_vault::hex_encode(device_id));
         self
     }
 

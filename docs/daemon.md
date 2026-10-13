@@ -41,6 +41,9 @@ nothing was done.
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list`, `vahta check` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
+| `vahta devices` | List the phones paired with this vault: name, id, when paired, when their access ends, when last used. | no |
+| `vahta devices pair NAME [--for DURATION]` / `extend ID [--for DURATION]` / `revoke ID` / `lost ID` | Pair a phone, give it more time, remove it, or remove it and change the vault's key. See [Devices](#devices-factors-re-keying-and-recovery). | the master password, always |
+| `vahta recover` | The password is forgotten: the recovery key opens the vault and a new password is chosen. | the recovery key |
 | `vahta daemon run\|status\|stop\|restart` | The daemon itself. | no |
 
 **Stray whitespace in a value.** `add` and `reset` check the typed value before
@@ -592,6 +595,118 @@ report to `<data dir>/vahta/hook-spool.jsonl` (mode 0600, at most 1 MiB; past
 that new reports are dropped), and the next daemon journals and empties it.
 Refusals of the person's own prompt are not reported. These reports are the
 evidence for the injection alarm.
+
+## Devices, factors, re-keying and recovery
+
+A vault can be opened by more than the password. Each way is a **slot** in the
+vault file that holds the vault key wrapped under a key that way can produce.
+The password and the recovery key are two kinds; a **paired phone** is a third.
+The daemon does not know the kinds: it asks the registry in `crates/auth`, which
+tries the phone first (when the policy lets a phone do it) and falls back to the
+password window.
+
+**The master password always works.** However the phone behaves (away, slow,
+denying, answering wrongly), the window is there and the password opens
+everything except what only the password may do (managing devices, below).
+
+### Pairing and what a phone can do
+
+`vahta devices pair NAME --for 90d` asks for the master password, then pairs
+the phone over the phone link, and records it in the vault's signed device list
+with a slot of its own. A phone's access lasts a limited time (1 minute to 365
+days, default 90 days). While it lasts, the phone can:
+
+* **open the vault**, with its biometric check, for an each-use run or a
+  session, with no password window. The request is a structure (action, secret
+  names, project, command, your agent's unverified label, a one-time number and
+  an expiry), the phone draws its own screen from it, and its answer is signed
+  with a key that lives in the phone's hardware keystore. The daemon accepts the
+  answer only for that request, once, before it expires, from the device the
+  vault lists;
+* **say yes** to a question the window would ask (extend a session, allow a
+  command once). The window and every phone in reach are asked at the same time;
+  the first answer wins and the others are closed.
+
+A phone can not manage devices: `pair`, `extend`, `revoke` and `lost` take the
+master password and nothing else (a stolen phone must not be able to keep
+itself alive).
+
+After every use the phone's slot is **written again with a new one-time key**
+(`ECDH` of a fresh ephemeral key with the phone's public key), so a shared
+secret captured once opens the file as it was, and no later one.
+
+### Factors: what each action needs
+
+What an action needs is data, in `crates/auth/policy/factors.toml`, compiled in:
+
+| Value | Meaning |
+|---|---|
+| `presence` | someone at the machine says yes (a window click) |
+| `knowledge` | the master password, or a phone |
+| `possession_biometric` | a phone with its biometric check, or the master password |
+| `password_only` | the master password only |
+
+Most actions need `knowledge`; extending a session and `alarm_lock` need
+`presence`; device management needs `password_only`. A row per **category** can
+override an action (for example the `payment` category: each-use runs, reveal
+and copy want `possession_biometric`). The master password satisfies every row
+except `password_only`.
+
+### `vahta devices extend`, `revoke`, `lost`
+
+* `extend ID --for 90d`: the device's access ends 90 days from now.
+* `revoke ID`: removes the device and its slot. **A copy of the vault file made
+  earlier still opens with that phone's key**; revoking only stops it opening
+  the file from now on.
+* `lost ID`: the phone is lost or stolen. It removes the device **and re-keys the
+  vault**. Re-keying draws a new vault key, seals every secret again under new
+  data keys, re-certifies the recipients, wraps the password slot and the other
+  devices' slots for the new key, drops every other slot, and makes a **new
+  recovery key** (shown once, in the window, before anything is written; the old
+  paper key stops working, destroy it). Open sessions end. A copy of the old file
+  still opens with the lost phone's key, but it is only the old vault: it holds
+  nothing newer than the copy, and rotating the secrets themselves at their source
+  is still up to you.
+
+`ID` is the device's name or the start of its id.
+
+**Other machines.** A machine that has opened the vault pinned its owner key.
+This machine's pin is moved to the new owner key by the re-key; another machine
+refuses the re-keyed file as "the vault's owner key differs from the one this
+machine saw before" until its record of the vault
+(`<data dir>/vaults/<vault id>/state`) is deleted by hand. The file carries no
+proof that the old owner approved the new one, so this is not done silently.
+Recipients (people and cloud members) pinned the owner the same way.
+
+### Recovery
+
+* **Forgot the password:** `vahta recover` asks for the recovery key in a window,
+  then a new password (twice). The secrets are untouched and the recovery key is
+  the same one.
+* **Lost the phone:** `vahta devices lost ID` (above).
+* **Both lost:** nothing recovers the vault. Keep the paper key; a phone is a way
+  in, not a backup.
+
+### Honest limits
+
+* **A device's expiry is enforced by the daemon, not by cryptography alone.** The
+  daemon refuses an expired device record and an expired slot, and the vault
+  library refuses an expired slot even with the right key. A copy of the vault
+  file together with a phone that still holds its key opens that copy whatever
+  its expiry says; `lost` (re-keying) is what makes such a copy stale.
+* **The phone's keys are only as safe as the phone's keystore.** The signing and
+  key-agreement keys should be hardware-backed (Android StrongBox or the
+  Trusted Execution Environment, Secure Enclave) and require biometrics for each
+  use. The daemon cannot check this from here; it holds only the public keys.
+* **Last used** in `vahta devices` is read from the daemon's journal
+  (`device_unlock` and `device_approve` events); a journal that was lost or
+  cleared shows nothing.
+* While the daemon waits for a phone (up to 30 seconds) the window is already
+  open and still empty; the password question appears once the phone has not
+  answered.
+* The journal records `device_paired`, `device_extended`, `device_revoked`,
+  `device_lost_rekey`, `device_unlock`, `device_approve`, `rekey` and `recover`,
+  with the device's id and name, never a key, a password or a recovery key.
 
 ## Injection alarm
 

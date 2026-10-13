@@ -34,7 +34,7 @@ use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, check_name, error, find_vault, from_vault, lines_for, refused, refused_names,
-    unknown_name, unlock,
+    unknown_name, unlock_as,
 };
 use crate::pathfind;
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
@@ -42,6 +42,7 @@ use crate::run_ask;
 use crate::session::{DelegateRefusal, Role, Session, Sessions, ask_time, info_of};
 use crate::session_ops::duration_of;
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 /// Variables never passed on to a command: the ones that load code into it, and
 /// Vahta's own controls.
@@ -359,6 +360,10 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             label: label.as_deref(),
             refused_event: "run_refused",
             nothing: "nothing was run",
+            action: Action::RunEachUse {
+                names: names.clone(),
+                command: command_text(&argv),
+            },
         },
     )?;
 
@@ -452,6 +457,8 @@ pub(crate) struct Unlock<'a> {
     pub refused_event: &'static str,
     /// What did not happen, for that refusal: "nothing was run".
     pub nothing: &'static str,
+    /// What the unlock is for, which decides what may open the vault.
+    pub action: Action,
 }
 
 /// The values of `names` for one use, the way every use of a secret gets them:
@@ -476,6 +483,7 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
         label,
         refused_event,
         nothing,
+        action,
     } = u;
     let each_use: Vec<String> = names
         .iter()
@@ -559,7 +567,7 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
         lines.extend(extra);
         let mut panel = ctx.panel(title, lines);
         panel.agent_note = label.and_then(sanitize_label);
-        let vault = unlock(ctx, window.as_mut(), vault_path, &panel)?;
+        let vault = unlock_as(ctx, window.as_mut(), vault_path, &panel, action)?;
         for n in names {
             let v = vault.get(n).map_err(|e| match e {
                 Error::NotFound(_) => unknown_name(n),

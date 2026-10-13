@@ -39,12 +39,13 @@ use crate::anchor;
 use crate::encoded::{EncodedSet, Form};
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, refused, unlock,
+    Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, refused, unlock_as,
 };
 use crate::protocol::{ClientReply, OutputSpan, Panel, RefusalKind};
 use crate::scrub::Scrubber;
 use crate::session_ops::nodes_of;
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 /// How long an original is kept for the agent to ask about.
 pub const HOLD_FOR: Duration = Duration::from_secs(10 * 60);
@@ -634,7 +635,13 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
                 && let Some(vault_path) = &vault
             {
                 // The password only approves; the vault is not changed.
-                drop(unlock(ctx, window.as_mut(), vault_path, &panel)?);
+                drop(unlock_as(
+                    ctx,
+                    window.as_mut(),
+                    vault_path,
+                    &panel,
+                    Action::OutputAllow,
+                )?);
             }
             let until = match &session {
                 Some((id, _)) => Until::Session(id.clone()),
@@ -757,7 +764,13 @@ fn save(
         0 => Tier::Session,
         _ => Tier::EachUse,
     };
-    let mut vault = unlock(ctx, window, vault_path, panel)?;
+    let mut vault = unlock_as(
+        ctx,
+        window,
+        vault_path,
+        panel,
+        Action::Add { name: name.clone() },
+    )?;
     if vault.entries().iter().any(|e| e.name == name) {
         return Err(error(
             "the vault changed while the window was open; nothing was saved",

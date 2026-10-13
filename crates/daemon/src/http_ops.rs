@@ -397,6 +397,10 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
             label: label.as_deref(),
             refused_event: "http_refused",
             nothing: "nothing was sent",
+            action: vahta_auth::Action::Http {
+                names: declared.clone(),
+                host: destination.clone(),
+            },
         },
     )?;
 

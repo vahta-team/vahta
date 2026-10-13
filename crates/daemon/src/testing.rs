@@ -127,6 +127,9 @@ pub fn apply_overrides(options: &mut Options) {
         {
             options.clipboard_clear = std::time::Duration::from_secs(secs);
         }
+        if let Some(links) = vahta_auth::loopback::LoopbackLinks::from_env() {
+            options.links = Some(Box::new(links));
+        }
         if let Some(surface) = scripted_from_env() {
             options.surface = Some(surface);
             options.kdf = vahta_vault::KdfParams::TEST;

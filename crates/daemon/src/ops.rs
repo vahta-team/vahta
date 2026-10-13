@@ -12,9 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use vahta_auth::Action;
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Class, Error, Kind, RuleSet, SecretValue, Tier, Vault, valid_name};
+use vahta_vault::{Class, Error, Kind, Peek, RuleSet, SecretValue, Tier, Vault, valid_name};
 use zeroize::Zeroizing;
 
 use crate::clipboard;
@@ -27,9 +28,6 @@ use crate::protocol::{
 use crate::server::Shared;
 use crate::surface::{SurfaceError, Window};
 use crate::valuecheck;
-
-/// How many wrong attempts one window accepts.
-const MAX_TRIES: usize = 3;
 
 /// How long a revealed value stays on screen.
 pub const REVEAL_SECONDS: u32 = 60;
@@ -164,36 +162,39 @@ pub(crate) fn find_vault(cwd: &str) -> Flow<(Project, PathBuf)> {
     Ok((project, vault))
 }
 
-/// Ask for the vault's password in `window` and unlock `path` with it. A wrong
-/// one is asked again, up to [`MAX_TRIES`] times, in the same window.
-pub(crate) fn unlock(
+/// Unlock `path` for `action`: a paired device when the policy lets one, and
+/// always the master password in `window` (asked up to three times in
+/// the same window). What opens the vault is `vahta-auth`'s registry; this
+/// only says what for.
+pub(crate) fn unlock_as(
     ctx: &Ctx<'_>,
     window: &mut dyn Window,
     path: &Path,
     panel: &Panel,
+    action: Action,
 ) -> Flow<Vault> {
-    let mut warning = None;
-    for _ in 0..MAX_TRIES {
-        let mut shown = panel.clone();
-        shown.warning = warning.take();
-        let typed = window
-            .ask_password(&shown, "Vault password", false)
-            .map_err(from_surface)?
-            .ok_or_else(cancelled)?;
-        match Vault::unlock_password(path, typed.expose().as_bytes(), ctx.store()) {
-            Ok(vault) => {
-                // The watchdog asks for this project's password later, so it
-                // must know the project (`<root>/.vahta/vault.vht`).
-                if let Some(root) = path.parent().and_then(Path::parent) {
-                    crate::guard_ops::note_project(ctx, root);
-                }
-                return Ok(vault);
-            }
-            Err(Error::Unlock) => warning = Some("Wrong password. Try again.".to_string()),
-            Err(e) => return Err(from_vault(e)),
-        }
+    crate::authn::unlock_for(ctx, window, path, panel, action).map(|(vault, _)| vault)
+}
+
+/// [`unlock_as`] for a flow that read the vault's plain index first (`peek`):
+/// refuses if the file is not the one that was read. A device unlock writes the
+/// slot again, one generation on, which is not a change.
+pub(crate) fn unlock_expecting(
+    ctx: &Ctx<'_>,
+    window: &mut dyn Window,
+    path: &Path,
+    panel: &Panel,
+    action: Action,
+    peek: &Peek,
+) -> Flow<Vault> {
+    let (vault, by) = crate::authn::unlock_for(ctx, window, path, panel, action)?;
+    let rewrote = u64::from(by.rewrapped);
+    if vault.vault_id() != peek.vault_id || vault.generation() != peek.generation + rewrote {
+        return Err(error(
+            "the vault changed while the window was open; nothing was done",
+        ));
     }
-    Err(error("too many wrong passwords; nothing was done"))
+    Ok(vault)
 }
 
 pub(crate) fn lines_for(project: &Project, vault: &Path) -> Vec<String> {
@@ -413,7 +414,15 @@ pub(crate) fn store(
         lines.push("This replaces the value it has now.".to_string());
     }
     let panel = ctx.panel(title, lines);
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = match mode {
+        StoreMode::Add => Action::Add {
+            name: name.to_string(),
+        },
+        StoreMode::Reset => Action::Reset {
+            name: name.to_string(),
+        },
+    };
+    let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     // The file may have changed between the peek and the unlock.
     let there = vault.entries().iter().any(|e| e.name == name);
     if there != (mode == StoreMode::Reset) {
@@ -820,12 +829,10 @@ pub(crate) fn set_tier(ctx: &Ctx<'_>, cwd: &str, name: &str, tier: Tier) -> Flow
         Tier::EachUse => "Every use will then need the password, even in a session.".to_string(),
     });
     let panel = ctx.panel(title, lines);
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
-    if vault.vault_id() != peek.vault_id || vault.generation() != peek.generation {
-        return Err(error(
-            "the vault changed while the window was open; nothing was done",
-        ));
-    }
+    let action = Action::SetTier {
+        name: name.to_string(),
+    };
+    let mut vault = unlock_expecting(ctx, window.as_mut(), &vault_path, &panel, action, &peek)?;
     vault.set_tier(name, tier).map_err(from_vault)?;
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     ctx.journal(
@@ -857,7 +864,10 @@ pub(crate) fn remove(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> 
     let mut lines = lines_for(&project, &vault_path);
     lines.push(format!("Remove: {name}"));
     let panel = ctx.panel("Remove a secret", lines);
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = Action::Remove {
+        name: name.to_string(),
+    };
+    let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     vault.remove(name).map_err(from_vault)?;
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     ctx.journal(
@@ -950,7 +960,10 @@ pub(crate) fn import(ctx: &Ctx<'_>, cwd: &str, source: &ImportSource) -> Flow<Cl
         lines.push(format!("Names: {}", names.join(", ")));
     }
     let panel = ctx.panel("Import secrets", lines);
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = Action::Import {
+        source: shown_path.to_string(),
+    };
+    let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     let items: Vec<(String, SecretValue)> = match (dotenv_items, ka_path) {
         (Some(parsed), _) => parsed.into_secrets(),
         (None, Some(path)) => {
@@ -1012,7 +1025,10 @@ pub(crate) fn reveal(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> 
     let mut lines = lines_for(&project, &vault_path);
     lines.push(format!("Reveal: {name}"));
     let mut panel = ctx.panel("Reveal a secret", lines);
-    let vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = Action::Reveal {
+        name: name.to_string(),
+    };
+    let vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     let value = named_value(&vault, name)?;
     let text = String::from_utf8_lossy(value.expose()).into_owned();
     let shown = Secret::new(text);
@@ -1053,7 +1069,10 @@ pub(crate) fn copy(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> {
     lines.push(format!("Copy: {name}"));
     lines.push(format!("The clipboard is cleared after {seconds} seconds."));
     let panel = ctx.panel("Copy a secret", lines);
-    let vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = Action::Copy {
+        name: name.to_string(),
+    };
+    let vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     let value = named_value(&vault, name)?;
     tool.set(value.expose())
         .map_err(|e| error(format!("cannot use the clipboard: {e}")))?;

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 11;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -469,6 +469,43 @@ pub enum ClientRequest {
         file: String,
         what: String,
     },
+    /// `vahta devices`: the phones this vault has paired. No password: the
+    /// list is in the signed plain part of the file.
+    DevicesList {
+        cwd: String,
+    },
+    /// `vahta devices pair NAME --for DURATION`: pair a phone. The window asks
+    /// for the master password; the phone then pairs over the link.
+    DevicesPair {
+        cwd: String,
+        name: String,
+        /// How long the phone's access lasts.
+        secs: u64,
+    },
+    /// `vahta devices extend ID --for DURATION`: the master password gives a
+    /// device access for `secs` from now.
+    DevicesExtend {
+        cwd: String,
+        id: String,
+        secs: u64,
+    },
+    /// `vahta devices revoke ID`: remove a device and its slot.
+    DevicesRevoke {
+        cwd: String,
+        id: String,
+    },
+    /// `vahta devices lost ID`: revoke, and change the vault key so that a
+    /// copy of the vault file that the phone could open is of no use to
+    /// whoever has it. Shows a new recovery key.
+    DevicesLost {
+        cwd: String,
+        id: String,
+    },
+    /// `vahta recover`: the password is forgotten; the recovery key opens the
+    /// vault and a new password is chosen.
+    Recover {
+        cwd: String,
+    },
     /// The watchdog tells the daemon what it did, for the journal.
     GuardNote {
         harness: String,
@@ -840,6 +877,28 @@ pub enum ClientReply {
     GuardChoice {
         choice: GuardChoice,
     },
+    /// The answer to [`ClientRequest::DevicesList`].
+    Devices {
+        devices: Vec<DeviceInfo>,
+    },
+}
+
+/// A paired device as `vahta devices` shows it. No key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceInfo {
+    /// The id in hex.
+    pub id: String,
+    pub name: String,
+    pub paired_at: u64,
+    /// When its access ends (Unix seconds); `None` does not end.
+    pub expires_at: Option<u64>,
+    /// The last time it opened the vault or approved something, from the
+    /// daemon's journal.
+    pub last_used: Option<u64>,
+    /// `active` or `expired`.
+    pub state: String,
+    pub transports: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,0 +1,36 @@
+[package]
+name = "vahta-auth"
+version = "0.0.0"
+description = "Vahta's authentication model: unlockers, approvers, factors, device slots, signed decisions"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# A software "phone" with P-256 keys for tests (see `loopback.rs`). Never
+# enabled by any shipped crate; CI fails if `vahta-cli` ever sees it.
+test-surface = []
+
+[dependencies]
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "std"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+vahta-vault = { path = "../vault" }
+zeroize = "1"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+vahta-auth = { path = ".", features = ["test-surface"] }
+vahta-vault = { path = "../vault", features = ["test-kdf"] }

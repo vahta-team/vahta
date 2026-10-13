@@ -92,6 +92,8 @@ pub struct ExtensionAsk {
     pub project: PathBuf,
     pub anchor_exe: String,
     pub anchor_pid: u32,
+    pub vault_path: PathBuf,
+    pub vault_id: [u8; 16],
 }
 
 #[derive(Default)]
@@ -321,6 +323,8 @@ impl Sessions {
                     project: s.project.clone(),
                     anchor_exe: s.anchor_exe.clone(),
                     anchor_pid: s.anchor.pid,
+                    vault_path: s.vault_path.clone(),
+                    vault_id: s.vault_id,
                 });
             }
         }

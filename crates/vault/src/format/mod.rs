@@ -198,6 +198,14 @@ impl Loaded {
         }
     }
 
+    /// The paired devices (an older format has none).
+    pub fn devices(&self) -> Vec<v2::Device> {
+        match self {
+            Loaded::V2(d) => d.model.devices.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn signer(&self) -> v2::Actor {
         match self {
             Loaded::V1(d) => d.signer,

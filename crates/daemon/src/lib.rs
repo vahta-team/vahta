@@ -14,9 +14,11 @@
 mod add_rules;
 mod alarm;
 mod anchor;
+mod authn;
 mod bind_ops;
 mod binding;
 mod clipboard;
+mod devices_ops;
 mod dotenv;
 mod encoded;
 mod guard_ops;

@@ -54,6 +54,9 @@ const INFO_LEGACY_SLOT_ID: &[u8] = b"vahta/v2/legacy-slot-id";
 /// added by giving it the next number here; an old build skips it.
 pub const SLOT_PASSWORD: u16 = 0;
 pub const SLOT_RECOVERY: u16 = 1;
+/// A paired device: the vault key wrapped under an ECDH-derived key (see
+/// `vahta-auth`). Opaque to this crate, which treats it as any other slot.
+pub const SLOT_DEVICE: u16 = 2;
 
 /// The slot crypto version written today.
 pub const SLOT_VERSION: u16 = 2;
@@ -281,6 +284,29 @@ pub fn recovery_slot(
         expires_at: None,
         params: Vec::new(),
         ct: seal_vault_key(&kek, &aad, vk)?,
+    })
+}
+
+/// The key-encryption key of the recovery slot for the paper key `key`.
+pub fn recovery_kek(key: &RecoveryKey) -> Zeroizing<[u8; KEY_LEN]> {
+    crypto::hkdf(key.bytes(), INFO_RECOVERY)
+}
+
+/// `old` with `vk` wrapped under `kek`: the same id, kind, label, expiry and
+/// parameters, a new nonce and ciphertext. What a re-key does to the slots it
+/// keeps. The result is a current-version slot (the AAD binds its id and kind).
+pub fn rewrap_slot(
+    vault_id: &[u8; 16],
+    old: &Slot,
+    vk: &[u8; KEY_LEN],
+    kek: &[u8; KEY_LEN],
+) -> Result<Slot, Error> {
+    let aad = slot_aad(SLOT_VERSION, vault_id, &old.slot_id, old.kind);
+    Ok(Slot {
+        slot_version: SLOT_VERSION,
+        created_at: crate::now(),
+        ct: seal_vault_key(kek, &aad, vk)?,
+        ..old.clone()
     })
 }
 
