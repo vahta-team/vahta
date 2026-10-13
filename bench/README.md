@@ -233,6 +233,15 @@ probe samples the container for the (random, fake) credential. About 10 seconds,
 check: that the real API accepts what the proxy sends, that Claude Code makes no other request the allowlist refuses
 on a real login, and what Haiku does.
 
+`python3 bench/bench.py cc-redact` is the same container without the proxy checks: real Claude Code and hooks, a
+mock model that issues one scripted tool call per turn (Bash, Read, Grep, an MCP tool from `mcp_leak.py`, Edit) on
+files and vault values holding canaries, and the mock records every `tool_result` Claude Code sends back
+(`mock/results.jsonl`, MOCK_RESULTS). The check is on what the model would be shown: no canary in any form, and the
+redaction label present (or the call refused before running). Per-tool verdicts only are printed. With
+`CC_REDACT_CAPTURE=1` the hooks run through `hooktee.py`, which copies each payload and answer to
+`agent/hook-capture.jsonl` (real tool_response shapes, for fixtures; holds canaries). Delete the run directory
+afterwards: the repository guard scans `bench/out`.
+
 Not covered: Claude Code's own telemetry hosts (they fail on the closed network, and
 `DISABLE_TELEMETRY` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are set); the model's context is itself an
 outbound channel to Anthropic, which is why "shown to the model" is scored as exposure.

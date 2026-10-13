@@ -324,4 +324,47 @@ mod tests {
         assert_eq!(doc["systemMessage"], "u");
         assert_eq!(doc["hookSpecificOutput"]["additionalContext"], "a");
     }
+
+    /// Codex marks a hook run failed, and lets the original result through, on a
+    /// field its PostToolUse does not support. Pin the keys we may emit.
+    #[test]
+    fn codex_after_tool_replies_use_only_supported_fields() {
+        let m = crate::manifest("codex").unwrap().unwrap();
+        let top = [
+            "systemMessage",
+            "continue",
+            "stopReason",
+            "decision",
+            "reason",
+            "hookSpecificOutput",
+        ];
+        let replies = [
+            m.render(
+                Kind::AfterTool,
+                &Decision::Notice {
+                    agent_message: "a".into(),
+                    user_message: "u".into(),
+                },
+            ),
+            m.render(Kind::AfterTool, &redact(json!({"stdout": "s"}), false, "u")),
+            m.render(
+                Kind::AfterTool,
+                &redact(json!([{"type": "text"}]), true, "u"),
+            ),
+        ];
+        for out in replies {
+            let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+            for key in doc.as_object().unwrap().keys() {
+                assert!(top.contains(&key.as_str()), "unsupported key {key}");
+            }
+            if let Some(h) = doc.get("hookSpecificOutput") {
+                for key in h.as_object().unwrap().keys() {
+                    assert!(
+                        ["hookEventName", "additionalContext"].contains(&key.as_str()),
+                        "{key}"
+                    );
+                }
+            }
+        }
+    }
 }
