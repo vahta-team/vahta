@@ -183,6 +183,9 @@ fn vectors_match_the_checked_in_file() {
         return;
     }
     let want = std::fs::read_to_string(path).expect("run with VAHTA_UPDATE_VECTORS=1 to create it");
+    // Parsed, not text: immune to line-ending conversion on checkout.
+    let got: Value = serde_json::from_str(&got).unwrap();
+    let want: Value = serde_json::from_str(&want).unwrap();
     assert_eq!(
         got, want,
         "vectors changed; if intended, regenerate with VAHTA_UPDATE_VECTORS=1"

@@ -22,11 +22,11 @@ use crate::frame::Pipe;
 use crate::transport::{DeviceAddr, Transport};
 
 /// The Vahta GATT service the phone advertises.
-pub const SERVICE_UUID: &str = "7a6d0001-5b1e-4c0a-9d3e-6f2b8a41c0de";
+pub const SERVICE_UUID: &str = "11ca9b36-035f-4d80-8e4a-7819627ac4c0";
 /// Central writes frames here (write with response).
-pub const WRITE_CHAR_UUID: &str = "7a6d0002-5b1e-4c0a-9d3e-6f2b8a41c0de";
+pub const WRITE_CHAR_UUID: &str = "0e1a6dcf-3ae7-4ba5-a24c-fc4c243d0629";
 /// Phone sends frames here (notify).
-pub const NOTIFY_CHAR_UUID: &str = "7a6d0003-5b1e-4c0a-9d3e-6f2b8a41c0de";
+pub const NOTIFY_CHAR_UUID: &str = "5625b7a7-3f03-49f9-8d96-a25a49559adf";
 
 const BLUEZ: &str = "org.bluez";
 const ADAPTER: &str = "org.bluez.Adapter1";

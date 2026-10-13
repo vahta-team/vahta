@@ -11,7 +11,7 @@ for the Kotlin/Dart side: `crates/link/tests/vectors.json`.
    whole frames, at most 65535 bytes. Untrusted.
    - **BLE** (Linux, BlueZ over D-Bus): the desktop is the GATT central, the phone the
      server. One service, one write characteristic (desktop to phone), one notify
-     characteristic (phone to desktop); UUIDs are in `ble.rs`. A frame is sent as
+     characteristic (phone to desktop); UUIDs (random v4, fixed forever): service `11ca9b36-035f-4d80-8e4a-7819627ac4c0`, write `0e1a6dcf-3ae7-4ba5-a24c-fc4c243d0629`, notify `5625b7a7-3f03-49f9-8d96-a25a49559adf` (constants in `ble.rs`). A frame is sent as
      a 2-byte big-endian length plus the bytes, cut into chunks of ATT MTU minus 3
      (`ble_frame.rs`; the vectors pin it). The device is found by the address
      remembered at pairing, or by scanning for the service UUID.
