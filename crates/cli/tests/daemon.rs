@@ -2449,7 +2449,6 @@ impl Sandbox {
     }
 }
 
-#[cfg(unix)]
 const PW_ANSWER: &str = r#"{"secret":"correct horse"}"#;
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).
