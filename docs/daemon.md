@@ -294,6 +294,31 @@ arguments), `run_allowed_once` and `binding_added`.
   can send it anywhere that `git` is told to.
 - The check and the start are two steps: a file replaced between them is not
   caught.
+- **Deny groups do not cut the network; only "no network" does.** See "Running
+  with no network" below.
+
+### Running with no network
+
+A command can be started with no network at all, as opposed to a deny list of
+program names.
+
+- **Linux: real isolation.** The command starts in its own user and network
+  namespace. It has no interface but a loopback that is down: it cannot connect
+  to the internet, to services on `127.0.0.1` or the local network, whatever it is
+  called, whether it is a renamed copy, an interpreter running a script, or
+  something it starts itself. Its user and group id are mapped to your own, so it
+  reads and writes the project exactly as before. This needs unprivileged user
+  namespaces; some systems (Ubuntu 24.04 restricts them with AppArmor) turn them
+  off. Then a run that needs "no network" is **refused** with a message, never run
+  with the network on.
+- **What it does not cut.** Unix sockets in the file system stay reachable: a
+  local resolver such as systemd-resolved still answers name lookups (the lookup
+  itself can carry data out, though nothing can be connected to), and so does a
+  container socket the user can open. It is not a file-system sandbox.
+- **macOS and Windows: no isolation.** There is no unprivileged way to do it, so
+  Vahta falls back to the deny groups `@network`, `@shells` and `@interpreters`.
+  That is a speed bump, not a wall: a program in no group, or a renamed copy, gets
+  past it.
 
 ## The daemon
 

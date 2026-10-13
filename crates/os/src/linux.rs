@@ -131,6 +131,84 @@ pub(crate) fn detach_command(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// What `isolate_network` makes of each failure the child can hit, as a raw
+/// errno it hands back through `spawn`. `ECANCELED` is the probe's "it worked".
+const PROBE_OK: i32 = 125;
+
+/// Prepare `cmd` to start in a fresh user and network namespace, mapping the
+/// caller's own uid and gid to themselves so file access is unchanged.
+pub(crate) fn isolate_network(cmd: &mut Command) -> Result<(), crate::Unsupported> {
+    use std::os::unix::process::CommandExt;
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    // Built here, before the fork: the closure below must not allocate.
+    let uid_map = format!("{uid} {uid} 1\n").into_bytes();
+    let gid_map = format!("{gid} {gid} 1\n").into_bytes();
+    // SAFETY: the closure runs in the forked child before exec, where only
+    // async-signal-safe calls are allowed. `enter_isolation` makes only raw
+    // syscalls (unshare, open, write, close through rustix) on buffers that
+    // were built before the fork, and never allocates or takes a lock.
+    unsafe {
+        cmd.pre_exec(move || enter_isolation(&uid_map, &gid_map));
+    }
+    Ok(())
+}
+
+/// In the child: leave the parent's network, then map the user back to itself.
+/// The order is fixed by the kernel: `setgroups` must be `deny` before an
+/// unprivileged `gid_map` write is accepted.
+fn enter_isolation(uid_map: &[u8], gid_map: &[u8]) -> io::Result<()> {
+    use rustix::thread::{UnshareFlags, unshare_unsafe};
+    // SAFETY: unshare of NEWUSER and NEWNET in a single-threaded just-forked
+    // child. It changes only this process's namespaces; no memory is touched.
+    unsafe { unshare_unsafe(UnshareFlags::NEWUSER | UnshareFlags::NEWNET) }?;
+    write_file(c"/proc/self/setgroups", b"deny")?;
+    write_file(c"/proc/self/uid_map", uid_map)?;
+    write_file(c"/proc/self/gid_map", gid_map)?;
+    Ok(())
+}
+
+fn write_file(path: &std::ffi::CStr, data: &[u8]) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, open};
+    let fd = open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())?;
+    // One write: the kernel takes a map file in a single write or not at all.
+    let n = rustix::io::write(&fd, data)?;
+    if n != data.len() {
+        return Err(io::Error::from_raw_os_error(5));
+    }
+    Ok(())
+}
+
+/// Whether a child can get a network namespace of its own here: does the whole
+/// sequence in a forked child, which then reports success as a spawn error
+/// instead of running anything.
+pub(crate) fn network_isolation_available() -> bool {
+    use std::os::unix::process::CommandExt;
+    let mut probe = Command::new("/");
+    let (u, g) = (b"0 0 1\n".to_vec(), b"0 0 1\n".to_vec());
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    let u = if uid == 0 {
+        u
+    } else {
+        format!("{uid} {uid} 1\n").into_bytes()
+    };
+    let g = if gid == 0 {
+        g
+    } else {
+        format!("{gid} {gid} 1\n").into_bytes()
+    };
+    // SAFETY: same constraints and same body as in `isolate_network`; the
+    // closure then returns an error so the child never reaches exec.
+    unsafe {
+        probe.pre_exec(move || {
+            enter_isolation(&u, &g)?;
+            Err(io::Error::from_raw_os_error(PROBE_OK))
+        });
+    }
+    matches!(probe.spawn(), Err(e) if e.raw_os_error() == Some(PROBE_OK))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
