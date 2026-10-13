@@ -4562,6 +4562,7 @@ fn the_encoded_forms_of_a_run_value_are_cut_from_output_and_nothing_leaks() {
     );
 }
 
+#[cfg(unix)]
 fn check_run(s: &Sandbox, names: &[&str], argv: &[&str], path: Option<&str>) -> ClientReply {
     let mut conn = connector(s, false).connect_running().unwrap().unwrap();
     conn.request(&ClientRequest::CheckRun {
