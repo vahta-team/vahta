@@ -1,0 +1,23 @@
+{
+  "event": "permission_request",
+  "env": {},
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "daemon": {
+    "check_run": "allowed"
+  },
+  "stdin": {
+    "hook_event_name": "PermissionRequest",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "vahta run --secret API_KEY -- cargo test",
+      "sandbox_permissions": "require_escalated"
+    },
+    "cwd": "{{TMP}}/proj",
+    "session_id": "s1"
+  },
+  "stdout": null,
+  "exit": 0,
+  "check_run": []
+}

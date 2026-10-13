@@ -32,7 +32,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
-use vahta_harness::{Manifest, Shape};
+use vahta_harness::{DenyRules, Manifest, Shape};
 
 pub mod guard;
 
@@ -436,7 +436,7 @@ fn strip(
     Ok((removed, emptied))
 }
 
-// --- deny rules ----------------------------------------------------------------------------
+// --- deny and allow rules ----------------------------------------------------------------------------
 
 /// The list at the dotted `key`, if it is there. A part of the path that is not
 /// an object, or a list that is not an array, is refused.
@@ -477,12 +477,26 @@ fn deny_list<'a>(
     }
 }
 
-/// Remove our deny rules. Returns how many were removed; a list (and an object
-/// above it) that only that emptied is removed too.
+/// The rule lists of ours in the config: what the harness refuses, then what
+/// it lets through.
+fn rule_lists(m: &Manifest) -> impl Iterator<Item = &DenyRules> {
+    [m.config.deny.as_ref(), m.config.allow.as_ref()]
+        .into_iter()
+        .flatten()
+}
+
+/// Remove our deny and allow rules. Returns how many were removed.
 fn strip_deny(doc: &mut Map<String, Value>, m: &Manifest) -> Result<usize, Refusal> {
-    let Some(d) = &m.config.deny else {
-        return Ok(0);
-    };
+    let mut removed = 0;
+    for d in rule_lists(m) {
+        removed += strip_rules(doc, d)?;
+    }
+    Ok(removed)
+}
+
+/// Remove one list of our rules. Returns how many were removed; a list (and an
+/// object above it) that only that emptied is removed too.
+fn strip_rules(doc: &mut Map<String, Value>, d: &DenyRules) -> Result<usize, Refusal> {
     let Some(list) = deny_list(doc, &d.key, false)? else {
         return Ok(0);
     };
@@ -515,18 +529,15 @@ fn strip_deny(doc: &mut Map<String, Value>, m: &Manifest) -> Result<usize, Refus
     Ok(removed)
 }
 
-/// Whether every deny rule of ours is in the config.
+/// Whether every deny and allow rule of ours is in the config.
 fn deny_present(doc: &mut Map<String, Value>, m: &Manifest) -> bool {
-    let Some(d) = &m.config.deny else {
-        return true;
-    };
-    match deny_list(doc, &d.key, false) {
+    rule_lists(m).all(|d| match deny_list(doc, &d.key, false) {
         Ok(Some(list)) => d
             .rules
             .iter()
             .all(|r| list.iter().any(|v| v.as_str() == Some(r.as_str()))),
         _ => false,
-    }
+    })
 }
 
 /// Where an install puts our entries in each event array.
@@ -668,9 +679,10 @@ pub fn install_text_placed(
     if placement == Placement::Last {
         strip(&mut doc, m.config.shape, os)?;
     }
-    if let Some(d) = &m.config.deny
-        && let Some(list) = deny_list(&mut doc, &d.key, true)?
-    {
+    for d in rule_lists(m) {
+        let Some(list) = deny_list(&mut doc, &d.key, true)? else {
+            continue;
+        };
         // Once each; the person's own rules keep their place. Ours keep
         // theirs too, unless they are to go last.
         if placement == Placement::Last {

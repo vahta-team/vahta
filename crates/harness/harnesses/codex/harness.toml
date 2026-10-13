@@ -4,7 +4,8 @@
 name = "codex"
 title = "Codex"
 # Bump when what `vahta setup` writes for this harness changes.
-setup_version = 1
+# 2: the PermissionRequest hook (approves a `vahta run` the secret's rules allow).
+setup_version = 2
 # Codex runs a non-managed hook only after the person trusts its exact
 # definition; trust is recorded against the hook's hash, so new or changed
 # hooks are skipped until reviewed in /hooks (docs read 2026-10-01). Setup does
@@ -49,6 +50,21 @@ name = "PreToolUse"
 kind = "before_tool"
 # Codex's shell tool is canonically "Bash"; file edits go through apply_patch.
 matcher = "Bash|apply_patch|mcp__.*"
+tool_name = "tool_name"
+tool_input = "tool_input"
+cwd = "cwd"
+session_id = "session_id"
+
+# Fires when Codex is about to ask the person to approve a tool call, and only
+# then (docs read 2026-10-13, https://learn.chatgpt.com/docs/hooks). Any hook's
+# deny wins; an allow skips the prompt; no answer falls back to the prompt. The
+# hook decides here exactly as for before_tool and answers only with an allow,
+# for a single `vahta run` whose inner command the secret's own rules let
+# through. PreToolUse cannot do this: its allow works only with updatedInput.
+[[events]]
+name = "PermissionRequest"
+kind = "permission_request"
+matcher = "Bash"
 tool_name = "tool_name"
 tool_input = "tool_input"
 cwd = "cwd"
@@ -126,6 +142,13 @@ body = { hookSpecificOutput = { hookEventName = "PostToolUse", additionalContext
 [replies.after_tool.redact]
 style = "json"
 body = { decision = "block", reason = "{redacted_text}\n\n{agent_message}", systemMessage = "{user_message}" }
+
+# Approve without asking (decision.behavior "allow", docs read 2026-10-13). Not
+# seen live yet. No updatedInput, updatedPermissions or interrupt: those fail
+# closed in Codex.
+[replies.permission_request.allow_explicit]
+style = "json"
+body = { hookSpecificOutput = { hookEventName = "PermissionRequest", decision = { behavior = "allow" } } }
 
 # SessionStart accepts systemMessage and additionalContext (docs read 2026-10-01).
 [replies.session_start.notice]

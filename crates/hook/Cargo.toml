@@ -32,3 +32,5 @@ serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 vahta-harness = { path = "../harness" }
+# A scripted daemon for the fixtures that need one to say yes.
+vahta-os = { path = "../os" }

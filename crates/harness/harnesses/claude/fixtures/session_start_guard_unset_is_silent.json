@@ -2,7 +2,7 @@
   "event": "session_start",
   "args": [
     "--setup",
-    "3"
+    "4"
   ],
   "env": {},
   "files": {},

@@ -12,7 +12,7 @@
     "cwd": "{{TMP}}"
   },
   "stdout": {
-    "systemMessage": "vahta: setup for Codex is outdated (v0 → v1); run `vahta setup --codex`"
+    "systemMessage": "vahta: setup for Codex is outdated (v0 → v2); run `vahta setup --codex`"
   },
   "exit": 0
 }

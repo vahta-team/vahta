@@ -208,6 +208,104 @@ pub(crate) struct RunArgs {
     pub reason: Option<String>,
 }
 
+/// What every named secret's approved rules say about a command: the names
+/// that have none, and a verdict for each that has. Shared by a run and by the
+/// hook's `CheckRun`, so the two can never disagree.
+struct Checked<'a> {
+    missing: Vec<String>,
+    verdicts: Vec<(&'a vahta_vault::RuleSet, Verdict)>,
+}
+
+fn check_rules<'a>(
+    peek: &'a Peek,
+    project: &vahta_vault::project::Project,
+    names: &[String],
+    argv: &[String],
+    program: Option<&std::path::Path>,
+    canonical_cwd: &std::path::Path,
+) -> Checked<'a> {
+    let missing: Vec<String> = names
+        .iter()
+        .filter(|n| !peek.bindings.iter().any(|b| &b.name == *n))
+        .cloned()
+        .collect();
+    let isolation = vahta_os::network_isolation_available();
+    let verdicts = names
+        .iter()
+        .filter_map(|n| peek.bindings.iter().find(|b| &b.name == n))
+        .map(|b| {
+            let v = vahta_policy::evaluate(
+                b,
+                &vahta_policy::Ctx {
+                    program,
+                    argv,
+                    cwd: canonical_cwd,
+                    project_root: &project.root,
+                    network_isolation: isolation,
+                },
+            );
+            (b, v)
+        })
+        .collect();
+    Checked { missing, verdicts }
+}
+
+/// The hook's question (`CheckRun`): would this command run, with no window,
+/// under the named secrets' own rules? `Allowed` only when the vault is found
+/// and verified, every name is a secret it holds, none is each-use (that one
+/// opens a window whatever the rules say), every one has approved rules, and
+/// all of them allow the command. Everything else is `NoOpinion`, including
+/// every refusal: the real run says why. Nothing is journaled and nothing is
+/// started; the vault is only peeked at.
+pub(crate) fn check(
+    ctx: &Ctx<'_>,
+    cwd: &str,
+    argv: &[String],
+    names: Vec<String>,
+    path: Option<String>,
+) -> ClientReply {
+    let allowed = (|| -> Option<()> {
+        if argv.is_empty() || argv[0].is_empty() {
+            return None;
+        }
+        let cwd_path = PathBuf::from(cwd);
+        if !cwd_path.is_dir() {
+            return None;
+        }
+        let (project, vault_path) = find_vault(cwd).ok()?;
+        let peek = Vault::peek(&vault_path).ok()?;
+        peek.verified(ctx.store()).ok()?;
+        let pairs = resolve(&peek, &project, Some(names), Vec::new()).ok()?;
+        let names: Vec<String> = pairs.into_iter().map(|(n, _)| n).collect();
+        let each_use = names.iter().any(|n| {
+            peek.entries
+                .iter()
+                .find(|e| &e.name == n)
+                .is_none_or(|e| e.tier == Tier::EachUse)
+        });
+        if each_use {
+            return None;
+        }
+        let client_path = path.map(OsString::from);
+        let program = pathfind::locate(&argv[0], client_path.as_ref(), &cwd_path)?;
+        let canonical_cwd = pathfind::canonical(&cwd_path).unwrap_or_else(|| cwd_path.clone());
+        let checked = check_rules(
+            &peek,
+            &project,
+            &names,
+            argv,
+            Some(&program),
+            &canonical_cwd,
+        );
+        (checked.missing.is_empty() && checked.verdicts.iter().all(|(_, v)| v.is_allowed()))
+            .then_some(())
+    })();
+    match allowed {
+        Some(()) => ClientReply::Allowed {},
+        None => ClientReply::NoOpinion {},
+    }
+}
+
 pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     let RunArgs {
         cwd,
@@ -242,36 +340,19 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         .find(|(k, _)| k == "PATH")
         .map(|(_, v)| OsString::from(v));
     let program = pathfind::locate(&argv[0], client_path.as_ref(), &cwd_path);
-    let missing: Vec<String> = names
-        .iter()
-        .filter(|n| !peek.bindings.iter().any(|b| &b.name == *n))
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        return Err(no_rules(ctx, &peek, &missing));
-    }
-    let bound: Vec<&vahta_vault::RuleSet> = names
-        .iter()
-        .filter_map(|n| peek.bindings.iter().find(|b| &b.name == n))
-        .collect();
     let canonical_cwd = pathfind::canonical(&cwd_path).unwrap_or_else(|| cwd_path.clone());
-    let isolation = vahta_os::network_isolation_available();
-    let verdicts: Vec<(&vahta_vault::RuleSet, Verdict)> = bound
-        .iter()
-        .map(|b| {
-            let v = vahta_policy::evaluate(
-                b,
-                &vahta_policy::Ctx {
-                    program: program.as_deref(),
-                    argv: &argv,
-                    cwd: &canonical_cwd,
-                    project_root: &project.root,
-                    network_isolation: isolation,
-                },
-            );
-            (*b, v)
-        })
-        .collect();
+    let checked = check_rules(
+        &peek,
+        &project,
+        &names,
+        &argv,
+        program.as_deref(),
+        &canonical_cwd,
+    );
+    if !checked.missing.is_empty() {
+        return Err(no_rules(ctx, &peek, &checked.missing));
+    }
+    let verdicts = checked.verdicts;
     let failures: Vec<(&vahta_vault::RuleSet, Verdict)> = verdicts
         .iter()
         .filter(|(_, v)| !v.is_allowed())

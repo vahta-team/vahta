@@ -1898,6 +1898,7 @@ dependencies = [
  "vahta-harness",
  "vahta-ipc",
  "vahta-json",
+ "vahta-os",
  "vahta-scan",
  "vahta-setup",
 ]

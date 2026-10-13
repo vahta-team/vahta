@@ -375,6 +375,8 @@ pub fn report(
         | ClientReply::OutputSpans { .. }
         | ClientReply::OutputReleased { .. }
         | ClientReply::ToolDeny { .. }
+        | ClientReply::Allowed {}
+        | ClientReply::NoOpinion {}
         | ClientReply::GuardChoice { .. }
         | ClientReply::Devices { .. }
         | ClientReply::HttpResponse { .. }

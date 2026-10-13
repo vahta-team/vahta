@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use vahta_harness::{HARNESSES, Manifest, manifest};
 use vahta_setup::{
     Action, Env, HookProblem, Os, Refusal, State, commit, detect, inspect, install_text, is_ours,
@@ -432,26 +432,34 @@ fn detection_by_directory_binary_and_variable() {
     );
 }
 
+/// Claude's config as an older setup wrote it: the allow rules taken out, and
+/// the version the hook commands carry put back.
+fn claude_before_allow(current: &str, version: u32) -> String {
+    let mut doc: Value = serde_json::from_str(current).unwrap();
+    doc["permissions"].as_object_mut().unwrap().remove("allow");
+    serde_json::to_string_pretty(&doc)
+        .unwrap()
+        .replace("--setup 4", &format!("--setup {version}"))
+}
+
 #[test]
 fn a_claude_v2_install_without_webfetch_is_outdated_and_upgrades_cleanly() {
     let t = Tree::new();
     let mut env = t.env();
     env.hook = t.write("bin/vahta-hook", "");
     let mf = m("claude");
-    assert_eq!(
-        mf.setup_version, 3,
+    assert!(
+        mf.setup_version >= 3,
         "v3 added WebFetch to the after-tool matcher"
     );
     commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Current);
     let path = config_in(&t, "claude");
-    let v3 = fs::read_to_string(&path).unwrap();
-    assert!(v3.contains("Bash|Read|Grep|Glob|WebFetch|mcp__.*"));
-    // What v2 wrote: the old matcher and --setup 2.
-    let v2 = v3
-        .replace("Glob|WebFetch|mcp__", "Glob|mcp__")
-        .replace("--setup 3", "--setup 2");
-    assert_ne!(v2, v3);
+    let now = fs::read_to_string(&path).unwrap();
+    assert!(now.contains("Bash|Read|Grep|Glob|WebFetch|mcp__.*"));
+    // What v2 wrote: the old matcher, no allow rules, and --setup 2.
+    let v2 = claude_before_allow(&now, 2).replace("Glob|WebFetch|mcp__", "Glob|mcp__");
+    assert_ne!(v2, now);
     fs::write(&path, &v2).unwrap();
     assert_eq!(inspect(&mf, &env).state, State::Outdated);
     commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
@@ -460,9 +468,130 @@ fn a_claude_v2_install_without_webfetch_is_outdated_and_upgrades_cleanly() {
     assert!(after.contains("WebFetch") && !after.contains("--setup 2"));
     assert_eq!(
         after.matches("vahta-hook").count(),
-        v3.matches("vahta-hook").count(),
+        now.matches("vahta-hook").count(),
         "no duplicate entries after the upgrade"
     );
+}
+
+#[test]
+fn a_claude_v3_install_without_allow_rules_is_outdated_and_upgrades_cleanly() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.hook = t.write("bin/vahta-hook", "");
+    let mf = m("claude");
+    assert_eq!(mf.setup_version, 4, "v4 added permissions.allow");
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    let path = config_in(&t, "claude");
+    let now = fs::read_to_string(&path).unwrap();
+    let doc = json(&now);
+    let allow: Vec<&str> = doc["permissions"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(allow.contains(&"Bash(vahta list)") && allow.contains(&"Bash(vh check --json)"));
+    // Never a rule on `vahta run`, nor a wildcard: the harness cannot see
+    // the secret's rules behind it.
+    assert!(
+        allow.iter().all(|r| !r.contains("run") && !r.contains('*')),
+        "{allow:?}"
+    );
+    // What v3 wrote: no allow rules, and --setup 3.
+    let v3 = claude_before_allow(&now, 3);
+    assert_ne!(v3, now);
+    fs::write(&path, &v3).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Outdated);
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(!after.contains("--setup 3"));
+    assert_eq!(
+        json(&after)["permissions"]["allow"],
+        doc["permissions"]["allow"]
+    );
+    assert_eq!(
+        after.matches("vahta-hook").count(),
+        now.matches("vahta-hook").count(),
+        "no duplicate entries after the upgrade"
+    );
+    // A removed allow rule is outdated, as a removed deny rule is.
+    let mut doc = json(&after);
+    doc["permissions"]["allow"].as_array_mut().unwrap().pop();
+    fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Outdated);
+}
+
+#[test]
+fn a_codex_v1_install_without_the_permission_hook_is_outdated_and_upgrades_cleanly() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.hook = t.write("bin/vahta-hook", "");
+    let mf = m("codex");
+    assert_eq!(mf.setup_version, 2, "v2 added the PermissionRequest hook");
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    let path = config_in(&t, "codex");
+    let now = fs::read_to_string(&path).unwrap();
+    let mut doc = json(&now);
+    assert_eq!(doc["hooks"]["PermissionRequest"][0]["matcher"], "Bash");
+    assert!(now.contains("--event permission_request --setup 2"));
+    // What v1 wrote: no PermissionRequest, and --setup 1.
+    doc["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("PermissionRequest");
+    let v1 = serde_json::to_string_pretty(&doc)
+        .unwrap()
+        .replace("--setup 2", "--setup 1");
+    fs::write(&path, &v1).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Outdated);
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(!after.contains("--setup 1"));
+    assert_eq!(
+        after.matches("vahta-hook").count(),
+        now.matches("vahta-hook").count(),
+        "no duplicate entries after the upgrade"
+    );
+}
+
+#[test]
+fn the_persons_own_allow_rules_stay_and_uninstall_takes_out_only_ours() {
+    let mf = m("claude");
+    let before = r#"{"permissions": {"allow": ["Bash(git status)"], "deny": ["Bash(rm -rf:*)"]}}"#;
+    let on = install("claude", Some(before)).unwrap();
+    let allow = json(&on)["permissions"]["allow"].clone();
+    let allow = allow.as_array().unwrap();
+    assert_eq!(allow[0], "Bash(git status)", "theirs keep their place");
+    assert!(allow.len() > 1);
+    assert_eq!(on, install("claude", Some(&on)).unwrap(), "once each");
+    let off = uninstall_text(&on, &mf, Os::Linux).unwrap().unwrap();
+    let doc = json(&off);
+    assert_eq!(doc["permissions"]["allow"], json!(["Bash(git status)"]));
+    assert_eq!(doc["permissions"]["deny"], json!(["Bash(rm -rf:*)"]));
+    assert!(doc.get("hooks").is_none());
+    // Nothing of theirs there: the lists and `permissions` go away.
+    let off = uninstall_text(&install("claude", None).unwrap(), &mf, Os::Linux)
+        .unwrap()
+        .unwrap();
+    assert_eq!(json(&off), json!({}));
+}
+
+#[test]
+fn the_administrator_policy_gets_refusals_and_no_allow_rules() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.hook = t.write("bin/vahta-hook", "");
+    let mf = m("claude");
+    let plan = vahta_setup::guard::managed_plan(&mf, &env, Some(&t.0.join("root")))
+        .unwrap()
+        .unwrap();
+    let doc = json(&plan.text);
+    assert!(doc["permissions"]["deny"].is_array());
+    assert!(doc["permissions"].get("allow").is_none(), "{doc}");
+    assert!(plan.text.contains("vahta-hook"));
 }
 
 #[test]

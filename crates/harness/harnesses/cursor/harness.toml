@@ -118,6 +118,17 @@ text_fields = ["command", "cmd", "script", "code", "contents", "new_string", "co
 group = "read"
 tools = ["read"]
 
+# An explicit allow for a `vahta run` the secret's rules let through. DISABLED
+# until a live test shows Cursor's hook allow suppresses its own approval
+# prompt and the auto-review classifier: the docs (read 2026-10-13) are silent
+# on that. Test with VAHTA_HOOK_UNVERIFIED=1 in the hook's environment on a
+# throwaway workspace, then delete `verified = false`. Only the Shell tool gets
+# it, never MCP. setup_version is unchanged: setup writes the same hooks.
+[replies.before_tool.allow_explicit]
+style = "json"
+verified = false
+body = { permission = "allow" }
+
 [replies.before_tool.deny]
 style = "json"
 # `permission` is allow | deny | ask. agent_message goes to the model,

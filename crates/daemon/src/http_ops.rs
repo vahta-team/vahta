@@ -215,6 +215,43 @@ fn shown(url: &Url) -> String {
     }
 }
 
+/// The hook's question (`CheckHttp`): would a request to `url` with these
+/// secrets pass the host lists their rule sets approve? `Allowed` only when the
+/// build can make requests, the URL is one `vahta http` accepts with no secret
+/// in it, the vault is found and verified, and every name is a session-tier
+/// secret whose approved network rule lists a host matching the URL (the very
+/// function a request uses). Anything else is `NoOpinion`, and the request
+/// itself says why. Nothing is journaled or opened.
+pub(crate) fn check(ctx: &Ctx<'_>, cwd: &str, url: &str, names: Vec<String>) -> ClientReply {
+    let allowed = (|| -> Option<()> {
+        if !cfg!(feature = "http") || names.is_empty() || mentions(url, &names) {
+            return None;
+        }
+        let target = Url::parse(url).ok()?;
+        let (_, vault_path) = find_vault(cwd).ok()?;
+        let peek = Vault::peek(&vault_path).ok()?;
+        peek.verified(ctx.store()).ok()?;
+        names
+            .iter()
+            .all(|n| {
+                let session = peek
+                    .entries
+                    .iter()
+                    .find(|e| &e.name == n)
+                    .is_some_and(|e| e.tier != vahta_vault::Tier::EachUse);
+                let hosts = peek.bindings.iter().find(|b| &b.name == n);
+                session
+                    && matches!(hosts.map(|r| &r.network),
+                        Some(Network::Hosts(h)) if host_allowed(h, &target))
+            })
+            .then_some(())
+    })();
+    match allowed {
+        Some(()) => ClientReply::Allowed {},
+        None => ClientReply::NoOpinion {},
+    }
+}
+
 fn issues(names: &[String], why: RefusalKind) -> Vec<NameIssue> {
     names
         .iter()

@@ -1,0 +1,35 @@
+{
+  "event": "before_tool",
+  "env": {
+    "VAHTA_HOOK_UNVERIFIED": "1"
+  },
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "daemon": {
+    "check_http": "allowed"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "vahta http --secret API_KEY -H 'Authorization: Bearer {API_KEY}' -X POST -d '{\"a\": 1}' https://api.example.com/v1/items"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": {
+    "permission": "allow"
+  },
+  "exit": 0,
+  "check_run": [
+    {
+      "cwd": "{{TMP}}/proj",
+      "url": "https://api.example.com/v1/items",
+      "names": [
+        "API_KEY"
+      ]
+    }
+  ]
+}

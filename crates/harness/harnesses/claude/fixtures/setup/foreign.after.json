@@ -2,7 +2,15 @@
   "model": "opus",
   "permissions": {
     "allow": [
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(vahta list)",
+      "Bash(vahta list --json)",
+      "Bash(vahta check)",
+      "Bash(vahta check --json)",
+      "Bash(vh list)",
+      "Bash(vh list --json)",
+      "Bash(vh check)",
+      "Bash(vh check --json)"
     ],
     "deny": [
       "Bash(vahta reveal:*)",
@@ -38,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 3"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 4"
           }
         ]
       },
@@ -47,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 3"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 4"
           }
         ]
       }
@@ -67,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 3"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 4"
           }
         ]
       }
@@ -87,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 3"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 4"
           }
         ]
       }
@@ -97,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 3"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 4"
           }
         ]
       }

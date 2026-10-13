@@ -27,6 +27,24 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
    `vahta unlock --secret A --secret B --for 1h --label "why"`. The person
    approves it once; `vahta run` from that process and what it starts then needs
    no window.
+
+   **Unattended.** When the command passes the secret's own rules, the hook
+   tells the harness to allow the call, so the person is not asked in the
+   harness either (Claude Code, and Codex after `vahta setup --codex`; Cursor
+   once its live test is done). That works for one plain command only:
+   `vahta run [options] -- PROGRAM ARGS...` with `--secret`, `--as`, `--label`,
+   `--ask`, `--reason`, or one `vahta http --secret ... URL` to a host the
+   secret is approved for, and nothing else in the Bash call (not a call that
+   asks to run outside the sandbox either). Write it that way:
+   no `&&`, `;` or pipe, no `cd` first (the call's directory is what counts),
+   no `$VAR`, `$(...)` or glob outside single quotes, no `FOO=1` before it, and `vahta` or `vh` by its
+   bare name. This removes the harness's question only: a run with no session
+   still opens the password window. Anything else still works, but the
+   harness may ask. Put the
+   pipes and the loops inside a script the rules allow, and run that.
+   `vahta list` and `vahta check` need no approval either (Claude Code). See
+   [hooks.md](hooks.md#running-unattended-when-the-hook-says-allow).
+
 4. Use the scrubbed output and the exit code. A value in the output is replaced
    by `***REDACTED(NAME)***`; do not try to recover it.
 5. If a run is refused (exit 3), the answer names the reason; with `--json` it is
