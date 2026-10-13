@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 2"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 3"
           }
         ]
       },
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 2"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 3"
           }
         ]
       }
@@ -63,11 +63,11 @@
         ]
       },
       {
-        "matcher": "Bash|Read|Grep|Glob|mcp__.*",
+        "matcher": "Bash|Read|Grep|Glob|WebFetch|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 2"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 3"
           }
         ]
       }
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 2"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 3"
           }
         ]
       }
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 2"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 3"
           }
         ]
       }

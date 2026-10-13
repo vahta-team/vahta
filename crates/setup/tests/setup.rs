@@ -433,6 +433,39 @@ fn detection_by_directory_binary_and_variable() {
 }
 
 #[test]
+fn a_claude_v2_install_without_webfetch_is_outdated_and_upgrades_cleanly() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.hook = t.write("bin/vahta-hook", "");
+    let mf = m("claude");
+    assert_eq!(
+        mf.setup_version, 3,
+        "v3 added WebFetch to the after-tool matcher"
+    );
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    let path = config_in(&t, "claude");
+    let v3 = fs::read_to_string(&path).unwrap();
+    assert!(v3.contains("Bash|Read|Grep|Glob|WebFetch|mcp__.*"));
+    // What v2 wrote: the old matcher and --setup 2.
+    let v2 = v3
+        .replace("Glob|WebFetch|mcp__", "Glob|mcp__")
+        .replace("--setup 3", "--setup 2");
+    assert_ne!(v2, v3);
+    fs::write(&path, &v2).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Outdated);
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(after.contains("WebFetch") && !after.contains("--setup 2"));
+    assert_eq!(
+        after.matches("vahta-hook").count(),
+        v3.matches("vahta-hook").count(),
+        "no duplicate entries after the upgrade"
+    );
+}
+
+#[test]
 fn status_none_current_outdated_and_hook_paths() {
     let t = Tree::new();
     let mut env = t.env();

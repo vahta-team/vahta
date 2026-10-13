@@ -7,6 +7,8 @@ Environment:
                 [{"name": "Bash", "input": {"command": "ls"}}, ...]
                 Then it answers with a final text. Default: none (just text).
   MOCK_LOG      where to append request records (default /out/mock.jsonl)
+  MOCK_ECHO    if set: a request with no tools (WebFetch's helper call) is answered with the text of its
+                last user message, so a fetched page comes back as the tool's result
   MOCK_RESULTS  if set: where to append the tool_result blocks each request carries
                 (the newest user message only), as {"id", "is_error", "text"} lines.
                 This is what the model would have been shown.
@@ -23,6 +25,7 @@ import time
 LOG = os.environ.get("MOCK_LOG", "/out/mock.jsonl")
 SCRIPT = json.loads(os.environ.get("MOCK_SCRIPT") or "[]")
 RESULTS = os.environ.get("MOCK_RESULTS")
+ECHO = bool(os.environ.get("MOCK_ECHO"))
 KEEP = ("cookie", "x-forwarded-for", "authorization", "x-api-key", "anthropic-beta", "anthropic-version", "user-agent", "content-type", "host")
 
 
@@ -53,10 +56,18 @@ def record_results(body):
                                     "text": _text(b.get("content"))}) + "\n")
 
 
+def _last_user_text(body):
+    for m in reversed(body.get("messages", [])):
+        if m.get("role") == "user":
+            return _text(m.get("content"))
+    return "ok"
+
+
 def reply_blocks(body):
     """Which content the mock answers with, from how many tool results the conversation holds."""
     if not body.get("tools"):
-        return [{"type": "text", "text": "ok"}], "end_turn"
+        # WebFetch asks a small model to answer from the page: quote the page back, as a model told to would.
+        return [{"type": "text", "text": _last_user_text(body) if ECHO else "ok"}], "end_turn"
     done = sum(1 for b in _blocks(body.get("messages", [])) if b.get("type") == "tool_result")
     if done < len(SCRIPT):
         call = SCRIPT[done]

@@ -5,7 +5,8 @@ name = "claude"
 title = "Claude Code"
 # Bump when what `vahta setup` writes for this harness changes.
 # 2: permissions.deny for the vahta commands that are for the person only.
-setup_version = 2
+# 3: the after-tool matcher also covers WebFetch.
+setup_version = 3
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -109,7 +110,7 @@ kind = "after_tool"
 # Claude sends the result as `tool_response` (a string or a structured object
 # such as {stdout, stderr}); `tool_output` is accepted too. All strings in it
 # are scanned.
-matcher = "Bash|Read|Grep|Glob|mcp__.*"
+matcher = "Bash|Read|Grep|Glob|WebFetch|mcp__.*"
 tool_name = "tool_name"
 tool_output = ["tool_response", "tool_output"]
 cwd = "cwd"
