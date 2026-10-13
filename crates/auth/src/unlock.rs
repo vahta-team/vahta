@@ -40,6 +40,9 @@ pub trait UnlockCtx {
     /// The device whose slot id is `slot_id` (a device's slot shares its id),
     /// if it is known and has a way to be reached.
     fn device(&mut self, slot_id: &[u8; 16]) -> Option<LinkedDevice>;
+    /// An unlocker was tried and passed on (a device refused, answered wrongly,
+    /// was out of reach). For the journal.
+    fn attempt_failed(&mut self, _slot: &SlotInfo, _why: &AuthError) {}
 }
 
 /// How a vault was opened, for the journal and the person. No secret.
@@ -293,7 +296,10 @@ impl Registry {
                         | AuthError::Denied
                         | AuthError::Refused(_)
                         | AuthError::BadDecision(_)),
-                    ) => last = Some(e),
+                    ) => {
+                        ctx.attempt_failed(&slot.info, &e);
+                        last = Some(e);
+                    }
                     Err(e) => return Err(e),
                 }
             }

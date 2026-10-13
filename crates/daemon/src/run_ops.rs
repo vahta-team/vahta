@@ -26,11 +26,12 @@ use std::time::Instant;
 use vahta_vault::manifest;
 use vahta_vault::{Error, Peek, SecretValue, Tier, Vault, valid_name};
 
+use vahta_auth::Action;
 use crate::binding::{self, Verdict};
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, check_name, error, find_vault, from_vault, lines_for, refused, refused_names,
-    unknown_name, unlock,
+    unknown_name, unlock_as,
 };
 use crate::pathfind;
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
@@ -401,7 +402,11 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         lines.push("This run only; no session is opened.".to_string());
         let mut panel = ctx.panel("Run a command", lines);
         panel.agent_note = label.as_deref().and_then(sanitize_label);
-        let vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+        let action = Action::RunEachUse {
+            names: names.clone(),
+            command: command_text(&argv),
+        };
+        let vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
         for n in &names {
             let v = vault.get(n).map_err(|e| match e {
                 Error::NotFound(_) => unknown_name(n),

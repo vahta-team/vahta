@@ -15,7 +15,8 @@ default = "knowledge"
 [actions]
 unlock        = "knowledge"
 run_each_use  = "knowledge"
-run_ask       = "knowledge"
+# The yes for "allow once". Adding a rule to the list is a `bind`.
+run_ask       = "presence"
 bind          = "knowledge"
 add           = "knowledge"
 reset         = "knowledge"

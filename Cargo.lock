@@ -1585,6 +1585,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "vahta-auth",
  "vahta-detect",
  "vahta-harness",
  "vahta-ipc",

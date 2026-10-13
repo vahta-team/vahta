@@ -107,6 +107,25 @@ impl Action {
     }
 }
 
+impl Action {
+    /// The secret names it touches.
+    pub fn names(&self) -> Vec<String> {
+        match self {
+            Action::Unlock { names, .. }
+            | Action::RunEachUse { names, .. }
+            | Action::RunAsk { names, .. }
+            | Action::Bind { names } => names.clone(),
+            Action::Add { name }
+            | Action::Reset { name }
+            | Action::Remove { name }
+            | Action::Reveal { name }
+            | Action::Copy { name }
+            | Action::SetTier { name } => vec![name.clone()],
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// A request for the person's yes. Canonical: its bytes are `postcard` of
 /// this struct, and [`Request::hash`] is over those bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

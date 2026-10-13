@@ -20,7 +20,7 @@ lock-hyprland = []
 # Lets a test drive the daemon without a person and a terminal: a scripted
 # prompt surface, the cheap vault KDF and a few overrides of timing. Never
 # enabled by any shipped crate; CI fails if `vahta-cli` ever sees it.
-test-surface = ["vahta-vault/test-kdf"]
+test-surface = ["vahta-vault/test-kdf", "vahta-auth/test-surface"]
 
 [dependencies]
 # The release list of let-through output values: HMAC-SHA256 under a key
@@ -29,6 +29,7 @@ hmac = "0.12"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+vahta-auth = { path = "../auth" }
 vahta-detect = { path = "../detect" }
 dunce = "1"
 vahta-harness = { path = "../harness" }

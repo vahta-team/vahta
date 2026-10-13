@@ -14,11 +14,12 @@ use std::time::{Duration, Instant};
 use vahta_vault::project::Project;
 use vahta_vault::{Peek, Tier, Vault, valid_name};
 
+use vahta_auth::Action;
 use crate::anchor::{self, Node};
 use crate::encoded::EncodedSet;
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, find_vault, from_vault, lines_for, refused, refused_names, unlock,
+    Ctx, Flow, check_name, find_vault, from_vault, lines_for, refused, refused_names, unlock_as,
 };
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
 use crate::server::Shared;
@@ -224,7 +225,11 @@ pub(crate) fn unlock_session(
     );
     let mut panel = ctx.panel("Open a session", lines);
     panel.agent_note = label.as_deref().and_then(sanitize_label);
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = Action::Unlock {
+        names: names.clone(),
+        duration_secs: lasts.map(|d| d.as_secs()),
+    };
+    let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     if vault.upgrade_pending() {
         // A session reads the current format only; the first save writes it.
         vault.save(&vault_path, ctx.store()).map_err(from_vault)?;

@@ -20,11 +20,12 @@ use vahta_vault::project::Project;
 use vahta_vault::rules::{self, ParsedRule, ProgramSpec};
 use vahta_vault::{ApprovedRule, Network, Peek, RuleSet, Vault, manifest};
 
+use vahta_auth::Action;
 use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, check_name, error, find_vault, from_surface, from_vault, lines_for, refused,
-    unknown_name, unlock,
+    unknown_name, unlock_expecting,
 };
 use crate::pathfind;
 use crate::protocol::{ClientReply, RefusalKind};
@@ -209,12 +210,10 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
         });
     }
     panel.warning = None;
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
-    if vault.vault_id() != peek.vault_id || vault.generation() != peek.generation {
-        return Err(error(
-            "the vault changed while the window was open; nothing was done",
-        ));
-    }
+    let action = Action::Bind {
+        names: names.clone(),
+    };
+    let mut vault = unlock_expecting(ctx, window.as_mut(), &vault_path, &panel, action, &peek)?;
     if !from_file {
         write_file(&project, &changes)?;
     }

@@ -257,27 +257,41 @@ impl Unlocker for DeviceUnlocker {
     }
 }
 
+/// Give the device `device_id` access until `expires_at` (`None`: no end) and a
+/// new slot with a fresh ephemeral key, under the same id. Updates the device
+/// record and the slot together. Nothing is saved.
+pub fn refresh_device(
+    vault: &mut Vault,
+    device_id: &[u8; 16],
+    expires_at: Option<u64>,
+) -> Result<(), AuthError> {
+    let mut device = vault
+        .devices()
+        .iter()
+        .find(|d| &d.device_id == device_id)
+        .cloned()
+        .ok_or(AuthError::Vault(vahta_vault::Error::UnknownDevice))?;
+    device.expires_at = expires_at;
+    let (params, kek) = fresh_kek(&device)?;
+    vault.replace_slot(slot_for(&device, expires_at, params), |vk, aad| {
+        vahta_vault::seal_vault_key(&kek, aad, vk)
+    })?;
+    vault.update_device(device)?;
+    Ok(())
+}
+
 fn rewrap(
     vault: &mut Vault,
     path: &Path,
     store: &LocalStore,
     device_id: &[u8; 16],
 ) -> Result<(), AuthError> {
-    let device = vault
-        .devices()
-        .iter()
-        .find(|d| &d.device_id == device_id)
-        .cloned()
-        .ok_or(AuthError::Vault(vahta_vault::Error::UnknownDevice))?;
     let slot = vault
         .slots()
         .into_iter()
         .find(|s| &s.slot_id == device_id)
         .ok_or(AuthError::Vault(vahta_vault::Error::UnknownSlot))?;
-    let (params, kek) = fresh_kek(&device)?;
-    vault.replace_slot(slot_for(&device, slot.expires_at, params), |vk, aad| {
-        vahta_vault::seal_vault_key(&kek, aad, vk)
-    })?;
+    refresh_device(vault, device_id, slot.expires_at)?;
     vault.save(path, store)?;
     Ok(())
 }
