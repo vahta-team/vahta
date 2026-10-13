@@ -94,6 +94,7 @@ fn ipc_evasion(how: vahta_detect::Evasion) -> Evasion {
         vahta_detect::Evasion::Base64 => Evasion::Base64,
         vahta_detect::Evasion::Concat => Evasion::Concat,
         vahta_detect::Evasion::Hex => Evasion::Hex,
+        vahta_detect::Evasion::Percent => Evasion::Encoded,
     }
 }
 

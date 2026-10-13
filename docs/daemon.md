@@ -433,7 +433,7 @@ bytes.
 Every hook report, live or spooled, and every `ToolCheck` hit counts toward a
 score per agent: the harness's session id when its payload has one, else the
 agent process. Weights: a refused secret 1, one let through in observe mode
-0.5, a refused secret that was hidden (base64, concatenation, hex) 4, a held
+0.5, a refused secret that was hidden (base64, concatenation, hex, percent-encoding) 4, a held
 value in a tool call 6, a touch of Vahta's own files 3, a command for the person
 (`reveal`, `copy`) 2, a change to the hook settings 4. The score is the sum over
 the last 10 minutes. At 6 the alarm goes off, at most once per agent per 10
@@ -628,8 +628,18 @@ out of reach; past 8 MiB the tail is covered only by the vendor prefixes, the
 structural rules and the name matchers, which have no size limit; at most 32 rules compile and
 run for one text (`MAX_RULES_PER_CALL`), the ones with the longest keyword hit
 first; no rule's regex may compile past 1 MiB (`REGEX_SIZE_LIMIT`); at most 16
-base64 runs and 16 hex runs of 64 KiB each, and 64 joined-literal chains, are
-looked at. A truncated scan is reported to a running daemon as `scan_truncated`.
+base64 runs, 16 hex runs and 16 percent-encoded runs of 64 KiB each, and 64
+joined-literal chains, are looked at. A truncated scan is reported to a running daemon as `scan_truncated`.
+The evasion pass (`vahta-detect`, `evasion.rs`) runs only when nothing else
+hit, undoes each form once, and scans the result with the same rules, in its
+context (the name, the `Bearer`, the flag in front of it): a percent-encoded run
+is decoded when it has at least 8 `%XX` escapes that are at least half of its
+bytes and the result is text, so `%20` in a path is left alone; a chain of
+quoted literals, adjacent, joined by `+` or `.`, or Bash's `$'ab'$'cd'`, is
+joined. A hit is always a block, reported as `base64`, `hex`, `encoded` (for
+percent-encoding) or `concat`. This is hygiene for values the daemon does not
+hold; for a held value the guarantee is the daemon's own check above. Marked
+test values (`fake-...`) and placeholders stay allowed in every form.
 The hook costs a few milliseconds more than it did before the rules:
 `cargo run --release -p vahta-hook --example latency` prints the table.
 

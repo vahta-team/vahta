@@ -1,5 +1,5 @@
-//! A secret hidden from a plain look at the text: base64 or hex of it, or
-//! pieces of it joined by the shell or the language.
+//! A secret hidden from a plain look at the text: base64, hex or percent-
+//! encoding of it, or pieces of it joined by the shell or the language.
 //!
 //! This runs only when nothing else hit. Each form is undone once (depth 1)
 //! and the result is scanned as ordinary text by the caller's `scan`. A hit
@@ -21,6 +21,11 @@ pub const MIN_HEX_RUN: usize = 40;
 pub const MAX_DECODED_RUNS: usize = 16;
 /// A run is decoded to at most this many bytes.
 pub const MAX_DECODED_BYTES: usize = 64 * 1024;
+/// A run is percent-encoded, and worth decoding, from this many `%XX` ...
+pub const MIN_PERCENT_ESCAPES: usize = 8;
+/// ... if they are at least this share of its bytes (`%20` in a path is a few
+/// escapes among many plain letters; a value spelled byte by byte is all of them).
+const PERCENT_SHARE: f64 = 0.5;
 /// A decoded run must be this share printable text, or it is binary.
 const PRINTABLE_SHARE: f64 = 0.9;
 /// At most this many literal chains are folded.
@@ -47,6 +52,13 @@ pub fn find<T>(text: &str, scan: &dyn Fn(&str) -> Option<T>) -> Option<(T, Evasi
     for decoded in hex_runs(text) {
         if let Some(found) = scan(&decoded) {
             return Some((found, Evasion::Hex));
+        }
+    }
+    for (decoded, plain) in percent_windows(text) {
+        if scan(&plain).is_none()
+            && let Some(found) = scan(&decoded)
+        {
+            return Some((found, Evasion::Percent));
         }
     }
     for (folded, plain) in concat_windows(text) {
@@ -185,6 +197,75 @@ fn printable(bytes: Vec<u8>) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+// --- percent-encoding ---------------------------------------------------------
+
+/// Bytes that can be in a run of percent-encoded text: unreserved characters
+/// and the `%` itself. A `:`, `@`, `=`, `&` or quote ends the run, so the value
+/// in `user:%41%42...@host` or `KEY=%41%42...` is a run of its own.
+fn is_pct_run(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'%' | b'-' | b'_' | b'.' | b'~')
+}
+
+/// Number of `%XX` escapes in `run`, and the run decoded (at most
+/// [`MAX_DECODED_BYTES`] bytes of it); an unfinished `%` stays as it is.
+fn percent_decode(run: &[u8]) -> (usize, Vec<u8>) {
+    let mut out = Vec::with_capacity(run.len() / 3 + 1);
+    let (mut escapes, mut i) = (0, 0);
+    while i < run.len() && out.len() < MAX_DECODED_BYTES {
+        let hi = (run[i] == b'%').then(|| run.get(i + 1)).flatten();
+        let lo = run.get(i + 2);
+        match (hi.and_then(|h| hex_val(*h)), lo.and_then(|l| hex_val(*l))) {
+            (Some(h), Some(l)) => {
+                out.push(h << 4 | l);
+                escapes += 1;
+                i += 3;
+            }
+            _ => {
+                out.push(run[i]);
+                i += 1;
+            }
+        }
+    }
+    (escapes, out)
+}
+
+/// The densely percent-encoded runs of `text` that decode to text: byte range
+/// and decoded text. At most [`MAX_DECODED_RUNS`] runs.
+fn percent_runs(text: &str) -> Vec<(usize, usize, String)> {
+    if !text.contains('%') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (s, e) in longest(runs(text, 3 * MIN_PERCENT_ESCAPES, is_pct_run)) {
+        let (escapes, bytes) = percent_decode(&text.as_bytes()[s..e]);
+        if escapes < MIN_PERCENT_ESCAPES || ((3 * escapes) as f64) < PERCENT_SHARE * (e - s) as f64
+        {
+            continue;
+        }
+        if let Some(decoded) = printable(bytes) {
+            out.push((s, e, decoded));
+        }
+    }
+    out
+}
+
+/// Each such run, decoded and put back in its context, with the same text
+/// undecoded: a decoded value alone has lost the name or the `Bearer` that
+/// made it a secret.
+fn percent_windows(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (s, e, decoded) in percent_runs(text) {
+        let before = floor_boundary(text, s.saturating_sub(CONTEXT_BEFORE));
+        let after = floor_boundary(text, (e + CONTEXT_AFTER).min(text.len()));
+        let mut window = String::with_capacity(decoded.len() + CONTEXT_BEFORE + CONTEXT_AFTER);
+        window.push_str(&text[before..s]);
+        window.push_str(&decoded);
+        window.push_str(&text[e..after]);
+        out.push((window, text[before..after].to_string()));
+    }
+    out
+}
+
 // --- literal pieces joined ---------------------------------------------------
 
 /// A quoted literal in the text.
@@ -276,6 +357,10 @@ fn joins(gap: &str) -> Option<&str> {
     if gap.len() > 64 {
         return None;
     }
+    // `$'ab'$'cd'`: the `$` opens the next literal in Bash (ANSI-C quoting).
+    if gap == "$" {
+        return Some("");
+    }
     let t = gap.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\\');
     if t.is_empty() || matches!(t, "+" | "." | "..") {
         return Some("");
@@ -334,7 +419,8 @@ fn chains(text: &str, all: &[Piece], out: &mut Vec<(String, String)>) {
             // The words just outside the quotes (`sk-ant-'..'`) are part of
             // the value, and the name before them is its context.
             let mut window = String::with_capacity(joined.len() + CONTEXT_BEFORE + CONTEXT_AFTER);
-            window.push_str(&text[before..start]);
+            let head = &text[before..start];
+            window.push_str(head.strip_suffix('$').unwrap_or(head));
             window.push_str(&joined);
             window.push_str(&text[end..after]);
             out.push((window, text[before..after].to_string()));
@@ -409,6 +495,43 @@ mod tests {
         let w = folded_windows("curl -d 'tok=ab'\"cd\"'ef' x");
         assert!(w.iter().any(|s| s.contains("tok=abcdef")), "{w:?}");
         assert!(folded_windows("echo hello").is_empty());
+    }
+
+    #[test]
+    fn percent_runs_need_to_be_dense() {
+        let dense: String = "abcdefghijklmnop"
+            .bytes()
+            .map(|b| format!("%{b:02X}"))
+            .collect();
+        let w = percent_windows(&format!("Bearer {dense} x"));
+        assert!(
+            w.iter()
+                .any(|(d, _)| d.contains("Bearer abcdefghijklmnop x")),
+            "{w:?}"
+        );
+        // A few escapes among plain letters (a path with spaces) are not decoded.
+        assert!(
+            percent_windows(
+                "/my%20long%20file%20name%20for%20the%20annual%20report%20of%20sales%20numbers"
+            )
+            .is_empty()
+        );
+        assert!(percent_windows("/plain/path/with-no-escapes-at-all-in-it-1234").is_empty());
+        // Binary under the escapes is not text.
+        let bin: String = (0u8..16).map(|b| format!("%{b:02X}")).collect();
+        assert!(percent_windows(&bin).is_empty());
+    }
+
+    #[test]
+    fn an_unfinished_escape_stays() {
+        let (n, out) = percent_decode(b"%41%4");
+        assert_eq!((n, out.as_slice()), (1, &b"A%4"[..]));
+    }
+
+    #[test]
+    fn ansi_c_pieces_join() {
+        let w = folded_windows("export K=$'abcd'$'efgh'");
+        assert!(w.iter().any(|s| s.contains("K=abcdefgh")), "{w:?}");
     }
 
     #[test]
