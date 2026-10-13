@@ -107,14 +107,16 @@ the result still matters, use observe mode, or one rewriting hook per event.
 
 | Harness | Rewrites | How |
 |---|---|---|
-| Claude Code | Bash, Read, Grep, Glob, MCP tools (the PostToolUse matcher) | `updatedToolOutput`, in the tool's own shape; `updatedMCPToolOutput` for MCP tools. The model is told through `additionalContext`. |
+| Claude Code | Bash, Read, Grep, Glob, WebFetch, MCP tools (the PostToolUse matcher) | `updatedToolOutput`, in the tool's own shape; `updatedMCPToolOutput` for MCP tools. The model is told through `additionalContext`. |
 | Cursor | MCP tools only | `updated_mcp_tool_output`. Cursor has no rewrite for its own tools (Shell, Read): there a secret gets the old notice instead. |
 | Codex | Bash, apply_patch, MCP tools (the matcher) | `decision: "block"` with the cut output, then the message for the model, as the reason. |
 
 ### What was checked, per tool
 
 Claude Code 2.1.286, live, with the real hooks and a mock model (no token):
-`python3 bench/bench.py cc-redact`. A canary held by Vahta is made to appear in
+`python3 bench/bench.py cc-redact`. (WebFetch runs offline there: a throwaway
+HTTPS server on 127.0.0.1, `skipWebFetchPreflight` set in the container's settings because the
+domain check goes to claude.ai, and the mock answers WebFetch's helper call by quoting the page.) A canary held by Vahta is made to appear in
 each tool's output, and the mock records every `tool_result` Claude Code sends
 back to the model.
 
@@ -126,13 +128,15 @@ back to the model.
 | MCP tool (stdio server) | redacted by the hook (`updatedMCPToolOutput`) |
 | Read, Grep, `cat` of a file holding an inline credential | refused before running (PreToolUse) |
 | Edit, Write | the result carries no file content in this version; not in the matcher |
-| WebFetch, WebSearch, Agent | not in the matcher, so not rewritten, and not tested offline |
+| WebFetch (a local HTTPS page holding the value) | redacted by the hook: `tool_response` is `{bytes, code, codeText, result, durationMs, url}` and the page text is in `result` |
+| WebSearch | not in the matcher. PostToolUse does fire for it in 2.1.286 (`tool_response` is `{query, results, durationSeconds, searchCount}`), so it could be covered, but the results are the search service's text about public pages, not a file or process of ours, and a held value there would already be public. Left out until there is a case for it. |
+| Agent | not in the matcher, so not rewritten, and not tested offline |
 
 The trap: Claude Code ignores, silently, a replacement that does not match the
 built-in tool's output shape, and the original reaches the model. The hook sends
 back the structure Claude sent (`tool_response`) with only its strings changed,
 so the shape is the tool's own. `crates/harness/harnesses/claude/fixtures/shape_*.json`
-pin it for Bash (stdout, stderr), Read, Grep, Glob and MCP (block array, string),
+pin it for Bash (stdout, stderr), Read, Grep, Glob, WebFetch and MCP (block array, string),
 using the shapes captured from the live run. If a Claude Code release changes a
 tool's shape, `cc-redact` is the check to rerun.
 

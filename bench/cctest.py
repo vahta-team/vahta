@@ -235,6 +235,7 @@ REDACT_SCRIPT = [
     ("Read file (bare value)", {"name": "Read", "input": {"file_path": "/work/proj/bare.txt"}}),
     ("Grep content (inline)", {"name": "Grep", "input": {"pattern": "PASS|TOKEN", "path": "/work/proj/leak.txt", "output_mode": "content", "-n": True}}),
     ("Grep content (bare value)", {"name": "Grep", "input": {"pattern": ".", "path": "/work/proj/bare.txt", "output_mode": "content", "-n": True}}),
+    ("WebFetch (local page)", {"name": "WebFetch", "input": {"url": "https://127.0.0.1:8099/page.html", "prompt": "quote the page"}}),
     ("MCP tool", {"name": "mcp__leak__get_token", "input": {}}),
     ("Edit (result snippet)", {"name": "Edit", "input": {"file_path": "/work/proj/bare.txt", "old_string": "NOTE=1", "new_string": "NOTE=3"}}),
 ]

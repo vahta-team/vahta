@@ -345,7 +345,7 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
         if test_upstream:
             docker("run", "-d", "--name", mock_n, "--network", net, "--network-alias", "mock",
                    "-e", "MOCK_SCRIPT=" + json.dumps(mock_script or []), "-e", "MOCK_LOG=/out/mock.jsonl",
-                   *(["-e", "MOCK_RESULTS=/out/results.jsonl"] if agent_cmd else []),
+                   *(["-e", "MOCK_RESULTS=/out/results.jsonl", "-e", "MOCK_ECHO=1"] if agent_cmd else []),
                    *mounts((os.path.join(run_dir, "mock"), "/out")), IMAGE, "python3", "/bench/mock_anthropic.py")
             start_proxy(net, px_n, run_dir, cap, env_name, test_upstream="http://mock:9000", allow=allow)
         else:
