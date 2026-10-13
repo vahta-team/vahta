@@ -10,6 +10,14 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Rules for every secret** (`vahta-policy`): six compiled-in categories (payment,
+  server, ordinary, database, publish, local-only), mandatory rule sets (a secret with
+  none is refused), folders, a network axis (none, hosts, app; no network on Linux),
+  rules proposed and shown in the `vahta add` window, downgrades shown loudly and
+  journaled.
+- **`vahta http`**: one HTTPS request made by the daemon with a secret in a header
+  or query value, only to hosts the secret is bound to; the response is scrubbed.
+  All network code is `crates/net` behind the `http` feature.
 - **The vault** (`vault.vht`, format 2; format 1 files upgrade on the owner's
   unlock and the original is kept as `vault.vht.v1.bak`): Argon2id for the password,
   XChaCha20-Poly1305 for every sealed value, a per-secret key wrapped for the

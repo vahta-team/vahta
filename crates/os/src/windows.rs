@@ -190,6 +190,14 @@ pub(crate) fn harden_process() -> io::Result<()> {
     ))
 }
 
+pub(crate) fn isolate_network(_cmd: &mut Command) -> Result<(), crate::Unsupported> {
+    Err(crate::Unsupported)
+}
+
+pub(crate) fn network_isolation_available() -> bool {
+    false
+}
+
 pub(crate) fn detach_session() {}
 
 pub(crate) fn detach_command(cmd: &mut Command) {

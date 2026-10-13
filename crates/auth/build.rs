@@ -12,6 +12,7 @@ const ACTIONS: &[&str] = &[
     "unlock",
     "run_each_use",
     "run_ask",
+    "http",
     "bind",
     "add",
     "reset",

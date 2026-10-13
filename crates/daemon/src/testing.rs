@@ -40,6 +40,14 @@ pub fn guard_poll() -> Option<std::time::Duration> {
     }
 }
 
+/// In a test build, the PEM root that `vahta http` also trusts, read from the
+/// file `VAHTA_TEST_HTTP_ROOT` names (a test HTTPS server's certificate
+/// authority). The shipped build trusts the public roots alone.
+#[cfg(all(feature = "http", feature = "test-surface"))]
+pub(crate) fn http_root() -> Option<Vec<u8>> {
+    std::env::var_os("VAHTA_TEST_HTTP_ROOT").and_then(|p| std::fs::read(p).ok())
+}
+
 /// Where the commands of a login autostart (`systemctl`, `launchctl`, `reg`)
 /// go instead of being run. `None` in the shipped build: they are run. In a
 /// test build they are never run: they are appended, one line each, to the

@@ -37,6 +37,11 @@ pub enum Action {
     Bind {
         names: Vec<String>,
     },
+    /// `vahta http`: a request sent with the secrets filled in.
+    Http {
+        names: Vec<String>,
+        host: String,
+    },
     Add {
         name: String,
     },
@@ -88,6 +93,7 @@ impl Action {
             Action::RunEachUse { .. } => "run_each_use",
             Action::RunAsk { .. } => "run_ask",
             Action::Bind { .. } => "bind",
+            Action::Http { .. } => "http",
             Action::Add { .. } => "add",
             Action::Reset { .. } => "reset",
             Action::Remove { .. } => "remove",
@@ -114,6 +120,7 @@ impl Action {
             Action::Unlock { names, .. }
             | Action::RunEachUse { names, .. }
             | Action::RunAsk { names, .. }
+            | Action::Http { names, .. }
             | Action::Bind { names } => names.clone(),
             Action::Add { name }
             | Action::Reset { name }

@@ -37,6 +37,7 @@ mod daemon_cmd;
 mod devices_cmd;
 mod guard_cmd;
 mod hooks_cmd;
+mod http_cmd;
 mod output_cmd;
 mod run_cmd;
 mod session_cmds;
@@ -104,6 +105,7 @@ commands:
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
   run     run a command with secrets in its environment, output scrubbed
+  http    one HTTPS request with a secret in a header or query, to bound hosts
   bind    say which commands may use a secret (the person approves)
   delegate  narrow your session for a sub-agent and run it
   unlock  open a session: one password, then `vahta run` needs no window
@@ -426,6 +428,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         }
         Some("bind") => bind_cmd::run(&args[1..], env, stdout, stderr),
         Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
+        Some("http") => http_cmd::run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),
         Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),
         Some("devices") => devices_cmd::run(&args[1..], env, stdout, stderr),

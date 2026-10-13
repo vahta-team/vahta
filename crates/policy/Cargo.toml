@@ -1,0 +1,20 @@
+[package]
+name = "vahta-policy"
+version = "0.0.0"
+description = "Vahta's rule-set policy: the compiled-in secret categories and the evaluation of a command against a secret's approved rules"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+vahta-vault = { path = "../vault" }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -11,7 +11,9 @@
 //!
 //! `required` defaults to true, `description` to empty and `env` to the name.
 //! It never holds a value or a tier. It may hold `allow` and `deny` lists of
-//! command rules (see [`crate::rules`]), but those are a **proposal**: the
+//! command rules (see [`crate::rules`]) and the rest of a rule set (`category`,
+//! `dirs`, `network` = "none" | "app" | "hosts" with `hosts`), but those are a
+//! **proposal**: the
 //! file is in the repository, so anyone who can push can edit it. What the
 //! daemon enforces is the approved copy in the signed vault, which changes
 //! only when the person approves it in a window with the password. So the
@@ -35,6 +37,28 @@ pub struct SecretEntry {
     pub allow: Vec<ParsedRule>,
     /// Proposed `deny` rules, in file order. Not enforced until approved.
     pub deny: Vec<ParsedRule>,
+    /// Proposed category id (checked against the built-in ones at approval).
+    pub category: Option<String>,
+    /// Proposed directories, as written (`PATH`, optionally `:ro` or `:rw`).
+    pub dirs: Vec<String>,
+    /// Proposed network: `none`, `app` or `hosts`. `None` is the file saying
+    /// nothing, which proposes `app`.
+    pub network: Option<String>,
+    /// Proposed hosts, for `network = "hosts"`.
+    pub hosts: Vec<crate::HostRule>,
+}
+
+/// The rule-set part of a secret's entry, as texts, to write into the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RulesText {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub category: Option<String>,
+    pub dirs: Vec<String>,
+    /// `Some("none")` or `Some("hosts")`; `None` is `app`, the default, which
+    /// is not written.
+    pub network: Option<String>,
+    pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +112,10 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                 env: name.clone(),
                 allow: Vec::new(),
                 deny: Vec::new(),
+                category: None,
+                dirs: Vec::new(),
+                network: None,
+                hosts: Vec::new(),
             };
             for (k, v) in body {
                 match (k.as_str(), v) {
@@ -100,9 +128,42 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                     ("deny", toml::Value::Array(items)) => {
                         entry.deny = rule_list(items, name, "deny", false).map_err(bad)?;
                     }
-                    ("allow" | "deny", _) => {
+                    ("category", toml::Value::String(s))
+                        if !s.is_empty()
+                            && s.len() <= 64
+                            && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') =>
+                    {
+                        entry.category = Some(s.clone());
+                    }
+                    ("network", toml::Value::String(s))
+                        if matches!(s.as_str(), "none" | "app" | "hosts") =>
+                    {
+                        entry.network = Some(s.clone());
+                    }
+                    ("dirs", toml::Value::Array(items)) => {
+                        entry.dirs = string_list(items, name, "dirs").map_err(bad)?;
+                    }
+                    ("hosts", toml::Value::Array(items)) => {
+                        entry.hosts = string_list(items, name, "hosts")
+                            .map_err(bad)?
+                            .iter()
+                            .map(|h| rules::parse_host(h))
+                            .collect::<Result<_, _>>()
+                            .map_err(|e| bad(format!("[secrets.{name}].hosts: {e}")))?;
+                    }
+                    ("allow" | "deny" | "dirs" | "hosts", _) => {
                         return Err(bad(format!(
                             "[secrets.{name}].{k} must be a list of strings"
+                        )));
+                    }
+                    ("category", _) => {
+                        return Err(bad(format!(
+                            "[secrets.{name}].category must be a category id such as \"ordinary\""
+                        )));
+                    }
+                    ("network", _) => {
+                        return Err(bad(format!(
+                            "[secrets.{name}].network must be \"none\", \"app\" or \"hosts\""
                         )));
                     }
                     ("required", _) => {
@@ -123,6 +184,21 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                     }
                 }
             }
+            let hosts_given = !entry.hosts.is_empty();
+            match entry.network.as_deref() {
+                Some("hosts") if !hosts_given => {
+                    return Err(bad(format!(
+                        "[secrets.{name}] has network = \"hosts\" and no hosts"
+                    )));
+                }
+                Some("hosts") => {}
+                _ if hosts_given => {
+                    return Err(bad(format!(
+                        "[secrets.{name}].hosts needs network = \"hosts\""
+                    )));
+                }
+                _ => {}
+            }
             secrets.insert(name.clone(), entry);
         }
     }
@@ -130,6 +206,21 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
         path: path.to_path_buf(),
         secrets,
     })
+}
+
+fn string_list(items: &[toml::Value], name: &str, key: &str) -> Result<Vec<String>, String> {
+    if items.len() > 64 {
+        return Err(format!("[secrets.{name}].{key} has too many entries"));
+    }
+    items
+        .iter()
+        .map(|item| match item {
+            toml::Value::String(t) if !t.is_empty() && t.len() <= 512 => Ok(t.clone()),
+            _ => Err(format!(
+                "[secrets.{name}].{key} must be a list of non-empty strings"
+            )),
+        })
+        .collect()
 }
 
 fn rule_list(
@@ -211,29 +302,51 @@ pub fn add_rule(text: &str, name: &str, allow: bool, rule: &str) -> Result<Strin
     Ok(doc.to_string())
 }
 
-/// `text` with `[secrets.NAME]`'s `allow` and `deny` set to exactly these
-/// rules (a key with no rules is removed). Everything else is kept.
-pub fn set_rules(
-    text: &str,
-    name: &str,
-    allow: &[String],
-    deny: &[String],
-) -> Result<String, Error> {
+/// `text` with `[secrets.NAME]`'s rule keys (`allow`, `deny`, `category`,
+/// `dirs`, `network`, `hosts`) set to exactly these (a key with nothing to say
+/// is removed). Everything else is kept.
+pub fn set_rules(text: &str, name: &str, rules: &RulesText) -> Result<String, Error> {
     let path = Path::new("vahta.toml");
     let mut doc = parse_doc(text).map_err(|e| edit_error(path, e))?;
     // Nothing to write and no table to write it in: leave the file alone.
-    if allow.is_empty() && deny.is_empty() && doc.get("secrets").and_then(|s| s.get(name)).is_none()
-    {
+    if rules == &RulesText::default() && doc.get("secrets").and_then(|s| s.get(name)).is_none() {
         return Ok(text.to_string());
     }
     let table = secret_table(&mut doc, name).map_err(|e| edit_error(path, e))?;
-    for (is_allow, rules) in [(true, allow), (false, deny)] {
-        let key = rules_key(is_allow);
-        if rules.is_empty() {
+    let list = |items: &[String]| -> toml_edit::Item {
+        toml_edit::value(
+            items
+                .iter()
+                .map(String::as_str)
+                .collect::<toml_edit::Array>(),
+        )
+    };
+    for (key, items) in [
+        ("allow", &rules.allow),
+        ("deny", &rules.deny),
+        ("dirs", &rules.dirs),
+        ("hosts", &rules.hosts),
+    ] {
+        if items.is_empty() {
             table.remove(key);
         } else {
-            let array: toml_edit::Array = rules.iter().map(String::as_str).collect();
-            table.insert(key, toml_edit::value(array));
+            table.insert(key, list(items));
+        }
+    }
+    match &rules.category {
+        Some(c) => {
+            table.insert("category", toml_edit::value(c.as_str()));
+        }
+        None => {
+            table.remove("category");
+        }
+    }
+    match &rules.network {
+        Some(n) => {
+            table.insert("network", toml_edit::value(n.as_str()));
+        }
+        None => {
+            table.remove("network");
         }
     }
     Ok(doc.to_string())
@@ -260,22 +373,52 @@ pub fn write_text(path: &Path, text: &str) -> Result<(), Error> {
     result
 }
 
+/// The network of an approved rule set as the file spells it.
+pub fn network_word(network: &crate::Network) -> &'static str {
+    match network {
+        crate::Network::None => "none",
+        crate::Network::Hosts(_) => "hosts",
+        crate::Network::App => "app",
+    }
+}
+
 /// Whether the rules `vahta.toml` proposes for `entry` are the ones the vault
-/// has approved: the same texts, in the same order, in both lists. No rules on
-/// either side is a match.
+/// has approved: the same texts, in the same order, in the command lists, the
+/// same category, directories, network and hosts. A file that says nothing
+/// about network proposes `app`. A file that proposes no rules for the secret
+/// never differs: only a proposal can be pending, and clearing is `bind --clear`.
 pub fn rules_in_sync(entry: Option<&SecretEntry>, approved: Option<&crate::RuleSet>) -> bool {
     let texts = |rules: &[ParsedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
     let approved_texts =
         |rules: &[crate::ApprovedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
-    let (proposed_allow, proposed_deny) = match entry {
-        Some(e) => (texts(&e.allow), texts(&e.deny)),
-        None => (Vec::new(), Vec::new()),
+    // A file that says nothing about a secret's rules (no entry, or an entry
+    // with none of the rule keys) proposes nothing, so it differs from
+    // nothing: the approved rules stand.
+    let Some(e) = entry else {
+        return true;
     };
-    let (have_allow, have_deny) = match approved {
-        Some(b) => (approved_texts(&b.allow), approved_texts(&b.deny)),
-        None => (Vec::new(), Vec::new()),
+    let proposes_nothing = e.allow.is_empty()
+        && e.deny.is_empty()
+        && e.category.is_none()
+        && e.dirs.is_empty()
+        && e.network.is_none()
+        && e.hosts.is_empty();
+    if proposes_nothing {
+        return true;
+    }
+    let Some(b) = approved else {
+        return false;
     };
-    proposed_allow == have_allow && proposed_deny == have_deny
+    let hosts_have = match &b.network {
+        crate::Network::Hosts(h) => h.iter().map(|h| h.text.clone()).collect(),
+        _ => Vec::new(),
+    };
+    texts(&e.allow) == approved_texts(&b.allow)
+        && texts(&e.deny) == approved_texts(&b.deny)
+        && e.category == b.category
+        && e.dirs == b.dirs.iter().map(|d| d.text.clone()).collect::<Vec<_>>()
+        && e.network.as_deref().unwrap_or("app") == network_word(&b.network)
+        && e.hosts.iter().map(|h| h.text.clone()).collect::<Vec<_>>() == hosts_have
 }
 
 /// The outcome of comparing a manifest with the names in a vault.
@@ -374,13 +517,71 @@ mod tests {
     #[test]
     fn setting_rules_replaces_both_lists_and_removes_empty_ones() {
         let text = "[secrets.A]\nallow = [\"x\"]\ndeny = [\"@shells\"]\nenv = \"E\"\n";
-        let got = set_rules(text, "A", &["y".to_string()], &[]).unwrap();
+        let rules = RulesText {
+            allow: vec!["y".to_string()],
+            ..RulesText::default()
+        };
+        let got = set_rules(text, "A", &rules).unwrap();
         let m = p(&got).unwrap();
         assert_eq!(m.secrets["A"].allow[0].text, "y");
         assert!(m.secrets["A"].deny.is_empty());
         assert_eq!(m.secrets["A"].env, "E");
         // Clearing a name the file does not have changes nothing.
-        assert_eq!(set_rules("", "Z", &[], &[]).unwrap(), "");
+        assert_eq!(set_rules("", "Z", &RulesText::default()).unwrap(), "");
+    }
+
+    #[test]
+    fn category_dirs_network_and_hosts_round_trip_and_are_compared() {
+        use crate::{DirRule, Network, RuleSet};
+        let rules = RulesText {
+            allow: vec!["stripe".into()],
+            deny: vec!["@shells".into()],
+            category: Some("payment".into()),
+            dirs: vec!["./scripts".into()],
+            network: Some("hosts".into()),
+            hosts: vec!["api.stripe.com".into(), "*.stripe.com:443".into()],
+        };
+        let text = set_rules("", "K", &rules).unwrap();
+        let m = p(&text).unwrap();
+        let e = &m.secrets["K"];
+        assert_eq!(e.category.as_deref(), Some("payment"));
+        assert_eq!(e.dirs, ["./scripts"]);
+        assert_eq!(e.network.as_deref(), Some("hosts"));
+        assert_eq!(e.hosts.len(), 2);
+        assert!(e.hosts[1].subdomains && e.hosts[1].port == Some(443));
+        // The vault's copy matches when it says the same; any difference shows.
+        let mut approved = RuleSet {
+            name: "K".into(),
+            category: Some("payment".into()),
+            allow: e
+                .allow
+                .iter()
+                .map(|r| r.to_allow("/usr/bin/stripe".into()))
+                .collect(),
+            deny: e.deny.iter().map(ParsedRule::to_deny).collect(),
+            dirs: vec![DirRule {
+                text: "./scripts".into(),
+                path: "/p/scripts".into(),
+                write: true,
+            }],
+            network: Network::Hosts(e.hosts.clone()),
+            ..RuleSet::default()
+        };
+        assert!(rules_in_sync(Some(e), Some(&approved)));
+        approved.network = Network::App;
+        assert!(!rules_in_sync(Some(e), Some(&approved)));
+        approved.network = Network::Hosts(e.hosts.clone());
+        approved.category = None;
+        assert!(!rules_in_sync(Some(e), Some(&approved)));
+        // A file that only lists commands proposes the default network.
+        let old = p("[secrets.K]\nallow = [\"x\"]\n").unwrap();
+        let v1 = RuleSet {
+            name: "K".into(),
+            allow: vec![old.secrets["K"].allow[0].to_allow("/bin/x".into())],
+            network: Network::App,
+            ..RuleSet::default()
+        };
+        assert!(rules_in_sync(Some(&old.secrets["K"]), Some(&v1)));
     }
 
     #[test]
@@ -396,6 +597,12 @@ mod tests {
             "[secrets.A]\ndeny = [\"@nope\"]\n",
             "[secrets.A]\nallow = [\"\"]\n",
             "[secrets.A]\nallow = [\"git 'push'\"]\n",
+            "[secrets.A]\nnetwork = \"hosts\"\n",
+            "[secrets.A]\nhosts = [\"a.com\"]\n",
+            "[secrets.A]\nnetwork = \"hosts\"\nhosts = [\"https://a.com\"]\n",
+            "[secrets.A]\nnetwork = \"everything\"\n",
+            "[secrets.A]\ncategory = \"Pay ment\"\n",
+            "[secrets.A]\ndirs = \"x\"\n",
             "secrets = 3\n",
             "[other]\n",
             "= broken",

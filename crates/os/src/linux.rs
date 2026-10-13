@@ -131,6 +131,124 @@ pub(crate) fn detach_command(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// The probe's "it worked": `ECANCELED`, handed back through `spawn`.
+const PROBE_OK: i32 = 125;
+
+/// Directories whose Unix sockets give a way out of the network namespace (the
+/// system and session buses, systemd-resolved, docker.sock, the XDG runtime
+/// directory, X11). Each that exists is covered with an empty tmpfs.
+const HIDDEN: [&str; 3] = ["/run", "/var/run", "/tmp/.X11-unix"];
+
+/// All of what the child does, built before the fork so that nothing after it
+/// allocates.
+struct Plan {
+    uid_map: Vec<u8>,
+    gid_map: Vec<u8>,
+    hide: Vec<std::ffi::CString>,
+}
+
+impl Plan {
+    fn new() -> Plan {
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        let hide = HIDDEN
+            .iter()
+            .filter(|p| {
+                // A symlink (`/var/run` -> `/run`) is covered by its target;
+                // mounting on the link would mount on the target again.
+                std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
+            })
+            .filter_map(|p| std::ffi::CString::new(*p).ok())
+            .collect();
+        Plan {
+            uid_map: format!("{uid} {uid} 1\n").into_bytes(),
+            gid_map: format!("{gid} {gid} 1\n").into_bytes(),
+            hide,
+        }
+    }
+}
+
+/// Prepare `cmd` to start in a fresh user, network and mount namespace, with
+/// the caller's own uid and gid mapped to themselves so file access is
+/// unchanged, and the socket directories in `HIDDEN` emptied.
+pub(crate) fn isolate_network(cmd: &mut Command) -> Result<(), crate::Unsupported> {
+    use std::os::unix::process::CommandExt;
+    let plan = Plan::new();
+    // SAFETY: the closure runs in the forked child before exec, where only
+    // async-signal-safe calls are allowed. `enter_isolation` makes only raw
+    // syscalls (unshare, open, write, mount through rustix) on data built
+    // before the fork, and never allocates or takes a lock.
+    unsafe {
+        cmd.pre_exec(move || enter_isolation(&plan));
+    }
+    Ok(())
+}
+
+/// In the child: leave the parent's network and mounts, map the user back to
+/// itself, and hide the socket directories. The order is fixed by the kernel:
+/// `setgroups` must be `deny` before an unprivileged `gid_map` write is
+/// accepted, and mounts need the mapped user namespace's rights.
+fn enter_isolation(plan: &Plan) -> io::Result<()> {
+    use rustix::mount::{MountFlags, MountPropagationFlags, mount, mount_change};
+    use rustix::thread::{UnshareFlags, unshare_unsafe};
+    // The daemon is not dumpable (`harden_process`), and the child inherits
+    // that: the kernel then makes its /proc/self/{uid,gid}_map unwritable.
+    // Only this just-forked child is made dumpable again (a normal command is
+    // anyway; exec resets the flag for it).
+    set_dumpable_behavior(DumpableBehavior::Dumpable)?;
+    // SAFETY: unshare of NEWUSER, NEWNET and NEWNS in a single-threaded
+    // just-forked child. It changes only this process's namespaces; no memory
+    // is touched.
+    unsafe { unshare_unsafe(UnshareFlags::NEWUSER | UnshareFlags::NEWNET | UnshareFlags::NEWNS) }?;
+    write_file(c"/proc/self/setgroups", b"deny")?;
+    write_file(c"/proc/self/uid_map", &plan.uid_map)?;
+    write_file(c"/proc/self/gid_map", &plan.gid_map)?;
+    // Nothing mounted below may propagate back to the parent's tree.
+    mount_change(
+        c"/",
+        MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
+    )?;
+    for dir in &plan.hide {
+        mount(
+            c"tmpfs",
+            dir.as_c_str(),
+            c"tmpfs",
+            MountFlags::empty(),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+fn write_file(path: &std::ffi::CStr, data: &[u8]) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, open};
+    let fd = open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())?;
+    // One write: the kernel takes a map file in a single write or not at all.
+    let n = rustix::io::write(&fd, data)?;
+    if n != data.len() {
+        return Err(io::Error::from_raw_os_error(5));
+    }
+    Ok(())
+}
+
+/// Whether a child can get the namespaces here: does the whole sequence in a
+/// forked child, which then reports success as a spawn error instead of
+/// running anything.
+pub(crate) fn network_isolation_available() -> bool {
+    use std::os::unix::process::CommandExt;
+    let mut probe = Command::new("/");
+    let plan = Plan::new();
+    // SAFETY: same constraints and same body as in `isolate_network`; the
+    // closure then returns an error so the child never reaches exec.
+    unsafe {
+        probe.pre_exec(move || {
+            enter_isolation(&plan)?;
+            Err(io::Error::from_raw_os_error(PROBE_OK))
+        });
+    }
+    matches!(probe.spawn(), Err(e) if e.raw_os_error() == Some(PROBE_OK))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

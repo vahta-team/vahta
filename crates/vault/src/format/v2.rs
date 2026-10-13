@@ -24,7 +24,6 @@
 //! definition, re-exported here; a format that changes one of them copies it.
 
 use std::fmt;
-use std::path::{Component, Path};
 
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -521,15 +520,26 @@ fn valid_category(c: &str) -> bool {
     !c.is_empty() && c.len() <= MAX_CATEGORY_LEN && !c.chars().any(char::is_control)
 }
 
+/// Whether `p` is absolute in either convention: `/…`, `X:\…` or `X:/…`, or a
+/// UNC path `\\server\share…`. Judged by the text alone, so a file decodes the
+/// same on every OS.
+fn portable_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    if b.first() == Some(&b'/') {
+        return true;
+    }
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\') {
+        return true;
+    }
+    p.starts_with("\\\\") && p.len() > 2
+}
+
 fn valid_dir(d: &DirRule) -> bool {
-    let path = Path::new(&d.path);
     valid_text(&d.text)
         && d.path.len() <= MAX_PATH_LEN
         && !d.path.contains('\0')
-        && path.is_absolute()
-        && path
-            .components()
-            .all(|c| !matches!(c, Component::CurDir | Component::ParentDir))
+        && portable_absolute(&d.path)
+        && !d.path.split(['/', '\\']).any(|c| c == "." || c == "..")
 }
 
 /// A lowercase DNS name (letters, digits, hyphens, dots; no empty label) or an

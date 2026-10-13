@@ -21,7 +21,9 @@ use vahta_vault::project::Project;
 use vahta_vault::rules::{normalize_program_name, parse_rule, runs_anything};
 use vahta_vault::{ApprovedRule, Peek, RuleSet, manifest};
 
-use crate::binding::{self, Verdict};
+use vahta_policy::Verdict;
+
+use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, error, from_vault, lines_for, unlock_expecting};
 use crate::protocol::ClientReply;
@@ -93,11 +95,17 @@ pub(crate) fn ask(
     delegated: bool,
 ) -> Flow<Decision> {
     let title = "Run a command that is not on the list";
+    // Neither a denied command nor one the rules refuse for another reason
+    // (a directory, no way to cut the network) can be fixed by adding it.
     let denied = failures
         .iter()
         .any(|(_, v)| matches!(v, Verdict::Denied { .. }));
+    let unfixable = denied
+        || failures
+            .iter()
+            .any(|(_, v)| matches!(v, Verdict::Refused { .. }));
     let proposal = match program {
-        Some(p) if !denied && !delegated => proposed_rule(&argv[0], p, &project.root, failures),
+        Some(p) if !unfixable && !delegated => proposed_rule(&argv[0], p, &project.root, failures),
         _ => None,
     };
     let names: Vec<String> = failures.iter().map(|(b, _)| b.name.clone()).collect();
@@ -112,8 +120,8 @@ pub(crate) fn ask(
     for (b, v) in failures {
         let why = match v {
             Verdict::Denied { rule } => format!("denied by `{rule}`"),
-            Verdict::NotAllowed { why } => why.clone(),
-            Verdict::Allowed => String::new(),
+            Verdict::NotAllowed { why } | Verdict::Refused { why } => why.clone(),
+            Verdict::Allowed { .. } => String::new(),
         };
         lines.push(format!("{}: {} ({why})", b.name, binding::rules_text(b)));
     }

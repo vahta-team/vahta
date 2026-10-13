@@ -167,6 +167,7 @@ pub(crate) fn execute(
         session,
         names,
         program,
+        isolate_network,
     } = prepared;
 
     // The file that was checked is the file that runs: not a second lookup of
@@ -185,6 +186,17 @@ pub(crate) fn execute(
     {
         use std::os::unix::process::CommandExt;
         command.arg0(&argv[0]).process_group(0);
+    }
+    if isolate_network
+        && (!vahta_os::network_isolation_available()
+            || vahta_os::isolate_network(&mut command).is_err())
+    {
+        let message = format!(
+            "refused: {} must run without network access, and this system cannot provide that",
+            argv[0]
+        );
+        send(&writer, &RunOutput::Failed { message });
+        return;
     }
     let mut child = match command.spawn() {
         Ok(c) => c,

@@ -111,25 +111,40 @@ is [docs/agent-usage.md](docs/agent-usage.md).
 What each side is told: the agent gets the category and the fix; the person gets
 the rule. Every refusal is journaled without the value.
 
-## Binding secrets to commands
+## Rules for every secret
 
-Without rules, a secret works with any command, so an injected instruction could
-send it somewhere in an open session. A secret can carry rules saying which
-commands may have it:
+A secret cannot be used until it has rules, and the rules are part of adding it.
+`vahta add` takes a **category** (payment, server, ordinary, database, publish,
+local-only) and the agent's proposal of programs, folders and network; the
+person sees it in plain words in the same window as the value:
 
 ```toml
 [secrets.STRIPE_KEY]
-description = "Stripe live key"
-allow = ["stripe", "./scripts/deploy.sh", "git push"]
-deny  = ["@network", "@shells"]
+category = "payment"
+network = "hosts"
+hosts = ["api.stripe.com"]
+allow = ["printenv"]
 ```
 
-The agent proposes rules with `vahta bind`; the person approves them in a window
-with the password. The rules that count are the approved copy inside the signed
-vault, not the file. A command the rules do not allow is refused;
-`vahta run --ask` lets the person decide once or add it to the list. Binding has
-real limits (an allowed program can itself pass a secret on); they are written
-down in [docs/daemon.md](docs/daemon.md#binding-secrets-to-commands).
+A payment key asks for the password on every use and runs with no network of its
+own (on Linux); a category lower than the one the key looks like is allowed but
+shown as a downgrade. The categories are compiled into the binary, and the rules
+that count are the approved copy inside the signed vault, not the file. A command
+the rules do not allow is refused; `vahta run --ask` lets the person decide once
+or add it to the list. The limits (an allowed program can itself pass a secret
+on) are written down in
+[docs/daemon.md](docs/daemon.md#rule-sets-and-categories).
+
+## Calling an API without the key
+
+`vahta http --secret NAME -H 'Authorization: Bearer {NAME}' https://api.example.com/...`
+makes the request in the daemon, puts the value only in the header (or a
+`--query` value) you mark, sends it only to hosts the person bound the secret to,
+and returns the response with the value cut out. It is the only operation in
+Vahta that opens a connection: **network only for operations you bind.** All
+network code is one crate (`crates/net`) behind a cargo feature, and CI checks
+that a build without it has no HTTP or TLS client at all. Details in
+[docs/daemon.md](docs/daemon.md#vahta-http).
 
 ## Supported harnesses and platforms
 

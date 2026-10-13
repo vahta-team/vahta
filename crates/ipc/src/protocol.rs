@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 11;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -199,6 +199,27 @@ pub enum DurationSpec {
     Forever {},
 }
 
+/// The rules a client proposes for a secret it adds. All of it is text: the
+/// daemon parses and resolves it and the person approves what comes out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuleArgs {
+    /// A category id (`payment`, `server`, `ordinary`, `database`, `publish`,
+    /// `local-only`); `None` lets the daemon suggest one from the value and
+    /// the name.
+    pub category: Option<String>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    /// Directories (`PATH`, optionally `:ro` or `:rw`).
+    pub dirs: Vec<String>,
+    /// `none`, `app` or `hosts:H[,H...]`; `None` is the category's default.
+    pub net: Option<String>,
+    /// Why, for the window; shown marked as unverified.
+    pub reason: Option<String>,
+    /// The caller's `PATH`, to resolve the programs of the rules.
+    pub path: Option<String>,
+}
+
 /// What a client may ask. No variant has a field for a value or a password:
 /// the person types those in the prompt window, which is not this connection.
 /// `cwd` is where the command was run, from which the daemon finds the
@@ -218,13 +239,18 @@ pub enum ClientRequest {
         cwd: String,
     },
     /// Add a new secret; its value is typed in the window. Refused if the
-    /// name is already in the vault.
+    /// name is already in the vault. The rules it will have are proposed in
+    /// `rules`, shown in the same window after the value, and stored in the
+    /// same save.
     Add {
         cwd: String,
         name: String,
-        tier: Tier,
+        /// `None`: the category's tier.
+        tier: Option<Tier>,
         /// A file name hint: the secret is a file, not an environment variable.
         file: Option<String>,
+        #[serde(default)]
+        rules: RuleArgs,
     },
     /// Replace the value of a secret the vault has; the new value is typed in
     /// the window. Refused if the name is not there. `None` keeps the tier
@@ -301,6 +327,32 @@ pub enum ClientRequest {
         /// `--reason`: why, for that window; shown marked as unverified.
         reason: Option<String>,
     },
+    /// `vahta http`: one HTTPS request with secrets put in headers or query
+    /// values, made by the daemon. The reply is `HttpResponse`, after which
+    /// the connection carries [`RunOutput::Stdout`] frames with the body and
+    /// one [`RunOutput::Exit`] (or [`RunOutput::Failed`] if the body could not
+    /// be sent). The client never holds a value.
+    Http {
+        cwd: String,
+        /// Upper-case; `GET`, `POST`...
+        method: String,
+        /// Must be `https://`, with no `{NAME}` in it.
+        url: String,
+        /// The secrets that may be used (`--secret`); each must appear in a
+        /// header or query value.
+        names: Vec<String>,
+        /// `(name, value template)`: `{NAME}` in a value is replaced by the
+        /// secret.
+        headers: Vec<(String, String)>,
+        /// `(key, value template)`, appended to the URL's query, encoded.
+        query: Vec<(String, String)>,
+        /// The body, base64. Never has a secret put in it.
+        body: Option<String>,
+        /// Cap on the response body kept, in bytes.
+        max_response: Option<u64>,
+        timeout_secs: Option<u32>,
+        label: Option<String>,
+    },
     /// Propose command rules for a secret (or, with no name, approve what
     /// `vahta.toml` says for every name). Replies `Done`, `Refused` or
     /// `Cancelled`; nothing changes without a window and the password.
@@ -318,6 +370,16 @@ pub enum ClientRequest {
         reason: Option<String>,
         /// The caller's `PATH`, to resolve the programs of the rules.
         path: Option<String>,
+        /// The rule set's category id; with `name` and no other rule-set
+        /// field, the rest of the approved rules is kept.
+        #[serde(default)]
+        category: Option<String>,
+        /// Directories (`PATH`, optionally `:ro` or `:rw`).
+        #[serde(default)]
+        dirs: Vec<String>,
+        /// `none`, `app` or `hosts:H[,H...]`.
+        #[serde(default)]
+        net: Option<String>,
     },
     /// The hook, after a tool ran and before its output reaches the model:
     /// `texts` are the strings of that output (every one, in order), and
@@ -718,6 +780,12 @@ pub enum RefusalKind {
     /// The secret has approved command rules and this command is not allowed by
     /// them (or is denied by them).
     CommandNotAllowed,
+    /// The secret has no approved rules, so no command may use it until some
+    /// are proposed (`vahta bind NAME --category ...`) and approved.
+    NoRules,
+    /// `vahta http`: the secret is not bound to the host the request goes to
+    /// (no host list, the app's own network, or another host).
+    HostNotAllowed,
 }
 
 /// One name in a refusal and why.
@@ -755,6 +823,17 @@ pub enum ClientReply {
         /// next unlock.
         #[serde(default)]
         alarm_at: Option<u64>,
+    },
+    /// An `Http` request got a response; the body follows as `RunOutput`
+    /// frames. Everything here has had the values taken out.
+    HttpResponse {
+        status: u16,
+        /// Lowercase names; credentials-carrying headers are left out.
+        headers: Vec<(String, String)>,
+        /// The body was cut at the size cap.
+        truncated: bool,
+        /// A redirect was not followed, and why.
+        redirect_stopped: Option<String>,
     },
     /// The request was carried out; `message` is for the person, and never a
     /// value.
