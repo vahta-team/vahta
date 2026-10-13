@@ -1029,6 +1029,13 @@ fn rule_set_shapes_are_checked_on_write_and_read() {
     };
     let ok = [
         with(&|r| r.dirs = vec![dir("/home/me/work")]),
+        with(&|r| {
+            r.dirs = vec![
+                dir("C:\\Users\\me"),
+                dir("D:/work"),
+                dir("\\\\srv\\share\\x"),
+            ]
+        }),
         with(&|r| r.network = Network::Hosts(vec![host("api.example.com", Some(443))])),
         with(&|r| r.category = Some("cloud".into())),
         // Only dirs and a network, no commands: still a rule set.
@@ -1046,6 +1053,8 @@ fn rule_set_shapes_are_checked_on_write_and_read() {
     let bad = [
         with(&|r| r.dirs = vec![dir("relative/path")]),
         with(&|r| r.dirs = vec![dir("/a/../b")]),
+        with(&|r| r.dirs = vec![dir("C:\\a\\..\\b")]),
+        with(&|r| r.dirs = vec![dir("C:rel")]),
         with(&|r| r.dirs = vec![dir("")]),
         with(&|r| {
             r.dirs = (0..=current::MAX_DIRS)

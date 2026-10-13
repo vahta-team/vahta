@@ -70,6 +70,9 @@ pub(crate) struct Prepared {
     /// The canonical path of the program, found once with the caller's PATH.
     /// This is what runs, and what the command rules were checked against.
     pub program: PathBuf,
+    /// Start the command with no network (a fresh network namespace). A run
+    /// that asks for it where it cannot be had is refused, never run open.
+    pub isolate_network: bool,
 }
 
 fn to_os(bytes: &[u8]) -> OsString {
@@ -364,6 +367,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         session: via,
         names,
         program,
+        isolate_network: false,
     })
 }
 

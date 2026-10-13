@@ -134,6 +134,14 @@ pub(crate) fn harden_process() -> io::Result<()> {
     .map_err(|e| io::Error::other(format!("RLIMIT_CORE: {e}")))
 }
 
+pub(crate) fn isolate_network(_cmd: &mut Command) -> Result<(), crate::Unsupported> {
+    Err(crate::Unsupported)
+}
+
+pub(crate) fn network_isolation_available() -> bool {
+    false
+}
+
 pub(crate) fn detach_session() {
     let _ = setsid();
 }

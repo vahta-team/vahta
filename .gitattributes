@@ -1,3 +1,4 @@
 crates/detect/src/pyunicode.rs linguist-generated=true
 # Byte-exact fixtures: never convert line endings on checkout.
 crates/harness/harnesses/** text eol=lf
+crates/link/tests/vectors.json text eol=lf

@@ -356,6 +356,38 @@ arguments), `run_allowed_once` and `binding_added`.
   can send it anywhere that `git` is told to.
 - The check and the start are two steps: a file replaced between them is not
   caught.
+- **Deny groups do not cut the network; only "no network" does.** See "Running
+  with no network" below.
+
+### Running with no network
+
+A command can be started with no network at all, as opposed to a deny list of
+program names.
+
+- **Linux: real isolation.** The command starts in its own user and network
+  namespace. It has no interface but a loopback that is down: it cannot connect
+  to the internet, to services on `127.0.0.1` or the local network, whatever it is
+  called, whether it is a renamed copy, an interpreter running a script, or
+  something it starts itself. Its user and group id are mapped to your own, so it
+  reads and writes the project exactly as before. This needs unprivileged user
+  namespaces; some systems (Ubuntu 24.04 restricts them with AppArmor) turn them
+  off. Then a run that needs "no network" is **refused** with a message, never run
+  with the network on.
+- **Unix sockets are closed off too.** The command also gets its own mount
+  namespace in which `/run` (and `/var/run` where it is a real directory) and
+  `/tmp/.X11-unix` are empty. The system and session buses, systemd-resolved (so a
+  lookup of `<data>.evil.example` has nowhere to go), `docker.sock`, the XDG
+  runtime directory and X11 are not there for it. Abstract Unix sockets belong to
+  the network namespace, so they are gone as well. `/tmp` itself is untouched,
+  since the project or temp files may live there.
+- **What it does not cut.** A pathname Unix socket anywhere else is still
+  reachable: in the project, in `/tmp`, in the home directory (some tools keep an
+  agent or control socket there). It is not a file-system sandbox. If the mount
+  setup fails, the run is refused.
+- **macOS and Windows: no isolation.** There is no unprivileged way to do it, so
+  Vahta falls back to the deny groups `@network`, `@shells` and `@interpreters`.
+  That is a speed bump, not a wall: a program in no group, or a renamed copy, gets
+  past it.
 
 ## The daemon
 
