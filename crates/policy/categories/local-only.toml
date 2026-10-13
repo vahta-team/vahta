@@ -1,0 +1,18 @@
+id = "local-only"
+name = "Local-only secret"
+description = "A key that must never leave this machine (an encryption passphrase, a signing key). No program that holds it may use the network."
+rank = 2
+tier = "session"
+networks = ["none"]
+default_network = "none"
+deny = ["@shells", "@interpreters", "@network"]
+dirs = true
+allow_required = true
+programs = ["gpg", "age", "sops", "openssl", "ssh-keygen"]
+words = ["SIGNING", "SIGN", "ENCRYPTION", "ENCRYPT", "PASSPHRASE", "GPG", "PGP", "SOPS", "AGE", "KEYSTORE", "MASTER"]
+checklist = [
+  "Name the exact program and its leading arguments (`gpg --decrypt`); this secret exists for one local job.",
+  "On Linux the program runs with no network, so it cannot send the key out. Where that cannot be had (macOS, Windows, or user namespaces off), only programs that are not shells, interpreters or network tools run, which is weaker.",
+  "A tool that can write the key to a file (an export command) is a leak path: do not allow the export subcommand.",
+  "Use `--dir` only for a folder the person controls; files in it that the agent can write are a way in.",
+]

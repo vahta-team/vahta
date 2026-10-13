@@ -18,7 +18,7 @@
 //! They make a deny list a speed bump, not a wall: a program that is in no
 //! group, or a copy under another name, is not caught. `allow` is the guard.
 
-use crate::format::current::{ApprovedRule, Program};
+use crate::format::current::{ApprovedRule, HostRule, Program};
 
 /// `@network`: programs whose job is to move bytes to another machine.
 pub const NETWORK: &[&str] = &[
@@ -227,6 +227,50 @@ impl ParsedRule {
     }
 }
 
+/// One network destination as written: `host`, `*.host` (every name beneath
+/// it, not the host itself), either with an optional `:port`. The host is a DNS
+/// name or an IPv4 literal, case-insensitive; no scheme, no path, no wildcard
+/// anywhere but a leading `*.`. The error is a short sentence for the person.
+pub fn parse_host(text: &str) -> Result<HostRule, String> {
+    let shown = text.trim();
+    let bad = |why: &str| Err(format!("host `{shown}`: {why}"));
+    if shown.is_empty() || shown.len() > 300 {
+        return bad("a host must be 1 to 300 characters");
+    }
+    if shown.contains("://") || shown.contains('/') {
+        return bad("write only the host name, with no scheme or path");
+    }
+    let (name, port) = match shown.rsplit_once(':') {
+        Some((name, port)) => match port.parse::<u16>() {
+            Ok(p) if p != 0 => (name, Some(p)),
+            _ => return bad("the port is a number from 1 to 65535"),
+        },
+        None => (shown, None),
+    };
+    let (name, subdomains) = match name.strip_prefix("*.") {
+        Some(rest) => (rest, true),
+        None => (name, false),
+    };
+    let host = name.to_ascii_lowercase();
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if host.is_empty() || host.len() > 253 || !host.split('.').all(label_ok) {
+        return bad("not a DNS name or IPv4 address (IPv6 and other wildcards are not supported)");
+    }
+    Ok(HostRule {
+        text: shown.to_string(),
+        host,
+        subdomains,
+        port,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +315,35 @@ mod tests {
         assert_eq!(normalize_program_name("pwsh.cmd"), "pwsh");
         assert_eq!(normalize_program_name("stripe"), "stripe");
         assert_eq!(normalize_program_name("3.12"), "3.12");
+    }
+
+    #[test]
+    fn hosts_parse_with_wildcards_and_ports() {
+        let h = parse_host(" API.Stripe.com ").unwrap();
+        assert_eq!(
+            (h.host.as_str(), h.subdomains, h.port),
+            ("api.stripe.com", false, None)
+        );
+        let h = parse_host("*.example.org:8443").unwrap();
+        assert_eq!(
+            (h.host.as_str(), h.subdomains, h.port),
+            ("example.org", true, Some(8443))
+        );
+        assert!(parse_host("10.0.0.5:80").is_ok());
+        for bad in [
+            "",
+            "https://a.com",
+            "a.com/x",
+            "a..com",
+            "*a.com",
+            "a.com:0",
+            "a.com:x",
+            "[::1]",
+            "-a.com",
+            "a_b.com",
+        ] {
+            assert!(parse_host(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

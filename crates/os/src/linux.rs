@@ -191,6 +191,11 @@ pub(crate) fn isolate_network(cmd: &mut Command) -> Result<(), crate::Unsupporte
 fn enter_isolation(plan: &Plan) -> io::Result<()> {
     use rustix::mount::{MountFlags, MountPropagationFlags, mount, mount_change};
     use rustix::thread::{UnshareFlags, unshare_unsafe};
+    // The daemon is not dumpable (`harden_process`), and the child inherits
+    // that: the kernel then makes its /proc/self/{uid,gid}_map unwritable.
+    // Only this just-forked child is made dumpable again (a normal command is
+    // anyway; exec resets the flag for it).
+    set_dumpable_behavior(DumpableBehavior::Dumpable)?;
     // SAFETY: unshare of NEWUSER, NEWNET and NEWNS in a single-threaded
     // just-forked child. It changes only this process's namespaces; no memory
     // is touched.

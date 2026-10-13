@@ -26,16 +26,40 @@ options:
 ";
 
 pub const ADD_USAGE: &str = "\
-usage: vahta add NAME [--tier session|each-use] [--file FILENAME] [--json]
+usage: vahta add NAME [--category C] [--allow RULE]... [--deny RULE]...
+                      [--dir PATH]... [--net none|app|hosts:H[,H...]]
+                      [--reason TEXT] [--tier session|each-use]
+                      [--file FILENAME] [--json]
 
-Store a new secret. A window opens where you type the vault password and then
-the value, hidden, twice; the value never passes through this command. A NAME
-the vault already has is refused: use `vahta reset NAME` to replace its value.
+Store a new secret together with the rules that say what may use it. A window
+opens where you type the vault password and then the value, hidden, twice; the
+value never passes through this command. Then the same window shows the rules in
+plain words and the person chooses: Accept, Use the default set for the
+category, or Cancel. A NAME the vault already has is refused: use `vahta reset
+NAME` to replace its value.
+
+Every secret must have rules: without them nothing may use it. Think them
+through once, now, so the person approves once and is rarely asked later, and
+close the ways a prompt injection could misuse the key (network tools,
+interpreters, shells, writing the value to a file, sending it to another host).
 
 options:
-  --tier TIER            session (default): a session may hold it, so `vahta
-                         run` can use it without a window while one is open.
-                         each-use: it needs the password every time.
+  --category C           payment, server, ordinary, database, publish or
+                         local-only. Left out, Vahta suggests one from the
+                         value and the name. A category lower than the one the
+                         value looks like is allowed but shown as a downgrade.
+  --allow RULE           a program that may use it, with optional leading
+                         arguments (`stripe`, `git push`, `./scripts/x.sh`)
+  --deny RULE            a program that may not (`@network`, `@shells`,
+                         `@interpreters`, or a name); the category adds its own
+  --dir PATH             a folder whose programs may use it and in which it may
+                         be used (`PATH:ro` for read-only)
+  --net WHAT             none (no network), app (the program's own) or
+                         hosts:H[,H...] (only these hosts, through `vahta http`)
+  --reason TEXT          why, for the window; shown marked as unverified
+  --tier TIER            session: a session may hold it, so `vahta run` can use
+                         it without a window while one is open. each-use: it
+                         needs the password every time. Default: the category's.
   --file FILENAME        the secret is a file with this name, not a variable
   --json                 machine-readable result
   -h, --help             show this help
@@ -137,10 +161,11 @@ struct Parsed {
     file: Option<String>,
     ka: Option<String>,
     dotenv: Option<String>,
+    rules: vahta_ipc::protocol::RuleArgs,
 }
 
 enum Args {
-    Run(Parsed),
+    Run(Box<Parsed>),
     Help,
     Error(String),
 }
@@ -153,6 +178,7 @@ fn parse(command: &str, args: &[String]) -> Args {
         file: None,
         ka: None,
         dotenv: None,
+        rules: Default::default(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -185,6 +211,30 @@ fn parse(command: &str, args: &[String]) -> Args {
                 Ok(v) => p.file = Some(v),
                 Err(e) => return Args::Error(e),
             },
+            "--category" if command == "add" => match value("--category") {
+                Ok(v) => p.rules.category = Some(v),
+                Err(e) => return Args::Error(e),
+            },
+            "--allow" if command == "add" => match value("--allow") {
+                Ok(v) => p.rules.allow.push(v),
+                Err(e) => return Args::Error(e),
+            },
+            "--deny" if command == "add" => match value("--deny") {
+                Ok(v) => p.rules.deny.push(v),
+                Err(e) => return Args::Error(e),
+            },
+            "--dir" if command == "add" => match value("--dir") {
+                Ok(v) => p.rules.dirs.push(v),
+                Err(e) => return Args::Error(e),
+            },
+            "--net" if command == "add" => match value("--net") {
+                Ok(v) => p.rules.net = Some(v),
+                Err(e) => return Args::Error(e),
+            },
+            "--reason" if command == "add" => match value("--reason") {
+                Ok(v) => p.rules.reason = Some(v),
+                Err(e) => return Args::Error(e),
+            },
             "--ka" if command == "import" => match value("--ka") {
                 Ok(v) => p.ka = Some(v),
                 Err(e) => return Args::Error(e),
@@ -197,7 +247,7 @@ fn parse(command: &str, args: &[String]) -> Args {
             s => p.positional.push(s.to_string()),
         }
     }
-    Args::Run(p)
+    Args::Run(Box::new(p))
 }
 
 pub fn run(
@@ -245,8 +295,12 @@ pub fn run(
         "add" => ClientRequest::Add {
             cwd,
             name,
-            tier: parsed.tier.unwrap_or(Tier::Session),
+            tier: parsed.tier,
             file: parsed.file,
+            rules: vahta_ipc::protocol::RuleArgs {
+                path: std::env::var_os("PATH").map(|p| p.to_string_lossy().into_owned()),
+                ..parsed.rules
+            },
         },
         "reset" => ClientRequest::Reset {
             cwd,

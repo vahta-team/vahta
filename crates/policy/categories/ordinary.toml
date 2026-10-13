@@ -1,0 +1,20 @@
+id = "ordinary"
+name = "Ordinary key"
+description = "An API key for a service that cannot move money or open a machine (an LLM, a SaaS API, a read-only token)."
+rank = 1
+tier = "session"
+# Hosts (reached through `vahta http`), or the application's own network.
+networks = ["hosts", "app", "none"]
+default_network = "app"
+deny = ["@shells", "@network"]
+dirs = true
+allow_required = false
+programs = []
+words = []
+checklist = [
+  "Prefer `--net hosts:API.HOST` and `vahta http`: then nothing that runs can send the key elsewhere.",
+  "If an application needs the network itself, name it with its first arguments (`python app.py`), not a bare interpreter.",
+  "A script you allow, or one in an allowed directory, can be rewritten by an injected agent; keep the list short.",
+  "Shells and network programs are denied; do not rely on that alone, since a renamed copy gets past a deny list.",
+  "Use `--dir` for a folder of scripts only when they are reviewed code, not files the agent writes.",
+]

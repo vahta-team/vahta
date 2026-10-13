@@ -30,10 +30,11 @@ vault's signed name index; needs no password and prints no values.
 
 When it is known, a class column says what a secret guards (payment, cloud or
 other, judged when it was added). A rules column says whether the secret has
-approved command rules: `any command` (none), `bound`, or `bound (toml differs)`
-when vahta.toml proposes other rules than the vault has approved (`vahta bind`
+approved rules: `NO RULES` (nothing may use it yet), or its category and
+network (`ordinary, app`; `payment, hosts`), with `(toml differs)` when
+vahta.toml proposes other rules than the vault has approved (`vahta bind`
 approves them; only the vault's copy is enforced). The JSON adds `class`,
-`bound` and `rules_pending` to every secret.
+`bound`, `category`, `network`, `dirs` and `rules_pending` to every secret.
 
 options:
   --json                 machine-readable JSON instead of text
@@ -177,6 +178,13 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
                 let mut o = json!({"name": e.name, "kind": "env", "tier": tier_text(e.tier)});
                 o["class"] = json!(e.class.map(Class::as_str));
                 o["bound"] = json!(bound(&e.name));
+                let set = peek.bindings.iter().find(|b| b.name == e.name);
+                o["category"] = json!(set.and_then(|b| b.category.clone()));
+                o["network"] = json!(set.map(|b| manifest::network_word(&b.network)));
+                o["dirs"] = json!(
+                    set.map(|b| b.dirs.iter().map(|d| d.text.clone()).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                );
                 o["rules_pending"] = json!(pending.contains(&e.name));
                 if let Kind::File { file_name } = &e.kind {
                     o["kind"] = json!("file");
@@ -209,7 +217,7 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
             let show_class = entries.iter().any(|e| e.class.is_some());
             // A secret with a class was written by a Vahta that knows rules, so
             // its "any command" is worth saying.
-            let show_rules = show_class || !peek.bindings.is_empty() || !pending.is_empty();
+            let show_rules = true;
             for (e, kind) in entries.iter().zip(&kinds) {
                 let mut line = format!(
                     "{:<width$}  {:<kind_width$}  {:<8}",
@@ -224,12 +232,18 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
                     ));
                 }
                 if show_rules {
-                    let rules = match (bound(&e.name), pending.contains(&e.name)) {
-                        (true, true) => "bound (toml differs)",
-                        (true, false) => "bound",
-                        (false, true) => "any command (toml differs)",
-                        (false, false) => "any command",
+                    let set = peek.bindings.iter().find(|b| b.name == e.name);
+                    let mut rules = match set {
+                        None => "NO RULES".to_string(),
+                        Some(b) => format!(
+                            "{}, {}",
+                            b.category.as_deref().unwrap_or("custom"),
+                            manifest::network_word(&b.network)
+                        ),
                     };
+                    if pending.contains(&e.name) {
+                        rules.push_str(" (toml differs)");
+                    }
                     line.push_str(&format!("  {rules}"));
                 }
                 let _ = writeln!(stdout, "{}", line.trim_end());
@@ -350,6 +364,7 @@ pub fn run_check(
 
     let vault_path = project.vault_path();
     let has_vault = vault_path.is_file();
+    let mut rules_lines: Vec<String> = Vec::new();
     let (names, vault_shown, pending): (Option<Vec<String>>, Option<&Path>, Vec<String>) =
         if has_vault {
             let Some(store) = store(env) else {
@@ -368,6 +383,20 @@ pub fn run_check(
                             stderr,
                             "unverified: this vault has not been unlocked on this machine yet"
                         );
+                    }
+                    for e in &peek.entries {
+                        if !manifest.secrets.contains_key(&e.name) {
+                            continue;
+                        }
+                        rules_lines.push(match peek.bindings.iter().find(|b| b.name == e.name) {
+                            Some(b) => format!(
+                                "  {}: {}, network {}",
+                                e.name,
+                                b.category.as_deref().unwrap_or("custom rules"),
+                                manifest::network_word(&b.network)
+                            ),
+                            None => format!("  {}: NO RULES (nothing may use it yet)", e.name),
+                        });
                     }
                     (
                         Some(peek.entries.iter().map(|e| e.name.clone()).collect()),
@@ -433,6 +462,10 @@ pub fn run_check(
                     result.optional_absent.join(", ")
                 ));
             }
+        }
+        if !rules_lines.is_empty() {
+            lines.push("Rules:".to_string());
+            lines.extend(rules_lines.iter().cloned());
         }
         if !pending.is_empty() {
             lines.push(format!(

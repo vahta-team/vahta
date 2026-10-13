@@ -1453,6 +1453,7 @@ dependencies = [
  "vahta-harness",
  "vahta-ipc",
  "vahta-os",
+ "vahta-policy",
  "vahta-setup",
  "vahta-vault",
  "zbus",
@@ -1515,6 +1516,15 @@ dependencies = [
  "libc",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "vahta-policy"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "toml",
+ "vahta-vault",
 ]
 
 [[package]]

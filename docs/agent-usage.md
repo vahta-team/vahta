@@ -31,12 +31,42 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
    by `***REDACTED(NAME)***`; do not try to recover it.
 5. If a run is refused (exit 3), the answer names the reason; with `--json` it is
    structured. Fix the command rather than retry it.
-6. To get a secret's allowed commands set, propose rules with `vahta bind NAME
-   --allow PROGRAM --reason "..."`. The person approves. `vahta run --ask` asks
-   the person about one command that the rules do not allow.
+6. A secret with no rules cannot be used (exit 3, `no_rules`). Rules come with
+   the secret: `vahta add NAME --category C --allow PROGRAM --net ... --reason
+   "..."` (see below), or later `vahta bind NAME ...`. The person approves.
+   `vahta run --ask` asks the person about one command that the rules do not
+   allow.
 7. If the hook cut something out of a tool's output that is needed,
    `vahta output allow REF --reason "..."` asks the person to show it
    ([hooks.md](hooks.md)).
+
+## Designing the rules
+
+Design the rules **once, up front**, so the person approves once and is rarely
+asked again. Inside the rules you work freely; every `--ask` is a window.
+
+1. Pick the category (`payment`, `server`, `ordinary`, `database`, `publish`,
+   `local-only`). Left out, Vahta suggests one from the value and the name; a
+   lower one than it expects is shown to the person as a downgrade.
+2. Name what the work needs and no more: the programs (`--allow "git push"`, not
+   `git`), the folders (`--dir ./scripts`, only for code the agent does not write)
+   and the network (`--net hosts:api.vendor.com` and `vahta http` where you can,
+   `--net none` for a local job, `--net app` only when the tool needs its own).
+3. **Walk through how a prompt injection could misuse this secret**, one path at a
+   time, and close each now:
+   - a **network tool** (`curl`, `nc`) or an allowed program told to send the
+     value to another host: keep the network `none`/`hosts`, or deny `@network`;
+   - an **interpreter** (`python -c`, `node -e`): do not allow one bare; name the
+     script with its arguments, or deny `@interpreters`;
+   - a **shell** (`sh -c '... $KEY ...'`, a launcher): deny `@shells`; do not allow
+     `env`, `xargs`, `timeout`;
+   - **writing the value to a file** (`cp`, `tee`, `pg_dump -f`) that you or a
+     tool then read: allow only programs that cannot, or fix the destination;
+   - **another host**: with `hosts`, name only the vendor's own;
+   - a **script in the project** you allow or a folder you list: an injected agent
+     can rewrite it. Prefer a program with arguments.
+4. Then `vahta add` with all of it in one command. The reply repeats the
+   category's checklist.
 
 ## What the agent must not do
 
@@ -57,7 +87,7 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
 | `vahta init` | Creates the vault; the recovery key is shown once, to the person |
 | `vahta add`, `reset`, `tier`, `remove` | Change the vault; password required |
 | `vahta reveal`, `vahta copy` | Show a value to the person only; always a fresh password |
-| `vahta bind` (approval) | The agent proposes; the person approves |
+| `vahta add` (rules) / `vahta bind` (approval) | The agent proposes; the person approves |
 
 A session is a *runner*: it can `run` and nothing else. `reveal`, `copy` and every
 write need a fresh password even inside one.

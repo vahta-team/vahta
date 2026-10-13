@@ -132,10 +132,36 @@ impl Sandbox {
             self.script(&[
                 r#"{"secret":"correct horse"}"#,
                 &format!(r#"{{"secret":"{value}"}}"#),
+                r#"{"choose":0}"#,
             ]);
             let out = self.vahta(&["add", name, "--tier", tier]);
             assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         }
+        self.open_rules(&items.iter().map(|i| i.0).collect::<Vec<_>>());
+    }
+
+    /// Give each of `names` an explicit rule set that lets any command use it
+    /// (no category, no deny groups, the program's own network), and drop the
+    /// `vahta.toml` that `add` wrote, so tests that are not about rules start
+    /// from "everything allowed" as they did before rules were mandatory.
+    fn open_rules(&self, names: &[&str]) {
+        let mut vault = self.open_vault();
+        for n in names {
+            vault
+                .set_bindings(
+                    n,
+                    Some(vahta_vault::RuleSet {
+                        name: (*n).to_string(),
+                        network: vahta_vault::Network::App,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+        }
+        vault
+            .save(&self.vault_path(), &LocalStore::new(self.root.join("data")))
+            .unwrap();
+        let _ = fs::remove_file(self.project().join("vahta.toml"));
     }
 
     fn vahta(&self, args: &[&str]) -> Output {
@@ -448,15 +474,27 @@ fn init_and_add_go_through_the_window_and_nothing_secret_comes_back() {
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(s.asks(), before);
 
-    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-one"}"#]);
+    s.script(&[
+        r#"{"secret":"correct horse"}"#,
+        r#"{"secret":"fake-one"}"#,
+        r#"{"choose":0}"#,
+    ]);
     let out = s.vahta(&["add", "ZETA"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // The first line says what was done; the rest tells the agent how to ask
     // for rules, with no value in it.
     let said = text(&out.stdout);
     assert_eq!(said.lines().next(), Some("saved ZETA"));
-    assert!(said.contains("vahta bind ZETA --allow PROGRAM") && !said.contains("fake-"));
-    s.script(&[r#"{"secret":"correct horse"}"#, r#"{"secret":"fake-two"}"#]);
+    assert!(
+        said.contains("Rules approved with it: category: ordinary")
+            && said.contains("prompt injection")
+            && !said.contains("fake-")
+    );
+    s.script(&[
+        r#"{"secret":"correct horse"}"#,
+        r#"{"secret":"fake-two"}"#,
+        r#"{"choose":0}"#,
+    ]);
     let out = s.vahta(&["add", "ALPHA", "--tier", "each-use", "--file", "alpha.pem"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
@@ -606,7 +644,12 @@ fn a_value_with_stray_whitespace_is_asked_about_and_never_shown() {
     let two_lines = format!("{core}\n{core}");
 
     // Trailing space, trim chosen: stored trimmed.
-    s.script(&[PW_ANSWER, &typed(&with_space), r#"{"choose":0}"#]);
+    s.script(&[
+        PW_ANSWER,
+        &typed(&with_space),
+        r#"{"choose":0}"#,
+        r#"{"choose":0}"#,
+    ]);
     let out = s.vahta(&["add", "ONE"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(!text(&out.stdout).contains(&core) && !text(&out.stderr).contains(&core));
@@ -625,7 +668,12 @@ fn a_value_with_stray_whitespace_is_asked_about_and_never_shown() {
     assert_eq!(asked["options"].as_array().unwrap().len(), 4);
 
     // Stored exactly as typed.
-    s.script(&[PW_ANSWER, &typed(&with_break), r#"{"choose":1}"#]);
+    s.script(&[
+        PW_ANSWER,
+        &typed(&with_break),
+        r#"{"choose":1}"#,
+        r#"{"choose":0}"#,
+    ]);
     let out = s.vahta(&["add", "TWO"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
@@ -639,6 +687,7 @@ fn a_value_with_stray_whitespace_is_asked_about_and_never_shown() {
         &typed(&format!("{pad}{core}")),
         r#"{"choose":2}"#,
         &typed(&core),
+        r#"{"choose":0}"#,
     ]);
     let out = s.vahta(&["add", "THREE"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -691,11 +740,11 @@ fn a_pem_block_and_a_file_secret_are_not_nagged_about_their_lines() {
     let body = ["Zm9v", "YmFy", "YmF6"].concat();
     let pem = format!("-----BEGIN KEY-----\n{body}\n{body}\n-----END KEY-----\n");
     let before = s.asks();
-    s.script(&[PW_ANSWER, &typed(&pem)]);
+    s.script(&[PW_ANSWER, &typed(&pem), r#"{"choose":0}"#]);
     let out = s.vahta(&["add", "PEMMED"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    // The password and the value: two questions, no third.
-    assert_eq!(s.asks() - before, 2);
+    // The password, the value and the rules: no whitespace question.
+    assert_eq!(s.asks() - before, 3);
     assert_eq!(
         s.open_vault().get("PEMMED").unwrap().expose(),
         pem.as_bytes()
@@ -703,11 +752,11 @@ fn a_pem_block_and_a_file_secret_are_not_nagged_about_their_lines() {
 
     // A file secret may be many lines of anything.
     let lines = format!("{body}\n{body}\n");
-    s.script(&[PW_ANSWER, &typed(&lines)]);
+    s.script(&[PW_ANSWER, &typed(&lines), r#"{"choose":0}"#]);
     let before = s.asks();
     let out = s.vahta(&["add", "FILED", "--file", "f.txt"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(s.asks() - before, 2);
+    assert_eq!(s.asks() - before, 3);
     assert!(!s.journal().contains("value_warning"));
 }
 
@@ -1410,14 +1459,9 @@ fn a_session_with_no_answer_to_the_extension_ends_at_its_deadline_and_the_journa
     s.script(&[r#"{"secret":"correct horse"}"#, r#"{"noanswer":true}"#]);
     let out = s.vahta(&["unlock", "--for", "4s"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    wait_until("the question", 10, || {
-        s.window_log().iter().any(|e| e["ask"] == "choose")
-    });
-    let q = s
-        .window_log()
-        .into_iter()
-        .find(|e| e["ask"] == "choose")
-        .unwrap();
+    let extension = |e: &Value| e["ask"] == "choose" && e["prompt"] == "Extend this session?";
+    wait_until("the question", 10, || s.window_log().iter().any(extension));
+    let q = s.window_log().into_iter().find(extension).unwrap();
     assert_eq!(q["prompt"], "Extend this session?");
     // The session's own length is offered, not a fixed half hour.
     assert_eq!(q["options"][0], "Extend by 4s");
@@ -2145,9 +2189,10 @@ fn nothing_secret_is_in_the_journal_the_daemons_stderr_or_any_clients_output() {
         ("BETA", "fake-two", "session"),
         ("ALPHA", "fake-three", "each-use"),
     ] {
-        s.script(&[pw, &format!(r#"{{"secret":"{value}"}}"#)]);
+        s.script(&[pw, &format!(r#"{{"secret":"{value}"}}"#), r#"{"choose":0}"#]);
         assert_eq!(run(&["add", name, "--tier", tier]).status.code(), Some(0));
     }
+    s.open_rules(&["ZETA", "BETA", "ALPHA"]);
     // A wrong password, a cancel, and a refusal.
     s.script(&[r#"{"secret":"wrong"}"#, pw, r#"{"secret":"fake-new"}"#]);
     run(&["reset", "ZETA"]);
@@ -2334,7 +2379,7 @@ fn a_bound_secret_runs_only_the_commands_on_its_list_and_the_refusal_has_no_wind
             && journal.contains(&format!("program {}", env_path.display())),
         "{journal}"
     );
-    // A secret with no rules still takes any command.
+    // A secret with the open rule set takes any command.
     let out = s.vahta(&["run", "--secret", "BETA", "--", "env"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // One bound name is enough to refuse a mixed run.
@@ -2441,6 +2486,16 @@ fn deny_groups_refuse_by_name_and_a_hand_edited_toml_changes_nothing() {
 // Runs commands that only a Unix has (sh, printenv, cat, true).
 #[cfg(unix)]
 impl Sandbox {
+    /// The approved rule set of `name`.
+    fn rules_of(&self, name: &str) -> vahta_vault::RuleSet {
+        self.open_vault()
+            .bindings()
+            .iter()
+            .find(|b| b.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} has no rules"))
+    }
+
     /// The last question of the kind `ask` the window was shown.
     fn last_ask(&self, ask: &str) -> Value {
         self.window_log()
@@ -2506,7 +2561,7 @@ fn ask_allow_once_runs_the_command_and_stores_nothing() {
         fs::read_to_string(&toml).unwrap(),
         "[secrets.ZETA]\nallow = [\"printenv\"]\n"
     );
-    assert_eq!(s.open_vault().bindings()[0].allow.len(), 1);
+    assert_eq!(s.rules_of("ZETA").allow.len(), 1);
     let journal = s.journal();
     assert!(journal.contains("run_allowed_once"), "{journal}");
     assert!(journal.contains(&format!("program {}", sh.display())));
@@ -2567,14 +2622,10 @@ fn ask_add_to_the_list_writes_the_toml_and_the_vault_and_the_next_run_passes() {
         written.contains("allow = [\"printenv\", \"env\"]"),
         "{written}"
     );
-    let vault = s.open_vault();
-    let rules: Vec<&str> = vault.bindings()[0]
-        .allow
-        .iter()
-        .map(|r| r.text.as_str())
-        .collect();
+    let zeta = s.rules_of("ZETA");
+    let rules: Vec<&str> = zeta.allow.iter().map(|r| r.text.as_str()).collect();
     assert_eq!(rules, ["printenv", "env"]);
-    match &vault.bindings()[0].allow[1].program {
+    match &zeta.allow[1].program {
         vahta_vault::Program::Path(p) => assert_eq!(PathBuf::from(p), Sandbox::which("env")),
         other => panic!("{other:?}"),
     }
@@ -2606,7 +2657,7 @@ fn ask_add_with_a_wrong_password_or_a_changed_vault_changes_nothing() {
     let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "env"]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
     assert!(!toml.exists());
-    assert_eq!(s.open_vault().bindings()[0].allow.len(), 1);
+    assert_eq!(s.rules_of("ZETA").allow.len(), 1);
 }
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).
@@ -2713,7 +2764,7 @@ fn bind_proposes_the_person_approves_and_then_only_the_listed_command_runs() {
     assert!(text(&out.stdout).contains("ZETA: allow: printenv; deny: @network"));
     let choice = s.last_ask("choose");
     let lines = choice["panel"]["lines"].to_string();
-    assert!(lines.contains("now:  any command"), "{lines}");
+    assert!(lines.contains("now:  no restrictions"), "{lines}");
     assert!(
         lines.contains("new:  allow: printenv; deny: @network"),
         "{lines}"
@@ -2735,7 +2786,7 @@ fn bind_proposes_the_person_approves_and_then_only_the_listed_command_runs() {
         "{toml}"
     );
     assert!(toml.contains("deny = [\"@network\"]"), "{toml}");
-    assert_eq!(s.open_vault().bindings().len(), 1);
+    assert_eq!(s.rules_of("ZETA").allow.len(), 1);
 
     // A bound run in the session needs no window; another command is refused
     // with no window, and the message names --ask.
@@ -2772,7 +2823,7 @@ fn bind_changes_nothing_without_approval_and_the_password() {
             text(&out.stderr)
         );
         assert!(!toml.exists());
-        assert!(s.open_vault().bindings().is_empty());
+        assert!(s.rules_of("ZETA").allow.is_empty());
     }
     // An unusable proposal is refused before any window.
     let asked = s.asks();
@@ -2811,12 +2862,15 @@ fn bind_clear_removes_the_rules_and_a_deny_group_refuses_a_shell() {
     s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
     let out = s.vahta(&["bind", "ZETA", "--clear"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(s.open_vault().bindings().is_empty());
+    assert!(!s.open_vault().bindings().iter().any(|b| b.name == "ZETA"));
     let toml = fs::read_to_string(s.project().join("vahta.toml")).unwrap();
     assert!(!toml.contains("deny"), "{toml}");
-    s.script(&[PW_ANSWER]);
+    // With no rules nothing may use it, and the refusal says how to fix that.
     let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", "true"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no_rules") || text(&out.stderr).contains("no approved rules")
+    );
 }
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).
@@ -2847,7 +2901,7 @@ fn a_hand_edited_toml_is_only_a_proposal_until_vahta_bind_approves_it() {
         lines.contains("now:  allow: printenv") && lines.contains("new:  allow: printenv, env"),
         "{lines}"
     );
-    assert_eq!(s.open_vault().bindings()[0].allow.len(), 1);
+    assert_eq!(s.rules_of("ZETA").allow.len(), 1);
 
     // Approving makes it effective, and the file is left as written.
     s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
@@ -2879,73 +2933,133 @@ fn key_like(prefix: &str, tail_len: usize) -> String {
 // Uses the helpers that run commands, which only a Unix has.
 #[cfg(unix)]
 #[test]
-fn a_payment_key_gets_the_each_use_offer_and_the_agent_learns_the_class_not_the_value() {
+fn a_payment_key_gets_its_category_each_use_and_the_agent_learns_the_class_not_the_value() {
     let s = Sandbox::new();
     s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
     assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
     let live = key_like("sk_live_", 24);
+    let value = format!(r#"{{"secret":"{live}"}}"#);
 
-    // Accepting the offer stores each-use.
-    s.script(&[
-        PW_ANSWER,
-        &format!(r#"{{"secret":"{live}"}}"#),
-        r#"{"choose":0}"#,
+    // The value points at payment: the category, the tier and the network come
+    // from it, all shown in the one window that also asked for the value.
+    s.script(&[PW_ANSWER, &value, r#"{"choose":0}"#]);
+    let before = s.asks();
+    let out = s.vahta(&[
+        "add",
+        "STRIPE_KEY",
+        "--net",
+        "hosts:api.stripe.com",
+        "--allow",
+        "printenv",
+        "--reason",
+        "billing script",
     ]);
-    let out = s.vahta(&["add", "STRIPE_KEY"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks() - before, 3, "password, value, rules: one window");
     let said = text(&out.stdout);
     assert!(
         said.starts_with("saved STRIPE_KEY (payment key, each-use)\n"),
         "{said}"
     );
     assert!(
-        said.contains("`vahta bind STRIPE_KEY --allow PROGRAM`")
-            && said.contains("`allow` is the real guard"),
+        said.contains("Rules approved with it: category: payment")
+            && said.contains("prompt injection")
+            && said.contains("vahta http"),
         "{said}"
     );
     let ask = s.last_ask("choose");
+    assert_eq!(ask["prompt"], "Store STRIPE_KEY with these rules?");
     assert_eq!(
-        ask["prompt"],
-        "This looks like a payment key. Ask for the password on each use?"
+        ask["options"],
+        serde_json::json!(["Accept", "Use the default set for payment", "Cancel"])
     );
-    assert_eq!(ask["options"][0], "Each use (recommended)");
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(
+        lines.contains(
+            "Payment key. Works only through Vahta with api.stripe.com. Only these may run: \
+             printenv. Never: @shells, @interpreters, @network. Asks you every time."
+        ),
+        "{lines}"
+    );
+    assert_eq!(ask["panel"]["agent_note"], "billing script");
+    assert!(ask["panel"]["warning"].is_null(), "{ask}");
     let vault = s.open_vault();
     let e = &vault.entries()[0];
-    assert_eq!(e.tier, Tier::EachUse);
-    assert_eq!(e.class, Some(vahta_vault::Class::Payment));
+    assert_eq!(
+        (e.tier, e.class),
+        (Tier::EachUse, Some(vahta_vault::Class::Payment))
+    );
+    let rs = s.rules_of("STRIPE_KEY");
+    assert_eq!(rs.category.as_deref(), Some("payment"));
+    assert_eq!(rs.downgraded_from, None);
+    assert!(matches!(&rs.network, vahta_vault::Network::Hosts(h) if h[0].host == "api.stripe.com"));
+    // The file the repository reviews shows the same.
+    let toml = fs::read_to_string(s.project().join("vahta.toml")).unwrap();
+    assert!(
+        toml.contains("category = \"payment\"")
+            && toml.contains("network = \"hosts\"")
+            && toml.contains("hosts = [\"api.stripe.com\"]"),
+        "{toml}"
+    );
+    // ...and is in sync with the vault: nothing to approve.
+    let out = s.vahta(&["bind"]);
+    assert!(
+        text(&out.stdout).contains("nothing to approve"),
+        "{}",
+        text(&out.stderr)
+    );
 
-    // Keeping the session is the person's call.
+    // No flags at all: the default set of the category the value points at; the
+    // hosts, which only the person can name there, are asked in the window.
     s.script(&[
         PW_ANSWER,
-        &format!(r#"{{"secret":"{live}"}}"#),
-        r#"{"choose":1}"#,
+        &value,
+        r#"{"text":"api.vendor.test"}"#,
+        r#"{"choose":0}"#,
     ]);
-    let out = s.vahta(&["add", "STRIPE_TEST"]);
-    assert!(text(&out.stdout).starts_with("saved STRIPE_TEST (payment key, session)"));
+    let out = s.vahta(&["add", "PLAIN_PAY"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let ask = s.last_ask("choose");
+    assert_eq!(
+        ask["options"],
+        serde_json::json!(["Accept", "Cancel"]),
+        "the proposal is the default set"
+    );
+    let rs = s.rules_of("PLAIN_PAY");
+    assert_eq!(rs.category.as_deref(), Some("payment"));
+    assert!(
+        matches!(&rs.network, vahta_vault::Network::Hosts(h) if h[0].host == "api.vendor.test")
+    );
 
-    // A cloud key is offered the same; anything else is not asked.
+    // A cloud key: the category is server, the tier a session.
     let aws = key_like("AKIA", 16).to_uppercase();
     s.script(&[
         PW_ANSWER,
         &format!(r#"{{"secret":"{aws}"}}"#),
         r#"{"choose":0}"#,
     ]);
-    let out = s.vahta(&["add", "CLOUD_KEY"]);
+    let out = s.vahta(&["add", "CLOUD_KEY", "--allow", "printenv"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).starts_with("saved CLOUD_KEY (cloud key, each-use)"),
+        text(&out.stdout).starts_with("saved CLOUD_KEY (cloud key, session)"),
         "{}",
         text(&out.stdout)
     );
-    let asked = s.asks();
-    s.script(&[PW_ANSWER, r#"{"secret":"fake-plain-value"}"#]);
+    assert_eq!(s.rules_of("CLOUD_KEY").category.as_deref(), Some("server"));
+
+    // A plain value: ordinary, nothing to warn about.
+    s.script(&[
+        PW_ANSWER,
+        r#"{"secret":"fake-plain-value"}"#,
+        r#"{"choose":0}"#,
+    ]);
     let out = s.vahta(&["add", "PLAIN"]);
-    assert_eq!(s.asks(), asked + 2, "a password and a value, no offer");
     let said = text(&out.stdout);
     assert!(
         said.starts_with("saved PLAIN\n") && !said.contains("key,"),
         "{said}"
     );
-    assert!(said.contains("`vahta bind PLAIN --allow PROGRAM`") && !said.contains("real guard"));
+    assert_eq!(s.rules_of("PLAIN").category.as_deref(), Some("ordinary"));
     assert_eq!(
         s.open_vault()
             .entries()
@@ -2956,54 +3070,46 @@ fn a_payment_key_gets_the_each_use_offer_and_the_agent_learns_the_class_not_the_
         Some(vahta_vault::Class::Other)
     );
 
-    // A reset can make the same offer, and names the class again; a secret
-    // that already has rules is not nagged.
+    // A reset can make the tier offer; it keeps the rules it has.
     s.bind_directly("PLAIN", &["printenv"], &[]);
     s.script(&[PW_ANSWER, r#"{"secret":"fake-other-value"}"#]);
     let out = s.vahta(&["reset", "PLAIN"]);
     assert_eq!(text(&out.stdout).trim(), "replaced PLAIN");
-    s.script(&[
-        PW_ANSWER,
-        &format!(r#"{{"secret":"{live}"}}"#),
-        r#"{"choose":0}"#,
-    ]);
+    s.script(&[PW_ANSWER, &value, r#"{"choose":0}"#]);
     let out = s.vahta(&["reset", "PLAIN"]);
     assert_eq!(
         text(&out.stdout).trim(),
         "replaced PLAIN (payment key, each-use)"
     );
-    assert_eq!(
-        s.open_vault()
-            .entries()
-            .iter()
-            .find(|e| e.name == "PLAIN")
-            .unwrap()
-            .tier,
-        Tier::EachUse
-    );
 
     // The value is nowhere it should not be.
-    let everywhere = [
+    for place in [
         s.journal(),
         fs::read_to_string(s.root.join("surface.log")).unwrap(),
-    ];
-    for place in &everywhere {
+        fs::read_to_string(s.project().join("vahta.toml")).unwrap(),
+    ] {
         assert!(!place.contains(&live) && !place.contains(&aws));
     }
-    // A cancelled offer stores nothing.
-    s.script(&[
-        PW_ANSWER,
-        &format!(r#"{{"secret":"{live}"}}"#),
-        r#"{"cancel":true}"#,
+    // A cancelled proposal stores nothing, not even the file's entry.
+    s.script(&[PW_ANSWER, &value, r#"{"cancel":true}"#]);
+    let out = s.vahta(&[
+        "add",
+        "NEVER",
+        "--net",
+        "hosts:a.test",
+        "--allow",
+        "printenv",
     ]);
-    let out = s.vahta(&["add", "NEVER"]);
     assert_eq!(out.status.code(), Some(4));
     assert!(!s.open_vault().entries().iter().any(|e| e.name == "NEVER"));
+    assert!(
+        !fs::read_to_string(s.project().join("vahta.toml"))
+            .unwrap()
+            .contains("NEVER")
+    );
 }
 
-// A value with no vendor prefix still gets the offer when its name says what
-// it guards; the name can only raise the class.
-// Uses the helpers that run commands, which only a Unix has.
+// Names point at a category too.
 #[cfg(unix)]
 #[test]
 fn a_name_like_aws_or_paypal_raises_the_class_of_a_plain_value() {
@@ -3011,26 +3117,364 @@ fn a_name_like_aws_or_paypal_raises_the_class_of_a_plain_value() {
     s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
     assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
     s.script(&[PW_ANSWER, &plain_value(1), r#"{"choose":0}"#]);
-    let out = s.vahta(&["add", "AWS_DEPLOY_TOKEN"]);
+    let out = s.vahta(&["add", "AWS_DEPLOY_TOKEN", "--allow", "printenv"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).starts_with("saved AWS_DEPLOY_TOKEN (cloud key, each-use)"),
+        text(&out.stdout).starts_with("saved AWS_DEPLOY_TOKEN (cloud key, session)"),
         "{}",
         text(&out.stdout)
     );
-    s.script(&[PW_ANSWER, &plain_value(2), r#"{"choose":1}"#]);
-    let out = s.vahta(&["add", "PAYPAL_CLIENT"]);
+    s.script(&[PW_ANSWER, &plain_value(2), r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "add",
+        "PAYPAL_CLIENT",
+        "--net",
+        "hosts:api.paypal.com",
+        "--allow",
+        "printenv",
+    ]);
     assert!(
-        text(&out.stdout).starts_with("saved PAYPAL_CLIENT (payment key, session)"),
-        "{}",
-        text(&out.stdout)
+        text(&out.stdout).starts_with("saved PAYPAL_CLIENT (payment key, each-use)"),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
     );
     // A word inside another word is not the word.
     let asked = s.asks();
-    s.script(&[PW_ANSWER, &plain_value(3)]);
+    s.script(&[PW_ANSWER, &plain_value(3), r#"{"choose":0}"#]);
     let out = s.vahta(&["add", "LAWS_TOKEN"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(s.asks(), asked + 2, "a password and a value, no offer");
+    assert_eq!(s.asks(), asked + 3, "a password, a value, the rules");
+    assert_eq!(
+        s.rules_of("LAWS_TOKEN").category.as_deref(),
+        Some("ordinary")
+    );
+}
+
+// Mandatory rules, categories, downgrades, folders and the network.
+#[cfg(unix)]
+#[test]
+fn a_secret_with_no_rules_is_refused_with_the_command_that_proposes_them() {
+    let s = sandbox_with_secrets();
+    // A secret from before rules were mandatory: take its rules away.
+    let mut vault = s.open_vault();
+    vault.set_bindings("ZETA", None).unwrap();
+    vault
+        .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+        .unwrap();
+    let asked = s.asks();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("vahta bind ZETA --category ordinary --allow PROGRAM")
+            && err.contains("prompt injection")
+            && err.contains("ZETA: no approved rules"),
+        "{err}"
+    );
+    assert_eq!(s.asks(), asked, "no window for a refusal");
+    assert!(s.journal().contains("no_rules"));
+    // Even a session does not help.
+    s.script(&[PW_ANSWER]);
+    assert_eq!(
+        s.vahta(&["unlock", "--secret", "ZETA"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        s.vahta(&["run", "--secret", "ZETA", "--", "true"])
+            .status
+            .code(),
+        Some(3)
+    );
+    // Proposing and approving makes it usable.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "bind",
+        "ZETA",
+        "--category",
+        "ordinary",
+        "--allow",
+        "printenv",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The category's denies came with it; a shell is refused even if listed.
+    let rs = s.rules_of("ZETA");
+    assert_eq!(rs.category.as_deref(), Some("ordinary"));
+    assert!(rs.deny.iter().any(|d| d.text == "@shells"));
+    let list = text(&s.vahta(&["list"]).stdout);
+    assert!(list.contains("ordinary, app"), "{list}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_category_below_the_one_the_value_looks_like_is_a_loud_downgrade_and_in_the_journal() {
+    let s = Sandbox::new();
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
+    let live = key_like("sk_live_", 24);
+    let value = format!(r#"{{"secret":"{live}"}}"#);
+
+    // Accepting is allowed.
+    s.script(&[PW_ANSWER, &value, r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "add",
+        "LOW_ONE",
+        "--category",
+        "ordinary",
+        "--allow",
+        "printenv",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let ask = s.last_ask("choose");
+    let warning = ask["panel"]["warning"].as_str().unwrap();
+    assert!(
+        warning.starts_with(
+            "This asks to downgrade: the value looks like a payment key, whose default \
+             category is payment; the agent proposes ordinary."
+        ),
+        "{warning}"
+    );
+    assert_eq!(ask["options"][1], "Use the default set for payment");
+    let rs = s.rules_of("LOW_ONE");
+    assert_eq!(rs.category.as_deref(), Some("ordinary"));
+    assert_eq!(rs.downgraded_from.as_deref(), Some("payment"));
+    let journal = s.journal();
+    assert!(
+        journal.contains("category_downgraded") && journal.contains("payment -> ordinary"),
+        "{journal}"
+    );
+
+    // The person overrules it in one click: the detected category's defaults
+    // (its hosts are asked), no downgrade left on the rules.
+    s.script(&[
+        PW_ANSWER,
+        &value,
+        r#"{"choose":1}"#,
+        r#"{"text":"api.stripe.com"}"#,
+    ]);
+    let out = s.vahta(&[
+        "add",
+        "LOW_TWO",
+        "--category",
+        "ordinary",
+        "--allow",
+        "printenv",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let rs = s.rules_of("LOW_TWO");
+    assert_eq!(rs.category.as_deref(), Some("payment"));
+    assert_eq!(rs.downgraded_from, None);
+    assert!(matches!(rs.network, vahta_vault::Network::Hosts(_)));
+    assert_eq!(
+        s.open_vault()
+            .entries()
+            .iter()
+            .find(|e| e.name == "LOW_TWO")
+            .unwrap()
+            .tier,
+        Tier::EachUse
+    );
+
+    // Proposals a category cannot take are refused before any window.
+    let asked = s.asks();
+    for args in [
+        vec![
+            "add",
+            "BAD_ONE",
+            "--category",
+            "payment",
+            "--allow",
+            "printenv",
+        ],
+        vec![
+            "add",
+            "BAD_TWO",
+            "--category",
+            "payment",
+            "--net",
+            "app",
+            "--allow",
+            "printenv",
+        ],
+        vec!["add", "BAD_THREE", "--category", "nonsense"],
+        vec!["add", "BAD_FOUR", "--category", "server"],
+        vec!["add", "BAD_FIVE", "--category", "ordinary", "--allow", "sh"],
+    ] {
+        let out = s.vahta(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    assert_eq!(s.asks(), asked);
+}
+
+#[cfg(unix)]
+#[test]
+fn directories_bound_where_a_secret_is_used_and_let_scripts_in_without_a_rule() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = sandbox_with_secrets();
+    fs::create_dir(s.project().join("scripts")).unwrap();
+    let script = s.project().join("scripts/hello.sh");
+    fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "bind",
+        "ZETA",
+        "--category",
+        "ordinary",
+        "--allow",
+        "printenv",
+        "--dir",
+        "./scripts",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let ask = s.last_ask("choose");
+    // The folder is inside the project, which the agent can write to.
+    assert!(
+        ask["panel"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("put files in this folder"),
+        "{ask}"
+    );
+    assert_eq!(s.rules_of("ZETA").dirs.len(), 1);
+    assert!(
+        fs::read_to_string(s.project().join("vahta.toml"))
+            .unwrap()
+            .contains("dirs = [\"./scripts\"]")
+    );
+
+    // From the project root the working directory is outside the folder.
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        text(&out.stderr).contains("outside the directories"),
+        "{}",
+        text(&out.stderr)
+    );
+    // From inside it, the allowed program runs, and so does a script there
+    // that no rule names.
+    let inside = s.project().join("scripts");
+    s.script(&[PW_ANSWER]);
+    let out = s
+        .command(&inside)
+        .args(["run", "--secret", "ZETA", "--", "printenv", "ZETA"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    s.script(&[PW_ANSWER]);
+    let out = s
+        .command(&inside)
+        .args(["run", "--secret", "ZETA", "--", "./hello.sh"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "hi\n");
+    // A program that is neither allowed nor in the folder is not.
+    let out = s
+        .command(&inside)
+        .args(["run", "--secret", "ZETA", "--", "cat", "/dev/null"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    // A payment key takes no folders at all.
+    let out = s.vahta(&[
+        "bind",
+        "ALPHA",
+        "--category",
+        "payment",
+        "--net",
+        "hosts:a.test",
+        "--allow",
+        "printenv",
+        "--dir",
+        "./scripts",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("directories"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn network_none_runs_the_command_with_no_network_on_linux() {
+    let Some(python) = ["python3", "python"]
+        .into_iter()
+        .find(|p| std::process::Command::new(p).arg("-V").output().is_ok())
+    else {
+        eprintln!("skipped: no python on PATH to make a connection with");
+        return;
+    };
+    if !vahta_os::network_isolation_available() {
+        eprintln!("skipped: no unprivileged network namespaces here");
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let probe = format!(
+        "import socket; s = socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', {port})); print('connected')"
+    );
+    let s = sandbox_with_secrets();
+    // The program's own network: the connection works.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "bind",
+        "ZETA",
+        "--category",
+        "ordinary",
+        "--allow",
+        python,
+        "--net",
+        "app",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", python, "-c", &probe]);
+    assert_eq!(text(&out.stdout), "connected\n", "{}", text(&out.stderr));
+    // No network: the same command cannot connect to the listener.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "bind",
+        "ZETA",
+        "--category",
+        "ordinary",
+        "--allow",
+        python,
+        "--net",
+        "none",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", python, "-c", &probe]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!text(&out.stdout).contains("connected"));
+    // `hosts` is cut off the same way (they are reachable only via `vahta http`).
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&[
+        "bind",
+        "ZETA",
+        "--category",
+        "ordinary",
+        "--allow",
+        python,
+        "--net",
+        "hosts:api.example.test",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", python, "-c", &probe]);
+    assert_ne!(out.status.code(), Some(0));
+    drop(listener);
 }
 
 // Uses the helpers that run commands, which only a Unix has.
@@ -3049,7 +3493,7 @@ fn tier_moves_a_secret_between_session_and_each_use_without_its_value() {
     let s = Sandbox::new();
     s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
     assert_eq!(s.vahta(&["init"]).status.code(), Some(0));
-    s.script(&[PW_ANSWER, &plain_value(4)]);
+    s.script(&[PW_ANSWER, &plain_value(4), r#"{"choose":0}"#]);
     assert_eq!(
         s.vahta(&["add", "TOKEN", "--tier", "each-use"])
             .status
@@ -3848,6 +4292,7 @@ fn disguised_secrets_raise_the_alarm_and_lock_ends_the_sessions() {
     let log = s.window_log();
     let ask = log
         .iter()
+        .rev()
         .find(|e| e["ask"] == "choose")
         .expect("the alarm asked");
     assert_eq!(
@@ -3937,7 +4382,12 @@ fn with_alarm_lock_the_sessions_end_without_a_question() {
                 .is_some_and(|m| m.contains("locked 1 session(s)") || m.contains("Vahta locked 1"))
         })
     });
-    assert!(s.window_log().iter().all(|e| e["ask"] != "choose"));
+    assert!(s.window_log().iter().all(|e| {
+        e["ask"] != "choose"
+            || e["prompt"]
+                .as_str()
+                .is_some_and(|p| p.starts_with("Store "))
+    }));
     let journal = s.journal();
     assert!(
         journal.contains("\"result\":\"lock\"") && journal.contains("the alarm is set to lock")

@@ -199,6 +199,27 @@ pub enum DurationSpec {
     Forever {},
 }
 
+/// The rules a client proposes for a secret it adds. All of it is text: the
+/// daemon parses and resolves it and the person approves what comes out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuleArgs {
+    /// A category id (`payment`, `server`, `ordinary`, `database`, `publish`,
+    /// `local-only`); `None` lets the daemon suggest one from the value and
+    /// the name.
+    pub category: Option<String>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    /// Directories (`PATH`, optionally `:ro` or `:rw`).
+    pub dirs: Vec<String>,
+    /// `none`, `app` or `hosts:H[,H...]`; `None` is the category's default.
+    pub net: Option<String>,
+    /// Why, for the window; shown marked as unverified.
+    pub reason: Option<String>,
+    /// The caller's `PATH`, to resolve the programs of the rules.
+    pub path: Option<String>,
+}
+
 /// What a client may ask. No variant has a field for a value or a password:
 /// the person types those in the prompt window, which is not this connection.
 /// `cwd` is where the command was run, from which the daemon finds the
@@ -218,13 +239,18 @@ pub enum ClientRequest {
         cwd: String,
     },
     /// Add a new secret; its value is typed in the window. Refused if the
-    /// name is already in the vault.
+    /// name is already in the vault. The rules it will have are proposed in
+    /// `rules`, shown in the same window after the value, and stored in the
+    /// same save.
     Add {
         cwd: String,
         name: String,
-        tier: Tier,
+        /// `None`: the category's tier.
+        tier: Option<Tier>,
         /// A file name hint: the secret is a file, not an environment variable.
         file: Option<String>,
+        #[serde(default)]
+        rules: RuleArgs,
     },
     /// Replace the value of a secret the vault has; the new value is typed in
     /// the window. Refused if the name is not there. `None` keeps the tier
@@ -318,6 +344,16 @@ pub enum ClientRequest {
         reason: Option<String>,
         /// The caller's `PATH`, to resolve the programs of the rules.
         path: Option<String>,
+        /// The rule set's category id; with `name` and no other rule-set
+        /// field, the rest of the approved rules is kept.
+        #[serde(default)]
+        category: Option<String>,
+        /// Directories (`PATH`, optionally `:ro` or `:rw`).
+        #[serde(default)]
+        dirs: Vec<String>,
+        /// `none`, `app` or `hosts:H[,H...]`.
+        #[serde(default)]
+        net: Option<String>,
     },
     /// The hook, after a tool ran and before its output reaches the model:
     /// `texts` are the strings of that output (every one, in order), and
@@ -681,6 +717,9 @@ pub enum RefusalKind {
     /// The secret has approved command rules and this command is not allowed by
     /// them (or is denied by them).
     CommandNotAllowed,
+    /// The secret has no approved rules, so no command may use it until some
+    /// are proposed (`vahta bind NAME --category ...`) and approved.
+    NoRules,
 }
 
 /// One name in a refusal and why.

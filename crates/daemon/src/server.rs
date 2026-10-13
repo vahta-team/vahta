@@ -579,6 +579,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 name,
                 tier,
                 file,
+                rules,
             } => (
                 ops::store(
                     &ctx,
@@ -586,8 +587,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     ops::StoreMode::Add,
                     ops::Store {
                         name: &name,
-                        tier: Some(ops::vault_tier(tier)),
+                        tier: tier.map(ops::vault_tier),
                         file: file.as_deref(),
+                        rules: Some(rules),
                     },
                 )
                 .unwrap_or_else(|r| r),
@@ -607,6 +609,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                         name: &name,
                         tier: tier.map(ops::vault_tier),
                         file: file.as_deref(),
+                        rules: None,
                     },
                 )
                 .unwrap_or_else(|r| r),
@@ -685,6 +688,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 clear,
                 reason,
                 path,
+                category,
+                dirs,
+                net,
             } => (
                 bind_ops::bind(
                     &ctx,
@@ -696,6 +702,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                         clear,
                         reason,
                         path,
+                        category,
+                        dirs,
+                        net,
                     },
                 )
                 .unwrap_or_else(|r| r),

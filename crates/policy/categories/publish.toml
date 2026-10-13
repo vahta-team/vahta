@@ -1,0 +1,19 @@
+id = "publish"
+name = "Publishing token"
+description = "Pushes code or releases to the world (git push, npm, PyPI, crates.io, GitHub). A leaked one can ship malicious code under your name."
+rank = 5
+tier = "each-use"
+networks = ["app"]
+default_network = "app"
+deny = ["@shells", "@interpreters", "@network"]
+dirs = false
+allow_required = true
+programs = ["git", "npm", "cargo", "twine", "gh"]
+words = ["NPM", "PYPI", "TWINE", "CARGO", "CRATES", "REGISTRY", "GITHUB", "GH", "GITLAB", "PUBLISH", "RELEASE"]
+checklist = [
+  "Allow the one command with its leading arguments (`git push`, `npm publish`, `cargo publish`), nothing broader.",
+  "A publish step runs project code (npm scripts, build.rs, setup.py): the agent can rewrite those, so the person must see every use; this category asks each time.",
+  "`git` can be told to push anywhere (`git push URL`): the person reads the command in the window.",
+  "No shell, interpreter or network program may hold the token.",
+  "Use a token scoped to one package or repository where the registry allows it.",
+]

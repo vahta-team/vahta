@@ -400,6 +400,7 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::NoSession => "no session to narrow; run `vahta unlock` first",
         RefusalKind::UnknownOutput => "no output kept under that reference for this agent",
         RefusalKind::CommandNotAllowed => "this command is not allowed to use this secret",
+        RefusalKind::NoRules => "no approved rules yet; propose them with `vahta bind`",
     }
 }
 

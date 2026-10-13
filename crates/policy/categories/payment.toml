@@ -1,0 +1,22 @@
+id = "payment"
+name = "Payment key"
+description = "Moves money or bills customers (Stripe, PayPal, a bank API). Leaked, it costs real money at once."
+rank = 6
+tier = "each-use"
+# The agent must name the vendor hosts. The command runs with no network at all
+# (Linux); the hosts are reachable only through `vahta http`.
+networks = ["hosts"]
+default_network = "hosts"
+deny = ["@shells", "@interpreters", "@network"]
+dirs = false
+allow_required = false
+programs = []
+words = []
+class = "payment"
+checklist = [
+  "Make every call with `vahta http` to the vendor hosts; `vahta run` is for local tools only.",
+  "Name only the vendor's own hosts (api.stripe.com), never a wildcard you do not need.",
+  "No shell, interpreter or network program may ever hold this key; they are denied here and cannot be allowed.",
+  "A program that can write a file (cp, tee, tar) can leave the key on disk for the agent to read: allow none, or name the one program and its first arguments.",
+  "Every use asks the person; keep the commands you run few and exact.",
+]
