@@ -25,7 +25,7 @@ nothing was done.
 | Command | What it does | Password |
 |---|---|---|
 | `vahta init` | Create `.vahta/` and the vault here. The recovery key is shown once, in the window. | new password, twice |
-| `vahta add NAME [--tier session\|each-use] [--file FILENAME]` | Store a new secret. The value is typed in the window, hidden, twice. A name the vault already has is refused (exit 3). | yes |
+| `vahta add NAME [--tier session\|each-use] [--file FILENAME]` | Store a new secret. The value is typed in the window, hidden, twice. A name the vault already has is refused (exit 3). A value with a space, tab or line break at either end, or a line break or tab inside, is asked about before it is stored (see below). | yes |
 | `vahta tier NAME session\|each-use` | Change a secret's tier without typing its value again. Same tier or an unknown name: refused (exit 3). | yes |
 | `vahta reset NAME [--tier session\|each-use] [--file FILENAME]` | Replace the value of a secret the vault has, as when rotating it. It keeps its tier and kind unless the flags say otherwise. A name the vault does not have is refused (exit 3). | yes |
 | `vahta remove NAME` | Remove a secret. | yes |
@@ -41,6 +41,21 @@ nothing was done.
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list`, `vahta check` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta daemon run\|status\|stop\|restart` | The daemon itself. | no |
+
+**Stray whitespace in a value.** `add` and `reset` check the typed value before
+storing it. A pasted token often carries a trailing line break or space, and
+then every use fails (a 401, say) with nothing to say why. If the value starts
+or ends with whitespace, or has a line break or a tab inside, the window says so
+in words ("The value you typed ends with a space, a tab or a line break...";
+never the value or any part of it) and offers: **Trim it and store** (only when
+trimming the ends fixes everything), **Store exactly as typed**, **Type it
+again**, or **Cancel**. A file secret (`--file`, or an existing file entry) and a
+PEM block (`-----BEGIN ...` and `-----END ...`) may have many lines, so line
+breaks inside them, and a final one, are not asked about; spaces around them
+and invisible characters inside still are. The journal records a
+`value_warning` event with the answer (`trimmed`, `as_typed`, `retype`,
+`cancelled`) and the name, never the value. `import` reads values from a file
+and is not checked.
 
 None of these takes a secret or the password as an argument or on standard input.
 There is no flag for it, on purpose.

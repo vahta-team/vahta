@@ -25,6 +25,7 @@ use crate::protocol::{
 };
 use crate::server::Shared;
 use crate::surface::{SurfaceError, Window};
+use crate::valuecheck;
 
 /// How many wrong attempts one window accepts.
 const MAX_TRIES: usize = 3;
@@ -372,13 +373,27 @@ pub(crate) fn store(
             "the vault changed while the window was open; nothing was done",
         ));
     }
-    let typed = window
-        .ask_value(&panel, &format!("Value of {name}"), true)
-        .map_err(from_surface)?
-        .ok_or_else(cancelled)?;
-    if typed.expose().is_empty() {
-        return Err(error("a secret cannot be empty; nothing was done"));
-    }
+    let typed = loop {
+        let typed = window
+            .ask_value(&panel, &format!("Value of {name}"), true)
+            .map_err(from_surface)?
+            .ok_or_else(cancelled)?;
+        if typed.expose().is_empty() {
+            return Err(error("a secret cannot be empty; nothing was done"));
+        }
+        match check_typed(
+            ctx,
+            window.as_mut(),
+            &panel,
+            &vault.vault_id(),
+            name,
+            matches!(kind, Kind::File { .. }),
+            typed,
+        )? {
+            Typed::Use(v) => break v,
+            Typed::Again => {}
+        }
+    };
     // What the value looks like it guards: its vendor prefix first, then the
     // name. The agent chose the name, so the name may only raise the class
     // (one more question in this window), never lower it. The agent is told
@@ -432,6 +447,72 @@ pub(crate) fn store(
     Ok(ClientReply::Done {
         message: with_note(done_message(done, name, class, tier, bound), &note),
     })
+}
+
+/// What the person decided about a value with stray whitespace.
+enum Typed {
+    Use(Secret),
+    Again,
+}
+
+/// A value with whitespace around it, a line break or a tab inside is almost
+/// always a paste accident, and every later use would fail with nothing to
+/// explain why. So the person is told, in words that never include the value,
+/// and picks: trim it, keep it as typed, or type it again. A file secret or a
+/// PEM block may have many lines and is not asked about them. The journal
+/// records that the question was shown and the answer, never the value.
+fn check_typed(
+    ctx: &Ctx<'_>,
+    window: &mut dyn Window,
+    panel: &Panel,
+    vault_id: &[u8; 16],
+    name: &str,
+    is_file: bool,
+    typed: Secret,
+) -> Flow<Typed> {
+    let multiline = is_file || valuecheck::looks_like_pem(typed.expose());
+    let problems = valuecheck::check(typed.expose(), multiline);
+    if !problems.any() {
+        return Ok(Typed::Use(typed));
+    }
+    let trimmed = typed.expose().trim();
+    let can_trim = problems.only_edges()
+        && !trimmed.is_empty()
+        && !valuecheck::check(trimmed, multiline).any();
+    let mut options = Vec::new();
+    if can_trim {
+        options.push("Trim it and store".to_string());
+    }
+    options.push("Store exactly as typed".to_string());
+    options.push("Type it again".to_string());
+    options.push("Cancel".to_string());
+    let picked = window
+        .choose(panel, &valuecheck::describe(&problems), &options)
+        .map_err(from_surface)?;
+    let shown = |answer: &str| {
+        ctx.journal(
+            Entry::new("value_warning")
+                .vault(vault_id)
+                .names(&[name.to_string()])
+                .result(answer, None),
+        );
+    };
+    // Without the trim option every index is one lower.
+    let at = |i: usize| picked.map(|p| if can_trim { p } else { p + 1 }) == Some(i);
+    if at(0) {
+        shown("trimmed");
+        return Ok(Typed::Use(Secret::new(trimmed.to_string())));
+    }
+    if at(1) {
+        shown("as_typed");
+        return Ok(Typed::Use(typed));
+    }
+    if at(2) {
+        shown("retype");
+        return Ok(Typed::Again);
+    }
+    shown("cancelled");
+    Err(cancelled())
 }
 
 /// After a secret's value, tier or presence changed: the open sessions that

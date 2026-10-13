@@ -35,6 +35,7 @@ mod session_ops;
 pub mod surface;
 pub mod terminal;
 pub mod testing;
+mod valuecheck;
 
 // The protocol, the client, the paths and the config live in `vahta-ipc`, so
 // that a client (the hook above all) need not build the daemon. Inside the

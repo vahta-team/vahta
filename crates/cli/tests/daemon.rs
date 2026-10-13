@@ -589,6 +589,128 @@ fn what_can_be_refused_is_refused_before_any_window() {
     assert_eq!(s.asks(), asks, "a window opened for a refusal");
 }
 
+/// A script line answering with a typed value, escaped as JSON.
+fn typed(value: &str) -> String {
+    serde_json::json!({ "secret": value }).to_string()
+}
+
+#[test]
+fn a_value_with_stray_whitespace_is_asked_about_and_never_shown() {
+    let s = Sandbox::new();
+    s.with_vault(&[]);
+    // Assembled at run time; the pieces are what the checks look for.
+    let core = ["tok", "en", "-body", "-1234"].concat();
+    let with_space = format!("{core} ");
+    let pad = "  ";
+    let with_break = format!("{core}\n");
+    let two_lines = format!("{core}\n{core}");
+
+    // Trailing space, trim chosen: stored trimmed.
+    s.script(&[PW_ANSWER, &typed(&with_space), r#"{"choose":0}"#]);
+    let out = s.vahta(&["add", "ONE"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains(&core) && !text(&out.stderr).contains(&core));
+    assert_eq!(s.open_vault().get("ONE").unwrap().expose(), core.as_bytes());
+    let log = s.window_log();
+    let asked = log
+        .iter()
+        .find(|e| {
+            e["ask"] == "choose"
+                && e["prompt"]
+                    .as_str()
+                    .is_some_and(|p| p.contains("ends with"))
+        })
+        .expect("the person was asked about the trailing space");
+    assert_eq!(asked["options"][0], "Trim it and store");
+    assert_eq!(asked["options"].as_array().unwrap().len(), 4);
+
+    // Stored exactly as typed.
+    s.script(&[PW_ANSWER, &typed(&with_break), r#"{"choose":1}"#]);
+    let out = s.vahta(&["add", "TWO"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        s.open_vault().get("TWO").unwrap().expose(),
+        with_break.as_bytes()
+    );
+
+    // Type it again: the second value is the one stored.
+    s.script(&[
+        PW_ANSWER,
+        &typed(&format!("{pad}{core}")),
+        r#"{"choose":2}"#,
+        &typed(&core),
+    ]);
+    let out = s.vahta(&["add", "THREE"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        s.open_vault().get("THREE").unwrap().expose(),
+        core.as_bytes()
+    );
+
+    // A line break inside cannot be trimmed: no trim option, and the numbers
+    // shift. Cancel stores nothing.
+    s.script(&[PW_ANSWER, &typed(&two_lines), r#"{"choose":2}"#]);
+    let out = s.vahta(&["add", "FOUR"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let log = s.window_log();
+    let last = log.iter().rev().find(|e| e["ask"] == "choose").unwrap();
+    assert!(
+        last["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("line break inside")
+    );
+    assert_eq!(last["options"][0], "Store exactly as typed");
+    assert!(s.open_vault().get("FOUR").is_err());
+
+    // A reset asks as well.
+    s.script(&[PW_ANSWER, &typed(&with_space), r#"{"choose":0}"#]);
+    let out = s.vahta(&["reset", "TWO"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.open_vault().get("TWO").unwrap().expose(), core.as_bytes());
+
+    // The journal says a warning was shown and what was chosen, not the value.
+    let journal = s.journal();
+    assert!(journal.contains("value_warning") && journal.contains("trimmed"));
+    assert!(journal.contains("as_typed") && journal.contains("retype"));
+    let surface = fs::read_to_string(s.root.join("surface.log")).unwrap();
+    for place in [&journal, &surface] {
+        assert!(!place.contains(&core));
+    }
+    for e in s.window_log() {
+        if e["ask"] == "choose" {
+            assert!(!e.to_string().contains(&core));
+        }
+    }
+}
+
+#[test]
+fn a_pem_block_and_a_file_secret_are_not_nagged_about_their_lines() {
+    let s = Sandbox::new();
+    s.with_vault(&[]);
+    let body = ["Zm9v", "YmFy", "YmF6"].concat();
+    let pem = format!("-----BEGIN KEY-----\n{body}\n{body}\n-----END KEY-----\n");
+    let before = s.asks();
+    s.script(&[PW_ANSWER, &typed(&pem)]);
+    let out = s.vahta(&["add", "PEMMED"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The password and the value: two questions, no third.
+    assert_eq!(s.asks() - before, 2);
+    assert_eq!(
+        s.open_vault().get("PEMMED").unwrap().expose(),
+        pem.as_bytes()
+    );
+
+    // A file secret may be many lines of anything.
+    let lines = format!("{body}\n{body}\n");
+    s.script(&[PW_ANSWER, &typed(&lines)]);
+    let before = s.asks();
+    let out = s.vahta(&["add", "FILED", "--file", "f.txt"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks() - before, 2);
+    assert!(!s.journal().contains("value_warning"));
+}
+
 #[test]
 fn add_refuses_a_name_there_is_and_reset_one_there_is_not() {
     let s = Sandbox::new();
