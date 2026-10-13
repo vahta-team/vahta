@@ -1,9 +1,16 @@
 //! Runs the built `vahta-hook` against every fixture under
 //! `crates/harness/harnesses/<harness>/fixtures/`.
 //!
-//! A fixture is `{event, [args], [env], [files], stdin | stdin_raw, stdout, exit,
-//! [spool]}`. `spool`, when present, is the list of signals the hook must have
-//! spooled for the daemon (no daemon runs here), in order.
+//! A fixture is `{event, [args], [env], [files], [daemon], stdin | stdin_raw,
+//! stdout, exit, [spool], [check_run]}`. `spool`, when present, is the list of
+//! signals the hook must have spooled for the daemon (no daemon runs here
+//! unless `daemon` is given), in order.
+//!
+//! `daemon` scripts a daemon for the fixture: `{"check_run": "allowed" |
+//! "no_opinion"}` is its answer to a `CheckRun`; it answers `Ok` to every
+//! other request, and a daemon of another version when `"version"` is given.
+//! `check_run`, when present, is the list of `{cwd, argv, names}` the hook
+//! must have asked it, in order.
 //! Secret-shaped values are never written in the files: `{{SECRET_ANTHROPIC}}`
 //! is replaced here, from pieces. `files` maps a relative path to its content;
 //! the test writes them under a fresh temp directory, which `{{TMP}}` names
@@ -85,6 +92,75 @@ fn secret_slack_path() -> String {
 
 fn pem(edge: &str) -> String {
     ["-----", edge, " OPENSSH ", "PRIVATE KEY", "-----"].concat()
+}
+
+/// A daemon that answers as scripted, on the fixture's own socket. It records
+/// each `CheckRun` it is asked.
+struct FakeDaemon {
+    asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl FakeDaemon {
+    fn start(runtime: &std::path::Path, script: &Value) -> Result<FakeDaemon, String> {
+        use vahta_ipc::protocol::{
+            ClientReply, ClientRequest, Hello, HelloReply, PROTOCOL, read_frame, write_frame,
+        };
+        std::fs::create_dir_all(runtime).map_err(|e| e.to_string())?;
+        let address =
+            vahta_os::ipc::Address::for_runtime_dir(runtime).map_err(|e| e.to_string())?;
+        let listener = vahta_os::ipc::Listener::bind(&address).map_err(|e| e.to_string())?;
+        let allowed = script["check_run"].as_str() == Some("allowed");
+        let version = script["version"]
+            .as_str()
+            .unwrap_or(vahta_ipc::VERSION)
+            .to_string();
+        let asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            while let Ok(mut stream) = listener.accept() {
+                let (log, version) = (log.clone(), version.clone());
+                std::thread::spawn(move || {
+                    let Ok(Some(_hello)) = read_frame::<Hello>(&mut stream) else {
+                        return;
+                    };
+                    let reply = HelloReply {
+                        ok: true,
+                        protocol: PROTOCOL,
+                        version,
+                        pid: std::process::id(),
+                        sessions: 0,
+                        error: None,
+                    };
+                    if write_frame(&mut stream, &reply).is_err() {
+                        return;
+                    }
+                    while let Ok(Some(request)) = read_frame::<ClientRequest>(&mut stream) {
+                        let answer = match request {
+                            ClientRequest::CheckRun {
+                                cwd, argv, names, ..
+                            } => {
+                                if let Ok(mut l) = log.lock() {
+                                    l.push(serde_json::json!(
+                                        {"cwd": cwd, "argv": argv, "names": names}
+                                    ));
+                                }
+                                if allowed {
+                                    ClientReply::Allowed {}
+                                } else {
+                                    ClientReply::NoOpinion {}
+                                }
+                            }
+                            _ => ClientReply::Ok {},
+                        };
+                        if write_frame(&mut stream, &answer).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Ok(FakeDaemon { asked })
+    }
 }
 
 fn harnesses_dir() -> PathBuf {
@@ -173,6 +249,10 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
             std::fs::write(&target, content.as_str().unwrap_or("")).map_err(|e| e.to_string())?;
         }
     }
+    let daemon = match fx.get("daemon") {
+        Some(script) => Some(FakeDaemon::start(&tmp.0.join("run"), script)?),
+        None => None,
+    };
     let stdin = match fx.get("stdin_raw") {
         Some(Value::String(raw)) => raw.clone(),
         _ => fx["stdin"].to_string(),
@@ -224,6 +304,12 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
     let want_exit = fx["exit"].as_i64().unwrap_or(0) as i32;
     if out.status.code() != Some(want_exit) {
         return Err(format!("exit {:?}, want {want_exit}", out.status.code()));
+    }
+    if let (Some(want), Some(daemon)) = (fx.get("check_run"), &daemon) {
+        let got = Value::Array(daemon.asked.lock().map_err(|e| e.to_string())?.clone());
+        if &got != want {
+            return Err(format!("check_run\n  want {want}\n  got  {got}"));
+        }
     }
     if let Some(want) = fx.get("spool") {
         let spooled =

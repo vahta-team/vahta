@@ -222,7 +222,7 @@ impl Manifest {
             ..Event::default()
         };
         match kind {
-            Kind::BeforeTool => {
+            Kind::BeforeTool | Kind::PermissionRequest => {
                 ev.tool = tool_name(payload, spec);
                 ev.group = if ev.tool.is_empty() {
                     self.unnamed_tool_group

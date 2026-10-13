@@ -757,6 +757,12 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     .unwrap_or_else(|r| r),
                 false,
             ),
+            ClientRequest::CheckRun {
+                cwd,
+                argv,
+                names,
+                path,
+            } => (run_ops::check(&ctx, &cwd, &argv, names, path), false),
             ClientRequest::OutputAllow { reference, reason } => (
                 output::allow(&ctx, &reference, reason).unwrap_or_else(|r| r),
                 false,

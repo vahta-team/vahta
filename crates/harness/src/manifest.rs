@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-/// The five things the hook can be asked about, whatever the harness calls them.
+/// The things the hook can be asked about, whatever the harness calls them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -21,6 +21,10 @@ pub enum Kind {
     AfterTool,
     /// A session has begun. Used to say that the installed setup is outdated.
     SessionStart,
+    /// The harness is about to ask the person to approve a tool call (Codex's
+    /// `PermissionRequest`). Read like `BeforeTool`; the only reply that means
+    /// anything is an explicit allow.
+    PermissionRequest,
 }
 
 impl Kind {
@@ -32,6 +36,7 @@ impl Kind {
             Kind::Prompt => "prompt",
             Kind::AfterTool => "after_tool",
             Kind::SessionStart => "session_start",
+            Kind::PermissionRequest => "permission_request",
         }
     }
 
@@ -42,6 +47,7 @@ impl Kind {
             "prompt" => Some(Kind::Prompt),
             "after_tool" => Some(Kind::AfterTool),
             "session_start" => Some(Kind::SessionStart),
+            "permission_request" => Some(Kind::PermissionRequest),
             _ => None,
         }
     }
@@ -119,6 +125,11 @@ pub struct Config {
     /// Command rules the harness itself enforces, written next to the hooks: a
     /// second layer for what the hook already refuses.
     pub deny: Option<DenyRules>,
+    /// Command rules the harness lets through without asking. Only narrow,
+    /// exact ones: an allow on a command that runs another command (`vahta
+    /// run`) would also allow whatever that command is. Not written to the
+    /// administrator policy.
+    pub allow: Option<DenyRules>,
     /// Where an administrator's (system-wide) policy lives, when the harness
     /// has one that users cannot override. Used by `vahta setup --managed`.
     pub managed: Option<Managed>,
@@ -143,8 +154,9 @@ pub enum ManagedFormat {
 }
 
 /// A list of strings in the config that the harness reads as commands to
-/// refuse (Claude Code's `permissions.deny`). Setup adds these exact strings
-/// and, on uninstall, removes exactly these; the person's own stay.
+/// refuse (Claude Code's `permissions.deny`) or to allow without asking
+/// (`permissions.allow`). Setup adds these exact strings and, on uninstall,
+/// removes exactly these; the person's own stay.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DenyRules {
@@ -243,6 +255,7 @@ pub struct Replies {
     pub prompt: Option<KindReplies>,
     pub after_tool: Option<KindReplies>,
     pub session_start: Option<KindReplies>,
+    pub permission_request: Option<KindReplies>,
 }
 
 /// What may be said for one kind of event. A missing `allow` means silence.
@@ -250,6 +263,10 @@ pub struct Replies {
 #[serde(deny_unknown_fields)]
 pub struct KindReplies {
     pub allow: Option<Reply>,
+    /// before_tool, permission_request: say "allow" out loud, so the harness
+    /// does not ask the person. Plain `allow` stays silence. `{reason}` is a
+    /// short line saying why. Absent where the harness has no such reply.
+    pub allow_explicit: Option<Reply>,
     pub deny: Option<Reply>,
     /// Neither allow nor deny: tell the model and the user, change nothing.
     pub notice: Option<Reply>,
@@ -287,6 +304,15 @@ pub struct Reply {
     pub body: Option<Value>,
     /// `exit_code`: the stderr text, same placeholders.
     pub stderr: Option<String>,
+    /// `false`: the shape is from the docs and has not been seen to work in
+    /// the harness. The hook then stays silent instead, unless
+    /// `VAHTA_HOOK_UNVERIFIED` is set (for the live test that verifies it).
+    #[serde(default = "yes")]
+    pub verified: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Manifest {

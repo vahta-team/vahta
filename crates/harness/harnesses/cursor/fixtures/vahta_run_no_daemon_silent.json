@@ -1,0 +1,21 @@
+{
+  "event": "before_tool",
+  "env": {
+    "VAHTA_HOOK_UNVERIFIED": "1"
+  },
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "vahta run --secret API_KEY -- cargo test"
+    },
+    "cwd": "{{TMP}}/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": null,
+  "exit": 0
+}

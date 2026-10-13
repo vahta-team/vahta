@@ -324,6 +324,17 @@ is relative to the **project root**; `@group` is for `deny` only. **Allow matche
 the file, not the name**: the program is resolved when you approve and again at
 run time, following symlinks, and the daemon starts the resolved path.
 
+### The hook's question (`CheckRun`)
+
+Before a harness asks the person to approve a `vahta run`, the hook asks the
+daemon the same question a run asks, without running anything: `CheckRun {cwd,
+argv, names, path}`. The daemon finds the vault from `cwd`, peeks at it (no
+password, no window, no session, nothing in the journal), finds the program on
+the caller's `path`, and evaluates the rules of each named secret with the code
+a run uses. It answers `Allowed` only if every secret exists, is session-tier,
+has approved rules, and every verdict is allowed; anything else is `NoOpinion`,
+never a refusal. What the hook does with it: [hooks.md](hooks.md#running-unattended-when-the-hook-says-allow).
+
 ### The vault's copy is what counts
 
 `vahta.toml` is a **proposal**: anyone who can push can edit it. The daemon

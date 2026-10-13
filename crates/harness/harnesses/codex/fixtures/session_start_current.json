@@ -2,7 +2,7 @@
   "event": "session_start",
   "args": [
     "--setup",
-    "1"
+    "2"
   ],
   "env": {},
   "stdin": {

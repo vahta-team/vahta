@@ -6,7 +6,8 @@ title = "Claude Code"
 # Bump when what `vahta setup` writes for this harness changes.
 # 2: permissions.deny for the vahta commands that are for the person only.
 # 3: the after-tool matcher also covers WebFetch.
-setup_version = 3
+# 4: permissions.allow for the read-only commands `vahta list` and `vahta check`.
+setup_version = 4
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -32,6 +33,28 @@ rules = [
   "Bash(vh reveal:*)",
   "Bash(vh copy:*)",
   "Bash(vh _surface:*)",
+]
+
+# Exact allow rules for the two commands that only read: `vahta list` and
+# `vahta check` peek at the vault and open no window, so an agent running them
+# unattended is what Vahta wants. Exact strings, no wildcard, and never `vahta
+# run`: a rule on it would also allow `vahta run -- rm -rf`, because the harness
+# matches the prefix and cannot see the rules of the secret. `vahta run` is
+# allowed by the hook instead, for one command at a time (`allow_explicit`
+# below). Not written by `--managed`: an administrator's allow list is the
+# person's to choose. (`vahta status` does not exist; the daemon's is `vahta
+# daemon status`, which is left to the harness.)
+[config.allow]
+key = "permissions.allow"
+rules = [
+  "Bash(vahta list)",
+  "Bash(vahta list --json)",
+  "Bash(vahta check)",
+  "Bash(vahta check --json)",
+  "Bash(vh list)",
+  "Bash(vh list --json)",
+  "Bash(vh check)",
+  "Bash(vh check --json)",
 ]
 
 # User scope only in v1. Hooks live under the "hooks" key of settings.json.
@@ -153,6 +176,16 @@ style = "json"
 # permissionDecision "deny" blocks the call; the reason goes to the model.
 # systemMessage is shown to the person.
 body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "deny", permissionDecisionReason = "{agent_message}" }, systemMessage = "{user_message}" }
+
+# An explicit allow, for a `vahta run` whose inner command the secret's own
+# rules let through (docs read 2026-10-13, https://code.claude.com/docs/en/hooks).
+# It skips the permission prompt; our permissions.deny and the harness's own
+# protections still win over it. Whether it also skips the auto-mode classifier
+# is not documented and is tested live in the bench. The reason is shown to the
+# person, not to the model.
+[replies.before_tool.allow_explicit]
+style = "json"
+body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision = "allow", permissionDecisionReason = "{reason}" } }
 
 [replies.before_read.deny]
 style = "json"

@@ -207,6 +207,21 @@ pub fn tool_check(session: Option<String>, cwd: &str, text: &str) -> Option<Held
     None
 }
 
+/// Ask a running daemon whether `argv` passes the rules of every secret in
+/// `names` (the project's list when empty), with no window. Only when a daemon
+/// of this version runs and answers `Allowed` within [`WAIT`]; every other
+/// outcome (no daemon, another version, a refusal, silence) is `false`, and the
+/// harness's own permission flow decides.
+pub fn run_allowed(cwd: &str, argv: Vec<String>, names: Vec<String>) -> bool {
+    let request = ClientRequest::CheckRun {
+        cwd: cwd.to_string(),
+        argv,
+        names,
+        path: std::env::var("PATH").ok(),
+    };
+    matches!(ask(request), Some(ClientReply::Allowed {}))
+}
+
 pub fn scan(scan: Scan) -> Option<Answer> {
     let request = ClientRequest::OutputScan {
         cwd: scan.cwd,

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 9;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -420,6 +420,19 @@ pub enum ClientRequest {
         cwd: String,
         text: String,
     },
+    /// The hook asks, before a `vahta run` runs, whether the command inside it
+    /// passes every named secret's own rules, so the harness need not ask the
+    /// person. No window, no password, no session, nothing journaled: the vault
+    /// is only peeked at. `names` empty means the project's `vahta.toml` list,
+    /// as for `Run`; `path` is the caller's `PATH`, which finds the program.
+    /// The reply is `Allowed` or `NoOpinion`, never a refusal: the run itself
+    /// says why it will not go.
+    CheckRun {
+        cwd: String,
+        argv: Vec<String>,
+        names: Vec<String>,
+        path: Option<String>,
+    },
     /// `vahta hooks pause`: take Vahta's hook entries out of these harnesses
     /// (all that have them, when empty) for `secs` (at most 8 hours). A window
     /// asks the person, with the password; `reason` is the caller's, shown as
@@ -788,6 +801,11 @@ pub enum ClientReply {
     OutputReleased {
         text: String,
     },
+    /// The answer to a `CheckRun`: every named secret exists, is session-tier,
+    /// and its approved rules allow this command.
+    Allowed {},
+    /// The answer to a `CheckRun` for anything else.
+    NoOpinion {},
     /// The answer to a `ToolCheck` that found a held value: the tool call
     /// must be refused. `form` is how the value was written (`base64`,
     /// `hex`, `raw`...), which the agent may be told; `name` is the secret's

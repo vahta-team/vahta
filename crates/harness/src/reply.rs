@@ -13,6 +13,13 @@ pub enum Decision {
         user_message: String,
         agent_message: String,
     },
+    /// before_tool, permission_request: let it through and say so, so the
+    /// harness does not ask the person. Only for a call Vahta has judged safe
+    /// by something stronger than its own prefix match. `reason` is one short
+    /// line, shown to the person.
+    AllowExplicit {
+        reason: String,
+    },
     /// Let it through, but say something.
     Notice {
         user_message: String,
@@ -99,6 +106,11 @@ impl Fill<'_> {
     }
 }
 
+/// A reply that is verified, or that the live test has switched on.
+fn usable(reply: &Reply) -> bool {
+    reply.verified || std::env::var_os("VAHTA_HOOK_UNVERIFIED").is_some_and(|v| !v.is_empty())
+}
+
 fn emit(reply: &Reply, fill: &Fill<'_>) -> Output {
     match reply.style {
         Style::Json => {
@@ -136,7 +148,17 @@ impl Manifest {
             Kind::Prompt => self.replies.prompt.as_ref(),
             Kind::AfterTool => self.replies.after_tool.as_ref(),
             Kind::SessionStart => self.replies.session_start.as_ref(),
+            Kind::PermissionRequest => self.replies.permission_request.as_ref(),
         }
+    }
+
+    /// Whether the hook can say "allow" out loud for an event of `kind` here:
+    /// the manifest has the reply and it is verified (or the live test that
+    /// verifies it is on). Where not, there is no point asking the daemon.
+    pub fn can_allow_explicit(&self, kind: Kind) -> bool {
+        self.replies_for(kind)
+            .and_then(|r| r.allow_explicit.as_ref())
+            .is_some_and(usable)
     }
 
     fn redact_reply(&self, mcp: bool) -> Option<&Reply> {
@@ -166,6 +188,14 @@ impl Manifest {
                 Fill {
                     user: "",
                     agent: "",
+                    output: None,
+                },
+            ),
+            Decision::AllowExplicit { reason } => (
+                replies.allow_explicit.as_ref().filter(|r| usable(r)),
+                Fill {
+                    user: reason,
+                    agent: reason,
                     output: None,
                 },
             ),

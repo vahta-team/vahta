@@ -718,7 +718,12 @@ pub fn managed_plan(
     };
     let (text, append, current) = match managed.format {
         ManagedFormat::JsonSettings => {
-            let text = super::install_text(existing.as_deref(), m, env.os, &program)?;
+            // Refusals only: an administrator's allow list is theirs to choose,
+            // and `allowManagedPermissionRulesOnly` would freeze the person's
+            // own rules around ours.
+            let mut policy = m.clone();
+            policy.config.allow = None;
+            let text = super::install_text(existing.as_deref(), &policy, env.os, &program)?;
             let current = existing.as_deref() == Some(text.as_str());
             (text, false, current)
         }

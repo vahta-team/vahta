@@ -4555,3 +4555,64 @@ fn the_encoded_forms_of_a_run_value_are_cut_from_output_and_nothing_leaks() {
         "fake-one",
     );
 }
+
+fn check_run(s: &Sandbox, names: &[&str], argv: &[&str], path: Option<&str>) -> ClientReply {
+    let mut conn = connector(s, false).connect_running().unwrap().unwrap();
+    conn.request(&ClientRequest::CheckRun {
+        cwd: s.project().to_string_lossy().into_owned(),
+        argv: argv.iter().map(|a| a.to_string()).collect(),
+        names: names.iter().map(|n| n.to_string()).collect(),
+        path: path.map(str::to_string),
+    })
+    .unwrap()
+}
+
+// Runs commands that only a Unix has (printenv, env).
+#[cfg(unix)]
+#[test]
+fn check_run_says_allowed_only_for_a_command_the_rules_let_through_and_opens_nothing() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+    let dir = Sandbox::which("printenv");
+    let path = dir.parent().unwrap().to_string_lossy().into_owned();
+    let path = Some(path.as_str());
+    let (asks, journal) = (s.asks(), s.journal());
+
+    let allowed = ClientReply::Allowed {};
+    let none = ClientReply::NoOpinion {};
+    // On the list, and not on it.
+    assert_eq!(
+        check_run(&s, &["ZETA"], &["printenv", "ZETA"], path),
+        allowed
+    );
+    assert_eq!(check_run(&s, &["ZETA"], &["env"], path), none);
+    // An open rule set takes anything; one bound name is enough to say no.
+    assert_eq!(check_run(&s, &["BETA"], &["env"], path), allowed);
+    assert_eq!(check_run(&s, &["BETA", "ZETA"], &["env"], path), none);
+    // The project's own list (here vahta.toml names none the vault holds).
+    assert_eq!(check_run(&s, &[], &["printenv"], path), none);
+    // Each-use opens a window whatever the rules say: no explicit allow.
+    assert_eq!(check_run(&s, &["ALPHA"], &["printenv"], path), none);
+    // Unknown names, no program on that PATH, no command, no vault.
+    assert_eq!(check_run(&s, &["NOPE"], &["printenv"], path), none);
+    assert_eq!(
+        check_run(&s, &["ZETA"], &["printenv"], Some("/nonexistent")),
+        none
+    );
+    assert_eq!(check_run(&s, &["ZETA"], &[], path), none);
+    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
+    let elsewhere = std::env::temp_dir().to_string_lossy().into_owned();
+    let reply = conn
+        .request(&ClientRequest::CheckRun {
+            cwd: elsewhere,
+            argv: vec!["printenv".into()],
+            names: vec!["ZETA".into()],
+            path: path.map(str::to_string),
+        })
+        .unwrap();
+    assert_eq!(reply, none);
+    // A question is not an event: no window, no journal line.
+    assert_eq!(s.asks(), asks);
+    assert_eq!(s.journal(), journal);
+}

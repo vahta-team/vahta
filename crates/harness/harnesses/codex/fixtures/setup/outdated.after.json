@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness codex --event session_start --setup 1"
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event session_start --setup 2"
           }
         ]
       }
@@ -26,7 +26,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness codex --event before_tool --setup 1"
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event before_tool --setup 2"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event permission_request --setup 2"
           }
         ]
       }
@@ -36,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness codex --event prompt --setup 1"
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event prompt --setup 2"
           }
         ]
       }
@@ -47,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness codex --event after_tool --setup 1"
+            "command": "/opt/vahta/bin/vahta-hook --harness codex --event after_tool --setup 2"
           }
         ]
       }

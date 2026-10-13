@@ -1,6 +1,7 @@
 //! `vahta-hook --harness <claude|codex|cursor> --event <kind> [--setup N]`
 //!
-//! Kinds: `before_tool`, `before_read`, `prompt`, `after_tool`, `session_start`.
+//! Kinds: `before_tool`, `before_read`, `prompt`, `after_tool`, `session_start`,
+//! `permission_request`.
 //! Reads one harness event on stdin and answers on stdout. Every failure
 //! (unreadable input, bad JSON, an unknown shape) is an allow: empty stdout,
 //! exit 0. A broken hook must never brick the agent.
@@ -15,6 +16,7 @@ mod daemon;
 mod hookguard;
 mod readguard;
 mod redact;
+mod runallow;
 
 use std::io::{Read, Write};
 
@@ -278,55 +280,91 @@ fn deny_read(file: &str, kind: &str) -> Decision {
     }
 }
 
+/// A tool call about to run. `explicit` says whether this harness can be told
+/// "allow" out loud for this event.
+fn before_tool(ev: &Event, explicit: bool) -> (Decision, Option<Signal>) {
+    // Commands for the person only, then Vahta's own files: both are
+    // refused whatever else is in the call, and the answer names the
+    // command or the path, not the text.
+    if ev.group == Some(vahta_harness::Group::Shell)
+        && let Some(invocation) = agentguard::forbidden_command(&ev.text)
+    {
+        let signal = Signal::AgentGuard {
+            command: invocation.clone(),
+        };
+        return (deny_vahta_command(&invocation), Some(signal));
+    }
+    if let Some(file) = vahta_file_touched(ev) {
+        let signal = Signal::VahtaFileTouch { path: file.clone() };
+        return (deny_vahta_file(&file), Some(signal));
+    }
+    if let Some(t) = hookguard::tampering(ev) {
+        let signal = Signal::HookTamper {
+            file: t.file.clone(),
+            what: t.what.clone(),
+        };
+        return (deny_hook_tamper(&t), Some(signal));
+    }
+    let (by_text, text_signal) = tool_secret(ev);
+    if by_text != Decision::Allow {
+        return (by_text, text_signal);
+    }
+    // A value Vahta holds for this agent, written any way. The daemon
+    // records the signal itself (it knows the name); the hook only
+    // refuses.
+    if let Some(held) = daemon::tool_check(
+        ev.session_id.clone(),
+        ev.cwd.as_deref().unwrap_or_default(),
+        &ev.text,
+    ) {
+        return (deny_known_value(&held), None);
+    }
+    if ev.group != Some(vahta_harness::Group::Shell) {
+        return (by_text, text_signal);
+    }
+    // Observed in the text, but a file a command reads is refused still.
+    match readguard::secret_file_in_command(&ev.text, ev.cwd.as_deref()) {
+        Some((file, kind)) => (deny_read(&file, &kind), Some(read_signal(&kind))),
+        None if text_signal.is_none() => (allow_or_approve(ev, explicit), None),
+        None => (Decision::Allow, text_signal),
+    }
+}
+
+/// A call nothing refused. Silence (`Allow`), unless it is one `vahta run` that
+/// the secret's own rules let through: then the harness is told so, and need
+/// not ask the person. Needs a shell call, a harness that can hear it, and a
+/// daemon that answers in time with a yes.
+fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
+    if !explicit || ev.group != Some(vahta_harness::Group::Shell) {
+        return Decision::Allow;
+    }
+    let (Some(call), Some(cwd)) = (runallow::parse(&ev.text), ev.cwd.as_deref()) else {
+        return Decision::Allow;
+    };
+    let whose = match call.names.as_slice() {
+        [] => "this project's secrets".to_string(),
+        [one] => one.clone(),
+        many => many.join(", "),
+    };
+    if !daemon::run_allowed(cwd, call.argv, call.names) {
+        return Decision::Allow;
+    }
+    Decision::AllowExplicit {
+        reason: format!("Vahta: the command is within {whose}'s approved rules"),
+    }
+}
+
 /// The answer to the event, and what to tell the daemon about it: each refusal
 /// of something an agent tried is evidence for its alarm.
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
     match args.kind {
-        Kind::BeforeTool => {
-            // Commands for the person only, then Vahta's own files: both are
-            // refused whatever else is in the call, and the answer names the
-            // command or the path, not the text.
-            if ev.group == Some(vahta_harness::Group::Shell)
-                && let Some(invocation) = agentguard::forbidden_command(&ev.text)
-            {
-                let signal = Signal::AgentGuard {
-                    command: invocation.clone(),
-                };
-                return (deny_vahta_command(&invocation), Some(signal));
-            }
-            if let Some(file) = vahta_file_touched(ev) {
-                let signal = Signal::VahtaFileTouch { path: file.clone() };
-                return (deny_vahta_file(&file), Some(signal));
-            }
-            if let Some(t) = hookguard::tampering(ev) {
-                let signal = Signal::HookTamper {
-                    file: t.file.clone(),
-                    what: t.what.clone(),
-                };
-                return (deny_hook_tamper(&t), Some(signal));
-            }
-            let (by_text, text_signal) = tool_secret(ev);
-            if by_text != Decision::Allow {
-                return (by_text, text_signal);
-            }
-            // A value Vahta holds for this agent, written any way. The daemon
-            // records the signal itself (it knows the name); the hook only
-            // refuses.
-            if let Some(held) = daemon::tool_check(
-                ev.session_id.clone(),
-                ev.cwd.as_deref().unwrap_or_default(),
-                &ev.text,
-            ) {
-                return (deny_known_value(&held), None);
-            }
-            if ev.group != Some(vahta_harness::Group::Shell) {
-                return (by_text, text_signal);
-            }
-            // Observed in the text, but a file a command reads is refused still.
-            match readguard::secret_file_in_command(&ev.text, ev.cwd.as_deref()) {
-                Some((file, kind)) => (deny_read(&file, &kind), Some(read_signal(&kind))),
-                None => (Decision::Allow, text_signal),
-            }
+        Kind::BeforeTool => before_tool(ev, m.can_allow_explicit(Kind::BeforeTool)),
+        // Codex asks the hook when it is about to ask the person. The same
+        // judgement as before the call; the only thing worth saying is an
+        // allow, and the refusals were already made (and reported) there.
+        Kind::PermissionRequest => {
+            let (decision, _) = before_tool(ev, m.can_allow_explicit(Kind::PermissionRequest));
+            (decision, None)
         }
         Kind::BeforeRead => {
             let Some(file) = ev.path.as_deref() else {
