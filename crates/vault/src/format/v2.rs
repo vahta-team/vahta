@@ -55,6 +55,9 @@ const INFO_LEGACY_SLOT_ID: &[u8] = b"vahta/v2/legacy-slot-id";
 /// added by giving it the next number here; an old build skips it.
 pub const SLOT_PASSWORD: u16 = 0;
 pub const SLOT_RECOVERY: u16 = 1;
+/// A paired device: the vault key wrapped under an ECDH-derived key (see
+/// `vahta-auth`). Opaque to this crate, which treats it as any other slot.
+pub const SLOT_DEVICE: u16 = 2;
 
 /// The slot crypto version written today.
 pub const SLOT_VERSION: u16 = 2;

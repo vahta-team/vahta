@@ -1,0 +1,41 @@
+# Which factor each action needs, compiled into the daemon. A change here is a
+# code change reviewed like any other, not a setting an agent can edit.
+#
+# Values:
+#   presence              a person at the machine says yes (the window).
+#   knowledge             the master password, or anything stronger.
+#   possession_biometric  a paired phone with its biometric check, or the
+#                         master password (the password always satisfies
+#                         everything, except `password_only`).
+#   password_only         the master password and nothing else: managing the
+#                         devices themselves must not be possible with one.
+
+default = "knowledge"
+
+[actions]
+unlock        = "knowledge"
+run_each_use  = "knowledge"
+run_ask       = "knowledge"
+bind          = "knowledge"
+add           = "knowledge"
+reset         = "knowledge"
+remove        = "knowledge"
+reveal        = "knowledge"
+copy          = "knowledge"
+import        = "knowledge"
+set_tier      = "knowledge"
+hooks_pause   = "knowledge"
+output_allow  = "knowledge"
+alarm_lock    = "presence"
+extend        = "presence"
+guard_choice  = "presence"
+devices       = "password_only"
+recover       = "password_only"
+other         = "knowledge"
+
+# Per category: a row overrides the action's row for secrets of that category.
+[category.payment]
+run_each_use = "possession_biometric"
+run_ask      = "possession_biometric"
+reveal       = "possession_biometric"
+copy         = "possession_biometric"
