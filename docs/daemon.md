@@ -311,10 +311,17 @@ program names.
   namespaces; some systems (Ubuntu 24.04 restricts them with AppArmor) turn them
   off. Then a run that needs "no network" is **refused** with a message, never run
   with the network on.
-- **What it does not cut.** Unix sockets in the file system stay reachable: a
-  local resolver such as systemd-resolved still answers name lookups (the lookup
-  itself can carry data out, though nothing can be connected to), and so does a
-  container socket the user can open. It is not a file-system sandbox.
+- **Unix sockets are closed off too.** The command also gets its own mount
+  namespace in which `/run` (and `/var/run` where it is a real directory) and
+  `/tmp/.X11-unix` are empty. The system and session buses, systemd-resolved (so a
+  lookup of `<data>.evil.example` has nowhere to go), `docker.sock`, the XDG
+  runtime directory and X11 are not there for it. Abstract Unix sockets belong to
+  the network namespace, so they are gone as well. `/tmp` itself is untouched,
+  since the project or temp files may live there.
+- **What it does not cut.** A pathname Unix socket anywhere else is still
+  reachable: in the project, in `/tmp`, in the home directory (some tools keep an
+  agent or control socket there). It is not a file-system sandbox. If the mount
+  setup fails, the run is refused.
 - **macOS and Windows: no isolation.** There is no unprivileged way to do it, so
   Vahta falls back to the deny groups `@network`, `@shells` and `@interpreters`.
   That is a speed bump, not a wall: a program in no group, or a renamed copy, gets

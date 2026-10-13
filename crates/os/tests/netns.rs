@@ -11,6 +11,7 @@ use std::time::Duration;
 
 const ENV_ADDR: &str = "VAHTA_NETNS_CHILD";
 const ENV_DIR: &str = "VAHTA_NETNS_DIR";
+const ENV_SOCK: &str = "VAHTA_NETNS_SOCK";
 
 /// The child's half. A no-op when run as a normal test.
 #[test]
@@ -26,9 +27,7 @@ fn child() {
         Duration::from_secs(2),
     )
     .is_ok();
-    // Name lookup may still answer: a resolver daemon reached over a Unix
-    // socket (systemd-resolved) is outside the network namespace. What counts
-    // is that nothing can be connected to afterwards.
+    // The resolver daemon is a Unix socket under /run, which is hidden.
     let resolved = "example.com:443"
         .to_socket_addrs()
         .map(|mut a| a.next().is_some())
@@ -38,6 +37,9 @@ fn child() {
         .ok()
         .and_then(|mut a| a.next())
         .is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok());
+    let unix = std::env::var(ENV_SOCK)
+        .map(|p| std::os::unix::net::UnixStream::connect(p).is_ok())
+        .unwrap_or(false);
     let path = std::path::Path::new(&dir).join("from-child.txt");
     let wrote = std::fs::write(&path, b"hello").is_ok();
     let read = std::fs::read(std::path::Path::new(&dir).join("from-parent.txt")).ok();
@@ -48,7 +50,7 @@ fn child() {
         .unwrap_or("")
         .to_string();
     println!(
-        "RESULT local={local} outward={outward} resolved={resolved} by_name={by_name} wrote={wrote} read={} {}",
+        "RESULT local={local} outward={outward} resolved={resolved} by_name={by_name} unix={unix} wrote={wrote} read={} {}",
         read.as_deref() == Some(b"data"),
         uid.replace('\t', " ")
     );
@@ -68,11 +70,26 @@ fn an_isolated_child_has_no_network_but_keeps_its_files() {
         .and_then(|mut f| f.write_all(b"data"))
         .expect("seed");
 
+    // A pathname socket under the user's runtime directory, as a bus or
+    // docker.sock would be.
+    let runtime =
+        std::path::PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()));
+    let sock = runtime
+        .is_dir()
+        .then(|| runtime.join(format!("vahta-netns-{}.sock", std::process::id())));
+    let _unix_listener = sock
+        .as_ref()
+        .and_then(|p| std::os::unix::net::UnixListener::bind(p).ok());
+    let have_sock = _unix_listener.is_some();
+
     let run = |isolate: bool| {
         let mut cmd = Command::new(std::env::current_exe().expect("exe"));
         cmd.args(["child", "--exact", "--nocapture", "--test-threads=1"])
             .env(ENV_ADDR, addr.to_string())
             .env(ENV_DIR, &dir);
+        if let (Some(p), true) = (&sock, have_sock) {
+            cmd.env(ENV_SOCK, p);
+        }
         if isolate {
             vahta_os::isolate_network(&mut cmd).expect("supported");
         }
@@ -90,6 +107,13 @@ fn an_isolated_child_has_no_network_but_keeps_its_files() {
 
     let closed = run(true);
     let uid_line = format!("Uid: {0} {0} {0} {0}", rustix::process::getuid().as_raw());
+    if have_sock {
+        assert!(open.contains("unix=true"), "control: {open}");
+        assert!(closed.contains("unix=false"), "{closed}");
+    } else {
+        eprintln!("no /run/user/<uid> here: Unix socket check skipped");
+    }
+    assert!(closed.contains("resolved=false"), "{closed}");
     assert!(closed.contains("local=false"), "{closed}");
     assert!(closed.contains("outward=false"), "{closed}");
     assert!(closed.contains("by_name=false"), "{closed}");
@@ -97,6 +121,9 @@ fn an_isolated_child_has_no_network_but_keeps_its_files() {
     assert!(closed.contains("read=true"), "{closed}");
     assert!(closed.contains(&uid_line), "{closed} vs {uid_line}");
     assert!(dir.join("from-child.txt").exists());
+    if let Some(p) = &sock {
+        let _ = std::fs::remove_file(p);
+    }
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!("netns test ran for real: {closed}");
 }
