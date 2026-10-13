@@ -1,0 +1,19 @@
+[package]
+name = "vahta-mobile"
+version = "0.0.0"
+description = "The phone side of the Vahta link protocol, shaped for a flutter_rust_bridge wrapper"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vahta-link = { path = "../link" }
