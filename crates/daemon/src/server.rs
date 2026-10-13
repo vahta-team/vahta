@@ -36,6 +36,7 @@ use crate::session::{ExtensionAsk, Sessions};
 use crate::session_ops;
 use crate::surface::{PromptSurface, SurfaceRegistry, TerminalSurface};
 use crate::{run, run_ops};
+use vahta_auth::{Action, Request};
 use vahta_ipc::duration::human;
 
 #[derive(Debug)]
@@ -84,6 +85,9 @@ pub struct Options {
     pub clipboard_clear: Duration,
     /// The executable that runs the prompt window; this one when `None`.
     pub exe: Option<PathBuf>,
+    /// How paired devices are reached. `None` is no way: the build without the
+    /// phone link (a test build supplies a loopback phone).
+    pub links: Option<Box<dyn vahta_auth::DeviceLinks>>,
 }
 
 impl Options {
@@ -99,6 +103,7 @@ impl Options {
             kdf: KdfParams::PRODUCTION,
             clipboard_clear: Duration::from_secs(30),
             exe: None,
+            links: None,
         }
     }
 }
@@ -117,6 +122,10 @@ pub(crate) struct Shared {
     pub(crate) outputs: Mutex<Outputs>,
     /// What agents have tried, weighed (see `alarm.rs`).
     pub(crate) alarm: crate::alarm::Alarm,
+    /// The ways to unlock a vault.
+    pub(crate) unlockers: vahta_auth::Registry,
+    /// How devices are reached.
+    pub(crate) links: Box<dyn vahta_auth::DeviceLinks>,
     started: Instant,
     stop: AtomicBool,
     connections: AtomicUsize,
@@ -238,6 +247,10 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         }
     };
     let store = LocalStore::new(options.paths.data.clone());
+    let links: Box<dyn vahta_auth::DeviceLinks> = options
+        .links
+        .take()
+        .unwrap_or_else(|| Box::new(vahta_auth::NoLinks));
     let outputs = Outputs::new().ok_or_else(|| {
         ServerError::Io(
             "draw a key",
@@ -254,6 +267,8 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
         alarm: crate::alarm::Alarm::default(),
+        unlockers: vahta_auth::Registry::standard(),
+        links,
         started: Instant::now(),
         stop: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
@@ -385,7 +400,34 @@ fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
         "No".to_string(),
         "Other duration...".to_string(),
     ];
-    let by = match window.choose_within(&panel, "Extend this session?", &options, left) {
+    // The window and any paired phone are asked together; the first answer
+    // wins. A presence-level yes: the session's keys are already in memory.
+    let asked = Request::new(
+        Action::Extend {
+            session: ask.id.clone(),
+            secs: ask.length.as_secs(),
+        },
+        &ask.project.display().to_string(),
+        ask.vault_id,
+        left,
+    )
+    .map(|r| r.with_options(&options))
+    .map_err(|e| e.to_string())
+    .and_then(|req| {
+        let need = vahta_auth::policy::need(req.action.key(), None);
+        crate::authn::approve(
+            shared,
+            window.as_mut(),
+            &panel,
+            "Extend this session?",
+            &ask.vault_path,
+            &req,
+            need,
+            left,
+        )
+        .map_err(|e| e.to_string())
+    });
+    let by = match asked {
         Ok(Some(0)) => Some((ask.length, format!("{same} (the last length)"))),
         Ok(Some(2)) => other_duration(shared, &ask, window.as_mut(), &mut panel),
         Ok(Some(_)) => {
@@ -835,6 +877,30 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 event,
             } => (
                 crate::guard_ops::guard_note(&ctx, &harness, &file, event),
+                false,
+            ),
+            ClientRequest::DevicesList { cwd } => (
+                crate::devices_ops::list(&ctx, &cwd).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::DevicesPair { cwd, name, secs } => (
+                crate::devices_ops::pair(&ctx, &cwd, &name, secs).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::DevicesExtend { cwd, id, secs } => (
+                crate::devices_ops::extend(&ctx, &cwd, &id, secs).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::DevicesRevoke { cwd, id } => (
+                crate::devices_ops::revoke(&ctx, &cwd, &id).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::DevicesLost { cwd, id } => (
+                crate::devices_ops::lost(&ctx, &cwd, &id).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Recover { cwd } => (
+                crate::devices_ops::recover(&ctx, &cwd).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Sessions {} => (session_ops::list(&ctx).unwrap_or_else(|r| r), false),

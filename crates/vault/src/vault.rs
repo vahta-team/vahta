@@ -130,6 +130,20 @@ pub struct Peek {
     /// The approved command rules, covered by the owner's signature.
     pub bindings: Vec<RuleSet>,
     pub recipient_count: usize,
+    /// The key slots as the file lists them, with the public parameters each
+    /// kind needs to derive its key-encryption key. No secret part.
+    pub slots: Vec<SlotView>,
+    /// The paired devices, covered by the owner's signature.
+    pub devices: Vec<Device>,
+}
+
+/// A slot as a reader without a key sees it: its description and its public
+/// parameters (a password slot's salt and cost, a device slot's ephemeral
+/// public key). The wrapped vault key is not part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotView {
+    pub info: SlotInfo,
+    pub params: Vec<u8>,
 }
 
 impl Peek {
@@ -149,6 +163,31 @@ impl Peek {
             mac_checked: false,
         })
     }
+}
+
+/// What [`Vault::rekey`] does with the recovery slot.
+pub enum RecoveryPlan<'a> {
+    /// Wrap the new key under the same paper key, which must open the current
+    /// recovery slot.
+    Keep(&'a RecoveryKey),
+    /// A new paper key; the old one stops working. It is returned once.
+    Replace,
+}
+
+/// A slot [`Vault::rekey`] carries over: its description and the function that
+/// wraps the new vault key for it (as for [`Vault::add_slot`]).
+pub struct KeptSlot<'a> {
+    pub new: NewSlot,
+    #[allow(clippy::type_complexity)]
+    pub wrap: Box<dyn FnOnce(&[u8; KEY_LEN], &[u8]) -> Result<Vec<u8>, Error> + 'a>,
+}
+
+/// What a re-key leaves for the caller.
+pub struct RekeyOutcome {
+    /// The new paper key, with `RecoveryPlan::Replace`. Show it once.
+    pub recovery: Option<RecoveryKey>,
+    /// The slots that were dropped (not password, not recovery, not kept).
+    pub dropped: Vec<SlotInfo>,
 }
 
 /// A recipient's opening: the file's model and the keys to read and sign with.
@@ -185,6 +224,15 @@ pub struct Vault {
     /// Which state file in the local store is this opener's, and its key.
     state_key: StateKey,
     first_open: bool,
+    /// Set by `rekey`: the store still holds the pin and MAC key of the old
+    /// vault key, and the next save moves them (see `rekey`).
+    repin: Option<Repin>,
+}
+
+/// What a re-keyed vault must tell the local store when it is saved.
+struct Repin {
+    old_state_key: StateKey,
+    old_owner_sign_pk: [u8; 32],
 }
 
 impl std::fmt::Debug for Vault {
@@ -234,6 +282,15 @@ fn peek_of(loaded: &Loaded) -> Peek {
         entries: loaded.index().to_vec(),
         bindings: loaded.rule_sets(),
         recipient_count: loaded.recipient_count(),
+        slots: loaded
+            .slots()
+            .iter()
+            .map(|s| SlotView {
+                info: s.info(),
+                params: s.params.clone(),
+            })
+            .collect(),
+        devices: loaded.devices(),
     }
 }
 
@@ -338,6 +395,7 @@ impl Vault {
             upgraded_from: None,
             state_key,
             first_open: true,
+            repin: None,
         };
         Ok((vault, recovery.ok_or(Error::Rng)?))
     }
@@ -457,6 +515,7 @@ impl Vault {
             upgraded_from: open.from,
             state_key,
             first_open: checked.first_open,
+            repin: None,
         })
     }
 
@@ -514,6 +573,7 @@ impl Vault {
             upgraded_from: None,
             state_key,
             first_open: checked.first_open,
+            repin: None,
         })
     }
 
@@ -1095,6 +1155,213 @@ impl Vault {
         Ok(())
     }
 
+    /// The key-encryption key of the password slot for `pw`, if `pw` opens
+    /// it: the one [`Vault::rekey`] wants. Costs one run of the password
+    /// hash. Owner only.
+    pub fn password_kek(&self, pw: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>, Error> {
+        let u = match &self.access {
+            Access::Owner(u) => u,
+            Access::Blocked { .. } => return Err(Error::UpgradeNeedsRecoveryKey),
+            Access::Recipient(_) => return Err(Error::NotOwner),
+        };
+        let slot = u
+            .model
+            .slots
+            .iter()
+            .find(|s| s.kind == current::SLOT_PASSWORD)
+            .ok_or(Error::Unlock)?;
+        let p = current::PasswordParams::decode(&slot.params).ok_or(Error::Unlock)?;
+        let cost = KdfParams {
+            m_kib: p.m_kib,
+            t: p.t,
+            p: p.p,
+        };
+        if !cost.meets(&crypto::kdf_floor()) {
+            return Err(Error::KdfBelowFloor);
+        }
+        let kek = crypto::argon2id(pw, &p.salt, p.m_kib, p.t, p.p)?;
+        slot.open(&u.model.header.vault_id, &kek)?;
+        Ok(kek)
+    }
+
+    /// Replace the slot that has `new.slot_id` (which must be given) by a new
+    /// one with the same id: remove and add in one step, so a failure leaves
+    /// the old slot. A device slot is re-wrapped this way after each use.
+    pub fn replace_slot(
+        &mut self,
+        new: NewSlot,
+        wrap: impl FnOnce(&[u8; KEY_LEN], &[u8]) -> Result<Vec<u8>, Error>,
+    ) -> Result<(), Error> {
+        let u = self.owner_mut()?;
+        let id = new.slot_id.ok_or(Error::Invalid("slot id"))?;
+        if matches!(new.kind, current::SLOT_PASSWORD | current::SLOT_RECOVERY) {
+            return Err(Error::Invalid("slot kind"));
+        }
+        let i = u
+            .model
+            .slots
+            .iter()
+            .position(|s| s.slot_id == id && s.kind == new.kind)
+            .ok_or(Error::UnknownSlot)?;
+        let slot = current::custom_slot(&u.model.header.vault_id, &u.vk, new, wrap)?;
+        let mut slots = u.model.slots.clone();
+        slots[i] = slot;
+        current::check_slots(&slots).map_err(|_| Error::Invalid("slots"))?;
+        u.model.slots = slots;
+        Ok(())
+    }
+
+    /// Change the vault key. The vault is the same vault (same id, same
+    /// names, same recipients, same rules and devices) under a new key, so
+    /// that nothing that held the old key can open the next saved file.
+    ///
+    /// * A new vault key is drawn, and the owner's signing and encryption
+    ///   keys, which derive from it, change with it.
+    /// * Every secret is sealed again under a fresh data key, for the new
+    ///   owner key and for the recipients that held it.
+    /// * Recipients the owner added are certified again by the new owner key
+    ///   (those an admin added keep the admin's certificate, which is still
+    ///   good).
+    /// * The password slot is wrapped again under `password_kek` (from
+    ///   [`Vault::password_kek`]); the recovery slot under the same paper key
+    ///   (`RecoveryPlan::Keep`) or under a new one (`RecoveryPlan::Replace`,
+    ///   returned once in the outcome and never stored).
+    /// * **Every other slot is dropped** unless the caller hands it back in
+    ///   `keep`, wrapped for the new key. A device slot is kept by wrapping the
+    ///   new key for the device again, which needs only the device's public
+    ///   key.
+    /// * The local store's pin and MAC key are moved to the new owner key by
+    ///   the next `save` ([`LocalStore::repin_owner`]), so this machine does not
+    ///   report `OwnerChanged`. Other machines that pinned the old owner key
+    ///   will, until the person clears their record of the vault: the file
+    ///   carries no proof that the old owner approved the new one.
+    /// * A session opened before keeps keys that open nothing in the new file:
+    ///   its reads fail with [`Error::SessionStale`].
+    ///
+    /// Takes effect at the next `save`. Nothing in the vault changes if it
+    /// fails. Owner only.
+    pub fn rekey(
+        &mut self,
+        password_kek: &[u8; KEY_LEN],
+        recovery: RecoveryPlan<'_>,
+        keep: Vec<KeptSlot<'_>>,
+    ) -> Result<RekeyOutcome, Error> {
+        let u = self.owner_mut()?;
+        let vault_id = u.model.header.vault_id;
+        let fmt = u.fmt;
+        let old_keys = current::owner_keys(&u.vk);
+        let old_state_key = StateKey::owner(&u.vk);
+        let old_owner_sign_pk = u.model.owner.sign_pk;
+
+        // The slots that must open before anything is touched.
+        let old_pw = u
+            .model
+            .slots
+            .iter()
+            .find(|s| s.kind == current::SLOT_PASSWORD)
+            .ok_or(Error::Invalid("no password slot"))?
+            .clone();
+        old_pw.open(&vault_id, password_kek)?;
+        if let RecoveryPlan::Keep(key) = &recovery
+            && !current::recovery_key_matches(&u.model, key)
+        {
+            return Err(Error::Unlock);
+        }
+
+        let new_vk = Zeroizing::new(crypto::random::<KEY_LEN>()?);
+        let new_keys = current::owner_keys(&new_vk);
+        let mut model = u.model.clone();
+
+        // Secrets: a fresh data key each, wrapped for the new owner key.
+        for i in 0..model.secrets.len() {
+            let old = &model.secrets[i];
+            let dek = current::open_dek(fmt, &vault_id, &old_keys.enc_sk, old)?;
+            let value = current::value_with_dek(fmt, &vault_id, &dek, old)?;
+            let holders: Vec<&Recipient> = model
+                .recipients
+                .iter()
+                .filter(|r| old.wraps.iter().any(|w| w.recipient_id == r.id))
+                .collect();
+            let sealed = current::seal_secret(
+                fmt,
+                &vault_id,
+                old.secret_id,
+                &new_keys.enc_pk,
+                value.expose(),
+                &holders,
+            )?;
+            model.secrets[i] = sealed;
+        }
+        model.owner = current::Owner {
+            sign_pk: new_keys.sign_pk,
+            enc_pk: new_keys.enc_pk,
+        };
+        for r in model.recipients.iter_mut() {
+            if r.added_by == Actor::Owner {
+                r.certify(&vault_id, &new_keys.sign);
+            }
+        }
+
+        // Slots.
+        let mut slots = vec![current::rewrap_slot(
+            &vault_id,
+            &old_pw,
+            &new_vk,
+            password_kek,
+        )?];
+        let mut new_recovery = None;
+        match recovery {
+            RecoveryPlan::Keep(key) => {
+                if let Some(old) = model
+                    .slots
+                    .iter()
+                    .find(|s| s.kind == current::SLOT_RECOVERY)
+                {
+                    let kek = current::recovery_kek(key);
+                    slots.push(current::rewrap_slot(&vault_id, old, &new_vk, &kek)?);
+                }
+            }
+            RecoveryPlan::Replace => {
+                let key = RecoveryKey::new(crypto::random::<32>()?);
+                slots.push(current::recovery_slot(&vault_id, &new_vk, &key)?);
+                new_recovery = Some(key);
+            }
+        }
+        let mut kept_ids = Vec::new();
+        for k in keep {
+            if matches!(k.new.kind, current::SLOT_PASSWORD | current::SLOT_RECOVERY) {
+                return Err(Error::Invalid("slot kind"));
+            }
+            let slot = current::custom_slot(&vault_id, &new_vk, k.new, k.wrap)?;
+            kept_ids.push(slot.slot_id);
+            slots.push(slot);
+        }
+        let dropped: Vec<SlotInfo> = model
+            .slots
+            .iter()
+            .filter(|s| {
+                !matches!(s.kind, current::SLOT_PASSWORD | current::SLOT_RECOVERY)
+                    && !kept_ids.contains(&s.slot_id)
+            })
+            .map(current::Slot::info)
+            .collect();
+        current::check_slots(&slots).map_err(|_| Error::Invalid("slots"))?;
+        model.slots = slots;
+
+        // Nothing failed: swap everything in.
+        u.model = model;
+        u.vk = new_vk;
+        self.state_key = StateKey::owner(&u.vk);
+        self.repin.get_or_insert(Repin {
+            old_state_key,
+            old_owner_sign_pk,
+        });
+        Ok(RekeyOutcome {
+            recovery: new_recovery,
+            dropped,
+        })
+    }
+
     /// Finish an upgrade that was waiting for the paper key. The key must be
     /// the one that opens the vault's recovery slot, so a wrong one cannot
     /// replace it. Does nothing if the vault is not blocked.
@@ -1179,7 +1446,17 @@ impl Vault {
         let (id, pk) = (model.header.vault_id, model.owner.sign_pk);
         self.base_generation = generation;
         self.upgraded_from = None;
-        store.record(&id, &self.state_key, &pk, generation)
+        match self.repin.take() {
+            Some(old) => store.repin_owner(
+                &id,
+                &old.old_state_key,
+                &old.old_owner_sign_pk,
+                &self.state_key,
+                &pk,
+                generation,
+            ),
+            None => store.record(&id, &self.state_key, &pk, generation),
+        }
     }
 }
 

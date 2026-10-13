@@ -378,6 +378,7 @@ pub fn report(
         | ClientReply::Allowed {}
         | ClientReply::NoOpinion {}
         | ClientReply::GuardChoice { .. }
+        | ClientReply::Devices { .. }
         | ClientReply::HttpResponse { .. }
         | ClientReply::RunStarted {} => {
             let _ = writeln!(stderr, "vahta {command}: error: unexpected reply");

@@ -18,12 +18,13 @@ use crate::anchor::{self, Node};
 use crate::encoded::EncodedSet;
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, find_vault, from_vault, lines_for, refused, refused_names, unlock,
+    Ctx, Flow, check_name, find_vault, from_vault, lines_for, refused, refused_names, unlock_as,
 };
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
 use crate::server::Shared;
 use crate::session::{self, Ended, Role, Session, ask_time, info_of};
 use crate::surface::sanitize_label;
+use vahta_auth::Action;
 
 /// The most a session may be asked to last, short of `forever`: a year.
 pub(crate) const MAX_SECS: u64 = 366 * 24 * 3600;
@@ -224,7 +225,11 @@ pub(crate) fn unlock_session(
     );
     let mut panel = ctx.panel("Open a session", lines);
     panel.agent_note = label.as_deref().and_then(sanitize_label);
-    let mut vault = unlock(ctx, window.as_mut(), &vault_path, &panel)?;
+    let action = Action::Unlock {
+        names: names.clone(),
+        duration_secs: lasts.map(|d| d.as_secs()),
+    };
+    let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
     if vault.upgrade_pending() {
         // A session reads the current format only; the first save writes it.
         vault.save(&vault_path, ctx.store()).map_err(from_vault)?;

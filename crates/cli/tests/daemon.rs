@@ -76,6 +76,8 @@ impl Sandbox {
             // tried a real terminal there is no display to open one on.
             .env("VAHTA_TEST_SURFACE", self.root.join("script.jsonl"))
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
+            // The software phones a test pairs live here.
+            .env("VAHTA_TEST_LOOPBACK", self.root.join("phones"))
             .env("VAHTA_TEST_HTTP_ROOT", self.root.join("ca.pem"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY");
@@ -4621,6 +4623,445 @@ fn check_run_says_allowed_only_for_a_command_the_rules_let_through_and_opens_not
     assert_eq!(s.journal(), journal);
 }
 
+// --- Paired devices, rekey, recovery -----------------------------------------------------------
+
+const OLD_PW: &str = "correct horse";
+
+impl Sandbox {
+    fn phones(&self) -> vahta_auth::loopback::LoopbackLinks {
+        vahta_auth::loopback::LoopbackLinks::new(self.root.join("phones"))
+    }
+
+    /// What the software phone does for its next questions.
+    fn phone(&self, behaviours: &[&str]) {
+        let dir = self.root.join("phones");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script");
+        let mut text = fs::read_to_string(&path).unwrap_or_default();
+        for b in behaviours {
+            text.push_str(b);
+            text.push('\n');
+        }
+        fs::write(path, text).unwrap();
+    }
+
+    fn phone_script_left(&self) -> usize {
+        fs::read_to_string(self.root.join("phones/script"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    #[cfg(unix)]
+    fn phone_log(&self) -> String {
+        fs::read_to_string(self.root.join("phones/log")).unwrap_or_default()
+    }
+
+    /// Pair a phone called `name` (the password, no phone needed).
+    fn pair(&self, name: &str, access: &str) -> Output {
+        self.script(&[r#"{"secret":"correct horse"}"#]);
+        self.vahta(&["devices", "pair", name, "--for", access])
+    }
+
+    fn devices(&self) -> Vec<Value> {
+        let out = self.vahta(&["devices", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        doc["devices"].as_array().unwrap().clone()
+    }
+
+    fn device_id(&self, name: &str) -> [u8; 16] {
+        let d = self.devices();
+        let hex = d.iter().find(|x| x["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        vahta_vault::hex_decode(&hex).unwrap().try_into().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn device_slot_params(&self) -> Vec<u8> {
+        Vault::peek(&self.vault_path())
+            .unwrap()
+            .slots
+            .iter()
+            .find(|s| s.info.kind == vahta_vault::SLOT_DEVICE)
+            .map(|s| s.params.clone())
+            .unwrap_or_default()
+    }
+
+    fn recovery_shown(&self) -> Vec<String> {
+        self.window_log()
+            .iter()
+            .filter(|e| e["ask"] == "recovery")
+            .map(|e| e["shown"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Run an each-use secret through `sh`, printing it (redacted).
+    #[cfg(unix)]
+    fn run_each_use(&self) -> Output {
+        self.vahta(&["run", "--secret", "ALPHA", "--", "sh", "-c", "echo $ALPHA"])
+    }
+}
+
+/// The key a phone would derive for a device slot, from the slot's public
+/// parameters (what a lost phone can still compute for a copy of the file).
+fn kek_of(phone: &vahta_auth::loopback::LoopbackDevice, id: &[u8; 16], params: &[u8]) -> [u8; 32] {
+    let shared = phone.shared_secret(params).unwrap();
+    let mut info = b"vahta/v2/device-kek".to_vec();
+    info.extend_from_slice(id);
+    info.extend_from_slice(params);
+    *vahta_vault::crypto::hkdf(&*shared, &info)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_paired_phone_opens_an_each_use_run_and_a_session_with_no_password_window() {
+    let s = sandbox_with_secrets();
+    let out = s.pair("pixel", "30d");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("paired pixel"),
+        "{}",
+        text(&out.stdout)
+    );
+    // Pairing asked for the password and nothing else.
+    let list = s.devices();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["state"], "active");
+    assert!(list[0]["expires_at"].as_u64().unwrap() > 29 * 86_400);
+
+    let before = s.device_slot_params();
+    let asks = s.asks();
+    s.phone(&["approve"]);
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ALPHA)***\n");
+    assert_eq!(s.asks(), asks, "the phone answered; no password window");
+    // The slot was written again with a new ephemeral key.
+    assert_ne!(s.device_slot_params(), before);
+    let journal = s.journal();
+    assert!(journal.contains("\"event\":\"device_paired\""), "{journal}");
+    assert!(journal.contains("\"event\":\"device_unlock\""), "{journal}");
+    assert!(!journal.contains("fake-") && !journal.contains("correct horse"));
+    assert!(
+        s.phone_log().contains("unlock pixel run_each_use"),
+        "{}",
+        s.phone_log()
+    );
+
+    // A session too.
+    s.phone(&["approve"]);
+    let out = s.vahta(&["unlock", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asks);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "sh", "-c", "echo $ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asks, "the session needs no window either");
+
+    // It shows as used.
+    let list = s.devices();
+    assert!(list[0]["last_used"].as_u64().is_some());
+    let out = s.vahta(&["devices"]);
+    let table = text(&out.stdout);
+    assert!(
+        table.contains("pixel") && table.contains("active"),
+        "{table}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_password_window_always_works_and_a_cheating_phone_is_refused() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+    // Out of reach: the password window.
+    s.script(&[PW_ANSWER]);
+    let asks = s.asks();
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asks + 1);
+
+    // One good unlock, so there is an old decision to replay.
+    s.phone(&["approve"]);
+    assert_eq!(s.run_each_use().status.code(), Some(0));
+    assert_eq!(s.asks(), asks + 1);
+
+    for cheat in ["deny", "timeout", "forge", "replay"] {
+        s.phone(&[cheat]);
+        s.script(&[PW_ANSWER]);
+        let before = s.asks();
+        let out = s.run_each_use();
+        assert_eq!(out.status.code(), Some(0), "{cheat}: {}", text(&out.stderr));
+        assert_eq!(
+            s.asks(),
+            before + 1,
+            "{cheat} must end at the password window"
+        );
+    }
+    let journal = s.journal();
+    assert!(journal.contains("does not verify"), "{journal}");
+    assert!(journal.contains("\"result\":\"refused\""), "{journal}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_device_expires_is_extended_with_the_password_and_is_revoked() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+    let id = s.device_id("pixel");
+
+    // Access that ends in two seconds.
+    let store = LocalStore::new(s.root.join("data"));
+    let mut v = s.open_vault();
+    let soon = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 2;
+    vahta_auth::refresh_device(&mut v, &id, Some(soon)).unwrap();
+    v.save(&s.vault_path(), &store).unwrap();
+    drop(v);
+    std::thread::sleep(Duration::from_millis(2500));
+
+    // Expired: the phone is not even asked; the password window is.
+    s.phone(&["approve"]);
+    s.script(&[PW_ANSWER]);
+    let asks = s.asks();
+    assert_eq!(s.run_each_use().status.code(), Some(0));
+    assert_eq!(s.asks(), asks + 1);
+    assert_eq!(s.phone_script_left(), 1, "the expired phone was not asked");
+    assert_eq!(s.devices()[0]["state"], "expired");
+
+    // Extending needs the password, never the phone.
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["devices", "extend", "pixel", "--for", "90d"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.phone_script_left(), 1, "extending does not ask the phone");
+    assert_eq!(s.devices()[0]["state"], "active");
+    let asks = s.asks();
+    assert_eq!(s.run_each_use().status.code(), Some(0));
+    assert_eq!(s.asks(), asks, "the extended phone answers again");
+
+    // Revoking: the phone is gone, the password stays.
+    s.phone(&["approve"]);
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["devices", "revoke", "pix"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.devices().is_empty());
+    assert!(
+        Vault::peek(&s.vault_path())
+            .unwrap()
+            .slots
+            .iter()
+            .all(|x| x.info.kind != vahta_vault::SLOT_DEVICE)
+    );
+    s.script(&[PW_ANSWER]);
+    let asks = s.asks();
+    assert_eq!(s.run_each_use().status.code(), Some(0));
+    assert_eq!(s.asks(), asks + 1);
+    let journal = s.journal();
+    for event in ["device_extended", "device_revoked"] {
+        assert!(journal.contains(event), "{event}: {journal}");
+    }
+}
+
+#[test]
+fn a_device_cannot_manage_devices() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+    // The phone says yes; the window still wants the password.
+    s.phone(&["approve", "approve"]);
+    s.script(&[r#"{"cancel":true}"#]);
+    let out = s.vahta(&["devices", "extend", "pixel"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert_eq!(s.phone_script_left(), 2);
+    // Two phones of one name are one too many.
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["devices", "pair", "pixel"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    // Unknown device, bad duration.
+    let out = s.vahta(&["devices", "revoke", "nothing"]);
+    assert_eq!(out.status.code(), Some(3));
+    let out = s.vahta(&["devices", "extend", "pixel", "--for", "10s"]);
+    assert_eq!(out.status.code(), Some(3));
+}
+
+#[test]
+fn a_lost_phone_is_revoked_and_the_vault_rekeyed_so_an_old_copy_is_no_use() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+    assert_eq!(s.pair("tablet", "30d").status.code(), Some(0));
+    let id = s.device_id("pixel");
+    let first_key = s.recovery_shown()[0].clone();
+
+    // A session is open when the phone is lost.
+    s.script(&[PW_ANSWER]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+
+    // The copy a thief of the phone's keys might hold.
+    let slot_params = s.device_slot_params_of(&id);
+    let copy = s.root.join("copy.vht");
+    fs::copy(s.vault_path(), &copy).unwrap();
+    let old_kek = kek_of(&s.phones().load(&id).unwrap(), &id, &slot_params);
+
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    let out = s.vahta(&["devices", "lost", "pixel"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("re-keyed"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // A new recovery key was shown; the old one is dead and the new one works.
+    let keys = s.recovery_shown();
+    assert_eq!(keys.len(), 2, "init showed one; lost shows the new one");
+    let new_key = vahta_vault::RecoveryKey::from_paper(&keys[1]).unwrap();
+    let old_key = vahta_vault::RecoveryKey::from_paper(&first_key).unwrap();
+    let store = LocalStore::new(s.root.join("data"));
+    assert!(Vault::unlock_recovery(&s.vault_path(), &old_key, &store).is_err());
+    let v = Vault::unlock_recovery(&s.vault_path(), &new_key, &store).unwrap();
+    assert_eq!(v.get("ZETA").unwrap().expose(), b"fake-one");
+
+    // The copy opens with the old phone's key, on a machine that never saw
+    // the new vault, and gives the old vault. The new file does not.
+    let stranger = LocalStore::new(s.root.join("elsewhere"));
+    assert!(Vault::unlock_with_slot(&copy, &id, &old_kek, &stranger).is_ok());
+    assert!(Vault::unlock_with_slot(&s.vault_path(), &id, &old_kek, &store).is_err());
+    // The password still opens the new file; the other phone is kept; this
+    // machine was not told the owner changed.
+    let v = Vault::unlock_password(&s.vault_path(), OLD_PW.as_bytes(), &store).unwrap();
+    assert_eq!(v.get("ALPHA").unwrap().expose(), b"fake-three");
+    let names: Vec<String> = s.devices().iter().map(|d| d["name"].to_string()).collect();
+    assert_eq!(names, vec!["\"tablet\"".to_string()]);
+    let sessions = s.vahta(&["sessions", "--json"]);
+    let doc: Value = serde_json::from_slice(&sessions.stdout).unwrap();
+    assert_eq!(
+        doc["sessions"].as_array().unwrap().len(),
+        0,
+        "sessions end with the old key"
+    );
+
+    // The kept tablet opens the new vault.
+    s.phone(&["approve"]);
+    #[cfg(unix)]
+    {
+        let asks = s.asks();
+        assert_eq!(s.run_each_use().status.code(), Some(0));
+        assert_eq!(s.asks(), asks);
+    }
+    let journal = s.journal();
+    for event in ["device_lost_rekey", "\"event\":\"rekey\""] {
+        assert!(journal.contains(event), "{event}: {journal}");
+    }
+    assert!(!journal.contains(&keys[1]) && !journal.contains("fake-"));
+}
+
+impl Sandbox {
+    fn device_slot_params_of(&self, id: &[u8; 16]) -> Vec<u8> {
+        Vault::peek(&self.vault_path())
+            .unwrap()
+            .slots
+            .iter()
+            .find(|s| &s.info.slot_id == id)
+            .map(|s| s.params.clone())
+            .unwrap()
+    }
+}
+
+#[test]
+fn forgot_the_password_the_recovery_key_sets_a_new_one() {
+    let s = sandbox_with_secrets();
+    let key = s.recovery_shown()[0].clone();
+    let store = LocalStore::new(s.root.join("data"));
+
+    // A wrong key three times changes nothing.
+    s.script(&[
+        r#"{"secret":"nonsense"}"#,
+        r#"{"secret":"more nonsense"}"#,
+        r#"{"secret":"00"}"#,
+    ]);
+    let out = s.vahta(&["recover"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(Vault::unlock_password(&s.vault_path(), OLD_PW.as_bytes(), &store).is_ok());
+
+    // A well-formed key that is not this vault's.
+    s.script(&[&format!(r#"{{"secret":"{}"}}"#, "ab".repeat(32))]);
+    let out = s.vahta(&["recover"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).contains("does not open"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // The right key, then a new password.
+    s.script(&[
+        &format!(r#"{{"secret":"{key}"}}"#),
+        r#"{"secret":"a brand new password"}"#,
+    ]);
+    let out = s.vahta(&["recover"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(Vault::unlock_password(&s.vault_path(), OLD_PW.as_bytes(), &store).is_err());
+    let v = Vault::unlock_password(&s.vault_path(), b"a brand new password", &store).unwrap();
+    assert_eq!(v.get("ZETA").unwrap().expose(), b"fake-one");
+    // The recovery key itself is unchanged and still opens it.
+    let k = vahta_vault::RecoveryKey::from_paper(&key).unwrap();
+    assert!(Vault::unlock_recovery(&s.vault_path(), &k, &store).is_ok());
+    let journal = s.journal();
+    assert!(journal.contains("\"event\":\"recover\""), "{journal}");
+    assert!(!journal.contains(&key) && !journal.contains("brand new"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_phone_can_answer_an_ask_and_a_forged_answer_to_it_is_not_taken() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\nallow = [\"printenv\"]\n",
+    )
+    .unwrap();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+
+    // The phone allows once, then opens the vault for the run: no password.
+    let passwords = |s: &Sandbox| {
+        s.window_log()
+            .iter()
+            .filter(|e| e["ask"] == "password")
+            .count()
+    };
+    let before = passwords(&s);
+    s.phone(&["approve:0", "approve"]);
+    let out = s.vahta(&[
+        "run",
+        "--ask",
+        "--reason",
+        "look",
+        "--secret",
+        "ZETA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(passwords(&s), before, "no password was asked");
+    let journal = s.journal();
+    assert!(journal.contains("device_approve"), "{journal}");
+    assert!(journal.contains("run_allowed_once"), "{journal}");
+
+    // A forged answer to the choice is not taken: the window decides.
+    s.phone(&["forge"]);
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "sh", "-c", "true"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert_eq!(s.journal().matches("run_allowed_once").count(), 1);
+}
 // --- `vahta http` ----------------------------------------------------------------------------
 
 mod http {

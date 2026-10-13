@@ -25,9 +25,10 @@ use vahta_policy::Verdict;
 
 use crate::binding;
 use crate::journal::Entry;
-use crate::ops::{Ctx, Flow, error, from_surface, from_vault, lines_for, unlock};
+use crate::ops::{Ctx, Flow, error, from_vault, lines_for, unlock_expecting};
 use crate::protocol::ClientReply;
 use crate::surface::sanitize_label;
+use vahta_auth::{Action, Request};
 
 const ALLOW_ONCE: usize = 0;
 const NO: usize = 1;
@@ -111,7 +112,7 @@ pub(crate) fn ask(
 
     let mut lines = lines_for(project, vault_path);
     lines.push(secrets_line);
-    lines.push(command_line);
+    lines.push(command_line.clone());
     lines.push(match program {
         Some(p) => format!("Program: {}", p.display()),
         None => "Program: not found".to_string(),
@@ -154,9 +155,35 @@ pub(crate) fn ask(
         options.push(format!("Add `{text}` to the list"));
     }
     let mut window = ctx.window(title)?;
-    let choice = window
-        .choose(&panel, "Let this command use the secret?", &options)
-        .map_err(from_surface)?;
+    // The window and any paired phone are asked together; the first answer
+    // wins. The yes lets this one run; a rule added to the list is a `bind` and
+    // asks for more (below).
+    let request = Request::new(
+        Action::RunAsk {
+            names: names.clone(),
+            command: command_line.clone(),
+            reason: reason.and_then(sanitize_label),
+        },
+        &project.root.display().to_string(),
+        peek.vault_id,
+        std::time::Duration::from_secs(5 * 60),
+    )
+    .map_err(|e| error(e.to_string()))?
+    .with_options(&options)
+    .with_category(failures.iter().find_map(|(b, _)| b.category.clone()))
+    .with_label(panel.agent_note.clone());
+    let need = crate::authn::need_of(peek, &request.action);
+    let choice = crate::authn::approve(
+        ctx.shared,
+        window.as_mut(),
+        &panel,
+        "Let this command use the secret?",
+        vault_path,
+        &request,
+        need,
+        std::time::Duration::from_secs(5 * 60),
+    )
+    .map_err(|e| error(e.to_string()))?;
     let journal = |event: &str, result: &str| {
         let shown = program
             .map(|p| format!("program {}", p.display()))
@@ -220,12 +247,10 @@ fn add_to_list(
 ) -> Flow<()> {
     panel.lines.push(format!("Adding the rule: {text}"));
     panel.warning = None;
-    let mut vault = unlock(ctx, window, vault_path, panel)?;
-    if vault.vault_id() != peek.vault_id || vault.generation() != peek.generation {
-        return Err(error(
-            "the vault changed while the window was open; nothing was done",
-        ));
-    }
+    let action = Action::Bind {
+        names: failures.iter().map(|(b, _)| b.name.clone()).collect(),
+    };
+    let mut vault = unlock_expecting(ctx, window, vault_path, panel, action, peek)?;
     let manifest_path: PathBuf = project.manifest_path();
     let current = match std::fs::read_to_string(&manifest_path) {
         Ok(t) => t,

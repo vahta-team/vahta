@@ -140,6 +140,14 @@ pub trait Window: Send {
     /// the window being closed or cancelled without one.
     fn show_recovery_key(&mut self, panel: &Panel, key: &Secret) -> Result<bool, SurfaceError>;
 
+    /// A function, callable from another thread, that ends whatever question
+    /// this window is blocked on (the answer then comes back as closed). For
+    /// when another way of answering won the race. `None` for a window that
+    /// cannot be interrupted; its question then ends on its own.
+    fn canceller(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        None
+    }
+
     /// End the conversation, with a last line for the person.
     fn close(self: Box<Self>, message: Option<&str>);
 }
@@ -590,6 +598,13 @@ impl Window for TerminalWindow {
             SurfaceAnswer::Cancel {} => Ok(false),
             _ => Err(SurfaceError::Protocol("unexpected answer".to_string())),
         }
+    }
+
+    fn canceller(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        let stream = self.stream.try_clone().ok()?;
+        Some(Box::new(move || {
+            let _ = stream.shutdown();
+        }))
     }
 
     fn close(mut self: Box<Self>, message: Option<&str>) {
