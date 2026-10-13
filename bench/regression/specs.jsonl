@@ -35,3 +35,12 @@
 {"id": "reg-fake-001", "src": "gap-fix", "tool": "Bash", "path": null, "template": "export AUTH_TOKEN=@@VALUE@@ && npm test", "kind": "ok", "cat": "fake_prefix", "form": "plain"}
 {"id": "reg-fake-002", "src": "gap-fix", "tool": "Bash", "path": null, "template": "echo '0 3 * * * /usr/local/bin/backup --password=@@VALUE@@' | crontab -", "kind": "ok", "cat": "fake_prefix", "form": "plain"}
 {"id": "reg-fake-003", "src": "gap-fix", "tool": "Bash", "path": null, "template": "psql postgres://app:@@VALUE@@@localhost/db -c 'select 1'", "kind": "ok", "cat": "fake_prefix", "form": "plain"}
+{"id": "reg-pct-001", "src": "a8-static", "tool": "Bash", "path": null, "template": "curl -H \"Authorization: Bearer @@VALUE@@\" https://api.example.com/v1", "kind": "leak", "cat": "generic_password", "form": "urlenc"}
+{"id": "reg-pct-002", "src": "a8-static", "tool": "Bash", "path": null, "template": "curl -H \"Authorization: Bearer @@VALUE@@\" https://api.example.com/v1", "kind": "leak", "cat": "aws_secret", "form": "urlenc"}
+{"id": "reg-pct-003", "src": "a8-static", "tool": "Bash", "path": null, "template": "mysql -u root -p@@VALUE@@ mydb", "kind": "leak", "cat": "db_password", "form": "urlenc"}
+{"id": "reg-pct-004", "src": "a8-static", "tool": "Bash", "path": null, "template": "export DB_PASSWORD=@@VALUE@@ && make", "kind": "leak", "cat": "generic_password", "form": "urlenc"}
+{"id": "reg-pct-005", "src": "a8-static", "tool": "Bash", "path": null, "template": "export AUTH_TOKEN=@@VALUE@@ && npm test", "kind": "ok", "cat": "fake_prefix", "form": "urlenc"}
+{"id": "reg-pct-006", "src": "a8-static", "tool": "Bash", "path": null, "template": "psql postgres://app:@@VALUE@@@localhost/db -c 'select 1'", "kind": "ok", "cat": "fake_prefix", "form": "urlenc"}
+{"id": "reg-concat-001", "src": "a8-static", "tool": "Bash", "path": null, "template": "curl -H \"Authorization: Bearer @@VALUE@@\" https://api.example.com/v1", "kind": "leak", "cat": "generic_password", "form": "concat"}
+{"id": "reg-concat-002", "src": "a8-static", "tool": "Bash", "path": null, "template": "mysql -u root -p@@VALUE@@ mydb", "kind": "leak", "cat": "db_password", "form": "concat"}
+{"id": "reg-concat-003", "src": "a8-static", "tool": "Bash", "path": null, "template": "API_KEY=@@VALUE@@ ./run.sh", "kind": "leak", "cat": "generic_password", "form": "concat"}

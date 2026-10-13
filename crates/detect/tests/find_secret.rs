@@ -32,6 +32,10 @@ fn b64(bytes: &[u8]) -> String {
     out
 }
 
+fn pct(text: &str) -> String {
+    text.bytes().map(|b| format!("%{b:02X}")).collect()
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -209,4 +213,55 @@ fn many_vendor_words_hit_the_rule_cap_but_not_a_vendor_prefix() {
     let d = vahta_detect::detect(words);
     assert_eq!(d.truncated, Some(vahta_detect::Truncated::Rules));
     assert!(d.finding.is_none());
+}
+
+#[test]
+fn percent_encoded_values_block_and_say_so() {
+    let bearer = ["Author", "ization: Bear", "er "].concat();
+    for text in [
+        format!(
+            "curl -H \"{bearer}{}\" https://api.example.com",
+            pct(&aws())
+        ),
+        format!(
+            "curl -H '{bearer}{}' https://api.example.com",
+            pct(&anthropic())
+        ),
+        format!(
+            "echo {} | python3 -c 'import sys,urllib.parse as u'",
+            pct(&anthropic())
+        ),
+        format!(
+            "curl https://api.example.com/?x={}",
+            pct(&format!("AWS_SECRET_ACCESS_KEY={}", aws()))
+        ),
+    ] {
+        let f = find_secret(&text).unwrap_or_else(|| panic!("missed: {text}"));
+        assert_eq!(f.evasion, Some(Evasion::Percent), "{text}");
+        assert_eq!(f.mode, Mode::Block);
+        assert_eq!(f.confidence, Confidence::Likely);
+    }
+}
+
+#[test]
+fn ansi_c_quoted_pieces_are_one_value() {
+    let a = anthropic();
+    let text = format!("export K=$'{}'$'{}'", &a[..9], &a[9..]);
+    let f = find_secret(&text).expect("missed");
+    assert_eq!(f.evasion, Some(Evasion::Concat));
+}
+
+#[test]
+fn ordinary_percent_encoding_is_left_alone() {
+    let fake = pct("fake-plain-value-1");
+    let name = ["API_", "KEY"].concat();
+    for text in [
+        "curl 'https://example.com/my%20docs/annual%20report%20final.pdf?q=hello%20world'".to_string(),
+        "curl 'https://example.com/auth?redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback%3Fnext%3D%2Fhome'".to_string(),
+        "curl --data 'payload=%7B%22name%22%3A%22bob%22%2C%22items%22%3A%5B1%2C2%2C3%5D%7D' https://example.com".to_string(),
+        format!("export {name}={fake} && ./run.sh"),
+        format!("echo {} | head", pct("hello world, this is plain text")),
+    ] {
+        assert!(find_secret(&text).is_none(), "{text}");
+    }
 }

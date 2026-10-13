@@ -88,7 +88,7 @@ is [docs/agent-usage.md](docs/agent-usage.md).
   vendor token shapes (about 400 rules, kept as data), passwords in connection
   strings and in program arguments, private-key headers, names that mean secret
   (`API_KEY=`, `--token`, Bearer values);
-- **blocks evasion**: values hidden in base64 or hex, or joined from pieces, and,
+- **blocks evasion**: values hidden in base64, hex or percent-encoding, or joined from pieces, and,
   with the daemon running, the values Vahta holds in other encodings (base64,
   hex, URL-encoded, reversed);
 - **redacts tool output** before the model sees it, replacing each value with

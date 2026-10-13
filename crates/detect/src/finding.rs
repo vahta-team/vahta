@@ -10,8 +10,8 @@
 //!    header);
 //! 4. a Bearer value, then names that mean "secret" (`API_KEY=...`,
 //!    `--password ...`), likely before possible;
-//! 5. the evasion pass, only when nothing else hit: a base64, hex or
-//!    piece-by-piece spelling of any of the above.
+//! 5. the evasion pass, only when nothing else hit: a base64, hex,
+//!    percent-encoded or piece-by-piece spelling of any of the above.
 //!
 //! A [`Finding`] carries a `category` for the agent (what it was, never which
 //! rule) and a `rule` and `description` for the person. It never carries a
@@ -30,6 +30,8 @@ pub enum Evasion {
     /// Pieces joined by the shell or the language (`'ab''cd'`, `"a" + "b"`).
     Concat,
     Hex,
+    /// Spelled byte by byte as `%XX`.
+    Percent,
 }
 
 impl Evasion {
@@ -38,6 +40,7 @@ impl Evasion {
             Evasion::Base64 => "base64",
             Evasion::Concat => "concatenation",
             Evasion::Hex => "hex",
+            Evasion::Percent => "percent-encoded",
         }
     }
 }

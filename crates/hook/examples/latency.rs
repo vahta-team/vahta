@@ -101,6 +101,12 @@ fn classes() -> Vec<Class> {
         .collect();
     // A key-shaped value, from pieces, for the refusing path.
     let key = ["sk-", "ant-", "api03-", "Zk9pL2xQ7mN4vB8wR3tY6uHs1DfG"].concat();
+    // Percent-encoded text, the worst case for that pass: many dense runs.
+    let escaped = |text: &str| -> String { text.bytes().map(|b| format!("%{b:02X}")).collect() };
+    let query: String = (0..60)
+        .map(|i| format!("&q{i}={}", escaped(&text(40)[..40])))
+        .collect();
+    let chain: String = (0..300).map(|i| format!("'p{i}x''y{i}'")).collect();
     vec![
         Class {
             name: "short command",
@@ -117,6 +123,14 @@ fn classes() -> Vec<Class> {
         Class {
             name: "base64 blob (8 KB)",
             stdin: bash(&format!("echo {} | base64 -d > logo.png", base64(&binary))),
+        },
+        Class {
+            name: "percent-encoded query (8 KB)",
+            stdin: bash(&format!("curl 'https://example.com/?a=1{query}'")),
+        },
+        Class {
+            name: "quote chains (3 KB)",
+            stdin: bash(&format!("echo {chain}")),
         },
         Class {
             name: "refused (vendor key)",

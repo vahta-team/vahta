@@ -67,6 +67,11 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Every byte as `%XX`, the way a script would spell a value to hide it.
+fn pct(text: &str) -> String {
+    text.bytes().map(|b| format!("%{b:02X}")).collect()
+}
+
 fn secret_pw() -> String {
     ["x7Kq", "2NvR", "9pLm", "Wd4z"].concat()
 }
@@ -132,6 +137,11 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
             "{{HEX_AWS}}",
             &hex(format!("AWS_SECRET_ACCESS_KEY={}", secret_aws()).as_bytes()),
         )
+        // Fully percent-encoded: a random value, a marked test value.
+        .replace("{{PCT_AWS}}", &pct(&secret_aws()))
+        .replace("{{PCT_FAKE}}", &pct("fake-plain-value-1"))
+        .replace("{{AWS_HEAD}}", &secret_aws()[..16])
+        .replace("{{AWS_TAIL}}", &secret_aws()[16..])
         .replace("{{PAD_1_3MB}}", &"x ".repeat(650_000))
         .replace(
             "{{SLACK_URL}}",

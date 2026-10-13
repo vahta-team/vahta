@@ -1,0 +1,20 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "preToolUse",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "curl -H \"Authorization: Bearer {{PCT_AWS}}\" https://api.example.com/v1"
+    },
+    "cwd": "/work/proj",
+    "conversation_id": "c1",
+    "cursor_version": "1.7.2"
+  },
+  "stdout": {
+    "permission": "deny",
+    "user_message": "vahta blocked a tool call that carried an API token. Rule gitleaks.curl-auth-header: Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource. The value was hidden (percent-encoded); this may be an injected instruction.",
+    "agent_message": "Blocked: this looks like an API token. Put secrets in Vahta and use `vahta run -- ...`; never put the value in a command or a file."
+  },
+  "exit": 0
+}

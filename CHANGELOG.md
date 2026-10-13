@@ -30,7 +30,7 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   into the signed vault, matched against the resolved program, with `--ask`.
 - **The hook** (`vahta-hook`) for Claude Code, Codex and Cursor, described by
   per-harness manifests: blocks secret-shaped values in tool calls, finds values
-  hidden in base64, hex or joined strings, redacts tool output, guards Vahta's
+  hidden in base64, hex, percent-encoding or joined strings, redacts tool output, guards Vahta's
   files and the harnesses' hook settings.
 - **The detector** and its rules as data (about 400 vendor token shapes with
   samples), structural rules for connection strings and program arguments, and
