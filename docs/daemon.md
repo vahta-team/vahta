@@ -41,7 +41,8 @@ nothing was done.
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list`, `vahta check` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
-| `vahta devices` | List the phones paired with this vault: name, id, when paired, when their access ends, when last used. | no |
+| `vahta devices` | List the phones paired with this vault: name, id, when paired, when their access ends, when last used, and which unlock method is current. | no |
+| `vahta config unlock [--global] [password\|device NAME\|last\|default]` | Show or set which unlock method is tried first. See [The current unlock method](#the-current-unlock-method). | no |
 | `vahta devices pair NAME [--for DURATION]` / `extend ID [--for DURATION]` / `revoke ID` / `lost ID` | Pair a phone, give it more time, remove it, or remove it and change the vault's key. See [Devices](#devices-factors-re-keying-and-recovery). | the master password, always |
 | `vahta recover` | The password is forgotten: the recovery key opens the vault and a new password is chosen. | the recovery key |
 | `vahta daemon run\|status\|stop\|restart` | The daemon itself. | no |
@@ -538,6 +539,10 @@ alarm = "warn"          # or "lock": what the injection alarm does (see below)
 
 guard = "on"            # or "off": the hook watchdog (below); unset until `vahta setup` asked
 hook_tool = "block"     # or "observe": a secret in a tool call is let through and reported
+unlock = "last"         # or "password", or "device:NAME": the method tried first (below)
+
+[unlock_vault]          # the same, for one vault (its id in hex); beats the line above
+5f0c2d6a9e1b4c37a8d2e4f6b1c3a5d7 = "device:pixel"
 ```
 
 A misspelt key is an error, not a silent default. On Linux the window opens in
@@ -615,12 +620,50 @@ A vault can be opened by more than the password. Each way is a **slot** in the
 vault file that holds the vault key wrapped under a key that way can produce.
 The password and the recovery key are two kinds; a **paired phone** is a third.
 The daemon does not know the kinds: it asks the registry in `crates/auth`, which
-tries the phone first (when the policy lets a phone do it) and falls back to the
-password window.
+tries the **current method** first (by default the one enrolled last: the
+phone, once one is paired) and then the others, ending with the password
+window.
 
 **The master password always works.** However the phone behaves (away, slow,
 denying, answering wrongly), the window is there and the password opens
 everything except what only the password may do (managing devices, below).
+
+### The current unlock method
+
+A person may have several ways in: the password, the recovery key (its own
+command, never part of an ordinary unlock), and one or more phones. The
+**current method** is the one tried first:
+
+* `unlock = "last"` (the default, also when nothing is set): the method
+  enrolled last, by the creation time of its slot among the ordinary methods.
+  The password counts from when the vault was made, so with no phone paired it
+  is the password, and a phone paired later takes over. Using a phone (its slot
+  is written again after every use), changing the password or re-keying does
+  not count as enrolling: a slot keeps its creation time.
+* `unlock = "password"`: the password window first. A phone is not asked.
+* `unlock = "device:NAME"`: that phone first (a name in any case, or the start of
+  its id, four hex characters or more); if it is away, refuses or times out, the
+  next methods follow, the password window last. A name that matches no phone
+  with a slot in this vault (the phone was removed) is treated as `last`.
+
+The line `unlock` applies to every vault; an entry in `[unlock_vault]`, keyed by the
+vault id in hex, applies to that vault and beats it. A phone's name only means
+something in the vault it is paired with, so `vahta config unlock device NAME` sets
+the entry of the vault of the current project (it refuses a name the vault does not
+have, or a phone with no way to open it); `--global` sets the general line, and
+`default` forgets the vault's own entry. With no argument the command shows the
+setting, where it comes from, the current method and the whole order.
+`vahta devices` marks the current phone (`UNLOCK` column) and ends with the same
+line.
+
+**Changing it needs no password.** It only orders methods that are already there,
+and the master password opens the vault whatever it says, so no setting can lock
+the person out or open anything that was closed. Whoever can write `config.toml`
+can already do worse to the person (for example turn `lock_on_sleep` off). The
+daemon reads the setting from the file at each unlock, so a change applies at the
+next one without restarting it. A policy that needs the password alone
+(`password_only`) never offers a phone, whatever is current. A fuller choice
+(a picker, per-action choices) is for the TUI and the GUI.
 
 ### Pairing and what a phone can do
 
@@ -684,12 +727,42 @@ except `password_only`.
 `ID` is the device's name or the start of its id.
 
 **Other machines.** A machine that has opened the vault pinned its owner key.
-This machine's pin is moved to the new owner key by the re-key; another machine
-refuses the re-keyed file as "the vault's owner key differs from the one this
-machine saw before" until its record of the vault
-(`<data dir>/vaults/<vault id>/state`) is deleted by hand. The file carries no
-proof that the old owner approved the new one, so this is not done silently.
-Recipients (people and cloud members) pinned the owner the same way.
+This machine's pin is moved to the new owner key by the re-key. The re-key also
+writes a **successor record** into the file (format 3): the old owner key signs
+"the owner is now this key, owner generation N". The last four records are kept,
+each starting where the one before ended. Another machine that pinned the old key
+then does not refuse the file for good, but it does not trust the record alone:
+
+1. the record must link the pinned key to the file's owner (each step signed by the
+   previous key, the generations rising), else it is refused as before ("the
+   vault's owner key differs from the one this machine saw before");
+2. the vault must **open on this machine with the person's own secret** (the
+   password, the recovery key or a phone), as for any unlock; and
+3. a window must say: "This vault's owner key was changed on another machine
+   (re-key after a lost device, DATE). Accept the new key on this machine?"
+   *Accept* pins the new key; *Refuse*, closing the window or no answer leaves the
+   old pin and the vault stays refused.
+
+Why the confirmation. A vault key that leaked together with a stolen phone and
+its fingerprint can sign anything the old owner could, including a successor for
+a key the thief chose. The chain only shows that the *old key* approved the new
+one, and that is exactly what an attacker holding the old key can fake. Step 2
+closes that: the new file must open with a secret the thief does not have (the
+new password-wrapped key is not derivable from the old vault key), and step 3
+puts the question to the person, who knows whether they re-keyed. A rolled-back
+file (a generation below one this machine has seen) is refused before any window.
+The answer is journaled (`owner_key_change`). Recipients (people and cloud
+members) pinned the owner the same way and follow the chain the same way, with
+their own keys in place of a password.
+
+Limits. A machine that was on a key more than four re-keys back finds no link and
+must clear its record of the vault (`<data dir>/vaults/<vault id>/state`) by
+hand, as before. `vahta list` and `vahta check` read the file without unlocking,
+so on such a machine they report the owner change until one unlock has accepted
+it. The old record of the machine is not authenticated at that step (its check key
+was derived from the old vault key); what is checked is that it pins the old owner
+key and a generation not above the file's. A file with a broken or forged chain
+does not open at all.
 
 ### Recovery
 
@@ -718,7 +791,8 @@ Recipients (people and cloud members) pinned the owner the same way.
   open and still empty; the password question appears once the phone has not
   answered.
 * The journal records `device_paired`, `device_extended`, `device_revoked`,
-  `device_lost_rekey`, `device_unlock`, `device_approve`, `rekey` and `recover`,
+  `device_lost_rekey`, `device_unlock`, `device_approve`, `rekey`, `recover` and
+  `owner_key_change`,
   with the device's id and name, never a key, a password or a recovery key.
 
 ## Injection alarm

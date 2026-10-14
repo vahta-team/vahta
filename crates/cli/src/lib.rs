@@ -33,6 +33,7 @@
 
 mod autostart;
 mod bind_cmd;
+mod config_cmd;
 mod daemon_cmd;
 mod devices_cmd;
 mod guard_cmd;
@@ -111,6 +112,7 @@ commands:
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
   sessions  list sessions, or `kill ID` one (no password)
+  config  `config unlock`: which unlock method is tried first (no password)
   devices  list, pair, extend, revoke or declare lost the phones that open the vault
   recover  forgot the password: use the recovery key and choose a new one
   hooks   `hooks pause` turns Vahta's hooks off for a while (the person approves)
@@ -431,6 +433,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("http") => http_cmd::run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),
         Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),
+        Some("config") => config_cmd::run(&args[1..], env, stdout, stderr),
         Some("devices") => devices_cmd::run(&args[1..], env, stdout, stderr),
         Some("recover") => devices_cmd::run_recover(&args[1..], env, stdout, stderr),
         Some("lock") => session_cmds::run_lock(&args[1..], env, stdout, stderr),

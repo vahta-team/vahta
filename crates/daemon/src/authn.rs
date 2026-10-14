@@ -13,7 +13,7 @@ use vahta_auth::{
     Action, Approver, AuthError, Cancel, DeviceApprover, Factor, LinkedDevice, Need, Request,
     UnlockCtx, UnlockedBy, policy,
 };
-use vahta_vault::{Device, Peek, RecoveryKey, SlotInfo, Vault};
+use vahta_vault::{Device, OwnerKeyChange, Peek, RecoveryKey, SlotInfo, Vault};
 use zeroize::Zeroizing;
 
 use crate::journal::Entry;
@@ -209,6 +209,8 @@ struct WindowCtx<'a> {
     surface: Option<SurfaceError>,
     typed: Option<Zeroizing<Vec<u8>>>,
     failures: Vec<(Option<[u8; 16]>, String)>,
+    /// Owner key changes the person was asked about, and what they said.
+    owner_changes: Vec<bool>,
 }
 
 impl UnlockCtx for WindowCtx<'_> {
@@ -263,6 +265,28 @@ impl UnlockCtx for WindowCtx<'_> {
     fn attempt_failed(&mut self, slot: &SlotInfo, why: &AuthError) {
         self.failures.push((Some(slot.slot_id), why.to_string()));
     }
+
+    fn confirm_owner_change(&mut self, change: &OwnerKeyChange) -> bool {
+        let mut shown = self.panel.clone();
+        shown.lines.push(format!(
+            "This vault's owner key was changed on another machine (re-key after a lost \
+             device, {}).",
+            vahta_ipc::duration::ymd(change.changed_at)
+        ));
+        shown.lines.push(
+            "It opened here with your own secret. Accept the new key on this machine?".to_string(),
+        );
+        shown.warning =
+            Some("If you did not re-key this vault, or do not know who did, refuse.".to_string());
+        let options = ["Accept the new key".to_string(), "Refuse".to_string()];
+        let accepted = matches!(
+            self.window
+                .choose_within(&shown, "Accept the new owner key?", &options, DEVICE_WAIT),
+            Ok(Some(0))
+        );
+        self.owner_changes.push(accepted);
+        accepted
+    }
 }
 
 /// The reply for an authentication that did not open the vault.
@@ -290,8 +314,32 @@ pub(crate) fn need_of(peek: &Peek, action: &Action) -> Need {
     policy::need_for(action.key(), &categories_of(peek, &action.names()))
 }
 
-/// Unlock the vault at `path` for `action`: the paired devices first if the
-/// policy lets a phone do it, then the master password in `window`. `peek` is
+/// The unlock setting for the vault `vault_id`, read from the config file each
+/// time (`vahta config unlock` may have changed it since the daemon started):
+/// the preference, its text and where it comes from. A config that cannot be
+/// read is the default, the last enrolled method; the password still opens.
+pub(crate) fn unlock_pref(
+    shared: &Shared,
+    vault_id: &[u8; 16],
+) -> (vahta_auth::UnlockPref, String, String) {
+    let cfg =
+        vahta_ipc::config::Config::load(&shared.options.paths.config_file()).unwrap_or_default();
+    let id = vahta_vault::hex_encode(vault_id);
+    let (setting, source) = if cfg.unlock_vault.contains_key(&id) {
+        (cfg.unlock_for(&id).clone(), "this vault")
+    } else if cfg.unlock != vahta_ipc::config::UnlockSetting::Last {
+        (cfg.unlock.clone(), "all vaults")
+    } else {
+        (cfg.unlock.clone(), "default")
+    };
+    let text = setting.as_text();
+    let pref = vahta_auth::UnlockPref::parse(&text).unwrap_or_default();
+    (pref, text, source.to_string())
+}
+
+/// Unlock the vault at `path` for `action`: the current method first (by
+/// default the last enrolled; see `vahta config unlock`), then the others,
+/// the master password in `window` always among them. `peek` is
 /// the plain view of the file just read. The returned [`UnlockedBy`] says what
 /// opened it.
 pub(crate) fn unlock_for(
@@ -335,11 +383,13 @@ pub(crate) fn unlock_keeping_password(
         surface: None,
         typed: None,
         failures: Vec::new(),
+        owner_changes: Vec::new(),
     };
+    let (pref, _, _) = unlock_pref(ctx.shared, &peek.vault_id);
     let result = ctx
         .shared
         .unlockers
-        .unlock(path, ctx.store(), need, &mut wctx);
+        .unlock_by(path, ctx.store(), need, &pref, &mut wctx);
     for (slot, why) in &wctx.failures {
         let mut entry = Entry::new("device_unlock")
             .vault(&peek.vault_id)
@@ -348,6 +398,16 @@ pub(crate) fn unlock_keeping_password(
             entry = entry.device(id);
         }
         ctx.journal(entry);
+    }
+    for accepted in &wctx.owner_changes {
+        ctx.journal(Entry::new("owner_key_change").vault(&peek.vault_id).result(
+            if *accepted { "ok" } else { "refused" },
+            Some(if *accepted {
+                "the person accepted the new owner key on this machine"
+            } else {
+                "the person refused the new owner key"
+            }),
+        ));
     }
     let surface = wctx.surface.take();
     match result {
@@ -397,6 +457,7 @@ pub(crate) fn unlock_with_recovery(
         surface: None,
         typed: None,
         failures: Vec::new(),
+        owner_changes: Vec::new(),
     };
     let result =
         ctx.shared

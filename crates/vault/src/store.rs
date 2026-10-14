@@ -171,6 +171,12 @@ impl LocalStore {
         Ok(Some(state))
     }
 
+    /// This opener's state for the vault, after its MAC is checked; `None` if
+    /// there is none.
+    pub fn state(&self, vault_id: &[u8; 16], key: &StateKey) -> Result<Option<State>, Error> {
+        self.load_authenticated(vault_id, key)
+    }
+
     /// Check a file's owner key and generation against this opener's state,
     /// after authenticating the state. A state that fails its MAC is
     /// [`Error::StoreTampered`], whatever else it says.
@@ -276,6 +282,46 @@ impl LocalStore {
             "pinned_owner_sign_pk = {}\nmax_generation = {}\nmac = {}\n",
             hex_encode(new_owner_sign_pk),
             max_generation,
+            hex_encode(&mac)
+        );
+        write::write_atomic(&self.state_path(vault_id, new.file), text.as_bytes())
+    }
+
+    /// Move this machine's owner state to a new owner key that a successor
+    /// chain vouches for. An owner's state is keyed from the vault key, and
+    /// the vault key changed with the owner key, so the old state's MAC cannot
+    /// be checked here; what is checked is that it pins `old_owner_sign_pk` and
+    /// that `generation` is not below the highest it recorded. The caller has
+    /// opened the file with the new vault key (`new`) and the person has
+    /// confirmed; this writes the state under `new`'s MAC.
+    pub fn adopt_owner(
+        &self,
+        vault_id: &[u8; 16],
+        new: &StateKey,
+        old_owner_sign_pk: &[u8; 32],
+        new_owner_sign_pk: &[u8; 32],
+        generation: u64,
+    ) -> Result<(), Error> {
+        let state = self
+            .load_unchecked(vault_id, new.file)?
+            .ok_or(Error::OwnerChanged)?;
+        if &state.pinned_owner_sign_pk != old_owner_sign_pk {
+            return Err(Error::OwnerChanged);
+        }
+        if generation < state.max_generation {
+            return Err(Error::RolledBack {
+                found: generation,
+                seen: state.max_generation,
+            });
+        }
+        let mac = new
+            .mac(vault_id, new_owner_sign_pk, generation)
+            .finalize()
+            .into_bytes();
+        let text = format!(
+            "pinned_owner_sign_pk = {}\nmax_generation = {}\nmac = {}\n",
+            hex_encode(new_owner_sign_pk),
+            generation,
             hex_encode(&mac)
         );
         write::write_atomic(&self.state_path(vault_id, new.file), text.as_bytes())

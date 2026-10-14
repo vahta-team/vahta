@@ -1376,6 +1376,294 @@ fn another_machine_that_pinned_the_old_owner_refuses_the_rekeyed_vault() {
     .unwrap();
 }
 
+/// A vault on machine A (`t.store`), already opened once on machine B (the
+/// returned store), then re-keyed on A and saved. Returns A's vault, the
+/// recovery key and B's store.
+fn rekeyed_on_a(t: &T) -> (Vault, RecoveryKey, LocalStore) {
+    let (mut v, recovery, _, _) = with_devices(t);
+    let b = LocalStore::new(t._dir.path().join("machine-b"));
+    Vault::unlock_password(&t.path, PW, &b).unwrap();
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+        .unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    (v, recovery, b)
+}
+
+#[test]
+fn a_rekey_writes_a_successor_the_old_key_signed() {
+    let t = t();
+    let (_, _, _) = rekeyed_on_a(&t);
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!(peek.format, 3);
+    assert_eq!(peek.successors.len(), 1);
+    let s = &peek.successors[0];
+    assert_eq!(s.new_owner_sign_pub, peek.owner_sign_pk);
+    assert_ne!(s.old_owner_sign_pub, s.new_owner_sign_pub);
+    assert_eq!(s.generation, 1);
+    assert!(s.verifies(&peek.vault_id));
+}
+
+#[test]
+fn the_machine_that_pinned_the_old_key_follows_the_chain_after_the_person_accepts() {
+    let t = t();
+    let (_, _, b) = rekeyed_on_a(&t);
+    // Before anything is unlocked: the plain peek check refuses, the one made
+    // for a caller that is about to unlock says "pending", and no more.
+    let peek = Vault::peek(&t.path).unwrap();
+    assert!(matches!(peek.verified(&b), Err(Error::OwnerChanged)));
+    assert_eq!(
+        peek.verified_for_unlock(&b).unwrap().status,
+        Verification::OwnerChangePending
+    );
+    let mut asked = Vec::new();
+    let v = Vault::unlock_password_accepting(&t.path, PW, &b, &mut |c| {
+        asked.push(c.clone());
+        true
+    })
+    .unwrap();
+    assert_eq!(asked.len(), 1);
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!(asked[0].new_owner_sign_pk, peek.owner_sign_pk);
+    assert_eq!(asked[0].owner_generation, 1);
+    assert_eq!(asked[0].changed_at, peek.successors[0].created_at);
+    assert!(!v.first_open_on_this_machine());
+    // Re-pinned: the plain unlock works now, and nobody is asked again.
+    Vault::unlock_password(&t.path, PW, &b).unwrap();
+    Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| panic!("asked twice")).unwrap();
+}
+
+#[test]
+fn declining_or_a_wrong_password_leaves_the_old_pin() {
+    let t = t();
+    let (_, recovery, b) = rekeyed_on_a(&t);
+    // The person says no.
+    assert!(matches!(
+        Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| false),
+        Err(Error::OwnerChanged)
+    ));
+    // A wrong password never gets as far as asking.
+    assert!(matches!(
+        Vault::unlock_password_accepting(&t.path, b"wrong", &b, &mut |_| panic!("asked")),
+        Err(Error::Unlock)
+    ));
+    // Still pinned to the old key, so the plain unlock still refuses.
+    assert!(matches!(
+        Vault::unlock_password(&t.path, PW, &b),
+        Err(Error::OwnerChanged)
+    ));
+    // The recovery key opens it the same way, and then accepting works.
+    Vault::unlock_recovery_accepting(&t.path, &recovery, &b, &mut |_| true).unwrap();
+    Vault::unlock_password(&t.path, PW, &b).unwrap();
+}
+
+#[test]
+fn a_forged_successor_is_not_followed() {
+    let t = t();
+    let (v, _, b) = rekeyed_on_a(&t);
+    // Someone who can sign the file as its owner swaps in a chain from a key
+    // the machine never pinned.
+    let mut m = model(&v);
+    let stranger = SigningKey::from_bytes(&[5; 32]);
+    m.successors = vec![current::Successor::sign(
+        &m.header.vault_id,
+        &stranger,
+        m.owner.sign_pk,
+        1,
+        now(),
+    )];
+    m.header.generation += 1;
+    fs::write(
+        &t.path,
+        encode_as(CURRENT, &m, Actor::Owner, &owner_key(&v)).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| panic!("asked")),
+        Err(Error::OwnerChanged)
+    ));
+    assert!(matches!(
+        Vault::peek(&t.path).unwrap().verified_for_unlock(&b),
+        Err(Error::OwnerChanged)
+    ));
+    // A record that names the pinned key but is not signed by it does not even
+    // decode.
+    let mut m = model(&v);
+    let old = m.successors[0].old_owner_sign_pub;
+    let mut forged =
+        current::Successor::sign(&m.header.vault_id, &stranger, m.owner.sign_pk, 1, now());
+    forged.old_owner_sign_pub = old;
+    m.successors = vec![forged];
+    m.header.generation += 2;
+    fs::write(
+        &t.path,
+        encode_as(CURRENT, &m, Actor::Owner, &owner_key(&v)).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(Vault::peek(&t.path), Err(Error::Corrupt(_))));
+}
+
+#[test]
+fn a_chain_that_does_not_end_at_the_owner_does_not_decode() {
+    let t = t();
+    let (v, _, _) = rekeyed_on_a(&t);
+    let mut m = model(&v);
+    m.successors[0].new_owner_sign_pub = [9; 32];
+    m.header.generation += 1;
+    fs::write(
+        &t.path,
+        encode_as(CURRENT, &m, Actor::Owner, &owner_key(&v)).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(Vault::peek(&t.path), Err(Error::Corrupt(_))));
+}
+
+#[test]
+fn rollback_is_detected_while_following_a_chain() {
+    let t = t();
+    let (_, _, b) = rekeyed_on_a(&t);
+    // B has seen a later generation than the re-keyed file carries. (B's
+    // record is edited by hand; the unauthenticated read is enough to refuse.)
+    let id = Vault::peek(&t.path).unwrap().vault_id;
+    let state = b
+        .root()
+        .join("vaults")
+        .join(crate::hex_encode(&id))
+        .join("state");
+    let text = fs::read_to_string(&state).unwrap();
+    let raised = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("max_generation") {
+                "max_generation = 99".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&state, raised + "\n").unwrap();
+    assert!(matches!(
+        Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| panic!("asked")),
+        Err(Error::RolledBack { found: 2, seen: 99 })
+    ));
+}
+
+#[test]
+fn rollback_after_following_a_chain_is_detected_as_usual() {
+    let t = t();
+    let (mut v, _, b) = rekeyed_on_a(&t);
+    let at_rekey = fs::read(&t.path).unwrap();
+    Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| true).unwrap();
+    v.set("C", b"fake-three", Kind::Env, Tier::Session).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    Vault::unlock_password(&t.path, PW, &b).unwrap();
+    fs::write(&t.path, &at_rekey).unwrap();
+    assert!(matches!(
+        Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| true),
+        Err(Error::RolledBack { .. })
+    ));
+}
+
+#[test]
+fn the_chain_keeps_the_last_four_and_a_key_further_back_is_not_followed() {
+    let t = t();
+    let (mut v, recovery, b) = rekeyed_on_a(&t);
+    // Machine C opens the file after the first re-key, so it pins key 1.
+    let c = LocalStore::new(t._dir.path().join("machine-c"));
+    Vault::unlock_password(&t.path, PW, &c).unwrap();
+    // Four more re-keys: five records made, the last four kept.
+    for _ in 0..4 {
+        let kek = v.password_kek(PW).unwrap();
+        v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+            .unwrap();
+        v.save(&t.path, &t.store).unwrap();
+    }
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!(
+        peek.successors
+            .iter()
+            .map(|s| s.generation)
+            .collect::<Vec<_>>(),
+        [2, 3, 4, 5]
+    );
+    // B (key 0) is too far behind; C (key 1) follows all four records.
+    assert!(matches!(
+        Vault::unlock_password_accepting(&t.path, PW, &b, &mut |_| panic!("asked")),
+        Err(Error::OwnerChanged)
+    ));
+    let mut gen_seen = 0;
+    Vault::unlock_password_accepting(&t.path, PW, &c, &mut |ch| {
+        gen_seen = ch.owner_generation;
+        true
+    })
+    .unwrap();
+    assert_eq!(gen_seen, 5);
+}
+
+#[test]
+fn a_recipient_follows_the_chain_with_its_own_keys() {
+    let t = t();
+    let (v, [(_, adm, adm_k), ..]) = built(&t);
+    let mine = LocalStore::new(t._dir.path().join("adm-machine"));
+    Vault::open_as_recipient(&t.path, &adm, &adm_k, &mine).unwrap();
+    let mut o = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    drop(v);
+    let kek = o.password_kek(PW).unwrap();
+    o.rekey(&kek, RecoveryPlan::Replace, vec![]).unwrap();
+    o.save(&t.path, &t.store).unwrap();
+    assert!(matches!(
+        Vault::open_as_recipient(&t.path, &adm, &adm_k, &mine),
+        Err(Error::OwnerChanged)
+    ));
+    assert!(matches!(
+        Vault::open_as_recipient_accepting(&t.path, &adm, &adm_k, &mine, &mut |_| false),
+        Err(Error::OwnerChanged)
+    ));
+    // Not the right keys: refused before anyone is asked.
+    let stranger = RecipientSecret::generate().unwrap();
+    assert!(
+        Vault::open_as_recipient_accepting(&t.path, &adm, &stranger, &mine, &mut |_| panic!(
+            "asked"
+        ))
+        .is_err()
+    );
+    Vault::open_as_recipient_accepting(&t.path, &adm, &adm_k, &mine, &mut |_| true).unwrap();
+    Vault::open_as_recipient(&t.path, &adm, &adm_k, &mine).unwrap();
+}
+
+#[test]
+fn slots_keep_the_time_they_were_enrolled_through_a_rekey_and_a_rewrap() {
+    let t = t();
+    let (mut v, recovery, lost, _) = with_devices(&t);
+    let before: Vec<_> = v
+        .slots()
+        .into_iter()
+        .map(|s| (s.slot_id, s.created_at))
+        .collect();
+    let t2 = [8u8; 32];
+    v.replace_slot(
+        NewSlot {
+            slot_id: Some(lost),
+            ..future_slot("lost")
+        },
+        |vk, aad| current::seal_vault_key(&t2, aad, vk),
+    )
+    .unwrap();
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, RecoveryPlan::Keep(&recovery), vec![])
+        .unwrap();
+    let after: Vec<_> = v
+        .slots()
+        .into_iter()
+        .filter(|s| before.iter().any(|(id, _)| id == &s.slot_id))
+        .map(|s| (s.slot_id, s.created_at))
+        .collect();
+    for (id, at) in &after {
+        assert_eq!(before.iter().find(|(i, _)| i == id).unwrap().1, *at);
+    }
+}
+
 #[test]
 fn only_the_owner_rekeys_and_a_slot_is_replaced_in_place() {
     let t0 = t();

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 12;
+pub const PROTOCOL: u32 = 13;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -907,7 +907,21 @@ pub enum ClientReply {
     /// The answer to [`ClientRequest::DevicesList`].
     Devices {
         devices: Vec<DeviceInfo>,
+        unlock: UnlockInfo,
     },
+}
+
+/// Which unlock method this vault tries first, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnlockInfo {
+    /// The setting in force: `last`, `password` or `device:NAME`.
+    pub setting: String,
+    /// Where it comes from: `this vault`, `all vaults` or `default`.
+    pub source: String,
+    /// The method that setting makes current now: `master password` or
+    /// `device NAME`.
+    pub current: String,
 }
 
 /// A paired device as `vahta devices` shows it. No key.
@@ -926,6 +940,8 @@ pub struct DeviceInfo {
     /// `active` or `expired`.
     pub state: String,
     pub transports: Vec<String>,
+    /// Whether this is the current unlock method (tried first).
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

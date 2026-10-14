@@ -355,7 +355,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
     let (project, vault_path) = find_vault(&cwd)?;
     crate::guard_ops::note_project(ctx, &project.root);
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
-    peek.verified(ctx.store()).map_err(from_vault)?;
+    peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     for n in &declared {
         if !peek.entries.iter().any(|e| &e.name == n) {
             return Err(unknown_name(n));

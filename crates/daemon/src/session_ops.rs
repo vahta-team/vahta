@@ -176,7 +176,7 @@ pub(crate) fn unlock_session(
     crate::guard_ops::note_project(ctx, &project.root);
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     // A swapped owner or a rolled-back file is refused here, before a window.
-    peek.verified(ctx.store()).map_err(from_vault)?;
+    peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     let names = match resolve_names(&peek, names) {
         Ok(names) => names,
         Err(reply) => {

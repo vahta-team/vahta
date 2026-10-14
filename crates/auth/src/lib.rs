@@ -37,6 +37,6 @@ pub use error::AuthError;
 pub use factor::{Factor, Need};
 pub use request::{Action, Decision, Request};
 pub use unlock::{
-    LinkedDevice, MAX_TRIES, PasswordUnlocker, RecoveryUnlocker, Registry, UnlockCtx, UnlockedBy,
-    Unlocker,
+    LinkedDevice, MAX_TRIES, PasswordUnlocker, RecoveryUnlocker, Registry, UnlockCtx, UnlockPref,
+    UnlockedBy, Unlocker, find_device,
 };

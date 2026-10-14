@@ -5469,3 +5469,183 @@ mod http {
         assert_eq!(s.journal(), journal);
     }
 }
+
+// --- The current unlock method ------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn config_unlock_orders_the_methods_and_the_password_stays_the_fallback() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+    let unlock_info = |s: &Sandbox| -> Value {
+        let out = s.vahta(&["devices", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+
+    // Not set: the last enrolled method, the phone, is current.
+    let doc = unlock_info(&s);
+    assert_eq!(doc["devices"][0]["current"], true);
+    assert_eq!(doc["unlock"]["setting"], "last");
+    assert_eq!(doc["unlock"]["source"], "default");
+    assert_eq!(doc["unlock"]["current"], "device pixel");
+    let shown = text(&s.vahta(&["devices"]).stdout);
+    assert!(
+        shown.contains("current") && shown.contains("device pixel first"),
+        "{shown}"
+    );
+    let out = s.vahta(&["config", "unlock"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("current: device pixel"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // Password first: the phone is not asked, its answer stays unused.
+    let out = s.vahta(&["config", "unlock", "password"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("current: master password"));
+    let doc = unlock_info(&s);
+    assert_eq!(doc["devices"][0]["current"], false);
+    assert_eq!(doc["unlock"]["source"], "this vault");
+    s.phone(&["approve"]);
+    s.script(&[PW_ANSWER]);
+    let asks = s.asks();
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asks + 1, "the password window");
+    assert_eq!(s.phone_script_left(), 1, "the phone was not asked");
+
+    // The phone by name (any case): asked first, no window.
+    let out = s.vahta(&["config", "unlock", "device", "PIXEL"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("unlock = device:pixel"),
+        "{}",
+        text(&out.stdout)
+    );
+    let asks = s.asks();
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asks);
+    assert_eq!(s.phone_script_left(), 0);
+
+    // The phone refuses: the password window follows.
+    s.phone(&["deny"]);
+    s.script(&[PW_ANSWER]);
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.asks(), asks + 1);
+
+    // An unknown device is refused and nothing changes.
+    let before = fs::read_to_string(s.root.join("config/config.toml")).unwrap();
+    let out = s.vahta(&["config", "unlock", "device", "nobody"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("no phone called nobody"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(s.root.join("config/config.toml")).unwrap(),
+        before
+    );
+    for bad in [
+        &["config", "unlock", "device"][..],
+        &["config", "unlock", "fast"],
+    ] {
+        assert_eq!(s.vahta(bad).status.code(), Some(2), "{bad:?}");
+    }
+
+    // Setting it never asks for a password.
+    let asks = s.asks();
+    assert_eq!(
+        s.vahta(&["config", "unlock", "last"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        s.vahta(&["config", "unlock", "default"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        s.vahta(&["config", "unlock", "--global", "password"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(s.asks(), asks);
+    let doc = unlock_info(&s);
+    assert_eq!(doc["unlock"]["setting"], "password");
+    assert_eq!(doc["unlock"]["source"], "all vaults");
+}
+
+/// Machine B has this vault pinned to the old owner key. The file is replaced
+/// by one re-keyed elsewhere (machine A, its own store): B follows the chain
+/// only after its person has opened the vault and said yes.
+#[cfg(unix)]
+#[test]
+fn a_rekey_made_elsewhere_is_accepted_only_after_the_person_unlocks_and_confirms() {
+    let s = sandbox_with_secrets();
+    let rekeyed = s.root.join("rekeyed.vht");
+    fs::copy(s.vault_path(), &rekeyed).unwrap();
+    let machine_a = LocalStore::new(s.root.join("machine-a"));
+    let mut a = Vault::unlock_password(&rekeyed, OLD_PW.as_bytes(), &machine_a).unwrap();
+    let kek = a.password_kek(OLD_PW.as_bytes()).unwrap();
+    a.rekey(&kek, vahta_vault::RecoveryPlan::Replace, vec![])
+        .unwrap();
+    a.save(&rekeyed, &machine_a).unwrap();
+    let on_b = fs::read(s.vault_path()).unwrap();
+    fs::copy(&rekeyed, s.vault_path()).unwrap();
+
+    // The person says no: refused, the old pin stays, and it is journalled.
+    s.script(&[PW_ANSWER, r#"{"choose":1}"#]);
+    let out = s.run_each_use();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).contains("owner key"),
+        "{}",
+        text(&out.stderr)
+    );
+    let asked = serde_json::to_string(&s.window_log()).unwrap();
+    assert!(
+        asked.contains("owner key was changed on another machine"),
+        "{asked}"
+    );
+    assert!(asked.contains("re-key after a lost device"), "{asked}");
+    let journal = s.journal();
+    assert!(
+        journal.contains("owner_key_change") && journal.contains("refused"),
+        "{journal}"
+    );
+    let store = LocalStore::new(s.root.join("data"));
+    assert!(matches!(
+        Vault::unlock_password(&s.vault_path(), OLD_PW.as_bytes(), &store),
+        Err(vahta_vault::Error::OwnerChanged)
+    ));
+
+    // A wrong password never reaches the question.
+    let asks = s.asks();
+    s.script(&[
+        r#"{"secret":"wrong 1"}"#,
+        r#"{"secret":"wrong 2"}"#,
+        r#"{"secret":"wrong 3"}"#,
+    ]);
+    assert_ne!(s.run_each_use().status.code(), Some(0));
+    assert_eq!(s.asks(), asks + 3);
+
+    // Yes: it opens, and the next unlock asks nothing more.
+    s.script(&[PW_ANSWER, r#"{"choose":0}"#]);
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ALPHA)***\n");
+    assert!(
+        s.journal()
+            .contains("the person accepted the new owner key")
+    );
+    let asks = s.asks();
+    s.script(&[PW_ANSWER]);
+    assert_eq!(s.run_each_use().status.code(), Some(0));
+    assert_eq!(s.asks(), asks + 1);
+    drop(on_b);
+}

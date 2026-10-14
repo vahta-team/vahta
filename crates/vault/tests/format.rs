@@ -269,16 +269,18 @@ fn rollback_to_the_pre_upgrade_file_is_detected() {
 }
 
 /// The v2 fixture carries a device, a rule set with directories and hosts,
-/// and a slot of a kind no build defines.
+/// and a slot of a kind no build defines; opening it here upgrades it to
+/// format 3 on the first save, with `.v2.bak` beside it.
 #[test]
 fn the_v2_fixture_carries_what_format_2_adds() {
     let work = tempfile::tempdir().unwrap();
     let path = work.path().join("vault.vht");
-    std::fs::copy(dir().join("v2.vht"), &path).unwrap();
+    let original = std::fs::read(dir().join("v2.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
     let store = LocalStore::new(work.path().join("store"));
 
     let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
-    assert!(!v.upgrade_pending());
+    assert!(v.upgrade_pending());
     let b = &v.bindings()[0];
     assert_eq!(b.category.as_deref(), Some("package-manager"));
     assert_eq!(b.dirs[0].path, "/opt/fixture/work");
@@ -288,7 +290,34 @@ fn the_v2_fixture_carries_what_format_2_adds() {
     assert_eq!(unknown.len(), 1);
 
     // Saving again keeps the unknown slot and the password still unlocks.
+    let slots_before = v.slots();
     v.save(&path, &store).unwrap();
+    assert_eq!(Vault::peek(&path).unwrap().format, 3);
+    assert!(Vault::peek(&path).unwrap().successors.is_empty());
+    assert_eq!(
+        std::fs::read(path.with_file_name("vault.vht.v2.bak")).unwrap(),
+        original
+    );
+    // The slots, ids and enrollment times included, came through unchanged.
+    assert_eq!(slots_before, v.slots());
     let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
     assert_eq!(again.slots(), v.slots());
+}
+
+/// The same rollback protection across the v2 to v3 upgrade.
+#[test]
+fn rollback_to_the_pre_upgrade_v2_file_is_detected() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v2.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    v.save(&path, &store).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&path, b"correct horse", &store),
+        Err(Error::RolledBack { found: 1, seen: 2 })
+    ));
 }

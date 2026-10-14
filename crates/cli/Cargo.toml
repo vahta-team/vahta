@@ -42,6 +42,7 @@ vahta-harness = { path = "../harness" }
 vahta-setup = { path = "../setup" }
 dunce = "1"
 vahta-vault = { path = "../vault" }
+vahta-auth = { path = "../auth" }
 vahta-daemon = { path = "../daemon", default-features = false }
 vahta-ipc = { path = "../ipc" }
 vahta-os = { path = "../os" }
