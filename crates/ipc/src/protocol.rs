@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 14;
+pub const PROTOCOL: u32 = 15;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -1075,6 +1075,21 @@ pub enum SurfaceRequest {
     /// The phone has connected: ends a pending `Pair` (answered `Done`). With
     /// none pending it does nothing.
     PairStop {},
+    /// The daemon is waiting for the person's phone to answer (an unlock) and
+    /// the window says so, until the daemon sends `DeviceWaitStop` (the phone
+    /// answered), the person presses Enter to use the password instead, or
+    /// `seconds` pass. Answered with `Done` when stopped by the daemon or timed
+    /// out, `Choice { index: 0 }` for the password, `Cancel` when the person
+    /// closed the window.
+    DeviceWait {
+        panel: Panel,
+        /// The phone's name, as the person gave it at pairing.
+        device: String,
+        seconds: u32,
+    },
+    /// The phone has answered: ends a pending `DeviceWait` (answered `Done`).
+    /// With none pending it does nothing.
+    DeviceWaitStop {},
     /// The conversation is over; the window may close after the message.
     Close { message: Option<String> },
 }

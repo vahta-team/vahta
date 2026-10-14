@@ -95,8 +95,10 @@ pub struct Decided {
 /// answer wins and the others are cancelled. A window that is among them stays
 /// a way through: the password is never made to wait for a phone.
 ///
-/// `Ok(None)` is no one answering; an error only when every approver failed
-/// and none answered.
+/// `Ok(None)` is no one answering. A device saying no ([`AuthError::Denied`])
+/// ends the ask at once as `Err(Denied)`, whatever the others are doing, unless
+/// one of them already said yes. Any other error comes out only when the one
+/// approver asked failed.
 pub fn decide_any(
     approvers: &[&dyn Approver],
     req: &Request,
@@ -118,6 +120,7 @@ pub fn decide_any(
     let total = chosen.len();
     let mut winner: Option<Decided> = None;
     let mut first_err: Option<AuthError> = None;
+    let mut denied = false;
     std::thread::scope(|scope| {
         for (i, a) in chosen.iter().enumerate() {
             let (tx, cancel) = (tx.clone(), cancel.clone());
@@ -142,6 +145,11 @@ pub fn decide_any(
                     break;
                 }
                 Ok(_) => {}
+                Err(AuthError::Denied) => {
+                    denied = true;
+                    cancel.cancel();
+                    break;
+                }
                 Err(e) => {
                     first_err.get_or_insert(e);
                 }
@@ -151,6 +159,7 @@ pub fn decide_any(
     });
     match (winner, first_err) {
         (Some(w), _) => Ok(Some(w)),
+        (None, _) if denied => Err(AuthError::Denied),
         (None, Some(e)) if total == 1 => Err(e),
         (None, _) => Ok(None),
     }

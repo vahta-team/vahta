@@ -66,6 +66,18 @@ pub trait DeviceChannel: Send + Sync {
     /// approves `req` on it. Blocks until `req.expires_at`.
     fn unlock(&self, req: &Request, eph_pub: &[u8]) -> Result<UnlockReply, AuthError>;
 
+    /// [`DeviceChannel::unlock`] that stops early when `cancel` fires (the
+    /// person chose the password instead). A channel that waits on a real phone
+    /// must override it.
+    fn unlock_cancellable(
+        &self,
+        req: &Request,
+        eph_pub: &[u8],
+        _cancel: &Cancel,
+    ) -> Result<UnlockReply, AuthError> {
+        self.unlock(req, eph_pub)
+    }
+
     /// Ask the device to answer `req` (its `options`). The answer is a
     /// [`Decision`] the caller verifies.
     fn approve(&self, req: &Request) -> Result<Decision, AuthError>;
@@ -266,7 +278,8 @@ impl Unlocker for DeviceUnlocker {
             )));
         }
         let req = ctx.request().clone();
-        let reply = linked.channel.unlock(&req, params)?;
+        let ask = |cancel: &Cancel| linked.channel.unlock_cancellable(&req, params, cancel);
+        let reply = ctx.ask_device(slot, &Cancel::new(), &ask)?;
         // The device must have seen and approved this very request.
         reply
             .decision
@@ -371,7 +384,9 @@ impl Approver for DeviceApprover {
                 decision.verify(req, &self.record.device_id, &self.record.sign_pub)?;
                 Ok(Some(usize::from(decision.choice)))
             }
-            Err(AuthError::Timeout | AuthError::Denied | AuthError::Cancelled) => Ok(None),
+            // A no on the phone is an answer: the approval is refused, and the
+            // others are not waited for.
+            Err(AuthError::Timeout | AuthError::Cancelled) => Ok(None),
             Err(e) => Err(e),
         }
     }

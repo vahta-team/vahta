@@ -4801,7 +4801,7 @@ fn the_password_window_always_works_and_a_cheating_phone_is_refused() {
     assert_eq!(s.run_each_use().status.code(), Some(0));
     assert_eq!(s.asks(), asks + 1);
 
-    for cheat in ["deny", "timeout", "forge", "replay"] {
+    for cheat in ["timeout", "forge", "replay"] {
         s.phone(&[cheat]);
         s.script(&[PW_ANSWER]);
         let before = s.asks();
@@ -4816,6 +4816,38 @@ fn the_password_window_always_works_and_a_cheating_phone_is_refused() {
     let journal = s.journal();
     assert!(journal.contains("does not verify"), "{journal}");
     assert!(journal.contains("\"result\":\"refused\""), "{journal}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_no_on_the_phone_ends_the_run_and_the_session_unlock_with_no_password_window() {
+    let s = sandbox_with_secrets();
+    assert_eq!(s.pair("pixel", "30d").status.code(), Some(0));
+    let asks = s.asks();
+    s.phone(&["deny"]);
+    let out = s.run_each_use();
+    // Like a person cancelling: a plain message, not a crash.
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refused on the phone"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(s.asks(), asks, "the password window was not asked");
+    assert_eq!(s.phone_script_left(), 0);
+    let journal = s.journal();
+    assert!(journal.contains("refused on the device"), "{journal}");
+    // The same for a session unlock.
+    s.phone(&["deny"]);
+    let out = s.vahta(&["unlock"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refused on the phone"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(s.asks(), asks);
 }
 
 #[cfg(unix)]
@@ -5542,12 +5574,23 @@ fn config_unlock_orders_the_methods_and_the_password_stays_the_fallback() {
     assert_eq!(s.asks(), asks);
     assert_eq!(s.phone_script_left(), 0);
 
-    // The phone refuses: the password window follows.
-    s.phone(&["deny"]);
+    // The phone is silent: the password window follows.
+    s.phone(&["timeout"]);
     s.script(&[PW_ANSWER]);
     let out = s.run_each_use();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(s.asks(), asks + 1);
+
+    // The phone refuses: that is the answer. No password window follows.
+    s.phone(&["deny"]);
+    let out = s.run_each_use();
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refused on the phone"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(s.asks(), asks + 1, "no password window after a no");
 
     // An unknown device is refused and nothing changes.
     let before = fs::read_to_string(s.root.join("config/config.toml")).unwrap();
@@ -5815,6 +5858,199 @@ fn a_software_phone_pairs_approves_and_unlocks_over_the_phone_link() {
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// A daemon with a software phone called "pixel" paired over the LAN
+/// transport on loopback and serving from then on. `ZETA` is on a
+/// `run --ask` list; `ALPHA` is each-use.
+#[cfg(unix)]
+struct LanPhone {
+    s: Sandbox,
+    phone: std::sync::Arc<vahta_mobile::fake::FakePhone>,
+}
+
+#[cfg(unix)]
+impl LanPhone {
+    fn new() -> LanPhone {
+        use std::sync::Arc;
+        use vahta_link::lan::LanListener;
+        use vahta_mobile::fake::FakePhone;
+
+        let listener = Arc::new(LanListener::bind("127.0.0.1:0").unwrap());
+        let mut s = Sandbox::new();
+        s.phone_addr = Some(listener.local_addr().unwrap().to_string());
+        s.with_vault(&[
+            ("ZETA", "fake-one", "session"),
+            ("ALPHA", "fake-three", "each-use"),
+        ]);
+        s.bind_directly("ZETA", &["printenv"], &[]);
+        fs::write(
+            s.project().join("vahta.toml"),
+            "[secrets.ZETA]\nallow = [\"printenv\"]\n",
+        )
+        .unwrap();
+        let phone = Arc::new(FakePhone::new("A32"));
+        s.script(&[PW_ANSWER, r#"{"wait":true}"#]);
+        let out = std::thread::scope(|scope| {
+            let pairing = scope.spawn(|| s.vahta(&["devices", "pair", "a32", "--for", "30d"]));
+            let mut code = None;
+            wait_until("the pairing code on the window", 20, || {
+                code = s
+                    .window_log()
+                    .iter()
+                    .find(|e| e["ask"] == "pairing")
+                    .map(|e| e["code"].as_str().unwrap().to_string());
+                code.is_some()
+            });
+            let pipe = listener.accept().unwrap();
+            phone
+                .pair_over(pipe, &code.unwrap(), vahta_link::unix_now())
+                .unwrap();
+            pairing.join().unwrap()
+        });
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        {
+            let phone = phone.clone();
+            std::thread::spawn(move || {
+                while let Ok(pipe) = listener.accept() {
+                    let phone = phone.clone();
+                    std::thread::spawn(move || {
+                        let _ = phone.serve(pipe);
+                    });
+                }
+            });
+        }
+        LanPhone { s, phone }
+    }
+
+    fn run_each_use(&self) -> Output {
+        self.s
+            .vahta(&["run", "--secret", "ALPHA", "--", "/usr/bin/true"])
+    }
+
+    fn password_asks(&self) -> usize {
+        self.s
+            .window_log()
+            .iter()
+            .filter(|e| e["ask"] == "password")
+            .count()
+    }
+
+    fn waits(&self) -> Vec<Value> {
+        self.s
+            .window_log()
+            .into_iter()
+            .filter(|e| e["ask"] == "device_wait")
+            .collect()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_no_on_the_phone_over_the_phone_link_refuses_an_unlock_and_asks_no_password() {
+    use vahta_mobile::fake::Behavior;
+    let t = LanPhone::new();
+    let passwords = t.password_asks();
+    // The wait window is up while the phone is asked; the phone says no.
+    t.s.script(&[r#"{"devicewait":"wait"}"#]);
+    t.phone.queue(Behavior::Deny);
+    let started = Instant::now();
+    let out = t.run_each_use();
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refused on the phone"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(t.password_asks(), passwords, "no password window");
+    let waits = t.waits();
+    assert_eq!(waits.len(), 1, "{waits:?}");
+    assert_eq!(waits[0]["device"], "a32");
+    assert_eq!(
+        t.phone
+            .asked()
+            .iter()
+            .filter(|a| a.kind == "unlock")
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_no_on_the_phone_over_the_phone_link_refuses_a_run_ask() {
+    use vahta_mobile::fake::Behavior;
+    let t = LanPhone::new();
+    let passwords = t.password_asks();
+    t.phone.queue(Behavior::Deny);
+    let started = Instant::now();
+    let out = t.s.vahta(&[
+        "run", "--ask", "--secret", "ZETA", "--", "sh", "-c", "echo ran",
+    ]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("refused on the phone"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "");
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(t.password_asks(), passwords);
+    let journal = t.s.journal();
+    assert!(journal.contains("run_refused"), "{journal}");
+    assert!(!journal.contains("run_allowed_once"), "{journal}");
+    // The question was put on the phone and the window said so.
+    assert_eq!(t.phone.asked().len(), 1);
+    assert!(
+        t.s.window_log().iter().any(|e| e["panel"]["lines"]
+            .to_string()
+            .contains("Also asked on your phone")),
+        "{:?}",
+        t.s.window_log()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_wait_window_moves_on_by_itself_when_the_phone_answers() {
+    use vahta_mobile::fake::Behavior;
+    let t = LanPhone::new();
+    let passwords = t.password_asks();
+    t.s.script(&[r#"{"devicewait":"wait"}"#]);
+    t.phone.queue(Behavior::Approve(0));
+    let out = t.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(t.password_asks(), passwords);
+    assert_eq!(t.waits().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn choosing_the_password_in_the_wait_window_cancels_the_phone_and_opens_with_the_password() {
+    use vahta_mobile::fake::Behavior;
+    let t = LanPhone::new();
+    let passwords = t.password_asks();
+    // The phone never answers; the person gives up on it.
+    t.phone.queue(Behavior::Ignore);
+    t.s.script(&[r#"{"devicewait":"password"}"#, PW_ANSWER]);
+    let started = Instant::now();
+    let out = t.run_each_use();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the phone was not waited for"
+    );
+    assert_eq!(t.waits().len(), 1);
+    assert_eq!(t.password_asks(), passwords + 1);
+    // Wait first, then the password.
+    let log = t.s.window_log();
+    let at = |what: &str| log.iter().rposition(|e| e["ask"] == what).unwrap();
+    assert!(at("device_wait") < at("password"));
+    // The phone was asked at most once (the choice may come before the
+    // question is on the wire) and never answered; had it been waited on to
+    // the end of the request, the run would have taken half a minute.
+    assert!(t.phone.asked().len() <= 1);
 }
 
 #[cfg(unix)]

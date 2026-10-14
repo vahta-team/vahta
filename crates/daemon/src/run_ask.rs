@@ -28,7 +28,7 @@ use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, error, from_vault, lines_for, unlock_expecting};
 use crate::protocol::ClientReply;
 use crate::surface::sanitize_label;
-use vahta_auth::{Action, Request};
+use vahta_auth::{Action, AuthError, Request};
 
 const ALLOW_ONCE: usize = 0;
 const NO: usize = 1;
@@ -173,7 +173,7 @@ pub(crate) fn ask(
     .with_category(failures.iter().find_map(|(b, _)| b.category.clone()))
     .with_label(panel.agent_note.clone());
     let need = crate::authn::need_of(peek, &request.action);
-    let choice = crate::authn::approve(
+    let asked = crate::authn::approve(
         ctx.shared,
         window.as_mut(),
         &panel,
@@ -182,8 +182,7 @@ pub(crate) fn ask(
         &request,
         need,
         std::time::Duration::from_secs(5 * 60),
-    )
-    .map_err(|e| error(e.to_string()))?;
+    );
     let journal = |event: &str, result: &str| {
         let shown = program
             .map(|p| format!("program {}", p.display()))
@@ -194,6 +193,15 @@ pub(crate) fn ask(
                 .names(&names)
                 .result(result, Some(&shown)),
         );
+    };
+    let choice = match asked {
+        Ok(choice) => choice,
+        Err(AuthError::Denied) => {
+            journal("run_refused", "declined");
+            window.close(None);
+            return Err(crate::authn::refused_on_phone());
+        }
+        Err(e) => return Err(error(e.to_string())),
     };
     match choice {
         Some(ALLOW_ONCE) => {

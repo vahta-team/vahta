@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use vahta_auth::{
     Action, Approver, AuthError, Cancel, DeviceApprover, Factor, LinkedDevice, Need, Request,
-    UnlockCtx, UnlockedBy, policy,
+    UnlockCtx, UnlockReply, UnlockedBy, policy,
 };
 use vahta_vault::{Device, OwnerKeyChange, Peek, RecoveryKey, SlotInfo, Vault};
 use zeroize::Zeroizing;
@@ -20,7 +20,7 @@ use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, cancelled, error, from_surface, from_vault};
 use crate::protocol::Panel;
 use crate::server::Shared;
-use crate::surface::{SurfaceError, Window};
+use crate::surface::{DeviceWait, SurfaceError, Window};
 
 /// How long a phone is given to answer before the password window is all
 /// that is left.
@@ -185,10 +185,36 @@ pub(crate) fn approve(
             Vault::unlock_password(&path, pw, &store).is_ok()
         }))
     };
-    let win = WindowApprover::new(window, panel, question, verify);
+    // Say that a phone is being asked too, so the window is not the only
+    // place the person looks.
+    let mut shown = panel.clone();
+    let names: Vec<&str> = phones
+        .iter()
+        .filter(|p| need.satisfied_by(p.factor()) && p.available())
+        .map(|p| p.record.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        shown.lines.push(format!(
+            "Also asked on your phone \"{}\". The first answer counts.",
+            names.join("\", \"")
+        ));
+    }
+    let win = WindowApprover::new(window, &shown, question, verify);
     let mut all: Vec<&dyn Approver> = vec![&win];
     all.extend(phones.iter().map(|p| p as &dyn Approver));
-    let decided = vahta_auth::decide_any(&all, request, &request.options, need, timeout)?;
+    let decided = vahta_auth::decide_any(&all, request, &request.options, need, timeout);
+    if matches!(decided, Err(AuthError::Denied)) {
+        shared.journal.record(
+            Entry::new("device_approve")
+                .vault(&request.vault_id)
+                .names(&request.action.names())
+                .result(
+                    "refused",
+                    Some(&format!("{}: refused on the phone", request.action.key())),
+                ),
+        );
+    }
+    let decided = decided?;
     Ok(decided.map(|d| {
         if let Some(id) = d.device_id {
             shared.journal.record(
@@ -269,6 +295,61 @@ impl UnlockCtx for WindowCtx<'_> {
             .cloned()
     }
 
+    fn ask_device(
+        &mut self,
+        slot: &SlotInfo,
+        cancel: &Cancel,
+        ask: &(dyn Fn(&Cancel) -> Result<UnlockReply, AuthError> + Sync),
+    ) -> Result<UnlockReply, AuthError> {
+        // A window that cannot show the wait: the phone is asked, nothing said.
+        let Some(stop) = self.window.device_wait_stopper() else {
+            return ask(cancel);
+        };
+        let window = &mut *self.window;
+        let mut shown = self.panel.clone();
+        shown.warning = None;
+        let device = slot.label.clone();
+        let (result, ended) = std::thread::scope(|scope| {
+            // The phone's answer (or its failing) ends the window's wait.
+            let worker = scope.spawn(move || {
+                let r = ask(cancel);
+                stop();
+                r
+            });
+            let ended = window.show_device_wait(&shown, &device, DEVICE_WAIT);
+            if !matches!(
+                ended,
+                Ok(DeviceWait::Over) | Err(SurfaceError::Unavailable(_))
+            ) {
+                // The person chose the password, closed the window, or the
+                // window broke: stop waiting on the phone.
+                cancel.cancel();
+            }
+            let r = worker
+                .join()
+                .unwrap_or_else(|_| Err(AuthError::Unavailable("the phone link failed".into())));
+            (r, ended)
+        });
+        match ended {
+            Ok(DeviceWait::Over) => result,
+            // An answer that was already in is honoured.
+            Ok(DeviceWait::Password) => match result {
+                Ok(reply) => Ok(reply),
+                Err(AuthError::Denied) => Err(AuthError::Denied),
+                Err(_) => Err(AuthError::Unavailable(
+                    "you chose the password instead".into(),
+                )),
+            },
+            Ok(DeviceWait::Closed) => Err(AuthError::Cancelled),
+            // The window could not show it; the phone was asked all the same.
+            Err(SurfaceError::Unavailable(_)) => result,
+            Err(e) => {
+                self.surface = Some(e);
+                Err(AuthError::Cancelled)
+            }
+        }
+    }
+
     fn attempt_failed(&mut self, slot: &SlotInfo, why: &AuthError) {
         self.failures.push((Some(slot.slot_id), why.to_string()));
     }
@@ -296,13 +377,25 @@ impl UnlockCtx for WindowCtx<'_> {
     }
 }
 
+/// What the client sees when the person refused on their phone.
+pub(crate) fn refused_on_phone() -> crate::protocol::ClientReply {
+    crate::protocol::ClientReply::Cancelled {
+        message: "refused on the phone; nothing was done".to_string(),
+    }
+}
+
 /// The reply for an authentication that did not open the vault.
-fn reply_for(e: AuthError, surface: Option<SurfaceError>) -> crate::protocol::ClientReply {
+pub(crate) fn reply_for(
+    e: AuthError,
+    surface: Option<SurfaceError>,
+) -> crate::protocol::ClientReply {
     if let Some(s) = surface {
         return from_surface(s);
     }
     match e {
         AuthError::Cancelled => cancelled(),
+        // The person said no on the phone: the same as saying no in a window.
+        AuthError::Denied => refused_on_phone(),
         AuthError::Vault(v) => from_vault(v),
         other => error(other.to_string()),
     }

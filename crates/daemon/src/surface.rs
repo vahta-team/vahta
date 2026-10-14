@@ -63,6 +63,17 @@ pub trait PromptSurface: Send + Sync {
     fn open(&self, title: &str) -> Result<Box<dyn Window>, SurfaceError>;
 }
 
+/// How a [`Window::show_device_wait`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceWait {
+    /// The phone answered (the stopper was called), or the time ran out.
+    Over,
+    /// The person chose to use the password instead.
+    Password,
+    /// The person closed the window.
+    Closed,
+}
+
 /// One window, for one request. It may be asked several things in turn (the
 /// password, then a value twice) and is closed by [`Window::close`] or by being
 /// dropped.
@@ -160,6 +171,30 @@ pub trait Window: Send {
     /// A function, callable from another thread, that ends a pending (or
     /// coming) [`Window::show_pairing`] with `Ok(true)`.
     fn pairing_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        None
+    }
+
+    /// Tell the person the phone `device` is being waited on, for at most
+    /// `wait`, and offer to use the password instead. Ends with
+    /// [`DeviceWait::Over`] when the function [`Window::device_wait_stopper`]
+    /// gave was called or the time ran out, [`DeviceWait::Password`] when the
+    /// person chose the password, [`DeviceWait::Closed`] when they closed the
+    /// window. The window stays usable after any of them.
+    fn show_device_wait(
+        &mut self,
+        _panel: &Panel,
+        _device: &str,
+        _wait: Duration,
+    ) -> Result<DeviceWait, SurfaceError> {
+        Err(SurfaceError::Unavailable(
+            "this window cannot show a device wait".to_string(),
+        ))
+    }
+
+    /// A function, callable from another thread, that ends a pending (or
+    /// coming) [`Window::show_device_wait`] with [`DeviceWait::Over`]. A window
+    /// that cannot show the wait gives `None`.
+    fn device_wait_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
         None
     }
 
@@ -399,6 +434,8 @@ struct TerminalWindow {
     /// Set by the pairing stopper; read after a `Pair` request is sent, so a
     /// stop that came first is not lost.
     pair_stopped: Arc<AtomicBool>,
+    /// The same for the device wait.
+    wait_stopped: Arc<AtomicBool>,
     stream: Stream,
     answers: Receiver<Result<SurfaceAnswer, ProtocolError>>,
     _child: Option<Child>,
@@ -430,6 +467,7 @@ impl TerminalWindow {
         TerminalWindow {
             write_lock: Arc::default(),
             pair_stopped: Arc::default(),
+            wait_stopped: Arc::default(),
             stream,
             answers,
             _child: child,
@@ -673,6 +711,53 @@ impl Window for TerminalWindow {
             stopped.store(true, Ordering::SeqCst);
             if let Ok(_w) = lock.lock() {
                 let _ = write_frame(&mut stream, &SurfaceRequest::PairStop {});
+            }
+        }))
+    }
+
+    fn show_device_wait(
+        &mut self,
+        panel: &Panel,
+        device: &str,
+        wait: Duration,
+    ) -> Result<DeviceWait, SurfaceError> {
+        let request = SurfaceRequest::DeviceWait {
+            panel: panel.clone(),
+            device: device.to_string(),
+            seconds: u32::try_from(wait.as_secs()).unwrap_or(u32::MAX),
+        };
+        {
+            let _w = self.write_lock.lock().map_err(|_| SurfaceError::Closed)?;
+            write_frame(&mut self.stream, &request).map_err(|_| SurfaceError::Closed)?;
+            // A stop that came before the wait was on the wire.
+            if self.wait_stopped.load(Ordering::SeqCst) {
+                let _ = write_frame(&mut self.stream, &SurfaceRequest::DeviceWaitStop {});
+            }
+        }
+        match self.answers.recv_timeout(wait + Duration::from_secs(10)) {
+            Ok(Ok(SurfaceAnswer::Done {})) => Ok(DeviceWait::Over),
+            Ok(Ok(SurfaceAnswer::Choice { index: 0 })) => Ok(DeviceWait::Password),
+            Ok(Ok(SurfaceAnswer::Cancel {})) => Ok(DeviceWait::Closed),
+            Ok(Ok(_)) => Err(SurfaceError::Protocol("unexpected answer".to_string())),
+            Ok(Err(ProtocolError::Garbage(why))) => Err(SurfaceError::Protocol(why)),
+            Ok(Err(_)) => Err(SurfaceError::Closed),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = self.stream.shutdown();
+                Ok(DeviceWait::Over)
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(SurfaceError::Closed),
+        }
+    }
+
+    fn device_wait_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        let mut stream = self.stream.try_clone().ok()?;
+        let (lock, stopped) = (self.write_lock.clone(), self.wait_stopped.clone());
+        // A new wait starts unstopped.
+        stopped.store(false, Ordering::SeqCst);
+        Some(Box::new(move || {
+            stopped.store(true, Ordering::SeqCst);
+            if let Ok(_w) = lock.lock() {
+                let _ = write_frame(&mut stream, &SurfaceRequest::DeviceWaitStop {});
             }
         }))
     }

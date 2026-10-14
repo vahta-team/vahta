@@ -16,7 +16,8 @@ use vahta_vault::{
 };
 use zeroize::Zeroizing;
 
-use crate::device::{DeviceChannel, DeviceUnlocker};
+use crate::approve::Cancel;
+use crate::device::{DeviceChannel, DeviceUnlocker, UnlockReply};
 use crate::error::AuthError;
 use crate::factor::{Factor, Need};
 use crate::request::Request;
@@ -43,6 +44,19 @@ pub trait UnlockCtx {
     /// The device whose slot id is `slot_id` (a device's slot shares its id),
     /// if it is known and has a way to be reached.
     fn device(&mut self, slot_id: &[u8; 16]) -> Option<LinkedDevice>;
+    /// Run `ask`, the call that waits on the device of `slot` for an unlock,
+    /// while the person is told it is being waited on. A context with a window
+    /// shows it and lets the person end the wait: it fires `cancel` and the
+    /// ask returns, and the next method (the password) follows. The default
+    /// just runs `ask`.
+    fn ask_device(
+        &mut self,
+        _slot: &SlotInfo,
+        cancel: &Cancel,
+        ask: &(dyn Fn(&Cancel) -> Result<UnlockReply, AuthError> + Sync),
+    ) -> Result<UnlockReply, AuthError> {
+        ask(cancel)
+    }
     /// An unlocker was tried and passed on (a device refused, answered wrongly,
     /// was out of reach). For the journal.
     fn attempt_failed(&mut self, _slot: &SlotInfo, _why: &AuthError) {}
@@ -407,8 +421,10 @@ impl Registry {
 
     /// Open the vault at `path` the way `need` allows, trying the methods in
     /// [`Registry::order`]. A method that is not available now (a phone out of
-    /// reach, a refusal, a timeout) passes to the next; the person cancelling,
-    /// or a wrong password three times, ends it. So with the phone current the
+    /// reach, a timeout, an answer that does not verify, an expired slot)
+    /// passes to the next; the person cancelling, a wrong password three times,
+    /// or the person refusing on the device ([`AuthError::Denied`]) ends it: a
+    /// no is an answer, and the password is not offered to override it. So with the phone current the
     /// phone is asked first and the password window follows if it fails; with
     /// the password current the phone is not asked unless the password path
     /// itself is out of reach.
@@ -441,12 +457,15 @@ impl Registry {
                 Err(
                     e @ (AuthError::Unavailable(_)
                     | AuthError::Timeout
-                    | AuthError::Denied
                     | AuthError::Refused(_)
                     | AuthError::BadDecision(_)),
                 ) => {
                     ctx.attempt_failed(&slot.info, &e);
                     last = Some(e);
+                }
+                Err(AuthError::Denied) => {
+                    ctx.attempt_failed(&slot.info, &AuthError::Denied);
+                    return Err(AuthError::Denied);
                 }
                 Err(e) => return Err(e),
             }

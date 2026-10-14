@@ -40,6 +40,12 @@ struct Ctx {
     pw: Vec<&'static [u8]>,
     asked_pw: usize,
     devices: Vec<LinkedDevice>,
+    /// What `attempt_failed` was told.
+    failed: Vec<String>,
+    /// Stands for the person choosing the password while the phone is asked:
+    /// the phone is then not asked at all, and the unlock passes on.
+    choose_password: bool,
+    waited: usize,
 }
 
 impl UnlockCtx for Ctx {
@@ -63,6 +69,22 @@ impl UnlockCtx for Ctx {
             .find(|d| &d.record.device_id == id)
             .cloned()
     }
+    fn ask_device(
+        &mut self,
+        _slot: &vahta_vault::SlotInfo,
+        cancel: &Cancel,
+        ask: &(dyn Fn(&Cancel) -> Result<UnlockReply, AuthError> + Sync),
+    ) -> Result<UnlockReply, AuthError> {
+        self.waited += 1;
+        if self.choose_password {
+            cancel.cancel();
+            return Err(AuthError::Unavailable("you chose the password".into()));
+        }
+        ask(cancel)
+    }
+    fn attempt_failed(&mut self, _: &vahta_vault::SlotInfo, why: &AuthError) {
+        self.failed.push(why.to_string());
+    }
 }
 
 fn ctx(
@@ -84,6 +106,9 @@ fn ctx(
         .unwrap(),
         pw: pw.to_vec(),
         asked_pw: 0,
+        failed: Vec::new(),
+        choose_password: false,
+        waited: 0,
         devices: vec![LinkedDevice {
             record: record.clone(),
             channel: phone.clone(),
@@ -162,11 +187,11 @@ fn vahta_auth_kek(shared: &[u8; 32], d: &Device, params: &[u8]) -> Zeroizing<[u8
 }
 
 #[test]
-fn an_unreachable_denying_or_silent_phone_falls_through_to_the_password() {
+fn an_unreachable_or_silent_phone_falls_through_to_the_password() {
     let w = world();
     let (phone, record) = paired(&w, None);
     let id = Vault::peek(&w.path).unwrap().vault_id;
-    for b in [None, Some(Behavior::Deny), Some(Behavior::Timeout)] {
+    for b in [None, Some(Behavior::Timeout)] {
         if let Some(b) = b {
             phone.queue(b);
         }
@@ -178,6 +203,118 @@ fn an_unreachable_denying_or_silent_phone_falls_through_to_the_password() {
         assert_eq!(c.asked_pw, 1);
         assert_eq!(v.get("A").unwrap().expose(), b"fake-one");
     }
+}
+
+#[test]
+fn a_no_on_the_phone_ends_the_unlock_and_the_password_is_never_asked() {
+    let w = world();
+    let (phone, record) = paired(&w, None);
+    let id = Vault::peek(&w.path).unwrap().vault_id;
+    phone.queue(Behavior::Deny);
+    // The password is at hand, and must not be asked for.
+    let mut c = ctx(id, &phone, &record, &[PW]);
+    let got = Registry::standard().unlock(&w.path, &w.store, Need::Knowledge, &mut c);
+    assert!(matches!(got, Err(AuthError::Denied)), "{:?}", got.err());
+    assert_eq!(c.asked_pw, 0);
+    // The journal is told, once.
+    assert_eq!(c.failed, ["refused on the device"]);
+    // The same with the phone named first, and with the password current.
+    phone.queue(Behavior::Deny);
+    let mut c = ctx(id, &phone, &record, &[PW]);
+    let pref = UnlockPref::parse("device:phone").unwrap();
+    let got = Registry::standard().unlock_by(&w.path, &w.store, Need::Knowledge, &pref, &mut c);
+    assert!(matches!(got, Err(AuthError::Denied)));
+    assert_eq!(c.asked_pw, 0);
+    // A no is not forever: the next ask goes to the phone again.
+    phone.queue(Behavior::Approve(0));
+    let mut c = ctx(id, &phone, &record, &[]);
+    let (_, by) = Registry::standard()
+        .unlock(&w.path, &w.store, Need::Knowledge, &mut c)
+        .unwrap();
+    assert_eq!(by.factor, Factor::PossessionBiometric);
+    // The master password still opens the vault on an explicit unlock.
+    let mut c = ctx(id, &phone, &record, &[PW]);
+    let (_, by) = Registry::standard()
+        .unlock_with(vahta_vault::SLOT_PASSWORD, &w.path, &w.store, &mut c)
+        .unwrap();
+    assert_eq!(by.factor, Factor::Knowledge);
+    assert_eq!(c.waited, 0, "no phone in an explicit password unlock");
+}
+
+#[test]
+fn choosing_the_password_while_the_phone_is_asked_goes_to_the_password() {
+    let w = world();
+    let (phone, record) = paired(&w, None);
+    let id = Vault::peek(&w.path).unwrap().vault_id;
+    // The phone would have said yes; the person did not wait for it.
+    phone.queue(Behavior::Approve(0));
+    let mut c = ctx(id, &phone, &record, &[PW]);
+    c.choose_password = true;
+    let (_, by) = Registry::standard()
+        .unlock(&w.path, &w.store, Need::Knowledge, &mut c)
+        .unwrap();
+    assert_eq!(by.factor, Factor::Knowledge);
+    assert_eq!((c.waited, c.asked_pw), (1, 1));
+}
+
+#[test]
+fn a_no_on_the_phone_refuses_an_approval_at_once_and_the_window_is_stopped() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+    // A window that waits for a person until it is told to stop.
+    struct Window(AtomicBool);
+    impl Approver for Window {
+        fn factor(&self) -> Factor {
+            Factor::Presence
+        }
+        fn label(&self) -> String {
+            "window".into()
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn decide(
+            &self,
+            _: &Request,
+            _: &[String],
+            _: Duration,
+            cancel: &Cancel,
+        ) -> Result<Option<usize>, AuthError> {
+            let end = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < end {
+                if cancel.is_cancelled() {
+                    self.0.store(true, Ordering::SeqCst);
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None)
+        }
+    }
+    let phone = Arc::new(LoopbackDevice::new("phone"));
+    let approver = DeviceApprover {
+        record: phone.record(None),
+        channel: phone.clone(),
+    };
+    let window = Window(AtomicBool::new(false));
+    let req = Request::new(Action::AlarmLock, "/p", [0; 16], Duration::from_secs(30))
+        .unwrap()
+        .with_options(&["Yes".to_string(), "No".to_string()]);
+    phone.queue(Behavior::Deny);
+    let started = Instant::now();
+    let got = decide_any(
+        &[&window, &approver],
+        &req,
+        &req.options,
+        Need::Presence,
+        Duration::from_secs(20),
+    );
+    assert!(matches!(got, Err(AuthError::Denied)), "{:?}", got.err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        window.0.load(Ordering::SeqCst),
+        "the window was told to stop"
+    );
 }
 
 #[test]
@@ -563,9 +700,10 @@ fn an_explicit_device_is_asked_first_and_the_password_follows() {
     assert_eq!(by.device_id, Some(record.device_id));
     assert_eq!((p.asked(), t.asked()), (1, 0));
 
-    // Refused: the next in line is asked (the tablet), then the password.
-    phone.queue(Behavior::Deny);
-    tablet.queue(Behavior::Deny);
+    // Out of reach or silent: the next in line is asked (the tablet), then the
+    // password.
+    phone.queue(Behavior::Timeout);
+    tablet.queue(Behavior::Timeout);
     let mut c = counting_ctx(id, &[(&p, &record), (&t, &tablet_record)], &[PW]);
     let (_, by) = Registry::standard()
         .unlock_by(&w.path, &w.store, Need::Knowledge, &pref, &mut c)
