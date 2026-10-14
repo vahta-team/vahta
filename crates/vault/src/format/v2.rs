@@ -588,7 +588,7 @@ pub fn check_binding_shapes(sets: &[RuleSet]) -> Result<(), Error> {
 }
 
 /// Rule sets name secrets that exist, once each, and carry well-formed rules.
-fn check_bindings(index: &[Entry], sets: &[RuleSet]) -> Result<(), Error> {
+pub(super) fn check_bindings(index: &[Entry], sets: &[RuleSet]) -> Result<(), Error> {
     if sets.len() > MAX_ENTRIES {
         return Err(Error::Corrupt("bindings"));
     }

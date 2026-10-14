@@ -152,7 +152,7 @@ fn list_json_has_the_documented_shape() {
     let out = s.run(&["list", "--json"]);
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["format"], 2);
+    assert_eq!(v["format"], 3);
     assert_eq!(v["verified"], true);
     assert_eq!(v["upgrade_pending"], false);
     assert_eq!(v["secrets"][0]["name"], "ALPHA");

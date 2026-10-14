@@ -34,12 +34,12 @@ pub use crypto::KdfParams;
 pub use format::current::{
     Actor, ApprovedRule, Class, Device, DirRule, Entry, HostRule, Kind, Network, NewSlot,
     PasswordParams, Program, Recipient, RecipientKind, Role, RuleSet, SLOT_DEVICE, SLOT_PASSWORD,
-    SLOT_RECOVERY, SlotInfo, Tier, open_vault_key, seal_vault_key,
+    SLOT_RECOVERY, SlotInfo, Successor, Tier, open_vault_key, seal_vault_key,
 };
 pub use session::SessionKeys;
 pub use vault::{
-    KeptSlot, Peek, RecipientSecret, RecoveryPlan, RekeyOutcome, SlotView, Vault, Verification,
-    read_file,
+    Consent, KeptSlot, OwnerKeyChange, Peek, RecipientSecret, RecoveryPlan, RekeyOutcome, SlotView,
+    Vault, Verification, read_file,
 };
 
 /// Names are env-var-like and short. Checked on every write and every read of

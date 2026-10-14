@@ -123,7 +123,7 @@ fn change_of(name: &str, peek: &Peek, built: Option<Built>, who: &str) -> Change
 pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
     let (project, vault_path) = find_vault(&args.cwd)?;
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
-    peek.verified(ctx.store()).map_err(from_vault)?;
+    peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     let path: Option<OsString> = args.path.as_deref().map(OsString::from);
     let changes = match &args.name {
         Some(name) => vec![change_for(&args, name, &peek, &project, path.as_ref())?],

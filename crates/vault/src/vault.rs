@@ -36,7 +36,7 @@ use crate::format::current::{
 use crate::format::upgrade::{self, AnyUnlocked};
 use crate::format::{self, CURRENT, Loaded, OwnerAccess, OwnerState};
 use crate::session::SessionKeys;
-use crate::store::{LocalStore, StateFile, StateKey};
+use crate::store::{Checked, LocalStore, StateFile, StateKey};
 use crate::write::{VaultLock, write_atomic};
 use crate::{Error, RecoveryKey, SecretValue, now, valid_name};
 
@@ -103,6 +103,11 @@ pub enum Verification {
     /// This machine has not opened the vault yet, so there is nothing to
     /// compare the owner key with. The file is self-consistent, nothing more.
     Unpinned,
+    /// Only from [`Peek::verified_for_unlock`]: this machine pinned an older
+    /// owner key, and the file's successor chain leads from it to the file's
+    /// owner. Nothing is established yet: the file is acceptable only if the
+    /// person opens it here and confirms (see `Vault::unlock_password_accepting`).
+    OwnerChangePending,
 }
 
 /// [`Verification`] plus how far it can be trusted.
@@ -135,6 +140,8 @@ pub struct Peek {
     pub slots: Vec<SlotView>,
     /// The paired devices, covered by the owner's signature.
     pub devices: Vec<Device>,
+    /// The owner successor chain (empty before format 3), oldest first.
+    pub successors: Vec<current::Successor>,
 }
 
 /// A slot as a reader without a key sees it: its description and its public
@@ -147,6 +154,43 @@ pub struct SlotView {
 }
 
 impl Peek {
+    /// [`Peek::verified`] for a caller that is about to unlock the vault and
+    /// can ask the person about an owner re-key: a chain-linked owner change
+    /// is [`Verification::OwnerChangePending`] instead of `OwnerChanged`. A
+    /// caller that would act on what the peek shows, with no unlock, must use
+    /// [`Peek::verified`]: an unconfirmed chain proves nothing about the rules
+    /// and names in the file.
+    pub fn verified_for_unlock(&self, store: &LocalStore) -> Result<Verified, Error> {
+        match self.verified(store) {
+            Err(Error::OwnerChanged) => {
+                let pinned = store
+                    .load_unchecked(&self.vault_id, StateFile::Owner)?
+                    .ok_or(Error::OwnerChanged)?;
+                let chain_leads_here =
+                    current::path_from(&self.successors, &pinned.pinned_owner_sign_pk).is_some_and(
+                        |p| {
+                            p.last()
+                                .is_some_and(|l| l.new_owner_sign_pub == self.owner_sign_pk)
+                        },
+                    );
+                if !chain_leads_here {
+                    return Err(Error::OwnerChanged);
+                }
+                if self.generation < pinned.max_generation {
+                    return Err(Error::RolledBack {
+                        found: self.generation,
+                        seen: pinned.max_generation,
+                    });
+                }
+                Ok(Verified {
+                    status: Verification::OwnerChangePending,
+                    mac_checked: false,
+                })
+            }
+            other => other,
+        }
+    }
+
     /// Compare with this machine's store: the pinned owner key and the highest
     /// generation seen. The state's MAC is not checked (a peek holds no key).
     pub fn verified(&self, store: &LocalStore) -> Result<Verified, Error> {
@@ -163,6 +207,40 @@ impl Peek {
             mac_checked: false,
         })
     }
+}
+
+/// An owner key change this machine is being asked to accept: the file's
+/// owner is not the one pinned here, but the file's successor chain leads from
+/// the pinned key to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerKeyChange {
+    pub vault_id: [u8; 16],
+    /// When the last re-key in the chain was made (Unix seconds).
+    pub changed_at: u64,
+    /// The owner generation reached (see `Successor::generation`).
+    pub owner_generation: u64,
+    pub old_owner_sign_pk: [u8; 32],
+    pub new_owner_sign_pk: [u8; 32],
+}
+
+/// The person's answer: `true` accepts the new owner key on this machine.
+/// Called only after the vault has been opened here with the person's own
+/// secret.
+pub type Consent<'a> = &'a mut dyn FnMut(&OwnerKeyChange) -> bool;
+
+/// The change that leads from `pinned` to the owner of `loaded`, if the file's
+/// chain links them.
+fn change_from(loaded: &Loaded, pinned: &[u8; 32]) -> Option<OwnerKeyChange> {
+    let chain = loaded.successors();
+    let path = current::path_from(&chain, pinned)?;
+    let last = path.last()?;
+    Some(OwnerKeyChange {
+        vault_id: loaded.header().vault_id,
+        changed_at: last.created_at,
+        owner_generation: last.generation,
+        old_owner_sign_pk: *pinned,
+        new_owner_sign_pk: last.new_owner_sign_pub,
+    })
 }
 
 /// What [`Vault::rekey`] does with the recovery slot.
@@ -291,6 +369,7 @@ fn peek_of(loaded: &Loaded) -> Peek {
             })
             .collect(),
         devices: loaded.devices(),
+        successors: loaded.successors(),
     }
 }
 
@@ -467,18 +546,39 @@ impl Vault {
         path: &Path,
         access: OwnerAccess<'_>,
         store: &LocalStore,
+        consent: Option<Consent<'_>>,
     ) -> Result<Vault, Error> {
         let loaded = format::decode(&read_file(path)?)?;
         let typed = match &access {
             OwnerAccess::Password(pw) => Some(Zeroizing::new(pw.to_vec())),
             OwnerAccess::Recovery(_) | OwnerAccess::Slot(..) => None,
         };
-        // A swapped owner is refused before the KDF runs.
-        store.check_owner_pin(
+        // A swapped owner is refused before the KDF runs, unless the file's
+        // successor chain leads from the pinned key to this one and there is
+        // someone to ask: then the unlock below decides.
+        let mut pending: Option<OwnerKeyChange> = None;
+        match store.check_owner_pin(
             &loaded.header().vault_id,
             StateFile::Owner,
             &loaded.owner().sign_pk,
-        )?;
+        ) {
+            Ok(()) => {}
+            Err(Error::OwnerChanged) if consent.is_some() => {
+                let state = store
+                    .load_unchecked(&loaded.header().vault_id, StateFile::Owner)?
+                    .ok_or(Error::OwnerChanged)?;
+                let change =
+                    change_from(&loaded, &state.pinned_owner_sign_pk).ok_or(Error::OwnerChanged)?;
+                if loaded.header().generation < state.max_generation {
+                    return Err(Error::RolledBack {
+                        found: loaded.header().generation,
+                        seen: state.max_generation,
+                    });
+                }
+                pending = Some(change);
+            }
+            Err(e) => return Err(e),
+        }
         let open = format::unlock_owner(&loaded, access)?;
         let (access, vk) = match open.state {
             OwnerState::Current(u) => {
@@ -496,12 +596,33 @@ impl Vault {
         // runs after the unlock: a tampered state is refused as tampered, not
         // mistaken for a rollback it may have been edited to cause.
         let state_key = StateKey::owner(&vk);
-        let checked = store.check(
-            &header.vault_id,
-            &state_key,
-            &owner.sign_pk,
-            header.generation,
-        )?;
+        let first_open = match (pending, consent) {
+            (Some(change), Some(ask)) => {
+                // The vault opened here with the person's own secret. Now the
+                // person decides; no answer is a no.
+                if !ask(&change) {
+                    return Err(Error::OwnerChanged);
+                }
+                store.adopt_owner(
+                    &header.vault_id,
+                    &state_key,
+                    &change.old_owner_sign_pk,
+                    &owner.sign_pk,
+                    header.generation,
+                )?;
+                false
+            }
+            _ => {
+                store
+                    .check(
+                        &header.vault_id,
+                        &state_key,
+                        &owner.sign_pk,
+                        header.generation,
+                    )?
+                    .first_open
+            }
+        };
         // The unlock proved the vault key derives this owner key: pin it.
         store.record(
             &header.vault_id,
@@ -514,7 +635,7 @@ impl Vault {
             base_generation: header.generation,
             upgraded_from: open.from,
             state_key,
-            first_open: checked.first_open,
+            first_open,
             repin: None,
         })
     }
@@ -522,7 +643,21 @@ impl Vault {
     /// Unlock with the password. An older format is upgraded in memory; the
     /// next `save` writes it (after backing up the original).
     pub fn unlock_password(path: &Path, pw: &[u8], store: &LocalStore) -> Result<Vault, Error> {
-        Vault::open_owner(path, OwnerAccess::Password(pw), store)
+        Vault::open_owner(path, OwnerAccess::Password(pw), store, None)
+    }
+
+    /// [`Vault::unlock_password`] that can follow an owner re-key made on
+    /// another machine: if this machine pinned an older owner key and the
+    /// file's successor chain leads from it to the file's owner, then once the
+    /// password has opened the vault `consent` is asked. A `true` re-pins the
+    /// new key; `false` is [`Error::OwnerChanged`], as without a chain.
+    pub fn unlock_password_accepting(
+        path: &Path,
+        pw: &[u8],
+        store: &LocalStore,
+        consent: Consent<'_>,
+    ) -> Result<Vault, Error> {
+        Vault::open_owner(path, OwnerAccess::Password(pw), store, Some(consent))
     }
 
     pub fn unlock_recovery(
@@ -530,7 +665,18 @@ impl Vault {
         key: &RecoveryKey,
         store: &LocalStore,
     ) -> Result<Vault, Error> {
-        Vault::open_owner(path, OwnerAccess::Recovery(key), store)
+        Vault::open_owner(path, OwnerAccess::Recovery(key), store, None)
+    }
+
+    /// [`Vault::unlock_recovery`] with the owner-change consent of
+    /// [`Vault::unlock_password_accepting`].
+    pub fn unlock_recovery_accepting(
+        path: &Path,
+        key: &RecoveryKey,
+        store: &LocalStore,
+        consent: Consent<'_>,
+    ) -> Result<Vault, Error> {
+        Vault::open_owner(path, OwnerAccess::Recovery(key), store, Some(consent))
     }
 
     /// Open as a recipient. An Admin or Editor of a current-format vault can
@@ -544,16 +690,74 @@ impl Vault {
         keys: &RecipientSecret,
         store: &LocalStore,
     ) -> Result<Vault, Error> {
+        Vault::open_as_recipient_with(path, recipient_id, keys, store, None)
+    }
+
+    /// [`Vault::open_as_recipient`] that can follow an owner re-key: when the
+    /// owner key this recipient pinned is replaced by a chain-linked one, and
+    /// the recipient's own keys open the file, `consent` decides whether to
+    /// re-pin (as [`Vault::unlock_password_accepting`] does for an owner).
+    pub fn open_as_recipient_accepting(
+        path: &Path,
+        recipient_id: &[u8; 16],
+        keys: &RecipientSecret,
+        store: &LocalStore,
+        consent: Consent<'_>,
+    ) -> Result<Vault, Error> {
+        Vault::open_as_recipient_with(path, recipient_id, keys, store, Some(consent))
+    }
+
+    fn open_as_recipient_with(
+        path: &Path,
+        recipient_id: &[u8; 16],
+        keys: &RecipientSecret,
+        store: &LocalStore,
+        consent: Option<Consent<'_>>,
+    ) -> Result<Vault, Error> {
         let loaded = format::decode(&read_file(path)?)?;
         let (header, owner) = (loaded.header(), loaded.owner());
         let state_key = StateKey::recipient(*recipient_id, keys.sign_sk());
-        let checked = store.check(
+        let mut moved: Option<OwnerKeyChange> = None;
+        let checked = match store.check(
             &header.vault_id,
             &state_key,
             &owner.sign_pk,
             header.generation,
-        )?;
+        ) {
+            Ok(c) => c,
+            Err(Error::OwnerChanged) if consent.is_some() => {
+                // This recipient's state is keyed by its own signing key, so it
+                // can be authenticated here, unlike an owner's.
+                let state = store
+                    .state(&header.vault_id, &state_key)?
+                    .ok_or(Error::OwnerChanged)?;
+                let change =
+                    change_from(&loaded, &state.pinned_owner_sign_pk).ok_or(Error::OwnerChanged)?;
+                if header.generation < state.max_generation {
+                    return Err(Error::RolledBack {
+                        found: header.generation,
+                        seen: state.max_generation,
+                    });
+                }
+                moved = Some(change);
+                Checked { first_open: false }
+            }
+            Err(e) => return Err(e),
+        };
         let open = format::unlock_recipient(&loaded, recipient_id, keys.enc_sk())?;
+        if let (Some(change), Some(ask)) = (moved, consent) {
+            if !ask(&change) {
+                return Err(Error::OwnerChanged);
+            }
+            store.repin_owner(
+                &header.vault_id,
+                &state_key,
+                &change.old_owner_sign_pk,
+                &state_key,
+                &owner.sign_pk,
+                header.generation,
+            )?;
+        }
         store.record(
             &open.model.header.vault_id,
             &state_key,
@@ -1027,14 +1231,18 @@ impl Vault {
             Access::Blocked { .. } => return Err(Error::UpgradeNeedsRecoveryKey),
             Access::Recipient(_) => return Err(Error::NotOwner),
         };
-        let slot = current::password_slot(&u.model.header.vault_id, &u.vk, new_password, kdf)?;
+        let mut slot = current::password_slot(&u.model.header.vault_id, &u.vk, new_password, kdf)?;
         match u
             .model
             .slots
             .iter_mut()
             .find(|s| s.kind == current::SLOT_PASSWORD)
         {
-            Some(existing) => *existing = slot,
+            Some(existing) => {
+                // A new password is not a new enrollment.
+                slot.created_at = existing.created_at;
+                *existing = slot;
+            }
             None => u.model.slots.insert(0, slot),
         }
         Ok(())
@@ -1112,7 +1320,19 @@ impl Vault {
         kek: &[u8; KEY_LEN],
         store: &LocalStore,
     ) -> Result<Vault, Error> {
-        Vault::open_owner(path, OwnerAccess::Slot(slot_id, kek), store)
+        Vault::open_owner(path, OwnerAccess::Slot(slot_id, kek), store, None)
+    }
+
+    /// [`Vault::unlock_with_slot`] with the owner-change consent of
+    /// [`Vault::unlock_password_accepting`].
+    pub fn unlock_with_slot_accepting(
+        path: &Path,
+        slot_id: &[u8; 16],
+        kek: &[u8; KEY_LEN],
+        store: &LocalStore,
+        consent: Consent<'_>,
+    ) -> Result<Vault, Error> {
+        Vault::open_owner(path, OwnerAccess::Slot(slot_id, kek), store, Some(consent))
     }
 
     pub fn devices(&self) -> &[Device] {
@@ -1203,7 +1423,9 @@ impl Vault {
             .iter()
             .position(|s| s.slot_id == id && s.kind == new.kind)
             .ok_or(Error::UnknownSlot)?;
-        let slot = current::custom_slot(&u.model.header.vault_id, &u.vk, new, wrap)?;
+        let mut slot = current::custom_slot(&u.model.header.vault_id, &u.vk, new, wrap)?;
+        // Re-wrapping after a use is not a new enrollment.
+        slot.created_at = u.model.slots[i].created_at;
         let mut slots = u.model.slots.clone();
         slots[i] = slot;
         current::check_slots(&slots).map_err(|_| Error::Invalid("slots"))?;
@@ -1230,11 +1452,14 @@ impl Vault {
     ///   `keep`, wrapped for the new key. A device slot is kept by wrapping the
     ///   new key for the device again, which needs only the device's public
     ///   key.
-    /// * The local store's pin and MAC key are moved to the new owner key by
-    ///   the next `save` ([`LocalStore::repin_owner`]), so this machine does not
-    ///   report `OwnerChanged`. Other machines that pinned the old owner key
-    ///   will, until the person clears their record of the vault: the file
-    ///   carries no proof that the old owner approved the new one.
+    /// * The old owner key signs a successor record for the new one (kept in
+    ///   the file's signed body, the last few). The local store's pin and MAC
+    ///   key are moved to the new owner key by the next `save`
+    ///   ([`LocalStore::repin_owner`]), so this machine does not report
+    ///   `OwnerChanged`. Another machine that pinned the old key follows the
+    ///   chain, but only after the person opens the file there with their own
+    ///   secret and confirms ([`Vault::unlock_password_accepting`]); without
+    ///   that, or without a chain that reaches it, it reports `OwnerChanged`.
     /// * A session opened before keeps keys that open nothing in the new file:
     ///   its reads fail with [`Error::SessionStale`].
     ///
@@ -1296,6 +1521,13 @@ impl Vault {
             sign_pk: new_keys.sign_pk,
             enc_pk: new_keys.enc_pk,
         };
+        // The old owner key vouches for the new one, so a machine that pinned
+        // the old key can follow (after the person confirms there).
+        let epoch = model.successors.last().map_or(0, |s| s.generation) + 1;
+        current::push_successor(
+            &mut model.successors,
+            current::Successor::sign(&vault_id, &old_keys.sign, new_keys.sign_pk, epoch, now()),
+        );
         for r in model.recipients.iter_mut() {
             if r.added_by == Actor::Owner {
                 r.certify(&vault_id, &new_keys.sign);
@@ -1303,12 +1535,19 @@ impl Vault {
         }
 
         // Slots.
-        let mut slots = vec![current::rewrap_slot(
-            &vault_id,
-            &old_pw,
-            &new_vk,
-            password_kek,
-        )?];
+        // A slot keeps the time it was enrolled: "the last enrolled method"
+        // must survive a re-key.
+        let enrolled = |id: &[u8; 16]| {
+            u.model
+                .slots
+                .iter()
+                .find(|s| &s.slot_id == id)
+                .map(|s| s.created_at)
+        };
+        let mut slots = vec![current::Slot {
+            created_at: old_pw.created_at,
+            ..current::rewrap_slot(&vault_id, &old_pw, &new_vk, password_kek)?
+        }];
         let mut new_recovery = None;
         match recovery {
             RecoveryPlan::Keep(key) => {
@@ -1318,7 +1557,10 @@ impl Vault {
                     .find(|s| s.kind == current::SLOT_RECOVERY)
                 {
                     let kek = current::recovery_kek(key);
-                    slots.push(current::rewrap_slot(&vault_id, old, &new_vk, &kek)?);
+                    slots.push(current::Slot {
+                        created_at: old.created_at,
+                        ..current::rewrap_slot(&vault_id, old, &new_vk, &kek)?
+                    });
                 }
             }
             RecoveryPlan::Replace => {
@@ -1332,7 +1574,10 @@ impl Vault {
             if matches!(k.new.kind, current::SLOT_PASSWORD | current::SLOT_RECOVERY) {
                 return Err(Error::Invalid("slot kind"));
             }
-            let slot = current::custom_slot(&vault_id, &new_vk, k.new, k.wrap)?;
+            let mut slot = current::custom_slot(&vault_id, &new_vk, k.new, k.wrap)?;
+            if let Some(t) = enrolled(&slot.slot_id) {
+                slot.created_at = t;
+            }
             kept_ids.push(slot.slot_id);
             slots.push(slot);
         }

@@ -247,7 +247,10 @@ impl Unlocker for DeviceUnlocker {
         store: &LocalStore,
     ) -> Result<(Vault, UnlockedBy), AuthError> {
         let kek = self.unwrap_kek(&slot.info, &slot.params, ctx)?;
-        let mut vault = Vault::unlock_with_slot(path, &slot.info.slot_id, &kek, store)?;
+        let mut vault =
+            Vault::unlock_with_slot_accepting(path, &slot.info.slot_id, &kek, store, &mut |c| {
+                ctx.confirm_owner_change(c)
+            })?;
         // Write the slot again with a new ephemeral key. A failure here (the
         // file changed under us) leaves the old slot, which still works; it is
         // reported, not fatal.

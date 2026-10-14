@@ -7,7 +7,7 @@
 use std::io::Write;
 
 use serde_json::json;
-use vahta_ipc::duration::{human, parse_secs};
+use vahta_ipc::duration::{human, parse_secs, ymd};
 use vahta_ipc::protocol::{ClientReply, ClientRequest, DeviceInfo};
 
 use crate::daemon_cmd;
@@ -44,6 +44,10 @@ options:
   --json           machine-readable list
   -h, --help       show this help
 
+The UNLOCK column and the last line show the current unlock method, the one
+tried first: the method enrolled last unless `vahta config unlock` says
+otherwise.
+
 The master password always works: if the phone is away or its access has run
 out, the window asks for the password.
 ";
@@ -63,23 +67,6 @@ fn when(t: Option<u64>) -> String {
     }
 }
 
-/// `YYYY-MM-DD` of a Unix time, UTC.
-fn ymd(t: u64) -> String {
-    let days = (t / 86_400) as i64;
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
 fn table(devices: &[DeviceInfo]) -> String {
     let mut rows = vec![vec![
         "NAME".to_string(),
@@ -88,6 +75,7 @@ fn table(devices: &[DeviceInfo]) -> String {
         "ACCESS UNTIL".to_string(),
         "LAST USED".to_string(),
         "STATE".to_string(),
+        "UNLOCK".to_string(),
     ]];
     for d in devices {
         rows.push(vec![
@@ -101,9 +89,10 @@ fn table(devices: &[DeviceInfo]) -> String {
             },
             when(d.last_used),
             d.state.clone(),
+            if d.current { "current" } else { "" }.to_string(),
         ]);
     }
-    let widths: Vec<usize> = (0..6)
+    let widths: Vec<usize> = (0..7)
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
     rows.iter()
@@ -209,17 +198,25 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Err(code) => return code,
     };
     match conn.request(&request) {
-        Ok(ClientReply::Devices { devices }) => {
+        Ok(ClientReply::Devices { devices, unlock }) => {
             if json {
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::to_string_pretty(&json!({"devices": devices})).unwrap_or_default()
+                    serde_json::to_string_pretty(&json!({"devices": devices, "unlock": unlock}))
+                        .unwrap_or_default()
                 );
-            } else if devices.is_empty() {
-                let _ = writeln!(stdout, "no devices are paired with this vault");
             } else {
-                let _ = writeln!(stdout, "{}", table(&devices));
+                if devices.is_empty() {
+                    let _ = writeln!(stdout, "no devices are paired with this vault");
+                } else {
+                    let _ = writeln!(stdout, "{}", table(&devices));
+                }
+                let _ = writeln!(
+                    stdout,
+                    "unlock: {} first (setting: {}, from {}); the master password always works",
+                    unlock.current, unlock.setting, unlock.source
+                );
             }
             EXIT_CLEAN
         }

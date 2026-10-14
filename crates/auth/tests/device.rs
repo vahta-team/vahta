@@ -385,3 +385,233 @@ fn a_device_approver_gives_a_verified_choice() {
             .is_err()
     );
 }
+
+// --- The current unlock method -----------------------------------------------------------
+
+/// A phone that counts how often it was asked to unlock.
+struct Counting {
+    inner: Arc<LoopbackDevice>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn new(inner: Arc<LoopbackDevice>) -> Arc<Counting> {
+        Arc::new(Counting {
+            inner,
+            asked: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+    fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl DeviceChannel for Counting {
+    fn unlock(&self, req: &Request, eph_pub: &[u8]) -> Result<UnlockReply, AuthError> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.unlock(req, eph_pub)
+    }
+    fn approve(&self, req: &Request) -> Result<Decision, AuthError> {
+        self.inner.approve(req)
+    }
+}
+
+fn counting_ctx(
+    vault_id: [u8; 16],
+    phones: &[(&Arc<Counting>, &Device)],
+    pw: &[&'static [u8]],
+) -> Ctx {
+    let mut c = ctx(
+        vault_id,
+        &Arc::new(LoopbackDevice::new("unused")),
+        &phones[0].1.clone(),
+        pw,
+    );
+    c.devices = phones
+        .iter()
+        .map(|(p, r)| LinkedDevice {
+            record: (*r).clone(),
+            channel: (*p).clone(),
+        })
+        .collect();
+    c
+}
+
+fn pair_another(w: &World, name: &str) -> (Arc<LoopbackDevice>, Device) {
+    let phone = Arc::new(LoopbackDevice::new(name));
+    let mut v = Vault::unlock_password(&w.path, PW, &w.store).unwrap();
+    enroll_device(&mut v, phone.record(None), None).unwrap();
+    v.save(&w.path, &w.store).unwrap();
+    let record = Vault::peek(&w.path)
+        .unwrap()
+        .devices
+        .into_iter()
+        .find(|d| d.name == name)
+        .unwrap();
+    (phone, record)
+}
+
+#[test]
+fn by_default_the_last_enrolled_method_is_current() {
+    let w = world();
+    let reg = Registry::standard();
+    let id = Vault::peek(&w.path).unwrap().vault_id;
+    // Only the password: it is current.
+    let peek = Vault::peek(&w.path).unwrap();
+    let now_ = reg
+        .current(&peek, Need::Knowledge, &UnlockPref::Last)
+        .unwrap();
+    assert_eq!(now_.kind, vahta_vault::SLOT_PASSWORD);
+
+    let (phone, record) = paired(&w, None);
+    let (tablet, tablet_record) = pair_another(&w, "tablet");
+    let peek = Vault::peek(&w.path).unwrap();
+    // The tablet came last.
+    let cur = reg
+        .current(&peek, Need::Knowledge, &UnlockPref::Last)
+        .unwrap();
+    assert_eq!(cur.slot_id, tablet_record.device_id);
+    let order: Vec<_> = reg
+        .order(&peek, Need::Knowledge, &UnlockPref::Last)
+        .iter()
+        .map(|s| s.label.clone())
+        .collect();
+    assert_eq!(order.len(), 3);
+    assert_eq!(
+        order.last().unwrap(),
+        "password",
+        "the password is the fallback"
+    );
+
+    // And the tablet is the one asked.
+    let (p, t) = (Counting::new(phone.clone()), Counting::new(tablet.clone()));
+    tablet.queue(Behavior::Approve(0));
+    let mut c = counting_ctx(id, &[(&p, &record), (&t, &tablet_record)], &[]);
+    let (_, by) = reg
+        .unlock(&w.path, &w.store, Need::Knowledge, &mut c)
+        .unwrap();
+    assert_eq!(by.device_id, Some(tablet_record.device_id));
+    assert_eq!((p.asked(), t.asked(), c.asked_pw), (0, 1, 0));
+
+    // The rewrap after that use did not make the slot newer: same order.
+    let peek = Vault::peek(&w.path).unwrap();
+    let cur = reg
+        .current(&peek, Need::Knowledge, &UnlockPref::Last)
+        .unwrap();
+    assert_eq!(cur.slot_id, tablet_record.device_id);
+    // An expired newest device is not current.
+    let mut v = Vault::unlock_password(&w.path, PW, &w.store).unwrap();
+    refresh_device(&mut v, &tablet_record.device_id, Some(1)).unwrap();
+    v.save(&w.path, &w.store).unwrap();
+    let peek = Vault::peek(&w.path).unwrap();
+    let cur = reg
+        .current(&peek, Need::Knowledge, &UnlockPref::Last)
+        .unwrap();
+    assert_eq!(cur.slot_id, record.device_id);
+}
+
+#[test]
+fn an_explicit_password_does_not_ask_the_phone() {
+    let w = world();
+    let (phone, record) = paired(&w, None);
+    let id = Vault::peek(&w.path).unwrap().vault_id;
+    let p = Counting::new(phone.clone());
+    phone.queue(Behavior::Approve(0));
+    let mut c = counting_ctx(id, &[(&p, &record)], &[PW]);
+    let (v, by) = Registry::standard()
+        .unlock_by(
+            &w.path,
+            &w.store,
+            Need::Knowledge,
+            &UnlockPref::Password,
+            &mut c,
+        )
+        .unwrap();
+    assert_eq!(by.factor, Factor::Knowledge);
+    assert_eq!((p.asked(), c.asked_pw), (0, 1));
+    assert_eq!(v.get("A").unwrap().expose(), b"fake-one");
+    // A cancelled password window ends it; the phone is not a way around that.
+    let mut c = counting_ctx(id, &[(&p, &record)], &[]);
+    assert!(matches!(
+        Registry::standard().unlock_by(
+            &w.path,
+            &w.store,
+            Need::Knowledge,
+            &UnlockPref::Password,
+            &mut c
+        ),
+        Err(AuthError::Cancelled)
+    ));
+    assert_eq!(p.asked(), 0);
+}
+
+#[test]
+fn an_explicit_device_is_asked_first_and_the_password_follows() {
+    let w = world();
+    let (phone, record) = paired(&w, None);
+    let (tablet, tablet_record) = pair_another(&w, "tablet");
+    let id = Vault::peek(&w.path).unwrap().vault_id;
+    let (p, t) = (Counting::new(phone.clone()), Counting::new(tablet.clone()));
+    let pref = UnlockPref::parse("device:PHONE").unwrap();
+
+    // Phone first although the tablet is newer; by name in any case.
+    phone.queue(Behavior::Approve(0));
+    let mut c = counting_ctx(id, &[(&p, &record), (&t, &tablet_record)], &[]);
+    let (_, by) = Registry::standard()
+        .unlock_by(&w.path, &w.store, Need::Knowledge, &pref, &mut c)
+        .unwrap();
+    assert_eq!(by.device_id, Some(record.device_id));
+    assert_eq!((p.asked(), t.asked()), (1, 0));
+
+    // Refused: the next in line is asked (the tablet), then the password.
+    phone.queue(Behavior::Deny);
+    tablet.queue(Behavior::Deny);
+    let mut c = counting_ctx(id, &[(&p, &record), (&t, &tablet_record)], &[PW]);
+    let (_, by) = Registry::standard()
+        .unlock_by(&w.path, &w.store, Need::Knowledge, &pref, &mut c)
+        .unwrap();
+    assert_eq!(by.factor, Factor::Knowledge);
+    assert_eq!((p.asked(), t.asked(), c.asked_pw), (2, 1, 1));
+
+    // The start of the id works too.
+    let by_id = UnlockPref::Device(hex_id(&record.device_id)[..8].to_string());
+    let peek = Vault::peek(&w.path).unwrap();
+    assert_eq!(
+        Registry::standard()
+            .current(&peek, Need::Knowledge, &by_id)
+            .unwrap()
+            .slot_id,
+        record.device_id
+    );
+}
+
+fn hex_id(id: &[u8; 16]) -> String {
+    vahta_vault::hex_encode(id)
+}
+
+#[test]
+fn a_setting_that_names_no_device_here_is_the_default() {
+    let w = world();
+    let (_, record) = paired(&w, None);
+    let peek = Vault::peek(&w.path).unwrap();
+    let reg = Registry::standard();
+    for pref in [
+        UnlockPref::Device("nobody".into()),
+        UnlockPref::Device("ab".into()),
+    ] {
+        assert_eq!(
+            reg.current(&peek, Need::Knowledge, &pref).unwrap().slot_id,
+            record.device_id
+        );
+    }
+    // Password-only actions never have a phone in the list.
+    let only = reg.order(&peek, Need::PasswordOnly, &UnlockPref::Last);
+    assert_eq!(only.len(), 1);
+    assert_eq!(only[0].kind, vahta_vault::SLOT_PASSWORD);
+    assert_eq!(UnlockPref::parse("device:"), None);
+    assert_eq!(UnlockPref::parse("phone"), None);
+    assert_eq!(
+        UnlockPref::parse("device: x y").unwrap().as_text(),
+        "device:x y"
+    );
+}

@@ -59,7 +59,7 @@ remembers each vault's owner key and highest generation, so a swapped or rolled-
 file is refused. The approved binding rules live inside the signed vault; `vahta.toml`
 is only a proposal.
 
-Format 2 (current) differs from format 1 in three places, all inside the signed body:
+Format 2 differs from format 1 in three places, all inside the signed body:
 
 - **Key slots are generic.** A slot is a kind number, an id, a label, creation and
   optional expiry times, kind-specific `params` and `ct` (the vault key wrapped under
@@ -82,6 +82,24 @@ every secret is re-sealed for the new format number. Nothing is written by openi
 first save writes the upgraded file and, before that, the original byte for byte to
 `<vault>.v1.bak` (mode 0600, never overwritten). The generation continues, so the
 rollback check is unaffected.
+
+Format 3 (current) adds one list to the signed body, `successors`: the owner
+successor chain. A re-key (new vault key, so new owner signing key) appends a record
+`{old_owner_sign_pub, new_owner_sign_pub, generation, created_at, signature_by_old}`,
+signed by the old owner key over `"vahta/successor" ‖ vault_id ‖ old ‖ new ‖
+generation ‖ created_at`. The generation counts re-keys (1, 2, ...), not file saves;
+the last four records are kept. A reader checks the whole chain at decode (each
+signature, each record starting where the one before ended, generations rising, the
+last record naming the file's owner) and refuses a file whose chain is broken. A machine pinned to an
+old owner key follows the chain only after the vault has opened there with the
+person's own secret and the person has confirmed in a window (a stolen old key can
+sign a fake successor; opening the new file needs a secret it does not give). Format
+3 shares everything else with format 2 (`v3.rs` re-exports it; the sealed secrets are
+sealed again under the number 3). A format 2 file is read as it is and upgraded the
+same way as 1 to 2: an owner unlock, the original kept once as `<vault>.v2.bak`, the
+generation continuing. Slots keep their creation time through re-keys, password
+changes and a device slot's rewrap, because "the last enrolled unlock method" is read
+from it. See `docs/daemon.md` ("Devices, factors, re-keying and recovery").
 
 ## Sessions and anchors
 

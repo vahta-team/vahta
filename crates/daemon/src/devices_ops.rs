@@ -24,7 +24,7 @@ use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, lines_for, refused,
 };
-use crate::protocol::{ClientReply, DeviceInfo, RefusalKind, Secret};
+use crate::protocol::{ClientReply, DeviceInfo, RefusalKind, Secret, UnlockInfo};
 use crate::surface::Window;
 
 /// The longest a device's access can be given at once.
@@ -113,6 +113,11 @@ pub(crate) fn list(ctx: &Ctx<'_>, cwd: &str) -> Flow<ClientReply> {
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     let journal = ctx.shared.options.paths.journal_file();
     let t = now();
+    let (pref, setting, source) = crate::authn::unlock_pref(ctx.shared, &peek.vault_id);
+    let current = ctx
+        .shared
+        .unlockers
+        .current(&peek, vahta_auth::Need::Knowledge, &pref);
     let devices = peek
         .devices
         .iter()
@@ -128,9 +133,25 @@ pub(crate) fn list(ctx: &Ctx<'_>, cwd: &str) -> Flow<ClientReply> {
                 "active".to_string()
             },
             transports: d.transports.clone(),
+            current: current.as_ref().is_some_and(|c| c.slot_id == d.device_id),
         })
         .collect();
-    Ok(ClientReply::Devices { devices })
+    let current = match &current {
+        Some(c) if c.kind == vahta_vault::SLOT_DEVICE => peek
+            .devices
+            .iter()
+            .find(|d| d.device_id == c.slot_id)
+            .map_or_else(|| c.label.clone(), |d| format!("device {}", d.name)),
+        _ => "master password".to_string(),
+    };
+    Ok(ClientReply::Devices {
+        devices,
+        unlock: UnlockInfo {
+            setting,
+            source,
+            current,
+        },
+    })
 }
 
 // --- pair ---------------------------------------------------------------------------------------
