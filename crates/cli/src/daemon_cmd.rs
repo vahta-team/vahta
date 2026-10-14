@@ -158,6 +158,9 @@ fn run_daemon(env: &Env, stderr: &mut dyn Write) -> i32 {
         }
     };
     let mut options = Options::new(paths, config);
+    options.links = Some(Box::new(vahta_daemon::LinkDevices::standard(
+        &options.paths.data,
+    )));
     vahta_daemon::testing::apply_overrides(&mut options);
     match server::run(options) {
         Ok(()) => EXIT_CLEAN,

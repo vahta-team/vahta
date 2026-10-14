@@ -42,19 +42,27 @@
       "name": "approve_request"
     },
     {
-      "encoded": "0103f237467ada4e5abffa3c5a754449953f2c31563aaad15744452045907bac1b2e0040c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "encoded": "0103f237467ada4e5abffa3c5a754449953f2c31563aaad15744452045907bac1b2e000140c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
       "name": "decision"
     },
     {
-      "encoded": "010410090909090909090909090909090909094104d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+      "encoded": "010410090909090909090909090909090909094104d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d412766168746120746573742072657175657374",
       "name": "unlock_request"
     },
     {
-      "encoded": "01050020e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
-      "name": "unlock_response_secret"
+      "encoded": "01050020e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e540f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+      "name": "unlock_response_approved"
     },
     {
-      "encoded": "0105010772656675736564",
+      "encoded": "010501",
+      "name": "unlock_response_denied"
+    },
+    {
+      "encoded": "0103f237467ada4e5abffa3c5a754449953f2c31563aaad15744452045907bac1b2e010000",
+      "name": "decision_deny"
+    },
+    {
+      "encoded": "0105020772656675736564",
       "name": "unlock_response_error"
     }
   ],
@@ -93,7 +101,15 @@
     ],
     "handshake_hash": "713d01316a7eeaf31c461c03dc71ee2aa9d0c3e3f9f80692cbfab7466b782f51",
     "phone_to_desktop_decision_frames": [
-      "85883509a517cb9cfbbe8524d5e8b120b0464eb83192b21898584b43972371676246751a53095d912d11c8df4c3de82981e68ee81fcf039d55c5b8a236853ccebb1469e13dc96ab9febcb824af643e3c415439995a70ed35f846b4c96ea1c34ae2eb22af10b512688ae714f852298c044f59c735d2"
+      "85883509a517cb9cfbbe8524d5e8b120b0464eb83192b21898584b43972371676246751a128a5d912d11c8df4c3de82981e68ee81fcf039d55c5b8a236853ccebb1469e13dc96ab9febcb824af643e3c415439995a70ed35f846b4c96ea1c34ae2eb22af1067910e9e10c821fc954d7f6e2f48c6479c"
     ]
+  },
+  "tags": {
+    "ble_service_data_pairing": "0102564981f3b0c82a95",
+    "ble_service_data_session": "01013620f94089bc434c",
+    "comment": "device_tag = SHA-256(phone static public)[..8]; pairing_tag = SHA-256('vahta/v1/pair-tag' || psk)[..8]; mDNS instance = lowercase hex of the tag; BLE service data = [1, kind (1 session, 2 pairing), tag]",
+    "device_tag": "3620f94089bc434c",
+    "mdns_instance": "3620f94089bc434c",
+    "pairing_tag": "564981f3b0c82a95"
   }
 }

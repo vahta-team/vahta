@@ -163,6 +163,7 @@ fn request_response_round_trip_over_kk() {
     p.send(&Message::Decision(Decision {
         request_hash: got.request_hash,
         choice: Choice::Approve,
+        option: 0,
         signature: vec![9; 64],
     }))
     .unwrap();
@@ -294,12 +295,7 @@ fn memory_transport_and_the_race() {
     let t = MemoryTransport::new();
     let phone = Keypair::generate().unwrap();
     let l = t.listen(phone.public);
-    let dev = DeviceAddr {
-        name: "p".into(),
-        static_pub: phone.public,
-        ble_address: None,
-        lan_hint: None,
-    };
+    let dev = DeviceAddr::paired("p", phone.public, None, None);
     let t: Arc<dyn Transport> = Arc::new(t);
     let (name, mut pipe) =
         reach_first(&[t], &dev, Instant::now() + Duration::from_secs(2)).unwrap();
@@ -307,10 +303,7 @@ fn memory_transport_and_the_race() {
     let mut other = l.accept(Duration::from_secs(1)).unwrap();
     pipe.send(b"x").unwrap();
     assert_eq!(other.recv().unwrap(), b"x");
-    let nobody = DeviceAddr {
-        static_pub: [9; 32],
-        ..dev
-    };
+    let nobody = DeviceAddr::paired("p", [9; 32], None, None);
     let t2: Arc<dyn Transport> = Arc::new(MemoryTransport::new());
     assert!(reach_first(&[t2], &nobody, Instant::now() + Duration::from_secs(1)).is_err());
 }

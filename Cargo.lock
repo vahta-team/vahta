@@ -1839,6 +1839,8 @@ dependencies = [
  "vahta-daemon",
  "vahta-harness",
  "vahta-ipc",
+ "vahta-link",
+ "vahta-mobile",
  "vahta-net",
  "vahta-os",
  "vahta-scan",
@@ -1853,6 +1855,8 @@ dependencies = [
  "aho-corasick",
  "dunce",
  "hmac",
+ "p256",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2",
@@ -1861,6 +1865,8 @@ dependencies = [
  "vahta-detect",
  "vahta-harness",
  "vahta-ipc",
+ "vahta-link",
+ "vahta-mobile",
  "vahta-net",
  "vahta-os",
  "vahta-policy",
@@ -1940,6 +1946,10 @@ dependencies = [
 name = "vahta-mobile"
 version = "0.0.0"
 dependencies = [
+ "p256",
+ "rand_core 0.6.4",
+ "serde_json",
+ "vahta-auth",
  "vahta-link",
 ]
 

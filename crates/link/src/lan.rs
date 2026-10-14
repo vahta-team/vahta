@@ -7,31 +7,66 @@ use std::time::{Duration, Instant};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::error::{LinkError, Result};
-use crate::frame::{Pipe, read_frame, write_frame};
+use crate::frame::{PeerHint, Pipe, write_frame};
 use crate::transport::{DeviceAddr, Transport};
 
 pub const SERVICE_TYPE: &str = "_vahta._tcp.local.";
 
-/// A pipe over a TCP stream.
-pub struct TcpPipe(TcpStream);
+/// A pipe over a TCP stream. It keeps what it has read of a frame across a
+/// receive timeout, so a caller that polls with short timeouts never loses the
+/// start of a frame.
+pub struct TcpPipe {
+    stream: TcpStream,
+    buf: Vec<u8>,
+}
 
 impl TcpPipe {
     pub fn new(stream: TcpStream) -> Self {
         let _ = stream.set_nodelay(true);
-        Self(stream)
+        Self {
+            stream,
+            buf: Vec::new(),
+        }
+    }
+
+    /// A whole frame out of `buf`, if there is one.
+    fn take_frame(&mut self) -> Option<Vec<u8>> {
+        let len = u16::from_be_bytes([*self.buf.first()?, *self.buf.get(1)?]) as usize;
+        if self.buf.len() < 2 + len {
+            return None;
+        }
+        let rest = self.buf.split_off(2 + len);
+        let frame = self.buf[2..].to_vec();
+        self.buf = rest;
+        Some(frame)
     }
 }
 
 impl Pipe for TcpPipe {
     fn send(&mut self, frame: &[u8]) -> Result<()> {
-        write_frame(&mut self.0, frame)
+        write_frame(&mut self.stream, frame)
     }
     fn recv(&mut self) -> Result<Vec<u8>> {
-        read_frame(&mut self.0)
+        use std::io::Read;
+        loop {
+            if let Some(f) = self.take_frame() {
+                return Ok(f);
+            }
+            let mut chunk = [0u8; 4096];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(LinkError::Closed),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
     fn set_recv_timeout(&mut self, t: Option<Duration>) -> Result<()> {
-        self.0.set_read_timeout(t)?;
+        self.stream.set_read_timeout(t)?;
         Ok(())
+    }
+    fn peer_hint(&self) -> Option<PeerHint> {
+        self.stream.peer_addr().ok().map(PeerHint::Lan)
     }
 }
 
@@ -157,12 +192,7 @@ mod tests {
     use std::thread;
 
     fn dev(hint: Option<SocketAddr>) -> DeviceAddr {
-        DeviceAddr {
-            name: "p".into(),
-            static_pub: [5; 32],
-            ble_address: None,
-            lan_hint: hint,
-        }
+        DeviceAddr::paired("p", [5; 32], None, hint)
     }
 
     #[test]
@@ -180,6 +210,40 @@ mod tests {
             .unwrap();
         p.send(b"abc").unwrap();
         assert_eq!(p.recv().unwrap(), b"cba");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_timeout_in_the_middle_of_a_frame_loses_nothing() {
+        use std::io::Write;
+        let l = LanListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = thread::spawn(move || {
+            let (mut s, _) = l.listener.accept().unwrap();
+            // Length 5, then the body in two parts with a pause between.
+            s.write_all(&[0, 5, 1, 2]).unwrap();
+            s.flush().unwrap();
+            thread::sleep(Duration::from_millis(300));
+            s.write_all(&[3, 4, 5, 0, 1, 9]).unwrap();
+            thread::sleep(Duration::from_millis(300));
+        });
+        let mut p = LanTransport::new()
+            .reach(&dev(Some(addr)), Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        p.set_recv_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut timeouts = 0;
+        let first = loop {
+            match p.recv() {
+                Ok(f) => break f,
+                Err(LinkError::Timeout) => timeouts += 1,
+                Err(e) => panic!("{e}"),
+            }
+        };
+        assert!(timeouts > 0, "the test must have timed out mid-frame");
+        assert_eq!(first, [1, 2, 3, 4, 5]);
+        // The next frame was already buffered with the first one's tail.
+        p.set_recv_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(p.recv().unwrap(), [9]);
         h.join().unwrap();
     }
 

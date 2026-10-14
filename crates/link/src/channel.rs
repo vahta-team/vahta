@@ -411,6 +411,11 @@ impl PipeChannel {
         self.pipe.set_recv_timeout(t)
     }
 
+    /// Where the peer was reached.
+    pub fn peer_hint(&self) -> Option<crate::PeerHint> {
+        self.pipe.peer_hint()
+    }
+
     pub fn send_bytes(&mut self, plaintext: &[u8]) -> Result<()> {
         for f in self.channel.seal(plaintext)? {
             self.pipe.send(&f)?;

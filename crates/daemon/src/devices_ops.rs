@@ -15,7 +15,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use vahta_auth::{
-    Action, AuthError, NewDevice, device_id_for, enroll_device, kept_device_slot, refresh_device,
+    Action, AuthError, Cancel, NewDevice, PairContext, PairingCode, device_id_for, enroll_device,
+    kept_device_slot, refresh_device,
 };
 use vahta_vault::{Device, RecoveryPlan, Vault, hex_encode};
 
@@ -24,7 +25,7 @@ use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, lines_for, refused,
 };
-use crate::protocol::{ClientReply, DeviceInfo, RefusalKind, Secret, UnlockInfo};
+use crate::protocol::{ClientReply, DeviceInfo, Panel, RefusalKind, Secret, UnlockInfo};
 use crate::surface::Window;
 
 /// The longest a device's access can be given at once.
@@ -187,15 +188,76 @@ pub(crate) fn pair(ctx: &Ctx<'_>, cwd: &str, name: &str, secs: u64) -> Flow<Clie
         what: format!("pair {name}"),
     };
     let vault = crate::ops::unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
-    let new = ctx
-        .shared
-        .links
-        .pair(name, PAIR_WAIT)
-        .map_err(|e| match e {
-            AuthError::Cancelled => cancelled(),
-            other => error(other.to_string()),
-        })?;
+    let new = wait_for_phone(ctx, window.as_mut(), &panel, name, vault.vault_id())?;
     record_pairing(ctx, window, &vault_path, vault, new, secs)
+}
+
+/// Pair over the phone link while the window shows the pairing code. The link
+/// waits on a thread of its own; the window's wait is ended when the phone has
+/// connected, and the link's when the person closes the window.
+fn wait_for_phone(
+    ctx: &Ctx<'_>,
+    window: &mut dyn Window,
+    panel: &Panel,
+    name: &str,
+    vault_id: [u8; 16],
+) -> Flow<NewDevice> {
+    let cancel = Cancel::new();
+    let (tx, rx) = std::sync::mpsc::channel::<PairingCode>();
+    let tx = std::sync::Mutex::new(tx);
+    let show = move |code: PairingCode| {
+        if let Ok(tx) = tx.lock() {
+            let _ = tx.send(code);
+        }
+    };
+    let stop = window.pairing_stopper();
+    let links = &ctx.shared.links;
+    let result = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let r = links.pair(
+                name,
+                &PairContext {
+                    vault_id,
+                    wait: PAIR_WAIT,
+                    show: &show,
+                    cancel: &cancel,
+                },
+            );
+            if let Some(stop) = stop {
+                stop();
+            }
+            r
+        });
+        // The code, or the link ending without one.
+        let code = loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(code) => break Some(code),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !worker.is_finished() => {}
+                Err(_) => break None,
+            }
+        };
+        if let Some(code) = code
+            && !worker.is_finished()
+        {
+            let mut shown = panel.clone();
+            shown.lines.push(format!(
+                "The code works for {}.",
+                vahta_ipc::duration::human(code.expires_at.saturating_sub(now()))
+            ));
+            let stopped = window.show_pairing(&shown, &code.qr, &code.text, PAIR_WAIT);
+            if !matches!(stopped, Ok(true)) {
+                // The person closed the window (or it failed): stop waiting.
+                cancel.cancel();
+            }
+        }
+        worker.join()
+    });
+    match result {
+        Ok(Ok(new)) => Ok(new),
+        Ok(Err(AuthError::Cancelled)) => Err(cancelled()),
+        Ok(Err(other)) => Err(error(other.to_string())),
+        Err(_) => Err(error("the phone link failed; nothing was done")),
+    }
 }
 
 /// Record a phone that has just paired, with the vault already open: the entry
@@ -343,6 +405,9 @@ pub(crate) fn revoke(ctx: &Ctx<'_>, cwd: &str, id: &str) -> Flow<ClientReply> {
     }
     vault.remove_device(&device.device_id).map_err(from_vault)?;
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+    ctx.shared
+        .links
+        .forget(&vault.vault_id(), &device.device_id);
     ctx.journal(
         Entry::new("device_revoked")
             .vault(&vault.vault_id())
@@ -418,6 +483,7 @@ pub(crate) fn lost(ctx: &Ctx<'_>, cwd: &str, id: &str) -> Flow<ClientReply> {
     }
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     let vault_id = vault.vault_id();
+    ctx.shared.links.forget(&vault_id, &device.device_id);
 
     // Sessions opened before hold keys of the old vault: end them.
     let ended = ctx

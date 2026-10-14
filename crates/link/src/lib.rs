@@ -19,10 +19,10 @@ pub mod ble_frame;
 
 pub use channel::{Channel, Handshake, Keypair, Partial, PipeChannel};
 pub use error::{LinkError, Result};
-pub use frame::{MAX_FRAME, Pipe, read_frame, write_frame};
+pub use frame::{MAX_FRAME, PeerHint, Pipe, read_frame, write_frame};
 pub use messages::{Message, PairAccept, PairOffer};
 pub use qr::render_qr;
-pub use transport::{DeviceAddr, Transport, reach_first};
+pub use transport::{DeviceAddr, Transport, probe_any, reach_first};
 
 /// Unix seconds now.
 pub fn unix_now() -> u64 {
