@@ -27,6 +27,9 @@ use std::io;
 use std::process::Command;
 
 pub mod ipc;
+mod stdin;
+
+pub use stdin::read_stdin;
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]

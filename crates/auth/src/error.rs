@@ -10,6 +10,9 @@ pub enum AuthError {
     /// This way is not available now (no window, no device in reach). The
     /// caller may try another.
     Unavailable(String),
+    /// The person chose another way (the password) while the device was
+    /// asked. Not a refusal by the device.
+    Skipped,
     /// The device or the person said no.
     Denied,
     /// Not allowed, and not by anyone's choice: an expired device, a device the
@@ -28,6 +31,7 @@ impl fmt::Display for AuthError {
             AuthError::Cancelled => f.write_str("cancelled"),
             AuthError::Timeout => f.write_str("no answer in time"),
             AuthError::Unavailable(why) => f.write_str(why),
+            AuthError::Skipped => f.write_str("the person chose the password instead"),
             AuthError::Denied => f.write_str("refused on the device"),
             AuthError::Refused(why) => f.write_str(why),
             AuthError::BadDecision(why) => write!(f, "the device's answer does not verify ({why})"),
