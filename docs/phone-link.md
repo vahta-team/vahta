@@ -218,6 +218,22 @@ from the device the vault lists, for an option the request offers.
 | Reply | `reply_decision`, `reply_unlock_ok(ecdh_result, signature)`, `reply_unlock_denied`, `reply_unlock_error` |
 | BLE chunks | `ble_chunks`, `BleReassembler` |
 
+### Phone key protection
+
+The phone holds two Keystore keys: one signs decisions, one does the ECDH for
+unlock. The signing key needs a fingerprint for every signature: the app signs
+through a `BiometricPrompt` `CryptoObject`, so the signature cannot be made
+without the person touching the sensor for that very operation. The ECDH key
+cannot be held to that. On Android 13 a `KeyAgreement` cannot be bound to one
+prompt, so the ECDH key is usable for 1 second after a fingerprint, and the app
+runs the ECDH right after the signature, inside that second. Only the Vahta
+app's own process can use these Keystore keys; other apps and the desktop
+cannot, and the private keys never leave the secure hardware. What the 1 second
+means: code running inside the Vahta app, in that window, could make one ECDH
+without a second fingerprint. Binding every ECDH to its own prompt needs a newer
+Android API or an RSA-OAEP key (which does support per-operation binding).
+RSA-OAEP was considered and deferred.
+
 ## Threat model
 
 - **The transport is untrusted.** An eavesdropper or a man in the middle on

@@ -12,10 +12,10 @@
 //! typed value or a revealed value, and it holds each for as long as a prompt
 //! takes.
 
-use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use vahta_ipc::protocol::{
@@ -73,6 +73,9 @@ struct Console {
     plain: bool,
 }
 
+/// What was read from standard input and not yet taken as a line.
+static TYPED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
 impl Console {
     fn new() -> Console {
         Console {
@@ -106,24 +109,60 @@ impl Console {
     }
 
     fn line() -> Option<String> {
-        let mut text = String::new();
-        match std::io::stdin().lock().read_line(&mut text) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(text.trim_end_matches(['\n', '\r']).to_string()),
+        Console::line_within(None).ok().flatten()
+    }
+
+    /// A line typed in the open, waiting at most `limit` (for ever with
+    /// `None`). `Err` is the time running out; a part-typed line stays for the
+    /// next call. Standard input is read here and nowhere else, and only while
+    /// a prompt waits on it, so no reader is left blocked when a wait ends.
+    fn line_within(limit: Option<Duration>) -> Result<Option<String>, ()> {
+        let until = limit.map(|l| Instant::now() + l);
+        let mut typed = TYPED.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(end) = typed.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = typed.drain(..=end).collect();
+                let text = String::from_utf8_lossy(&line);
+                return Ok(Some(text.trim_end_matches(['\n', '\r']).to_string()));
+            }
+            let wait = match until {
+                Some(t) => {
+                    let left = t.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(());
+                    }
+                    left
+                }
+                None => Duration::from_secs(3600),
+            };
+            let mut chunk = [0u8; 1024];
+            match vahta_os::read_stdin(&mut chunk, wait) {
+                Ok(Some(0)) | Err(_) => {
+                    // The end of input: a part-typed last line still counts.
+                    if typed.is_empty() {
+                        return Ok(None);
+                    }
+                    let text = String::from_utf8_lossy(&typed).into_owned();
+                    typed.clear();
+                    return Ok(Some(text.trim_end_matches('\r').to_string()));
+                }
+                Ok(Some(n)) => typed.extend_from_slice(&chunk[..n]),
+                Ok(None) => {}
+            }
         }
     }
 
-    /// A line typed in the open, waiting at most `limit`. `Err` is the time
-    /// running out.
-    fn line_within(limit: Option<Duration>) -> Result<Option<String>, ()> {
-        let Some(limit) = limit else {
-            return Ok(Console::line());
-        };
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(Console::line());
-        });
-        rx.recv_timeout(limit).map_err(|_| ())
+    /// Throws away what was typed while a wait ran, so the next prompt does
+    /// not take a stray Enter for its answer.
+    fn discard_typed() {
+        let mut typed = TYPED.lock().unwrap_or_else(|e| e.into_inner());
+        typed.clear();
+        let mut chunk = [0u8; 1024];
+        while let Ok(Some(n)) = vahta_os::read_stdin(&mut chunk, Duration::ZERO) {
+            if n == 0 {
+                break;
+            }
+        }
     }
 
     fn panel(&self, panel: &Panel) {
@@ -391,8 +430,8 @@ pub fn run(args: &[String]) -> i32 {
 
 /// Shows the pairing code and waits for the phone: the daemon's `PairStop`
 /// ends it with `Done`; Enter, end of input or the time running out with
-/// `Cancel`. (A thread of its own reads the line, so the wait can also watch
-/// the daemon; it ends with the window's next prompt or exit.)
+/// `Cancel`. (The line is read in short turns, so the wait can also watch the
+/// daemon and no reader is left blocked when it ends.)
 fn pair_wait(
     console: &Console,
     panel: &Panel,
@@ -415,36 +454,33 @@ fn pair_wait(
         "Waiting for the phone ({} min). Press Enter to cancel.",
         seconds.div_ceil(60)
     ));
-    let (tx, line) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(Console::line());
-    });
     let until = Instant::now() + Duration::from_secs(u64::from(seconds));
     loop {
         match queue.try_recv() {
             Ok(SurfaceRequest::PairStop {}) => {
+                Console::discard_typed();
                 console.say("Phone connected.");
                 return SurfaceAnswer::Done {};
             }
             Ok(_) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        match line.try_recv() {
-            Ok(_) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
-            Err(mpsc::TryRecvError::Empty) => {}
+        // Also the pause between looks at the daemon.
+        if Console::line_within(Some(Duration::from_millis(50))).is_ok() {
+            return SurfaceAnswer::Cancel {};
         }
         if Instant::now() >= until {
             return SurfaceAnswer::Cancel {};
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 /// Tells the person the phone is being asked and waits: the daemon's
 /// `DeviceWaitStop` (the phone answered) or the time running out ends it with
 /// `Done`; Enter answers `Choice { index: 0 }` (use the password instead); end
-/// of input is `Cancel`. The line is read on a thread of its own so the wait
-/// can also watch the daemon.
+/// of input is `Cancel`. The line is read in short turns so the wait can also
+/// watch the daemon and leaves no reader blocked when it ends; what was typed
+/// during a wait the daemon ended is dropped.
 fn device_wait(
     console: &Console,
     panel: &Panel,
@@ -459,26 +495,26 @@ fn device_wait(
     ));
     console.say("");
     console.say("Press Enter to use the password instead.");
-    let (tx, line) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(Console::line());
-    });
     let until = Instant::now() + Duration::from_secs(u64::from(seconds));
     loop {
         match queue.try_recv() {
-            Ok(SurfaceRequest::DeviceWaitStop {}) => return SurfaceAnswer::Done {},
+            Ok(SurfaceRequest::DeviceWaitStop {}) => {
+                Console::discard_typed();
+                return SurfaceAnswer::Done {};
+            }
             Ok(_) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        match line.try_recv() {
+        // Also the pause between looks at the daemon.
+        match Console::line_within(Some(Duration::from_millis(50))) {
             Ok(Some(_)) => return SurfaceAnswer::Choice { index: 0 },
-            Ok(None) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
-            Err(mpsc::TryRecvError::Empty) => {}
+            Ok(None) => return SurfaceAnswer::Cancel {},
+            Err(()) => {}
         }
         if Instant::now() >= until {
+            Console::discard_typed();
             return SurfaceAnswer::Done {};
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

@@ -6051,6 +6051,18 @@ fn choosing_the_password_in_the_wait_window_cancels_the_phone_and_opens_with_the
     // question is on the wire) and never answered; had it been waited on to
     // the end of the request, the run would have taken half a minute.
     assert!(t.phone.asked().len() <= 1);
+    // The journal says the person chose, not that the phone refused.
+    let journal = t.s.journal();
+    assert!(
+        journal.contains("the person chose the password instead"),
+        "{journal}"
+    );
+    assert!(!journal.contains("you chose the password"), "{journal}");
+    let line = journal
+        .lines()
+        .find(|l| l.contains("the person chose the password instead"))
+        .unwrap();
+    assert!(line.contains("\"skipped\""), "{line}");
 }
 
 #[cfg(unix)]

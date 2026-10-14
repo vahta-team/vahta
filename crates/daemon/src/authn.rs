@@ -241,7 +241,7 @@ struct WindowCtx<'a> {
     devices: Vec<LinkedDevice>,
     surface: Option<SurfaceError>,
     typed: Option<Zeroizing<Vec<u8>>>,
-    failures: Vec<(Option<[u8; 16]>, String)>,
+    failures: Vec<(Option<[u8; 16]>, &'static str, String)>,
     /// Owner key changes the person was asked about, and what they said.
     owner_changes: Vec<bool>,
 }
@@ -336,9 +336,7 @@ impl UnlockCtx for WindowCtx<'_> {
             Ok(DeviceWait::Password) => match result {
                 Ok(reply) => Ok(reply),
                 Err(AuthError::Denied) => Err(AuthError::Denied),
-                Err(_) => Err(AuthError::Unavailable(
-                    "you chose the password instead".into(),
-                )),
+                Err(_) => Err(AuthError::Skipped),
             },
             Ok(DeviceWait::Closed) => Err(AuthError::Cancelled),
             // The window could not show it; the phone was asked all the same.
@@ -351,7 +349,13 @@ impl UnlockCtx for WindowCtx<'_> {
     }
 
     fn attempt_failed(&mut self, slot: &SlotInfo, why: &AuthError) {
-        self.failures.push((Some(slot.slot_id), why.to_string()));
+        let result = if matches!(why, AuthError::Skipped) {
+            "skipped"
+        } else {
+            "refused"
+        };
+        self.failures
+            .push((Some(slot.slot_id), result, why.to_string()));
     }
 
     fn confirm_owner_change(&mut self, change: &OwnerKeyChange) -> bool {
@@ -490,10 +494,10 @@ pub(crate) fn unlock_keeping_password(
         .shared
         .unlockers
         .unlock_by(path, ctx.store(), need, &pref, &mut wctx);
-    for (slot, why) in &wctx.failures {
+    for (slot, result, why) in &wctx.failures {
         let mut entry = Entry::new("device_unlock")
             .vault(&peek.vault_id)
-            .result("refused", Some(why));
+            .result(result, Some(why));
         if let Some(id) = slot {
             entry = entry.device(id);
         }

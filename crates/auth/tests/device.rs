@@ -78,7 +78,7 @@ impl UnlockCtx for Ctx {
         self.waited += 1;
         if self.choose_password {
             cancel.cancel();
-            return Err(AuthError::Unavailable("you chose the password".into()));
+            return Err(AuthError::Skipped);
         }
         ask(cancel)
     }
@@ -255,6 +255,7 @@ fn choosing_the_password_while_the_phone_is_asked_goes_to_the_password() {
         .unwrap();
     assert_eq!(by.factor, Factor::Knowledge);
     assert_eq!((c.waited, c.asked_pw), (1, 1));
+    assert_eq!(c.failed, ["the person chose the password instead"]);
 }
 
 #[test]

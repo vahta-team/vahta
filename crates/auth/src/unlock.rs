@@ -457,6 +457,7 @@ impl Registry {
                 Err(
                     e @ (AuthError::Unavailable(_)
                     | AuthError::Timeout
+                    | AuthError::Skipped
                     | AuthError::Refused(_)
                     | AuthError::BadDecision(_)),
                 ) => {
