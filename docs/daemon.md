@@ -642,7 +642,7 @@ command, never part of an ordinary unlock), and one or more phones. The
   not count as enrolling: a slot keeps its creation time.
 * `unlock = "password"`: the password window first. A phone is not asked.
 * `unlock = "device:NAME"`: that phone first (a name in any case, or the start of
-  its id, four hex characters or more); if it is away, refuses or times out, the
+  its id, four hex characters or more); if it is away or times out, the
   next methods follow, the password window last. A name that matches no phone
   with a slot in this vault (the phone was removed) is treated as `last`.
 
@@ -655,6 +655,17 @@ have, or a phone with no way to open it); `--global` sets the general line, and
 setting, where it comes from, the current method and the whole order.
 `vahta devices` marks the current phone (`UNLOCK` column) and ends with the same
 line.
+
+**While the phone is asked, the window says so.** The window opens at once and
+shows `Confirm on your phone "NAME"... Waiting.` with **Enter to use the
+password instead**. Pressing Enter stops asking the phone and goes to the
+password prompt; when the phone answers first the window moves on by itself. A
+phone that is out of reach, silent, or answers wrongly still falls back to the
+password. A **no on the phone is an answer**: the command ends with `refused on
+the phone; nothing was done` (exit 4, like cancelling) and the password window
+is not opened to override it. The same holds for an approval (`run --ask`): a
+no on the phone refuses it at once, and the window that was asked with it is
+closed. The master password still works through an explicit unlock.
 
 **Changing it needs no password.** It only orders methods that are already there,
 and the master password opens the vault whatever it says, so no setting can lock

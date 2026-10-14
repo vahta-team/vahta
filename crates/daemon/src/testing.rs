@@ -177,7 +177,13 @@ pub mod scripted {
     //! * `{"ack": true}` acknowledges something shown;
     //! * `{"wait": true}` leaves a pairing code on screen until the phone
     //!   connects (the log entry of kind `pairing` carries the code, `qr` and
-    //!   `code`, for a test's phone to read).
+    //!   `code`, for a test's phone to read);
+    //! * `{"devicewait": "wait"}` answers a device wait (`{"ask":"device_wait",
+    //!   "device":"A32"}` in the log): it stays until the phone answers;
+    //!   `{"devicewait": "password"}` chooses the password instead and
+    //!   `{"devicewait": "close"}` closes the window. A device wait with no
+    //!   such line next in the script is not logged and shows nothing: the
+    //!   phone is asked as if the window could not show it.
     //!
     //! Every question is appended to the log (`VAHTA_TEST_SURFACE_LOG`) with
     //! what the window would have shown: its lines, warning and agent note, and
@@ -194,7 +200,7 @@ pub mod scripted {
     use serde_json::{Value, json};
 
     use crate::protocol::{Panel, Secret};
-    use crate::surface::{PromptSurface, SurfaceError, Window};
+    use crate::surface::{DeviceWait, PromptSurface, SurfaceError, Window};
 
     struct Inner {
         script: PathBuf,
@@ -230,6 +236,21 @@ pub mod scripted {
             {
                 let _ = writeln!(f, "{entry}");
             }
+        }
+
+        /// Whether the next answer is for a device wait.
+        fn next_is_device_wait(&self) -> bool {
+            let Ok(_guard) = self.io.lock() else {
+                return false;
+            };
+            std::fs::read_to_string(&self.script)
+                .ok()
+                .and_then(|t| {
+                    t.lines()
+                        .find(|l| !l.trim().is_empty())
+                        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+                })
+                .is_some_and(|v| v.get("devicewait").is_some())
         }
 
         /// The next answer, removed from the script.
@@ -271,6 +292,7 @@ pub mod scripted {
             Ok(Box::new(ScriptedWindow {
                 inner: self.inner.clone(),
                 pair_stopped: Arc::default(),
+                wait_stopped: Arc::default(),
             }))
         }
     }
@@ -279,6 +301,8 @@ pub mod scripted {
         inner: Arc<Inner>,
         /// Set when the daemon says the phone has connected.
         pair_stopped: Arc<(Mutex<bool>, Condvar)>,
+        /// Set when the daemon says the phone has answered an unlock.
+        wait_stopped: Arc<(Mutex<bool>, Condvar)>,
     }
 
     impl ScriptedWindow {
@@ -435,6 +459,51 @@ pub mod scripted {
 
         fn pairing_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
             let state = self.pair_stopped.clone();
+            Some(Box::new(move || {
+                let (lock, cv) = &*state;
+                if let Ok(mut s) = lock.lock() {
+                    *s = true;
+                    cv.notify_all();
+                }
+            }))
+        }
+
+        fn show_device_wait(
+            &mut self,
+            panel: &Panel,
+            device: &str,
+            wait: Duration,
+        ) -> Result<DeviceWait, SurfaceError> {
+            if !self.inner.next_is_device_wait() {
+                return Err(unavailable("no device wait in the script"));
+            }
+            self.inner.log(json!({
+                "ask": "device_wait", "device": device, "panel": panel_json(panel)
+            }));
+            let answer = self.inner.pop()?;
+            match answer.get("devicewait").and_then(Value::as_str) {
+                Some("password") => return Ok(DeviceWait::Password),
+                Some("close") => return Ok(DeviceWait::Closed),
+                Some("wait") => {}
+                _ => {
+                    return Err(unavailable(
+                        "the script answered a device wait with the wrong kind",
+                    ));
+                }
+            }
+            let (lock, cv) = &*self.wait_stopped;
+            let guard = lock.lock().map_err(|_| unavailable("poisoned"))?;
+            let _ = cv
+                .wait_timeout_while(guard, wait, |s| !*s)
+                .map_err(|_| unavailable("poisoned"))?;
+            Ok(DeviceWait::Over)
+        }
+
+        fn device_wait_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
+            let state = self.wait_stopped.clone();
+            if let Ok(mut s) = state.0.lock() {
+                *s = false;
+            }
             Some(Box::new(move || {
                 let (lock, cv) = &*state;
                 if let Ok(mut s) = lock.lock() {

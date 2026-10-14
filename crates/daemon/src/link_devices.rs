@@ -529,14 +529,26 @@ impl DeviceChannel for LinkChannel {
     }
 
     fn unlock(&self, req: &Request, eph_pub: &[u8]) -> Result<UnlockReply, AuthError> {
+        self.unlock_cancellable(req, eph_pub, &Cancel::new())
+    }
+
+    fn unlock_cancellable(
+        &self,
+        req: &Request,
+        eph_pub: &[u8],
+        cancel: &Cancel,
+    ) -> Result<UnlockReply, AuthError> {
         let mut chan = self.session(self.connect_by(req))?;
+        if cancel.is_cancelled() {
+            return Err(AuthError::Cancelled);
+        }
         chan.send(&Message::UnlockRequest(UnlockRequest {
             slot_id: self.device_id.to_vec(),
             eph_pub: eph_pub.to_vec(),
             request: req.to_bytes(),
         }))
         .map_err(|e| self.not_in_reach(e))?;
-        match self.wait_for(&mut chan, req, &Cancel::new())? {
+        match self.wait_for(&mut chan, req, cancel)? {
             Message::UnlockResponse(UnlockResponse::Approved { shared, signature }) => {
                 let mut key = Zeroizing::new([0u8; 32]);
                 if shared.len() != key.len() {

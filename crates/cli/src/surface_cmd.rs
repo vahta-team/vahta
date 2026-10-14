@@ -278,8 +278,12 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
             console.clear();
             Some(SurfaceAnswer::Done {})
         }
-        // Handled by the loop (`pair_wait`, and a stop with no code pending).
-        SurfaceRequest::Pair { .. } | SurfaceRequest::PairStop {} => None,
+        // Handled by the loop (`pair_wait`, `device_wait`, and a stop with
+        // nothing pending).
+        SurfaceRequest::Pair { .. }
+        | SurfaceRequest::PairStop {}
+        | SurfaceRequest::DeviceWait { .. }
+        | SurfaceRequest::DeviceWaitStop {} => None,
         SurfaceRequest::Close { message } => {
             if let Some(m) = message {
                 console.say(&safe(m));
@@ -329,7 +333,10 @@ pub fn run(args: &[String]) -> i32 {
     };
     while let Ok(request) = requests.queue.recv() {
         // A stop with no code waiting (the code was already answered).
-        if matches!(request, SurfaceRequest::PairStop {}) {
+        if matches!(
+            request,
+            SurfaceRequest::PairStop {} | SurfaceRequest::DeviceWaitStop {}
+        ) {
             continue;
         }
         // Close only prints; the daemon may hang up while it does. Anything
@@ -353,6 +360,17 @@ pub fn run(args: &[String]) -> i32 {
                 panel,
                 qr,
                 text,
+                *seconds,
+                &requests.queue,
+            )),
+            SurfaceRequest::DeviceWait {
+                panel,
+                device,
+                seconds,
+            } => Some(device_wait(
+                &console,
+                panel,
+                device,
                 *seconds,
                 &requests.queue,
             )),
@@ -417,6 +435,48 @@ fn pair_wait(
         }
         if Instant::now() >= until {
             return SurfaceAnswer::Cancel {};
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Tells the person the phone is being asked and waits: the daemon's
+/// `DeviceWaitStop` (the phone answered) or the time running out ends it with
+/// `Done`; Enter answers `Choice { index: 0 }` (use the password instead); end
+/// of input is `Cancel`. The line is read on a thread of its own so the wait
+/// can also watch the daemon.
+fn device_wait(
+    console: &Console,
+    panel: &Panel,
+    device: &str,
+    seconds: u32,
+    queue: &mpsc::Receiver<SurfaceRequest>,
+) -> SurfaceAnswer {
+    console.panel(panel);
+    console.say(&format!(
+        "Confirm on your phone \"{}\"... Waiting.",
+        safe(device)
+    ));
+    console.say("");
+    console.say("Press Enter to use the password instead.");
+    let (tx, line) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Console::line());
+    });
+    let until = Instant::now() + Duration::from_secs(u64::from(seconds));
+    loop {
+        match queue.try_recv() {
+            Ok(SurfaceRequest::DeviceWaitStop {}) => return SurfaceAnswer::Done {},
+            Ok(_) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        match line.try_recv() {
+            Ok(Some(_)) => return SurfaceAnswer::Choice { index: 0 },
+            Ok(None) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= until {
+            return SurfaceAnswer::Done {};
         }
         std::thread::sleep(Duration::from_millis(50));
     }
