@@ -202,8 +202,12 @@ impl Request {
         postcard::to_allocvec(self).unwrap_or_default()
     }
 
+    /// Strict: the bytes must be exactly the canonical encoding of one
+    /// request (no trailing bytes, no other spelling of the same value), so
+    /// the hash a phone signs is the hash of the bytes it was shown.
     pub fn from_bytes(bytes: &[u8]) -> Option<Request> {
-        postcard::from_bytes(bytes).ok()
+        let req: Request = postcard::from_bytes(bytes).ok()?;
+        (req.to_bytes() == bytes).then_some(req)
     }
 
     /// `SHA-256("vahta/v1/request" ‖ canonical bytes)`.
@@ -212,6 +216,14 @@ impl Request {
         h.update(DOMAIN_REQUEST);
         h.update(self.to_bytes());
         h.finalize().into()
+    }
+
+    /// The exact bytes a device signs to answer this request with `choice`:
+    /// `"vahta/v1/decision" ‖ request hash ‖ choice ‖ device id`. The one
+    /// place the domain separation lives; [`Decision::sign`],
+    /// [`Decision::verify`] and the phone's helpers all come here.
+    pub fn decision_message(&self, choice: u8, device_id: &[u8; 16]) -> Vec<u8> {
+        Decision::message(&self.hash(), choice, device_id)
     }
 
     pub fn expired(&self) -> bool {
@@ -232,7 +244,8 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// `"vahta/v1/decision" ‖ request hash ‖ choice ‖ device id`.
+    /// `"vahta/v1/decision" ‖ request hash ‖ choice ‖ device id`. Callers
+    /// that hold the [`Request`] use [`Request::decision_message`].
     pub fn message(request_hash: &[u8; 32], choice: u8, device_id: &[u8; 16]) -> Vec<u8> {
         let mut m = DOMAIN_DECISION.to_vec();
         m.extend_from_slice(request_hash);
@@ -243,10 +256,9 @@ impl Decision {
 
     /// What a device does: sign `choice` for `req`.
     pub fn sign(req: &Request, choice: u8, device_id: [u8; 16], key: &SigningKey) -> Decision {
-        let request_hash = req.hash();
-        let sig: Signature = key.sign(&Decision::message(&request_hash, choice, &device_id));
+        let sig: Signature = key.sign(&req.decision_message(choice, &device_id));
         Decision {
-            request_hash,
+            request_hash: req.hash(),
             choice,
             device_id,
             signature: sig.to_bytes().to_vec(),
@@ -280,11 +292,10 @@ impl Decision {
             .map_err(|_| AuthError::BadDecision("bad device key"))?;
         let sig = Signature::from_slice(&self.signature)
             .map_err(|_| AuthError::BadDecision("bad signature"))?;
-        key.verify(
-            &Decision::message(&self.request_hash, self.choice, &self.device_id),
-            &sig,
-        )
-        .map_err(|_| AuthError::BadDecision("signature"))
+        // The hash was checked against the request above, so this is
+        // `req.decision_message(choice, device_id)`.
+        key.verify(&req.decision_message(self.choice, &self.device_id), &sig)
+            .map_err(|_| AuthError::BadDecision("signature"))
     }
 }
 

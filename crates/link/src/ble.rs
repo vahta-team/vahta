@@ -5,6 +5,14 @@
 //! [`crate::ble_frame`] carries the unit tests.
 //!
 //! Bluetooth link-layer encryption is not relied on: everything above is Noise.
+//!
+//! **Finding the phone.** The phone advertises the service UUID and, in the
+//! scan response, service data under the same UUID:
+//! `[1, kind, tag (8 bytes)]` (see [`crate::messages::ble_service_data`]).
+//! The tag is what identifies a device; the address does not, because phones
+//! advertise with random addresses that rotate. The desktop scans for the
+//! service, picks the devices whose tag matches, and connects to the address
+//! BlueZ reports for them.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -18,15 +26,11 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::ble_frame::{DEFAULT_CHUNK, Reassembler, chunk_frame};
 use crate::error::{LinkError, Result};
-use crate::frame::Pipe;
+use crate::frame::{PeerHint, Pipe};
+use crate::messages::{TAG_LEN, parse_ble_service_data};
 use crate::transport::{DeviceAddr, Transport};
 
-/// The Vahta GATT service the phone advertises.
-pub const SERVICE_UUID: &str = "11ca9b36-035f-4d80-8e4a-7819627ac4c0";
-/// Central writes frames here (write with response).
-pub const WRITE_CHAR_UUID: &str = "0e1a6dcf-3ae7-4ba5-a24c-fc4c243d0629";
-/// Phone sends frames here (notify).
-pub const NOTIFY_CHAR_UUID: &str = "5625b7a7-3f03-49f9-8d96-a25a49559adf";
+pub use crate::ble_frame::{NOTIFY_CHAR_UUID, SERVICE_UUID, WRITE_CHAR_UUID};
 
 const BLUEZ: &str = "org.bluez";
 const ADAPTER: &str = "org.bluez.Adapter1";
@@ -66,6 +70,16 @@ fn has_service(p: &Props) -> bool {
         .is_some_and(|u| u.iter().any(|u| u.eq_ignore_ascii_case(SERVICE_UUID)))
 }
 
+/// The tag in the device's service data: `(is pairing, tag)`.
+fn service_tag(p: &Props) -> Option<(bool, [u8; TAG_LEN])> {
+    let v = p.get("ServiceData")?.try_clone().ok()?;
+    let map = HashMap::<String, OwnedValue>::try_from(v).ok()?;
+    let (_, data) = map
+        .into_iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(SERVICE_UUID))?;
+    parse_ble_service_data(&Vec::<u8>::try_from(data).ok()?)
+}
+
 fn adapter_path(m: &Managed, name: &str) -> Result<String> {
     let want = format!("/org/bluez/{name}");
     m.iter()
@@ -80,6 +94,8 @@ pub struct BleDevice {
     pub address: String,
     pub name: Option<String>,
     pub rssi: Option<i16>,
+    /// `(is pairing, tag)` from the advertisement, when it carries one.
+    pub tag: Option<(bool, [u8; TAG_LEN])>,
 }
 
 fn collect(m: &Managed, adapter: &str) -> Vec<BleDevice> {
@@ -97,6 +113,7 @@ fn collect(m: &Managed, adapter: &str) -> Vec<BleDevice> {
                     .get("RSSI")
                     .and_then(|v| v.try_clone().ok())
                     .and_then(|v| i16::try_from(v).ok()),
+                tag: service_tag(d),
             })
         })
         .collect();
@@ -165,21 +182,115 @@ impl Transport for BleTransport {
     }
 
     fn reach(&self, device: &DeviceAddr, deadline: Instant) -> Result<Box<dyn Pipe>> {
-        let address = device
-            .ble_address
-            .clone()
-            .ok_or_else(|| LinkError::Unsupported("no Bluetooth address remembered".into()))?;
         let adapter = self.adapter.clone();
+        let (tag, hint) = (device.tag, device.ble_address.clone());
         // BlueZ's Connect has its own long timeout; run it on a helper thread
         // so the deadline holds. A late result is dropped, which disconnects.
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(BlePipe::connect(&adapter, &address, deadline));
+            let _ = tx.send(find_and_connect(&adapter, &tag, hint.as_deref(), deadline));
         });
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(r) => r.map(|p| Box::new(p) as Box<dyn Pipe>),
             Err(_) => Err(LinkError::Timeout),
         }
+    }
+
+    fn probe(&self, device: &DeviceAddr, deadline: Instant) -> Result<()> {
+        self.probe_inner(device, deadline)
+    }
+}
+
+/// Scans until a device advertising `tag` is seen (no connection), or the
+/// deadline.
+fn seen(adapter_name: &str, tag: &[u8; TAG_LEN], deadline: Instant) -> Result<()> {
+    let conn = Connection::system().map_err(dbus)?;
+    let adapter = adapter_path(&managed(&conn)?, adapter_name)?;
+    start_discovery(&conn, &adapter)?;
+    let result = loop {
+        // Only devices heard from lately: BlueZ keeps stale ones for minutes.
+        let heard = collect(&managed(&conn)?, &adapter)
+            .into_iter()
+            .filter(|d| d.rssi.is_some())
+            .collect::<Vec<_>>();
+        if !candidates(&heard, tag, None).is_empty() {
+            break Ok(());
+        }
+        if Instant::now() >= deadline {
+            break Err(LinkError::Unreachable("the phone is not in range".into()));
+        }
+        thread::sleep(Duration::from_millis(300));
+    };
+    stop_discovery(&conn, &adapter);
+    result
+}
+
+/// The addresses of the Vahta devices BlueZ knows whose advertisement carries
+/// `tag`, the ones heard most recently (they have an RSSI) first. `hint` is
+/// kept as a last resort for a device whose advertisement has no tag.
+fn candidates(devices: &[BleDevice], tag: &[u8; TAG_LEN], hint: Option<&str>) -> Vec<String> {
+    let mut hits: Vec<&BleDevice> = devices
+        .iter()
+        .filter(|d| d.tag.is_some_and(|(_, t)| &t == tag))
+        .collect();
+    hits.sort_by_key(|d| std::cmp::Reverse(d.rssi));
+    let mut out: Vec<String> = hits.iter().map(|d| d.address.clone()).collect();
+    if let Some(h) = hint
+        && !out.iter().any(|a| a.eq_ignore_ascii_case(h))
+        && devices
+            .iter()
+            .any(|d| d.tag.is_none() && d.address.eq_ignore_ascii_case(h))
+    {
+        out.push(h.to_string());
+    }
+    out
+}
+
+fn find_and_connect(
+    adapter_name: &str,
+    tag: &[u8; TAG_LEN],
+    hint: Option<&str>,
+    deadline: Instant,
+) -> Result<BlePipe> {
+    let conn = Connection::system().map_err(dbus)?;
+    let adapter = adapter_path(&managed(&conn)?, adapter_name)?;
+    let mut scanning = false;
+    let mut tried: Vec<String> = Vec::new();
+    let mut last = LinkError::Unreachable("the phone is not in range".into());
+    let result = loop {
+        let found = candidates(&collect(&managed(&conn)?, &adapter), tag, hint);
+        if let Some(addr) = found.into_iter().find(|a| !tried.contains(a)) {
+            tried.push(addr.clone());
+            match BlePipe::connect(adapter_name, &addr, deadline) {
+                Ok(p) => break Ok(p),
+                Err(e) => last = e,
+            }
+            continue;
+        }
+        if Instant::now() >= deadline {
+            break Err(last);
+        }
+        if !scanning {
+            start_discovery(&conn, &adapter)?;
+            scanning = true;
+        }
+        thread::sleep(Duration::from_millis(300));
+    };
+    if scanning {
+        stop_discovery(&conn, &adapter);
+    }
+    result
+}
+
+impl BleTransport {
+    fn probe_inner(&self, device: &DeviceAddr, deadline: Instant) -> Result<()> {
+        let (adapter, tag) = (self.adapter.clone(), device.tag);
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(seen(&adapter, &tag, deadline));
+        });
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Err(LinkError::Timeout))
     }
 }
 
@@ -189,6 +300,7 @@ enum Event {
 }
 
 pub struct BlePipe {
+    address: String,
     conn: Connection,
     device_path: String,
     write_path: String,
@@ -238,6 +350,7 @@ impl BlePipe {
             .map_err(|e| LinkError::Unreachable(e.to_string()))?;
         // From here a failure must disconnect; the pipe's Drop does it.
         let mut pipe = Self {
+            address: address.to_string(),
             conn: conn.clone(),
             device_path: dpath.clone(),
             write_path: String::new(),
@@ -395,6 +508,10 @@ impl Pipe for BlePipe {
         self.timeout = t;
         Ok(())
     }
+
+    fn peer_hint(&self) -> Option<PeerHint> {
+        Some(PeerHint::Ble(self.address.clone()))
+    }
 }
 
 impl Drop for BlePipe {
@@ -442,18 +559,40 @@ mod tests {
         assert!(!has_service(&p));
     }
 
+    #[test]
+    fn candidates_match_by_tag_and_prefer_the_recently_heard() {
+        let dev = |addr: &str, rssi: Option<i16>, tag: Option<[u8; 8]>| BleDevice {
+            address: addr.into(),
+            name: None,
+            rssi,
+            tag: tag.map(|t| (false, t)),
+        };
+        let devices = [
+            dev("AA:00:00:00:00:01", None, Some([1; 8])),
+            dev("AA:00:00:00:00:02", Some(-60), Some([1; 8])),
+            dev("AA:00:00:00:00:03", Some(-40), Some([2; 8])),
+            dev("AA:00:00:00:00:04", Some(-50), None),
+        ];
+        assert_eq!(
+            candidates(&devices, &[1; 8], None),
+            ["AA:00:00:00:00:02", "AA:00:00:00:00:01"]
+        );
+        assert!(candidates(&devices, &[9; 8], None).is_empty());
+        // An address hint is used only for a device with no tag at all.
+        assert_eq!(
+            candidates(&devices, &[9; 8], Some("aa:00:00:00:00:04")),
+            ["aa:00:00:00:00:04"]
+        );
+        assert!(candidates(&devices, &[9; 8], Some("AA:00:00:00:00:03")).is_empty());
+    }
+
     /// Needs a phone (or a stand-in GATT server) running the Vahta service and
     /// its address in VAHTA_TEST_BLE_ADDRESS.
     #[test]
     #[ignore = "needs a phone advertising the Vahta service"]
     fn connects_and_pings() {
         let address = std::env::var("VAHTA_TEST_BLE_ADDRESS").expect("set VAHTA_TEST_BLE_ADDRESS");
-        let dev = DeviceAddr {
-            name: "phone".into(),
-            static_pub: [0; 32],
-            ble_address: Some(address),
-            lan_hint: None,
-        };
+        let dev = DeviceAddr::paired("phone", [0; 32], Some(address), None);
         let mut p = BleTransport::default()
             .reach(&dev, Instant::now() + Duration::from_secs(30))
             .unwrap();

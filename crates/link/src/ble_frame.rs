@@ -9,6 +9,13 @@
 use crate::error::{LinkError, Result};
 use crate::frame::MAX_FRAME;
 
+/// The Vahta GATT service the phone advertises (random v4, fixed forever).
+pub const SERVICE_UUID: &str = "11ca9b36-035f-4d80-8e4a-7819627ac4c0";
+/// The desktop (GATT central) writes frames here (write with response).
+pub const WRITE_CHAR_UUID: &str = "0e1a6dcf-3ae7-4ba5-a24c-fc4c243d0629";
+/// The phone sends frames here (notify).
+pub const NOTIFY_CHAR_UUID: &str = "5625b7a7-3f03-49f9-8d96-a25a49559adf";
+
 /// The ATT payload when the MTU is unknown (the minimum, 23, minus 3).
 pub const DEFAULT_CHUNK: usize = 20;
 

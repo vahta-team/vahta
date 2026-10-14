@@ -101,6 +101,7 @@ fn build() -> Value {
     let dec = Message::Decision(Decision {
         request_hash: ar.request_hash,
         choice: Choice::Approve,
+        option: 1,
         signature: vec![0xC3; 64],
     });
     let dec_frames = one(&mut pc, &dec);
@@ -117,11 +118,28 @@ fn build() -> Value {
             Message::UnlockRequest(UnlockRequest {
                 slot_id: vec![9; 16],
                 eph_pub: [&[4u8][..], &[0xD4; 64]].concat(),
+                request: b"vahta test request".to_vec(),
             }),
         ),
         (
-            "unlock_response_secret",
-            Message::UnlockResponse(UnlockResponse::SharedSecret(vec![0xE5; 32])),
+            "unlock_response_approved",
+            Message::UnlockResponse(UnlockResponse::Approved {
+                shared: vec![0xE5; 32],
+                signature: vec![0xF6; 64],
+            }),
+        ),
+        (
+            "unlock_response_denied",
+            Message::UnlockResponse(UnlockResponse::Denied),
+        ),
+        (
+            "decision_deny",
+            Message::Decision(Decision {
+                request_hash: ar.request_hash,
+                choice: Choice::Deny,
+                option: 0,
+                signature: vec![],
+            }),
         ),
         (
             "unlock_response_error",
@@ -157,6 +175,14 @@ fn build() -> Value {
         "ble_framing": { "frame": hx(&chunk_in), "chunk_len": 20,
             "chunks": chunk_frame(&chunk_in, 20).unwrap().iter().map(|c| hx(c)).collect::<Vec<_>>() },
         "base64url": { "input": "fbff", "output": b64_encode(&[0xfb, 0xff]) },
+        "tags": {
+            "comment": "device_tag = SHA-256(phone static public)[..8]; pairing_tag = SHA-256('vahta/v1/pair-tag' || psk)[..8]; mDNS instance = lowercase hex of the tag; BLE service data = [1, kind (1 session, 2 pairing), tag]",
+            "device_tag": hx(&device_tag(&phone.public)),
+            "pairing_tag": hx(&pairing_tag(&offer.psk)),
+            "mdns_instance": tag_hex(&device_tag(&phone.public)),
+            "ble_service_data_session": hx(&ble_service_data(false, &device_tag(&phone.public))),
+            "ble_service_data_pairing": hx(&ble_service_data(true, &pairing_tag(&offer.psk))),
+        },
     })
 }
 

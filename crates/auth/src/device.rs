@@ -69,6 +69,13 @@ pub trait DeviceChannel: Send + Sync {
     /// Ask the device to answer `req` (its `options`). The answer is a
     /// [`Decision`] the caller verifies.
     fn approve(&self, req: &Request) -> Result<Decision, AuthError>;
+
+    /// [`DeviceChannel::approve`] that stops early when `cancel` fires (another
+    /// approver answered first). A channel that waits on a real phone must
+    /// override it, or the race for the first answer waits for the phone too.
+    fn approve_cancellable(&self, req: &Request, _cancel: &Cancel) -> Result<Decision, AuthError> {
+        self.approve(req)
+    }
 }
 
 /// A device that has just paired: what the phone said about itself.
@@ -95,26 +102,54 @@ pub fn device_id_for(sign_pub: &[u8], ecdh_pub: &[u8]) -> [u8; 16] {
     id
 }
 
+/// The pairing code to show the person: what the phone scans or is given.
+#[derive(Debug, Clone)]
+pub struct PairingCode {
+    /// The code as a Unicode-block QR, several lines.
+    pub qr: String,
+    /// The same code as one line of text, for a phone that cannot scan.
+    pub text: String,
+    /// Unix seconds after which the code is refused.
+    pub expires_at: u64,
+}
+
+/// What a pairing needs from the caller.
+pub struct PairContext<'a> {
+    pub vault_id: [u8; 16],
+    /// How long the phone is waited for.
+    pub wait: Duration,
+    /// Called once the code exists, before waiting; the caller puts it on
+    /// screen.
+    pub show: &'a (dyn Fn(PairingCode) + Sync),
+    /// Fires when the person gave up (closed the window).
+    pub cancel: &'a Cancel,
+}
+
 /// The daemon's view of everything that can reach devices (`vahta-link`
 /// implements it).
 pub trait DeviceLinks: Send + Sync {
-    /// The channel to `device`, if some transport can reach it.
-    fn channel(&self, device: &Device) -> Option<Arc<dyn DeviceChannel>>;
+    /// The channel to `device` of the vault `vault_id`, if some transport can
+    /// reach it.
+    fn channel(&self, vault_id: &[u8; 16], device: &Device) -> Option<Arc<dyn DeviceChannel>>;
 
-    /// Pair a new device: show the pairing code and wait for the phone, up to
-    /// `wait`. The caller records the result in the vault.
-    fn pair(&self, name: &str, wait: Duration) -> Result<NewDevice, AuthError>;
+    /// Pair a new device: build the pairing code, hand it to `ctx.show`, and
+    /// wait for the phone. The caller records the result in the vault.
+    fn pair(&self, name: &str, ctx: &PairContext<'_>) -> Result<NewDevice, AuthError>;
+
+    /// A device was removed from the vault: forget what is kept for reaching
+    /// it.
+    fn forget(&self, _vault_id: &[u8; 16], _device_id: &[u8; 16]) {}
 }
 
 /// No device can be reached: the build without a transport.
 pub struct NoLinks;
 
 impl DeviceLinks for NoLinks {
-    fn channel(&self, _device: &Device) -> Option<Arc<dyn DeviceChannel>> {
+    fn channel(&self, _vault_id: &[u8; 16], _device: &Device) -> Option<Arc<dyn DeviceChannel>> {
         None
     }
 
-    fn pair(&self, _name: &str, _wait: Duration) -> Result<NewDevice, AuthError> {
+    fn pair(&self, _name: &str, _ctx: &PairContext<'_>) -> Result<NewDevice, AuthError> {
         Err(AuthError::Unavailable(
             "pairing a phone needs the phone link, which this build does not have".into(),
         ))
@@ -329,9 +364,9 @@ impl Approver for DeviceApprover {
         req: &Request,
         _options: &[String],
         _timeout: Duration,
-        _cancel: &Cancel,
+        cancel: &Cancel,
     ) -> Result<Option<usize>, AuthError> {
-        match self.channel.approve(req) {
+        match self.channel.approve_cancellable(req, cancel) {
             Ok(decision) => {
                 decision.verify(req, &self.record.device_id, &self.record.sign_pub)?;
                 Ok(Some(usize::from(decision.choice)))

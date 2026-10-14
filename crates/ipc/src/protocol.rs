@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 13;
+pub const PROTOCOL: u32 = 14;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -1059,6 +1059,22 @@ pub enum SurfaceRequest {
         /// Ask for an explicit acknowledgement, as for a recovery key.
         acknowledge: bool,
     },
+    /// A pairing code to scan, shown until the phone connects (the daemon then
+    /// sends `PairStop`), the person presses Enter, or `seconds` pass. Answered
+    /// with `Done` when stopped by the daemon, `Cancel` otherwise. The code is
+    /// single-use and short-lived, but it is what lets a phone pair, so it
+    /// goes over this connection like a password does.
+    Pair {
+        panel: Panel,
+        /// The code as lines of Unicode blocks.
+        qr: String,
+        /// The same code as text, for a phone that cannot scan.
+        text: String,
+        seconds: u32,
+    },
+    /// The phone has connected: ends a pending `Pair` (answered `Done`). With
+    /// none pending it does nothing.
+    PairStop {},
     /// The conversation is over; the window may close after the message.
     Close { message: Option<String> },
 }

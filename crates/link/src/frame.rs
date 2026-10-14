@@ -9,6 +9,15 @@ use crate::error::{LinkError, Result};
 /// The largest frame, which is also the largest Noise message.
 pub const MAX_FRAME: usize = 65535;
 
+/// Where the far end of a pipe was found, for the caller to remember as a hint
+/// for next time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerHint {
+    /// A Bluetooth address (may be a random one that changes).
+    Ble(String),
+    Lan(std::net::SocketAddr),
+}
+
 pub trait Pipe: Send {
     fn send(&mut self, frame: &[u8]) -> Result<()>;
     /// The next whole frame; blocks (up to the receive timeout, if set).
@@ -17,6 +26,10 @@ pub trait Pipe: Send {
     /// time out ignore it.
     fn set_recv_timeout(&mut self, _timeout: Option<Duration>) -> Result<()> {
         Ok(())
+    }
+    /// Where this pipe's peer was reached, if the transport knows.
+    fn peer_hint(&self) -> Option<PeerHint> {
+        None
     }
 }
 

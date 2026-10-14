@@ -278,6 +278,8 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
             console.clear();
             Some(SurfaceAnswer::Done {})
         }
+        // Handled by the loop (`pair_wait`, and a stop with no code pending).
+        SurfaceRequest::Pair { .. } | SurfaceRequest::PairStop {} => None,
         SurfaceRequest::Close { message } => {
             if let Some(m) = message {
                 console.say(&safe(m));
@@ -326,6 +328,10 @@ pub fn run(args: &[String]) -> i32 {
         None => return EXIT_DAEMON,
     };
     while let Ok(request) = requests.queue.recv() {
+        // A stop with no code waiting (the code was already answered).
+        if matches!(request, SurfaceRequest::PairStop {}) {
+            continue;
+        }
         // Close only prints; the daemon may hang up while it does. Anything
         // else waits on the person, so a hang-up from here on ends the window.
         if !matches!(request, SurfaceRequest::Close { .. }) {
@@ -336,7 +342,22 @@ pub fn run(args: &[String]) -> i32 {
                 break;
             }
         }
-        let answer = answer_for(&console, &request);
+        let answer = match &request {
+            SurfaceRequest::Pair {
+                panel,
+                qr,
+                text,
+                seconds,
+            } => Some(pair_wait(
+                &console,
+                panel,
+                qr,
+                text,
+                *seconds,
+                &requests.queue,
+            )),
+            _ => answer_for(&console, &request),
+        };
         requests.answering.store(false, Ordering::SeqCst);
         match answer {
             Some(answer) => {
@@ -348,6 +369,57 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     EXIT_CLEAN
+}
+
+/// Shows the pairing code and waits for the phone: the daemon's `PairStop`
+/// ends it with `Done`; Enter, end of input or the time running out with
+/// `Cancel`. (A thread of its own reads the line, so the wait can also watch
+/// the daemon; it ends with the window's next prompt or exit.)
+fn pair_wait(
+    console: &Console,
+    panel: &Panel,
+    qr: &str,
+    text: &str,
+    seconds: u32,
+    queue: &mpsc::Receiver<SurfaceRequest>,
+) -> SurfaceAnswer {
+    console.panel(panel);
+    console.say("Scan this code with the Vahta app on your phone:");
+    console.say("");
+    for line in qr.lines() {
+        console.say(&format!("    {}", safe(line)));
+    }
+    console.say("");
+    console.say("No camera? Give the app this code instead:");
+    console.say(&format!("    {}", safe(text)));
+    console.say("");
+    console.say(&format!(
+        "Waiting for the phone ({} min). Press Enter to cancel.",
+        seconds.div_ceil(60)
+    ));
+    let (tx, line) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Console::line());
+    });
+    let until = Instant::now() + Duration::from_secs(u64::from(seconds));
+    loop {
+        match queue.try_recv() {
+            Ok(SurfaceRequest::PairStop {}) => {
+                console.say("Phone connected.");
+                return SurfaceAnswer::Done {};
+            }
+            Ok(_) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        match line.try_recv() {
+            Ok(_) | Err(mpsc::TryRecvError::Disconnected) => return SurfaceAnswer::Cancel {},
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= until {
+            return SurfaceAnswer::Cancel {};
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The daemon's requests, read on their own thread.

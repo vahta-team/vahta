@@ -133,14 +133,21 @@ impl Approver for WindowApprover<'_> {
 pub(crate) const MAX_PASSWORD_TRIES: usize = 3;
 
 /// The devices of the vault at `vault_path` that can be reached.
-pub(crate) fn linked_devices(shared: &Shared, devices: &[Device]) -> Vec<LinkedDevice> {
+pub(crate) fn linked_devices(
+    shared: &Shared,
+    vault_id: &[u8; 16],
+    devices: &[Device],
+) -> Vec<LinkedDevice> {
     devices
         .iter()
         .filter_map(|d| {
-            shared.links.channel(d).map(|channel| LinkedDevice {
-                record: d.clone(),
-                channel,
-            })
+            shared
+                .links
+                .channel(vault_id, d)
+                .map(|channel| LinkedDevice {
+                    record: d.clone(),
+                    channel,
+                })
         })
         .collect()
 }
@@ -162,7 +169,7 @@ pub(crate) fn approve(
     let devices = Vault::peek(vault_path)
         .map(|p| p.devices)
         .unwrap_or_default();
-    let phones: Vec<DeviceApprover> = linked_devices(shared, &devices)
+    let phones: Vec<DeviceApprover> = linked_devices(shared, &request.vault_id, &devices)
         .into_iter()
         .map(|l| DeviceApprover {
             record: l.record,
@@ -378,7 +385,7 @@ pub(crate) fn unlock_keeping_password(
     let mut wctx = WindowCtx {
         window,
         panel,
-        devices: linked_devices(ctx.shared, &peek.devices),
+        devices: linked_devices(ctx.shared, &peek.vault_id, &peek.devices),
         request,
         surface: None,
         typed: None,

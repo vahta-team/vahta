@@ -80,8 +80,8 @@ jobs:
       - name: No test-only features in the shipped CLI
         run: |
           set -euo pipefail
-          if cargo tree -p vahta-cli -e features,normal,build --prefix none | grep -Eq 'test-kdf|test-surface|test-roots'; then
-            echo "a test-only feature (test-kdf, test-surface, test-roots) is enabled in vahta-cli" >&2
+          if cargo tree -p vahta-cli -e features,normal,build --prefix none | grep -Eq 'test-kdf|test-surface|test-roots|fake-phone'; then
+            echo "a test-only feature (test-kdf, test-surface, test-roots, fake-phone) is enabled in vahta-cli" >&2
             cargo tree -p vahta-cli -e features,normal,build -i vahta-vault >&2
             cargo tree -p vahta-cli -e features,normal,build -i vahta-daemon >&2
             exit 1

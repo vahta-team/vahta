@@ -15,5 +15,18 @@ workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# A software phone for tests (`fake.rs`). Never enabled by the app.
+fake-phone = ["dep:rand_core"]
+
 [dependencies]
+# The request and decision types, so the phone signs exactly the bytes the
+# desktop verifies. Same P-256 crate the desktop uses.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "std"] }
+vahta-auth = { path = "../auth" }
 vahta-link = { path = "../link" }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"

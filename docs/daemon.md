@@ -667,9 +667,19 @@ next one without restarting it. A policy that needs the password alone
 
 ### Pairing and what a phone can do
 
-`vahta devices pair NAME --for 90d` asks for the master password, then pairs
-the phone over the phone link, and records it in the vault's signed device list
-with a slot of its own. A phone's access lasts a limited time (1 minute to 365
+`vahta devices pair NAME --for 90d` asks for the master password, then opens the
+**pairing code** in the same window: a QR code and, under it, the same code as a line
+of text. The Vahta app on the phone scans it (or takes the text), shows this
+computer's name for the person to confirm, and the two connect over Bluetooth LE or
+the local network, whichever is up first. The code works for five minutes and once;
+closing the window cancels. The phone is then recorded in the vault's signed device
+list with a slot of its own. How the phone is reached (its channel key, where it was
+last seen) is kept beside the daemon's data, in `link/<vault id>/` (a transport
+identity, mode 0600, not a vault secret; see [phone-link.md](phone-link.md)), so a
+copy of the vault on another computer does not reach the phone and asks for the
+password. `revoke` and `lost` delete it. Bluetooth is available on Linux; on
+macOS and Windows the phone link uses the local network only for now. A phone's
+access lasts a limited time (1 minute to 365
 days, default 90 days). While it lasts, the phone can:
 
 * **open the vault**, with its biometric check, for an each-use run or a

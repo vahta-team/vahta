@@ -130,6 +130,21 @@ pub fn apply_overrides(options: &mut Options) {
         if let Some(links) = vahta_auth::loopback::LoopbackLinks::from_env() {
             options.links = Some(Box::new(links));
         }
+        // The real phone link over the LAN transport alone, with the pairing
+        // phone at a fixed address (no multicast in a test): a test's fake
+        // phone listens there.
+        if let Some(addr) = std::env::var("VAHTA_TEST_PHONE_ADDR")
+            .ok()
+            .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+        {
+            options.links = Some(Box::new(
+                crate::LinkDevices::with_transports(
+                    options.paths.data.join("link"),
+                    vec![std::sync::Arc::new(vahta_link::lan::LanTransport::new())],
+                )
+                .with_pair_hint(addr),
+            ));
+        }
         if let Some(surface) = scripted_from_env() {
             options.surface = Some(surface);
             options.kdf = vahta_vault::KdfParams::TEST;
@@ -159,7 +174,10 @@ pub mod scripted {
     //!   confirmation;
     //! * `{"choose": N}` picks option N of a choice;
     //! * `{"text": "..."}` answers a plain-text question;
-    //! * `{"ack": true}` acknowledges something shown.
+    //! * `{"ack": true}` acknowledges something shown;
+    //! * `{"wait": true}` leaves a pairing code on screen until the phone
+    //!   connects (the log entry of kind `pairing` carries the code, `qr` and
+    //!   `code`, for a test's phone to read).
     //!
     //! Every question is appended to the log (`VAHTA_TEST_SURFACE_LOG`) with
     //! what the window would have shown: its lines, warning and agent note, and
@@ -170,7 +188,7 @@ pub mod scripted {
 
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
     use serde_json::{Value, json};
@@ -252,12 +270,15 @@ pub mod scripted {
             self.inner.log(json!({"open": title}));
             Ok(Box::new(ScriptedWindow {
                 inner: self.inner.clone(),
+                pair_stopped: Arc::default(),
             }))
         }
     }
 
     struct ScriptedWindow {
         inner: Arc<Inner>,
+        /// Set when the daemon says the phone has connected.
+        pair_stopped: Arc<(Mutex<bool>, Condvar)>,
     }
 
     impl ScriptedWindow {
@@ -382,6 +403,45 @@ pub mod scripted {
             }));
             let answer = self.inner.pop()?;
             Ok(answer.get("ack").is_some())
+        }
+
+        fn show_pairing(
+            &mut self,
+            panel: &Panel,
+            qr: &str,
+            text: &str,
+            wait: Duration,
+        ) -> Result<bool, SurfaceError> {
+            self.inner.log(json!({
+                "ask": "pairing", "qr": qr, "code": text, "panel": panel_json(panel)
+            }));
+            let answer = self.inner.pop()?;
+            if answer.get("cancel").is_some() {
+                return Ok(false);
+            }
+            if answer.get("wait").is_none() {
+                return Err(unavailable(
+                    "the script answered a pairing code with the wrong kind",
+                ));
+            }
+            // Until the daemon stops it (the phone connected) or `wait` ends.
+            let (lock, cv) = &*self.pair_stopped;
+            let guard = lock.lock().map_err(|_| unavailable("poisoned"))?;
+            let (stopped, _) = cv
+                .wait_timeout_while(guard, wait, |s| !*s)
+                .map_err(|_| unavailable("poisoned"))?;
+            Ok(*stopped)
+        }
+
+        fn pairing_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
+            let state = self.pair_stopped.clone();
+            Some(Box::new(move || {
+                let (lock, cv) = &*state;
+                if let Ok(mut s) = lock.lock() {
+                    *s = true;
+                    cv.notify_all();
+                }
+            }))
         }
 
         fn close(self: Box<Self>, message: Option<&str>) {

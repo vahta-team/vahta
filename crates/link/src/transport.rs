@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::error::{LinkError, Result};
 use crate::frame::Pipe;
+use crate::messages::{TAG_LEN, device_tag, tag_hex};
 
 /// What the desktop remembers about where to find a paired phone. The phone's
 /// static key is its identity; the rest are hints a transport may use.
@@ -15,18 +16,50 @@ use crate::frame::Pipe;
 pub struct DeviceAddr {
     pub name: String,
     pub static_pub: [u8; 32],
-    /// Bluetooth address learned at pairing, e.g. `AA:BB:CC:DD:EE:FF`.
+    /// What the phone advertises (BLE service data, mDNS instance name): see
+    /// [`crate::messages::device_tag`] and [`crate::messages::pairing_tag`].
+    pub tag: [u8; TAG_LEN],
+    /// A Bluetooth address seen before, e.g. `AA:BB:CC:DD:EE:FF`. Only a hint:
+    /// phones use random addresses, so the tag is what finds the device.
     pub ble_address: Option<String>,
     /// A last-known LAN address; mDNS is tried when it is absent or stale.
     pub lan_hint: Option<SocketAddr>,
 }
 
 impl DeviceAddr {
-    /// The mDNS instance name a phone advertises: a hash prefix of its public
-    /// key, so the name identifies the device without carrying the key.
+    /// A paired phone, found by the tag derived from its static key.
+    pub fn paired(
+        name: &str,
+        static_pub: [u8; 32],
+        ble_address: Option<String>,
+        lan_hint: Option<SocketAddr>,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            static_pub,
+            tag: device_tag(&static_pub),
+            ble_address,
+            lan_hint,
+        }
+    }
+
+    /// A phone that is about to pair and whose key is not known yet: found by
+    /// the tag derived from the offer's PSK. `lan_hint` is only for tests and
+    /// for phones that print an address.
+    pub fn pairing(tag: [u8; TAG_LEN], lan_hint: Option<SocketAddr>) -> Self {
+        Self {
+            name: "pairing".to_string(),
+            static_pub: [0; 32],
+            tag,
+            ble_address: None,
+            lan_hint,
+        }
+    }
+
+    /// The mDNS instance name a phone advertises: the tag in hex, so the name
+    /// identifies the device without carrying its key.
     pub fn lan_instance(&self) -> String {
-        let h = crate::messages::sha256(&self.static_pub);
-        h[..8].iter().map(|b| format!("{b:02x}")).collect()
+        tag_hex(&self.tag)
     }
 }
 
@@ -34,6 +67,38 @@ pub trait Transport: Send + Sync {
     fn name(&self) -> &str;
     /// A pipe to the device, or an error by `deadline`.
     fn reach(&self, device: &DeviceAddr, deadline: Instant) -> Result<Box<dyn Pipe>>;
+
+    /// Whether the device can be seen now, without opening a connection when
+    /// the transport can tell otherwise (a Bluetooth scan for its tag). The
+    /// default connects and hangs up.
+    fn probe(&self, device: &DeviceAddr, deadline: Instant) -> Result<()> {
+        self.reach(device, deadline).map(|_| ())
+    }
+}
+
+/// Whether any transport sees the device before `deadline` (see
+/// [`Transport::probe`]); the first to say yes ends the wait.
+pub fn probe_any(
+    transports: &[Arc<dyn Transport>],
+    device: &DeviceAddr,
+    deadline: Instant,
+) -> bool {
+    let (tx, rx) = mpsc::channel::<bool>();
+    for t in transports {
+        let (t, tx, device) = (Arc::clone(t), tx.clone(), device.clone());
+        thread::spawn(move || {
+            let _ = tx.send(t.probe(&device, deadline).is_ok());
+        });
+    }
+    drop(tx);
+    loop {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(wait) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Tries every transport in its own thread; the first to connect wins and the
@@ -99,12 +164,7 @@ mod tests {
     }
 
     fn dev() -> DeviceAddr {
-        DeviceAddr {
-            name: "p".into(),
-            static_pub: [1; 32],
-            ble_address: None,
-            lan_hint: None,
-        }
+        DeviceAddr::paired("p", [1; 32], None, None)
     }
 
     fn t(name: &'static str, ms: u64, ok: bool) -> Arc<dyn Transport> {

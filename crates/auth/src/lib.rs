@@ -30,8 +30,8 @@ mod unlock;
 
 pub use approve::{Approver, Cancel, Decided, decide_any};
 pub use device::{
-    DeviceApprover, DeviceChannel, DeviceLinks, DeviceUnlocker, NewDevice, NoLinks, UnlockReply,
-    device_id_for, enroll_device, kept_device_slot, refresh_device,
+    DeviceApprover, DeviceChannel, DeviceLinks, DeviceUnlocker, NewDevice, NoLinks, PairContext,
+    PairingCode, UnlockReply, device_id_for, enroll_device, kept_device_slot, refresh_device,
 };
 pub use error::AuthError;
 pub use factor::{Factor, Need};

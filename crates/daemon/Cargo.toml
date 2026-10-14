@@ -38,6 +38,8 @@ vahta-detect = { path = "../detect" }
 dunce = "1"
 vahta-harness = { path = "../harness" }
 vahta-ipc = { path = "../ipc" }
+# The phone link: Bluetooth LE and LAN transports, the Noise channel, pairing.
+vahta-link = { path = "../link" }
 vahta-os = { path = "../os" }
 vahta-policy = { path = "../policy" }
 # The strict URL parser always; the client only with the `http` feature.
@@ -56,5 +58,9 @@ zbus = "5"
 
 [dev-dependencies]
 tempfile = "3"
+# A phone for the link tests, and its P-256 (the version the auth crate uses).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+vahta-mobile = { path = "../mobile", features = ["fake-phone"] }
 # The session tests build real vaults; that needs the cheap KDF.
 vahta-vault = { path = "../vault", features = ["test-kdf"] }

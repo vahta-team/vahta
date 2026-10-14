@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -139,6 +140,28 @@ pub trait Window: Send {
     /// Show the recovery key once and ask for an acknowledgement. `false` is
     /// the window being closed or cancelled without one.
     fn show_recovery_key(&mut self, panel: &Panel, key: &Secret) -> Result<bool, SurfaceError>;
+
+    /// Show a pairing code (`qr`: Unicode blocks, `text`: the same as a line)
+    /// and wait, at most `wait`. `Ok(true)`: ended by the function
+    /// [`Window::pairing_stopper`] gave (the phone connected; the window stays
+    /// usable). `Ok(false)`: the person closed it or the time ran out.
+    fn show_pairing(
+        &mut self,
+        _panel: &Panel,
+        _qr: &str,
+        _text: &str,
+        _wait: Duration,
+    ) -> Result<bool, SurfaceError> {
+        Err(SurfaceError::Unavailable(
+            "this window cannot show a pairing code".to_string(),
+        ))
+    }
+
+    /// A function, callable from another thread, that ends a pending (or
+    /// coming) [`Window::show_pairing`] with `Ok(true)`.
+    fn pairing_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        None
+    }
 
     /// A function, callable from another thread, that ends whatever question
     /// this window is blocked on (the answer then comes back as closed). For
@@ -370,6 +393,12 @@ fn window_is_ours(child: Option<&Child>, peer: ProcessId, exe: &Path) -> bool {
 
 /// A window on the far end of a surface connection.
 struct TerminalWindow {
+    /// Held by whoever writes to the stream from another thread (the pairing
+    /// stopper), so two frames never interleave.
+    write_lock: Arc<Mutex<()>>,
+    /// Set by the pairing stopper; read after a `Pair` request is sent, so a
+    /// stop that came first is not lost.
+    pair_stopped: Arc<AtomicBool>,
     stream: Stream,
     answers: Receiver<Result<SurfaceAnswer, ProtocolError>>,
     _child: Option<Child>,
@@ -399,6 +428,8 @@ impl TerminalWindow {
             });
         }
         TerminalWindow {
+            write_lock: Arc::default(),
+            pair_stopped: Arc::default(),
             stream,
             answers,
             _child: child,
@@ -598,6 +629,52 @@ impl Window for TerminalWindow {
             SurfaceAnswer::Cancel {} => Ok(false),
             _ => Err(SurfaceError::Protocol("unexpected answer".to_string())),
         }
+    }
+
+    fn show_pairing(
+        &mut self,
+        panel: &Panel,
+        qr: &str,
+        text: &str,
+        wait: Duration,
+    ) -> Result<bool, SurfaceError> {
+        let request = SurfaceRequest::Pair {
+            panel: panel.clone(),
+            qr: qr.to_string(),
+            text: text.to_string(),
+            seconds: u32::try_from(wait.as_secs()).unwrap_or(u32::MAX),
+        };
+        {
+            let _w = self.write_lock.lock().map_err(|_| SurfaceError::Closed)?;
+            write_frame(&mut self.stream, &request).map_err(|_| SurfaceError::Closed)?;
+            // A stop that came before the code was on the wire.
+            if self.pair_stopped.load(Ordering::SeqCst) {
+                let _ = write_frame(&mut self.stream, &SurfaceRequest::PairStop {});
+            }
+        }
+        match self.answers.recv_timeout(wait + Duration::from_secs(10)) {
+            Ok(Ok(SurfaceAnswer::Done {})) => Ok(true),
+            Ok(Ok(SurfaceAnswer::Cancel {})) => Ok(false),
+            Ok(Ok(_)) => Err(SurfaceError::Protocol("unexpected answer".to_string())),
+            Ok(Err(ProtocolError::Garbage(why))) => Err(SurfaceError::Protocol(why)),
+            Ok(Err(_)) => Err(SurfaceError::Closed),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = self.stream.shutdown();
+                Ok(false)
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(SurfaceError::Closed),
+        }
+    }
+
+    fn pairing_stopper(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        let mut stream = self.stream.try_clone().ok()?;
+        let (lock, stopped) = (self.write_lock.clone(), self.pair_stopped.clone());
+        Some(Box::new(move || {
+            stopped.store(true, Ordering::SeqCst);
+            if let Ok(_w) = lock.lock() {
+                let _ = write_frame(&mut stream, &SurfaceRequest::PairStop {});
+            }
+        }))
     }
 
     fn canceller(&self) -> Option<Box<dyn FnOnce() + Send>> {

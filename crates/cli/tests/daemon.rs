@@ -30,6 +30,10 @@ const PW: &[u8] = b"correct horse";
 
 struct Sandbox {
     root: PathBuf,
+    /// Where a test's software phone listens on loopback. Set, the daemon
+    /// reaches phones over the real phone link (LAN transport) instead of the
+    /// loopback phones kept in files.
+    phone_addr: Option<String>,
 }
 
 impl Sandbox {
@@ -43,7 +47,10 @@ impl Sandbox {
         // The certificate authority of the tests' HTTPS server, which a test
         // daemon (and only a test daemon) also trusts for `vahta http`.
         fs::write(root.join("ca.pem"), vahta_net::test_server::CA_PEM).unwrap();
-        Sandbox { root }
+        Sandbox {
+            root,
+            phone_addr: None,
+        }
     }
 
     fn project(&self) -> PathBuf {
@@ -80,7 +87,11 @@ impl Sandbox {
             .env("VAHTA_TEST_LOOPBACK", self.root.join("phones"))
             .env("VAHTA_TEST_HTTP_ROOT", self.root.join("ca.pem"))
             .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY");
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("VAHTA_TEST_PHONE_ADDR");
+        if let Some(addr) = &self.phone_addr {
+            cmd.env("VAHTA_TEST_PHONE_ADDR", addr);
+        }
         cmd
     }
 
@@ -5648,4 +5659,183 @@ fn a_rekey_made_elsewhere_is_accepted_only_after_the_person_unlocks_and_confirms
     assert_eq!(s.run_each_use().status.code(), Some(0));
     assert_eq!(s.asks(), asks + 1);
     drop(on_b);
+}
+
+// --- The phone link, end to end with a software phone ------------------------------------------
+
+/// A software phone (the helper calls the Kotlin app must make, in
+/// `vahta-mobile`) pairs with the real daemon over the LAN transport on
+/// loopback, then answers an approval and unlocks the vault. The window is the
+/// scripted surface; nothing here touches a real phone, adapter or network.
+#[cfg(unix)]
+#[test]
+fn a_software_phone_pairs_approves_and_unlocks_over_the_phone_link() {
+    use std::sync::Arc;
+    use vahta_link::lan::LanListener;
+    use vahta_mobile::fake::{Behavior, FakePhone};
+
+    let listener = Arc::new(LanListener::bind("127.0.0.1:0").unwrap());
+    let mut s = Sandbox::new();
+    s.phone_addr = Some(listener.local_addr().unwrap().to_string());
+    s.with_vault(&[
+        ("ZETA", "fake-one", "session"),
+        ("ALPHA", "fake-three", "each-use"),
+    ]);
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\nallow = [\"printenv\"]\n",
+    )
+    .unwrap();
+    let phone = Arc::new(FakePhone::new("Pixel 9"));
+
+    // --- Pair: the window shows the code; the phone reads it and answers the
+    // daemon's call.
+    s.script(&[PW_ANSWER, r#"{"wait":true}"#]);
+    let out = std::thread::scope(|scope| {
+        let pairing = scope.spawn(|| s.vahta(&["devices", "pair", "pixel", "--for", "30d"]));
+        let mut code = None;
+        wait_until("the pairing code on the window", 20, || {
+            code = s
+                .window_log()
+                .iter()
+                .find(|e| e["ask"] == "pairing")
+                .map(|e| (e["code"].as_str().unwrap().to_string(), e["qr"].clone()));
+            code.is_some()
+        });
+        let (code, qr) = code.unwrap();
+        assert!(code.starts_with("vahta-pair:"), "{code}");
+        assert!(qr.as_str().unwrap().contains('\u{2588}'), "a QR code");
+        let pipe = listener.accept().unwrap();
+        phone
+            .pair_over(pipe, &code, vahta_link::unix_now())
+            .unwrap();
+        pairing.join().unwrap()
+    });
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("paired pixel"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        s.window_log().iter().any(|e| e["close"] == "Phone paired."),
+        "the window said so"
+    );
+    let list = s.devices();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["name"], "pixel");
+    assert_eq!(list[0]["transports"][0], "lan");
+
+    // Kept beside the daemon's data, privately; never in the journal.
+    let vault_hex = vahta_vault::hex_encode(&s.open_vault().vault_id());
+    let link_dir = s.root.join("data/link").join(vault_hex);
+    let key = fs::read_to_string(link_dir.join("desktop.key")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&link_dir.join("desktop.key")), 0o600);
+    assert!(!s.journal().contains(key.trim()));
+
+    // From now on the phone serves sessions on the same address.
+    {
+        let (listener, phone) = (listener.clone(), phone.clone());
+        std::thread::spawn(move || {
+            while let Ok(pipe) = listener.accept() {
+                let phone = phone.clone();
+                std::thread::spawn(move || {
+                    let _ = phone.serve(pipe);
+                });
+            }
+        });
+    }
+    let passwords = |s: &Sandbox| {
+        s.window_log()
+            .iter()
+            .filter(|e| e["ask"] == "password")
+            .count()
+    };
+
+    // --- Approve and unlock: the phone allows once, then opens the vault.
+    let before = passwords(&s);
+    phone.queue(Behavior::Approve(0));
+    phone.queue(Behavior::Approve(0));
+    let out = s.vahta(&[
+        "run",
+        "--ask",
+        "--reason",
+        "look",
+        "--secret",
+        "ZETA",
+        "--",
+        "sh",
+        "-c",
+        "echo $ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(passwords(&s), before, "no password was asked");
+    let asked = phone.asked();
+    assert_eq!(
+        asked.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(),
+        ["approve", "unlock"]
+    );
+    assert_eq!(asked[0].view.kind, "run_ask");
+    assert_eq!(asked[0].view.names, ["ZETA"]);
+    assert_eq!(asked[0].view.reason.as_deref(), Some("look"));
+    let journal = s.journal();
+    assert!(journal.contains("device_approve"), "{journal}");
+    assert!(journal.contains("device_unlock"), "{journal}");
+    assert!(journal.contains("run_allowed_once"), "{journal}");
+
+    // --- The person says no on the phone: nothing runs.
+    phone.queue(Behavior::Deny);
+    let out = s.vahta(&["run", "--ask", "--secret", "ZETA", "--", "sh", "-c", "true"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    assert_eq!(phone.asked().len(), 3, "the phone was asked and said no");
+    assert_eq!(s.journal().matches("run_allowed_once").count(), 1);
+
+    // --- A session opened by the phone alone.
+    phone.queue(Behavior::Approve(0));
+    let out = s.vahta(&["unlock", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{} {}",
+        text(&out.stderr),
+        text(&out.stdout)
+    );
+    assert_eq!(passwords(&s), before);
+
+    // --- Revoking forgets how to reach it.
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["devices", "revoke", "pixel"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let left: Vec<_> = fs::read_dir(&link_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_the_pairing_window_pairs_nothing_and_a_dead_phone_link_is_an_error_not_a_hang() {
+    // Nobody listens where the phone is said to be.
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().to_string()
+    };
+    let mut s = Sandbox::new();
+    s.phone_addr = Some(dead);
+    s.with_vault(&[("ZETA", "fake-one", "session")]);
+    s.script(&[PW_ANSWER, r#"{"cancel":true}"#]);
+    let started = Instant::now();
+    let out = s.vahta(&["devices", "pair", "pixel"]);
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(s.devices().is_empty());
+    assert!(
+        s.window_log().iter().any(|e| e["ask"] == "pairing"),
+        "the code was shown"
+    );
 }

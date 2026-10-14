@@ -67,6 +67,9 @@ vahta-vault = { path = "../vault", features = ["test-kdf"] }
 vahta-daemon = { path = "../daemon", features = ["test-surface"] }
 # The device tests read the software phone's keys and write device records.
 vahta-auth = { path = "../auth", features = ["test-surface"] }
+# The phone link tests pair and answer with a software phone over loopback.
+vahta-link = { path = "../link" }
+vahta-mobile = { path = "../mobile", features = ["fake-phone"] }
 # The tests' HTTPS server for `vahta http`, with a throwaway certificate; its
 # `test-roots` feature, like `test-surface`, is checked out of the shipped tree
 # by CI.

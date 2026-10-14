@@ -24,6 +24,8 @@ mod encoded;
 mod guard_ops;
 mod http_ops;
 pub mod journal;
+mod link_devices;
+pub use link_devices::LinkDevices;
 mod lock;
 mod ops;
 mod output;

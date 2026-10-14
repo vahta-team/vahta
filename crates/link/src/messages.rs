@@ -22,6 +22,55 @@ fn bad(what: &str) -> LinkError {
     LinkError::Protocol(what.to_string())
 }
 
+/// Length of the tag a phone advertises so the desktop can tell it from other
+/// Vahta phones.
+pub const TAG_LEN: usize = 8;
+
+/// The tag of a paired phone: the first 8 bytes of SHA-256 of its static
+/// Noise public key. It is the BLE advertisement tag and, in hex, the mDNS
+/// instance name. It names a device without carrying its key.
+pub fn device_tag(phone_static_pub: &[u8; 32]) -> [u8; TAG_LEN] {
+    let h = sha256(phone_static_pub);
+    let mut t = [0u8; TAG_LEN];
+    t.copy_from_slice(&h[..TAG_LEN]);
+    t
+}
+
+/// The tag a phone advertises while it waits to be paired: the first 8 bytes
+/// of `SHA-256("vahta/v1/pair-tag" || psk)`. Only someone who has seen the QR
+/// code can compute it, and it reveals nothing of the PSK.
+pub fn pairing_tag(psk: &[u8; 32]) -> [u8; TAG_LEN] {
+    let mut h = Sha256::new();
+    h.update(b"vahta/v1/pair-tag");
+    h.update(psk);
+    let h: [u8; 32] = h.finalize().into();
+    let mut t = [0u8; TAG_LEN];
+    t.copy_from_slice(&h[..TAG_LEN]);
+    t
+}
+
+/// A tag as the lowercase hex used for the mDNS instance name.
+pub fn tag_hex(tag: &[u8; TAG_LEN]) -> String {
+    tag.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The BLE service data a phone advertises under the Vahta service UUID:
+/// `[1 (format), kind (1 session, 2 pairing), tag (8 bytes)]`.
+pub fn ble_service_data(pairing: bool, tag: &[u8; TAG_LEN]) -> Vec<u8> {
+    let mut v = vec![1, if pairing { 2 } else { 1 }];
+    v.extend_from_slice(tag);
+    v
+}
+
+/// Reads [`ble_service_data`]: `(is pairing, tag)`. `None` for anything else
+/// (another format version is ignored, not guessed at).
+pub fn parse_ble_service_data(data: &[u8]) -> Option<(bool, [u8; TAG_LEN])> {
+    let [1, kind @ (1 | 2), tag @ ..] = data else {
+        return None;
+    };
+    Some((*kind == 2, tag.try_into().ok()?))
+}
+
 /// What the desktop shows as a QR code. The PSK is the one-time secret that
 /// proves the phone saw the screen; it never travels over a transport.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,9 +225,15 @@ pub enum Choice {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Decision {
+    /// SHA-256 of the `ApproveRequest::request` bytes (the link-level hash,
+    /// not the domain-separated one the signature covers).
     pub request_hash: [u8; 32],
     pub choice: Choice,
-    /// Made by the phone's Keystore key; opaque here. Empty on a deny.
+    /// Which of the request's options was chosen (what the signature covers);
+    /// 0 on a deny.
+    pub option: u8,
+    /// Made by the phone's Keystore key, 64 bytes (r then s); opaque here.
+    /// Empty on a deny.
     pub signature: Vec<u8>,
 }
 
@@ -187,12 +242,21 @@ pub struct UnlockRequest {
     pub slot_id: Vec<u8>,
     /// The desktop's ephemeral P-256 public key (SEC1).
     pub eph_pub: Vec<u8>,
+    /// The structured request the person is asked to approve with the unlock
+    /// (opaque here), so one biometric prompt both approves and opens.
+    pub request: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum UnlockResponse {
-    /// The ECDH result of the phone's Keystore key with `eph_pub`.
-    SharedSecret(Vec<u8>),
+    /// The person approved: the ECDH result of the phone's Keystore key with
+    /// `eph_pub`, and the signature of the decision (option 0) on `request`.
+    Approved {
+        shared: Vec<u8>,
+        signature: Vec<u8>,
+    },
+    /// The person said no.
+    Denied,
     Error(String),
 }
 
@@ -231,9 +295,19 @@ impl Message {
             Message::PairAccept(a) => a.validate()?,
             Message::ApproveRequest(r) => r.validate()?,
             Message::UnlockRequest(u)
-                if u.slot_id.len() > 64 || !looks_like_sec1_p256(&u.eph_pub) =>
+                if u.slot_id.len() > 64
+                    || !looks_like_sec1_p256(&u.eph_pub)
+                    || u.request.is_empty() =>
             {
                 return Err(bad("malformed unlock request"));
+            }
+            Message::Decision(d) if d.choice == Choice::Approve && d.signature.len() != 64 => {
+                return Err(bad("malformed decision"));
+            }
+            Message::UnlockResponse(UnlockResponse::Approved { shared, signature })
+                if shared.len() != 32 || signature.len() != 64 =>
+            {
+                return Err(bad("malformed unlock response"));
             }
             _ => {}
         }
@@ -349,12 +423,25 @@ mod tests {
             Message::Decision(Decision {
                 request_hash: [3; 32],
                 choice: Choice::Approve,
-                signature: vec![1, 2, 3],
+                option: 1,
+                signature: vec![1; 64],
+            }),
+            Message::Decision(Decision {
+                request_hash: [3; 32],
+                choice: Choice::Deny,
+                option: 0,
+                signature: vec![],
             }),
             Message::UnlockRequest(UnlockRequest {
                 slot_id: vec![1; 16],
                 eph_pub: [&[4u8][..], &[1; 64]].concat(),
+                request: b"req".to_vec(),
             }),
+            Message::UnlockResponse(UnlockResponse::Approved {
+                shared: vec![5; 32],
+                signature: vec![6; 64],
+            }),
+            Message::UnlockResponse(UnlockResponse::Denied),
             Message::UnlockResponse(UnlockResponse::Error("no".into())),
         ];
         for m in msgs {
@@ -383,5 +470,17 @@ mod tests {
             ecdh_pub: vec![4; 65],
         });
         assert!(Message::decode(&bad_key.encode()).is_err());
+        let short_sig = Message::Decision(Decision {
+            request_hash: [0; 32],
+            choice: Choice::Approve,
+            option: 0,
+            signature: vec![1; 10],
+        });
+        assert!(Message::decode(&short_sig.encode()).is_err());
+        let short_shared = Message::UnlockResponse(UnlockResponse::Approved {
+            shared: vec![1; 31],
+            signature: vec![1; 64],
+        });
+        assert!(Message::decode(&short_shared.encode()).is_err());
     }
 }

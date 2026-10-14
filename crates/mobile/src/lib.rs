@@ -11,8 +11,15 @@
 //!
 //! Errors are `String`s: the bridge turns them into exceptions.
 
+#[cfg(feature = "fake-phone")]
+pub mod fake;
+
+use vahta_auth::{Action, Request};
 use vahta_link::channel::{Channel, Handshake, Keypair, Partial};
-use vahta_link::messages::{Choice, Decision, UnlockResponse};
+use vahta_link::messages::{
+    Choice, Decision, UnlockResponse, ble_service_data, device_tag as link_device_tag, pairing_tag,
+    tag_hex,
+};
 use vahta_link::pairing::PairResponder;
 use vahta_link::{Message, PairAccept, PairOffer};
 
@@ -137,10 +144,16 @@ pub enum LinkEvent {
     /// Nothing for the app yet (handshake step, or a fragment of a message).
     None,
     Approve(ApprovalRequest),
-    /// The desktop asks the phone to do the Keystore ECDH with `eph_pub`.
+    /// The desktop asks the phone to approve `request` and, once the person
+    /// has, to do the Keystore ECDH with `eph_pub`. Answer with
+    /// `reply_unlock_ok` (shared secret plus the signature of the decision on
+    /// `request`, option 0), `reply_unlock_denied` or `reply_unlock_error`.
     Unlock {
         slot_id: Vec<u8>,
         eph_pub: Vec<u8>,
+        /// The structured request, as for `Approve`; pass it to
+        /// `request_summary` and `decision_message`.
+        request: Vec<u8>,
     },
     /// Already answered by the session; reported for the UI's liveness.
     Ping,
@@ -224,16 +237,29 @@ impl LinkSession {
                         frames = ch.seal_message(&Message::Pong(n)).map_err(e)?;
                         LinkEvent::Ping
                     }
-                    Some(Message::ApproveRequest(r)) => LinkEvent::Approve(ApprovalRequest {
-                        request: r.request,
-                        request_hash: r.request_hash.to_vec(),
-                        nonce: r.nonce.to_vec(),
-                        expires_at: r.expires_at,
-                    }),
-                    Some(Message::UnlockRequest(u)) => LinkEvent::Unlock {
-                        slot_id: u.slot_id,
-                        eph_pub: u.eph_pub,
-                    },
+                    Some(Message::ApproveRequest(r)) => {
+                        // What the person will be shown must be what the
+                        // envelope says: refuse a request that does not parse
+                        // or whose nonce and expiry differ from the envelope.
+                        let req = parse_request(&r.request)?;
+                        if req.nonce != r.nonce || req.expires_at != r.expires_at {
+                            return Err("the request does not match its envelope".into());
+                        }
+                        LinkEvent::Approve(ApprovalRequest {
+                            request: r.request,
+                            request_hash: r.request_hash.to_vec(),
+                            nonce: r.nonce.to_vec(),
+                            expires_at: r.expires_at,
+                        })
+                    }
+                    Some(Message::UnlockRequest(u)) => {
+                        parse_request(&u.request)?;
+                        LinkEvent::Unlock {
+                            slot_id: u.slot_id,
+                            eph_pub: u.eph_pub,
+                            request: u.request,
+                        }
+                    }
                     Some(_) => return Err("unexpected message from the desktop".into()),
                 };
                 self.stage = Stage::Open(ch);
@@ -250,14 +276,24 @@ impl LinkSession {
         }
     }
 
-    /// Answers an approval. `signature` is the Keystore's, over whatever the
-    /// app and the desktop agreed to sign; empty for a deny.
+    /// Answers an approval. `request_hash` is the event's; `option` is the
+    /// index the person chose among the request's options and `signature` the
+    /// 64-byte (r then s) Keystore signature over
+    /// `decision_message(request, option, device_id)`. For a deny, `approve`
+    /// is false and both are ignored.
     pub fn reply_decision(
         &mut self,
         request_hash: Vec<u8>,
         approve: bool,
+        option: u8,
         signature: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, String> {
+        let (option, signature) = if approve {
+            arr::<64>(&signature, "the signature")?;
+            (option, signature)
+        } else {
+            (0, Vec::new())
+        };
         self.seal(Message::Decision(Decision {
             request_hash: arr(&request_hash, "request hash")?,
             choice: if approve {
@@ -265,15 +301,31 @@ impl LinkSession {
             } else {
                 Choice::Deny
             },
+            option,
             signature,
         }))
     }
 
-    /// Answers an unlock request with the Keystore's ECDH output.
-    pub fn reply_unlock_ok(&mut self, ecdh_result: Vec<u8>) -> Result<Vec<Vec<u8>>, String> {
-        self.seal(Message::UnlockResponse(UnlockResponse::SharedSecret(
-            ecdh_result,
-        )))
+    /// Answers an unlock request: `ecdh_result` is the Keystore's 32-byte ECDH
+    /// output with the event's `eph_pub`; `signature` is the 64-byte (r then
+    /// s) signature over `decision_message(request, 0, device_id)`. Both come
+    /// from one biometric prompt.
+    pub fn reply_unlock_ok(
+        &mut self,
+        ecdh_result: Vec<u8>,
+        signature: Vec<u8>,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        arr::<32>(&ecdh_result, "the ECDH result")?;
+        arr::<64>(&signature, "the signature")?;
+        self.seal(Message::UnlockResponse(UnlockResponse::Approved {
+            shared: ecdh_result,
+            signature,
+        }))
+    }
+
+    /// The person said no to an unlock.
+    pub fn reply_unlock_denied(&mut self) -> Result<Vec<Vec<u8>>, String> {
+        self.seal(Message::UnlockResponse(UnlockResponse::Denied))
     }
 
     /// Declines an unlock request (biometrics failed, slot unknown).
@@ -301,4 +353,200 @@ impl BleReassembler {
     pub fn push(&mut self, chunk: Vec<u8>) -> Vec<Vec<u8>> {
         self.inner.push(&chunk)
     }
+}
+
+// --- Helpers for the Kotlin side --------------------------------------------------------------
+//
+// Kotlin only signs bytes and does ECDH. Everything about what is signed, how
+// a request is read and what is advertised lives here.
+
+fn parse_request(bytes: &[u8]) -> Result<Request, String> {
+    Request::from_bytes(bytes).ok_or_else(|| "not a Vahta request".to_string())
+}
+
+/// The exact bytes the phone's Keystore signing key signs to answer
+/// `request` with option `choice`: `"vahta/v1/decision" || request hash ||
+/// choice || device_id` (the desktop's `Decision::sign` signs the same bytes:
+/// both call `Request::decision_message`). Sign them with `SHA256withECDSA`
+/// and give the result to `signature_from_der`. Refuses a `choice` the
+/// request does not offer.
+pub fn decision_message(
+    request: Vec<u8>,
+    choice: u8,
+    device_id: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let req = parse_request(&request)?;
+    if usize::from(choice) >= req.options.len().max(1) {
+        return Err("the request has no such option".into());
+    }
+    Ok(req.decision_message(choice, &arr(&device_id, "device id")?))
+}
+
+/// A device's id from its two public keys (SEC1): the first 16 bytes of
+/// `SHA-256("vahta/v1/device-id" || sign_pub || ecdh_pub)`. The desktop
+/// derives the same id when pairing.
+pub fn device_id(sign_pub: Vec<u8>, ecdh_pub: Vec<u8>) -> Vec<u8> {
+    vahta_auth::device_id_for(&sign_pub, &ecdh_pub).to_vec()
+}
+
+/// Android's `Signature` (SHA256withECDSA) gives an ASN.1 DER signature; the
+/// desktop wants the 64 bytes r then s. Rejects anything that is not one
+/// valid DER signature.
+pub fn signature_from_der(der: Vec<u8>) -> Result<Vec<u8>, String> {
+    let sig = p256::ecdsa::Signature::from_der(&der).map_err(|_| "not a DER signature")?;
+    Ok(sig.to_bytes().to_vec())
+}
+
+/// The SEC1 uncompressed point (65 bytes) inside the X.509
+/// SubjectPublicKeyInfo that Android's `PublicKey.getEncoded()` gives for a
+/// P-256 key. This is the form `PairingSession::start` wants for `sign_pub`
+/// and `ecdh_pub`. Rejects any other curve or a point not on the curve.
+pub fn sec1_from_spki(spki: Vec<u8>) -> Result<Vec<u8>, String> {
+    // SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING 04 || x || y }
+    const PREFIX: [u8; 26] = [
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let point = spki
+        .strip_prefix(&PREFIX)
+        .filter(|p| p.len() == 65)
+        .ok_or("not a P-256 public key")?;
+    p256::PublicKey::from_sec1_bytes(point).map_err(|_| "not a point on P-256")?;
+    Ok(point.to_vec())
+}
+
+/// The 8-byte tag a paired phone advertises: the first 8 bytes of
+/// SHA-256(its static Noise public key). Same bytes as the mDNS instance name
+/// in hex.
+pub fn device_tag(static_pub: Vec<u8>) -> Result<Vec<u8>, String> {
+    Ok(link_device_tag(&arr(&static_pub, "static key")?).to_vec())
+}
+
+/// What a phone advertises and how, so the desktop can find it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advert {
+    /// Advertise the service `service_uuid` in the advertising packet, and
+    /// `service_data` as service data under the same UUID in the scan
+    /// response.
+    pub service_uuid: String,
+    pub service_data: Vec<u8>,
+    /// The mDNS instance name for a `_vahta._tcp` registration of the LAN
+    /// listener.
+    pub lan_instance: String,
+    /// The GATT characteristic the desktop writes frames to.
+    pub write_characteristic: String,
+    /// The GATT characteristic the phone notifies frames on.
+    pub notify_characteristic: String,
+}
+
+fn advert(pairing: bool, tag: [u8; 8]) -> Advert {
+    Advert {
+        service_uuid: vahta_link::ble_frame::SERVICE_UUID.to_string(),
+        service_data: ble_service_data(pairing, &tag),
+        lan_instance: tag_hex(&tag),
+        write_characteristic: vahta_link::ble_frame::WRITE_CHAR_UUID.to_string(),
+        notify_characteristic: vahta_link::ble_frame::NOTIFY_CHAR_UUID.to_string(),
+    }
+}
+
+/// The advertisement while waiting to be paired, from the scanned QR string
+/// (the tag derives from the offer's one-time secret).
+pub fn pairing_advert(qr: String) -> Result<Advert, String> {
+    let offer = PairOffer::from_qr_string(&qr).map_err(e)?;
+    Ok(advert(true, pairing_tag(&offer.psk)))
+}
+
+/// The advertisement of a paired phone.
+pub fn session_advert(static_pub: Vec<u8>) -> Result<Advert, String> {
+    Ok(advert(
+        false,
+        link_device_tag(&arr(&static_pub, "static key")?),
+    ))
+}
+
+/// An approval request drawn for the person. Every string came from the
+/// computer (names, project, command) or from the agent (`agent_label`,
+/// which nobody verified); show the label marked as unverified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestView {
+    /// What is being done: `unlock`, `run_each_use`, `run_ask`, `bind`,
+    /// `http`, `add`, `reset`, `remove`, `reveal`, `copy`, `import`,
+    /// `set_tier`, `hooks_pause`, `alarm_lock`, `extend`, `guard_choice`,
+    /// `output_allow`, `devices`, `recover`, `other`.
+    pub kind: String,
+    /// The secret names it touches (never values).
+    pub names: Vec<String>,
+    pub project: String,
+    /// The command, for `run_each_use` and `run_ask`.
+    pub command: Option<String>,
+    /// The host, for `http`.
+    pub host: Option<String>,
+    /// The reason the agent gave, for `run_ask` (unverified like the label).
+    pub reason: Option<String>,
+    /// The one text parameter of the other kinds: the import source, the
+    /// session to extend, what is being chosen or managed.
+    pub detail: Option<String>,
+    /// A time in seconds: how long an unlock lasts (absent: until revoked),
+    /// the pause for `hooks_pause`, the extension for `extend`.
+    pub seconds: Option<u64>,
+    /// The strictest category of the secrets involved.
+    pub category: Option<String>,
+    /// What the agent said it is for. Not verified.
+    pub agent_label: Option<String>,
+    /// Always false: a label comes from the agent. Present so the UI cannot
+    /// forget to mark it.
+    pub agent_label_verified: bool,
+    /// The choices; the one tapped is the `option` of the reply.
+    pub options: Vec<String>,
+    pub expires_at: u64,
+    pub nonce: Vec<u8>,
+    pub vault_id: Vec<u8>,
+}
+
+/// Reads the request bytes of an `Approve` or `Unlock` event into what the
+/// approval screen shows.
+pub fn request_summary(request: Vec<u8>) -> Result<RequestView, String> {
+    let req = parse_request(&request)?;
+    let (mut command, mut host, mut reason, mut detail, mut seconds) =
+        (None, None, None, None, None);
+    match &req.action {
+        Action::Unlock { duration_secs, .. } => seconds = *duration_secs,
+        Action::RunEachUse { command: c, .. } => command = Some(c.clone()),
+        Action::RunAsk {
+            command: c,
+            reason: r,
+            ..
+        } => {
+            command = Some(c.clone());
+            reason = r.clone();
+        }
+        Action::Http { host: h, .. } => host = Some(h.clone()),
+        Action::Import { source } => detail = Some(source.clone()),
+        Action::HooksPause { secs } => seconds = Some(*secs),
+        Action::Extend { session, secs } => {
+            detail = Some(session.clone());
+            seconds = Some(*secs);
+        }
+        Action::GuardChoice { what } | Action::Devices { what } | Action::Other { what } => {
+            detail = Some(what.clone());
+        }
+        _ => {}
+    }
+    Ok(RequestView {
+        kind: req.action.key().to_string(),
+        names: req.action.names(),
+        project: req.project.clone(),
+        command,
+        host,
+        reason,
+        detail,
+        seconds,
+        category: req.category.clone(),
+        agent_label: req.agent_label.clone(),
+        agent_label_verified: false,
+        options: req.options.clone(),
+        expires_at: req.expires_at,
+        nonce: req.nonce.to_vec(),
+        vault_id: req.vault_id.to_vec(),
+    })
 }

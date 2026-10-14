@@ -23,7 +23,7 @@ use p256::{PublicKey, SecretKey};
 use vahta_vault::{Device, hex_decode, hex_encode};
 use zeroize::Zeroizing;
 
-use crate::device::{DeviceChannel, DeviceLinks, NewDevice, UnlockReply};
+use crate::device::{DeviceChannel, DeviceLinks, NewDevice, PairContext, UnlockReply};
 use crate::error::AuthError;
 use crate::request::{Decision, Request};
 
@@ -320,12 +320,12 @@ impl LoopbackLinks {
 }
 
 impl DeviceLinks for LoopbackLinks {
-    fn channel(&self, device: &Device) -> Option<Arc<dyn DeviceChannel>> {
+    fn channel(&self, _vault_id: &[u8; 16], device: &Device) -> Option<Arc<dyn DeviceChannel>> {
         self.load(&device.device_id)
             .map(|d| Arc::new(d) as Arc<dyn DeviceChannel>)
     }
 
-    fn pair(&self, name: &str, _wait: Duration) -> Result<NewDevice, AuthError> {
+    fn pair(&self, name: &str, _ctx: &PairContext<'_>) -> Result<NewDevice, AuthError> {
         let d = LoopbackDevice::new(name);
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| AuthError::Unavailable(format!("loopback directory: {e}")))?;

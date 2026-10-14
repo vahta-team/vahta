@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{LinkError, Result};
 use crate::frame::{MAX_FRAME, Pipe};
+use crate::messages::{TAG_LEN, device_tag};
 use crate::transport::{DeviceAddr, Transport};
 
 pub struct MemoryPipe {
@@ -84,9 +85,9 @@ impl Pipe for MemoryPipe {
     }
 }
 
-type Listeners = Arc<Mutex<HashMap<[u8; 32], Sender<MemoryPipe>>>>;
+type Listeners = Arc<Mutex<HashMap<[u8; TAG_LEN], Sender<MemoryPipe>>>>;
 
-/// A registry of devices that accept connections, keyed by static public key.
+/// A registry of devices that accept connections, keyed by their tag.
 /// Clones share the registry.
 #[derive(Clone, Default)]
 pub struct MemoryTransport {
@@ -112,10 +113,16 @@ impl MemoryTransport {
         Self::default()
     }
 
-    /// Makes the device with this static key reachable.
+    /// Makes the paired device with this static key reachable.
     pub fn listen(&self, static_pub: [u8; 32]) -> MemoryListener {
+        self.listen_tag(device_tag(&static_pub))
+    }
+
+    /// Makes whatever advertises this tag reachable (a phone waiting to pair
+    /// advertises [`crate::messages::pairing_tag`]).
+    pub fn listen_tag(&self, tag: [u8; TAG_LEN]) -> MemoryListener {
         let (tx, rx) = mpsc::channel();
-        self.listeners.lock().unwrap().insert(static_pub, tx);
+        self.listeners.lock().unwrap().insert(tag, tx);
         MemoryListener { rx }
     }
 }
@@ -126,12 +133,7 @@ impl Transport for MemoryTransport {
     }
 
     fn reach(&self, device: &DeviceAddr, _deadline: Instant) -> Result<Box<dyn Pipe>> {
-        let tx = self
-            .listeners
-            .lock()
-            .unwrap()
-            .get(&device.static_pub)
-            .cloned();
+        let tx = self.listeners.lock().unwrap().get(&device.tag).cloned();
         let tx = tx.ok_or_else(|| LinkError::Unreachable("no such device".into()))?;
         let (mine, theirs) = memory_pipe();
         tx.send(theirs)

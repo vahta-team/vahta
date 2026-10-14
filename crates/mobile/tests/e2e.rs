@@ -64,7 +64,14 @@ fn pair_then_session_then_approval() {
     d.read(&out.frames[0]).unwrap();
     let mut dc = d.finish().unwrap();
 
-    let req = ApproveRequest::new(b"do the thing".to_vec(), [1; 16], NOW + 30);
+    let inner = vahta_auth::Request::new(
+        vahta_auth::Action::AlarmLock,
+        "/p",
+        VAULT,
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    let req = ApproveRequest::new(inner.to_bytes(), inner.nonce, inner.expires_at);
     let mut got = None;
     for f in dc
         .seal_message(&Message::ApproveRequest(req.clone()))
@@ -79,7 +86,7 @@ fn pair_then_session_then_approval() {
     assert_eq!(a.request_hash, req.request_hash.to_vec());
 
     let frames = link
-        .reply_decision(a.request_hash, true, vec![7; 64])
+        .reply_decision(a.request_hash, true, 0, vec![7; 64])
         .unwrap();
     let mut p = Partial::default();
     let m = frames
@@ -89,6 +96,7 @@ fn pair_then_session_then_approval() {
         .unwrap();
     let Message::Decision(dec) = m else { panic!() };
     assert_eq!(dec.choice, Choice::Approve);
+    assert_eq!(dec.option, 0);
 
     // Ping is answered by the session itself.
     let f = dc.seal_message(&Message::Ping(9)).unwrap().remove(0);
@@ -135,4 +143,103 @@ fn ble_helpers_round_trip() {
         .flat_map(|c| r.push(c))
         .collect();
     assert_eq!(got, vec![frame]);
+}
+
+/// A session in which the desktop side can send whatever it likes.
+fn open_session() -> (LinkSession, vahta_link::Channel) {
+    let desktop = Keypair::generate().unwrap();
+    let key = generate_static_key().unwrap();
+    let mut link =
+        LinkSession::start(key.clone(), desktop.public.to_vec(), VAULT.to_vec()).unwrap();
+    let phone_pub: [u8; 32] = key.public.clone().try_into().unwrap();
+    let mut d = Handshake::session_initiator(&desktop, &phone_pub, &VAULT).unwrap();
+    let out = link.handle_frame(d.write().unwrap()).unwrap();
+    d.read(&out.frames[0]).unwrap();
+    (link, d.finish().unwrap())
+}
+
+fn some_request() -> vahta_auth::Request {
+    vahta_auth::Request::new(
+        vahta_auth::Action::AlarmLock,
+        "/p",
+        VAULT,
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_envelope_that_disagrees_with_its_request_is_refused() {
+    let (mut link, mut dc) = open_session();
+    let inner = some_request();
+    let lying = ApproveRequest::new(inner.to_bytes(), [0; 16], inner.expires_at);
+    let f = dc
+        .seal_message(&Message::ApproveRequest(lying))
+        .unwrap()
+        .remove(0);
+    assert!(link.handle_frame(f).is_err());
+    assert!(!link.is_established(), "an error ends the session");
+
+    // Bytes that are not a request at all.
+    let (mut link, mut dc) = open_session();
+    let junk = ApproveRequest::new(b"do the thing".to_vec(), [1; 16], NOW);
+    let f = dc
+        .seal_message(&Message::ApproveRequest(junk))
+        .unwrap()
+        .remove(0);
+    assert!(link.handle_frame(f).is_err());
+}
+
+#[test]
+fn an_unlock_request_carries_the_request_and_is_answered_with_both_halves() {
+    use vahta_link::messages::{UnlockRequest, UnlockResponse};
+    let (mut link, mut dc) = open_session();
+    let inner = some_request();
+    let eph = p256::PublicKey::from(p256::SecretKey::random(&mut rand_core::OsRng).public_key());
+    let eph = p256::EncodedPoint::from(eph).as_bytes().to_vec();
+    let f = dc
+        .seal_message(&Message::UnlockRequest(UnlockRequest {
+            slot_id: vec![1; 16],
+            eph_pub: eph.clone(),
+            request: inner.to_bytes(),
+        }))
+        .unwrap()
+        .remove(0);
+    let out = link.handle_frame(f).unwrap();
+    assert_eq!(
+        out.event,
+        LinkEvent::Unlock {
+            slot_id: vec![1; 16],
+            eph_pub: eph,
+            request: inner.to_bytes()
+        }
+    );
+    let reply = |frames: Vec<Vec<u8>>, dc: &mut vahta_link::Channel| {
+        let mut p = Partial::default();
+        frames
+            .iter()
+            .filter_map(|f| dc.open_message(&mut p, f).unwrap())
+            .next()
+            .unwrap()
+    };
+    let frames = link.reply_unlock_ok(vec![1; 32], vec![2; 64]).unwrap();
+    assert_eq!(
+        reply(frames, &mut dc),
+        Message::UnlockResponse(UnlockResponse::Approved {
+            shared: vec![1; 32],
+            signature: vec![2; 64]
+        })
+    );
+    let frames = link.reply_unlock_denied().unwrap();
+    assert_eq!(
+        reply(frames, &mut dc),
+        Message::UnlockResponse(UnlockResponse::Denied)
+    );
+    // The phone will not send a malformed approval.
+    assert!(link.reply_unlock_ok(vec![1; 5], vec![2; 64]).is_err());
+    assert!(link.reply_unlock_ok(vec![1; 32], vec![2; 63]).is_err());
+    assert!(
+        link.reply_decision(vec![0; 32], true, 0, vec![2; 8])
+            .is_err()
+    );
 }
