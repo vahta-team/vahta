@@ -1725,6 +1725,23 @@ impl Sandbox {
     }
 }
 
+// A scripted answer can be held back (`after_ms`), for tests of what happens
+// while a window waits.
+#[cfg(unix)]
+#[test]
+fn a_scripted_answer_can_be_held_back() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse","after_ms":900}"#]);
+    let t = Instant::now();
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        t.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
 // Runs commands that only a Unix has (sh, printenv, cat, true).
 #[cfg(unix)]
 #[test]
@@ -5293,10 +5310,11 @@ fn one_refused_network_tool_raises_the_alarm_naming_the_secret_and_the_program()
         s.windows_titled("Suspicious agent behaviour") == 1
     });
     let log = s.window_log();
+    // Another window may follow the alarm's; pick the alarm by its options.
     let ask = log
         .iter()
         .rev()
-        .find(|e| e["ask"] == "choose")
+        .find(|e| e["ask"] == "choose" && e["options"][0] == "Lock all sessions")
         .expect("the alarm asked");
     let lines = ask["panel"]["lines"].to_string();
     assert!(
