@@ -467,6 +467,10 @@ pub(crate) fn unlock_keeping_password(
     action: Action,
 ) -> Flow<Opened> {
     let peek = Vault::peek(path).map_err(from_vault)?;
+    // A member's package opens with the member's identity, not a password slot.
+    if peek.package {
+        return crate::members_ops::open_member(ctx, window, path, panel, &action);
+    }
     let need = need_of(&peek, &action);
     let project = path
         .parent()

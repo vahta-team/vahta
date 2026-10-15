@@ -195,6 +195,7 @@ name the Vahta vault already has refuses the whole import.
   watchdog, the alarm, detector rules, limits
 - [docs/hooks.md](docs/hooks.md): tool output redaction and observe mode
 - [docs/agent-usage.md](docs/agent-usage.md): how an agent should use Vahta
+- [docs/team.md](docs/team.md): sharing a vault with teammates through a chat
 - [DESIGN.md](DESIGN.md): how the parts fit together
 - [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md),
   [CHANGELOG.md](CHANGELOG.md)

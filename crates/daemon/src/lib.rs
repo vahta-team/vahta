@@ -27,6 +27,7 @@ pub mod journal;
 mod link_devices;
 pub use link_devices::LinkDevices;
 mod lock;
+mod members_ops;
 mod ops;
 mod output;
 mod pathfind;

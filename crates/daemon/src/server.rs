@@ -936,6 +936,10 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 crate::devices_ops::recover(&ctx, &cwd).unwrap_or_else(|r| r),
                 false,
             ),
+            ClientRequest::Members { cwd, what } => (
+                crate::members_ops::handle(&ctx, &cwd, what).unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::Sessions {} => (session_ops::list(&ctx).unwrap_or_else(|r| r), false),
             ClientRequest::SessionKill { id } => {
                 (session_ops::kill(&ctx, &id).unwrap_or_else(|r| r), false)

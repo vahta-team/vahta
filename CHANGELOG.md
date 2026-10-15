@@ -10,6 +10,14 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Team members** ([docs/team.md](docs/team.md)): share a vault by sending a file
+  through a chat. `vahta id` (a key sealed with the member's own password),
+  `vahta members add|list|extend|remove` (the owner types the six verification
+  words the member read out; expiry on every membership), `vahta grant|revoke`,
+  `vahta share MEMBER -o FILE` (a package with only that member's secrets, signed by
+  the owner), `vahta join FILE` (the member pins the owner after confirming the
+  owner's words; an older package is refused) and `vahta share --to owner` for an
+  editor to send one secret back. Roles limit what a member may do.
 - **Hardening of rules.** `vahta check` compares the rules a category implies, not
   the literal `vahta.toml`; a `vahta run` or `vahta http` refused by a secret's rules
   counts for the injection alarm (a refused network tool, shell or interpreter at

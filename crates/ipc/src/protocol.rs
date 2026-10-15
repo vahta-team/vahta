@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 16;
+pub const PROTOCOL: u32 = 17;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -234,7 +234,8 @@ impl ClientRequest {
             | DevicesExtend { cwd, .. }
             | DevicesRevoke { cwd, .. }
             | DevicesLost { cwd, .. }
-            | Recover { cwd } => Some(cwd),
+            | Recover { cwd }
+            | Members { cwd, .. } => Some(cwd),
             _ => None,
         }
     }
@@ -618,6 +619,12 @@ pub enum ClientRequest {
         file: String,
         event: GuardEvent,
     },
+    /// The team commands (`id`, `members`, `grant`, `revoke`, `share`,
+    /// `join`); see [`crate::members::MemberOp`].
+    Members {
+        cwd: String,
+        what: crate::members::MemberOp,
+    },
 }
 
 /// What the person chose when the watchdog asked.
@@ -1000,6 +1007,13 @@ pub enum ClientReply {
     Devices {
         devices: Vec<DeviceInfo>,
         unlock: UnlockInfo,
+    },
+    /// The answer to [`crate::members::MemberOp::List`]: the owner's six
+    /// verification words (what a new member compares on joining) and the
+    /// members.
+    Members {
+        owner_words: String,
+        members: Vec<crate::members::MemberInfo>,
     },
 }
 
