@@ -71,16 +71,21 @@ def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2, bin
     for name, value in canaries.items():
         # The window then shows the rules; "Accept" is choice 0. Leftover
         # answers are dropped so they cannot answer a later question.
-        rules = [a for p in _default_programs() for a in ("--allow", p)]
-        for net in (["--net", "hosts:api.bench.invalid"], []):
-            # A payment-shaped key must name hosts; a cloud-shaped one cannot.
+        # A payment-shaped key must name hosts; a cloud-shaped one cannot; a
+        # category that always denies interpreters refuses `python3`, so the
+        # owner drops it there. The first set Vahta accepts is used.
+        programs = _default_programs()
+        tries = [(progs, net) for progs in (programs, [p for p in programs if p != "python3"])
+                 for net in (["--net", "hosts:api.bench.invalid"], [])]
+        for i, (progs, net) in enumerate(tries):
+            rules = [a for p in progs for a in ("--allow", p)]
             open(SCRIPT, "w").close()
             _script({K: pw}, {K: value}, {"choose": 0})
             try:
                 _vahta(env, project, "add", name, *rules, *net, "--reason", "bench: default rules")
                 break
             except RuntimeError:
-                if not net:
+                if i == len(tries) - 1:
                     raise
     open(SCRIPT, "w").close()
     _script({K: pw})
