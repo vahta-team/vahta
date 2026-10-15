@@ -2567,7 +2567,12 @@ fn the_run_window_lists_extra_arguments_and_dropped_variables_and_the_journal_ha
         panel.contains("NPM_CONFIG_REGISTRY") && panel.contains("CARGO_REGISTRIES_EVIL_INDEX"),
         "{panel}"
     );
-    assert!(panel.contains("SOME_ORDINARY_VAR"), "{panel}");
+    assert!(
+        panel.contains("tried to point this at another place") && panel.contains("other variable"),
+        "{panel}"
+    );
+    // The rest is a count, not a list.
+    assert!(!panel.contains("SOME_ORDINARY_VAR"), "{panel}");
     assert!(
         !panel.contains("CARGO_HOME"),
         "a kept variable is not listed: {panel}"
@@ -2577,10 +2582,31 @@ fn the_run_window_lists_extra_arguments_and_dropped_variables_and_the_journal_ha
     let journal = s.journal();
     assert!(
         journal.contains("extra arguments: --manifest-path=/elsewhere")
-            && journal.contains("env dropped: CARGO_REGISTRIES_EVIL_INDEX,NPM_CONFIG_REGISTRY"),
+            && journal.contains("env dropped: CARGO_REGISTRIES_EVIL_INDEX,NPM_CONFIG_REGISTRY")
+            && journal.contains("other env variables dropped"),
         "{journal}"
     );
+    assert!(!journal.contains("SOME_ORDINARY_VAR"), "{journal}");
     assert!(!journal.contains("evil.invalid") && !journal.contains("ordinary-value"));
+
+    // With nothing that redirects, only the count is shown.
+    s.script(&[PW_ANSWER]);
+    s.run_with_env(
+        &[("SOME_ORDINARY_VAR", "ordinary-value")],
+        &["run", "--secret", "ALPHA", "--", "printenv", "HOME"],
+    );
+    let panels: Vec<String> = s
+        .window_log()
+        .iter()
+        .filter_map(|e| e["panel"]["lines"].as_array())
+        .map(|l| Value::Array(l.clone()).to_string())
+        .filter(|l| l.contains("Command: printenv HOME"))
+        .collect();
+    let last = panels.last().unwrap();
+    assert!(
+        last.contains("other variable") && !last.contains("tried to point"),
+        "{last}"
+    );
 
     // An ordinary secret with an exact rule shows the extra arguments too, and
     // nothing about the environment.

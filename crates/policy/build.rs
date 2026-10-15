@@ -9,6 +9,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+include!("redirecting_env.rs");
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
@@ -101,21 +103,7 @@ fn main() {
                     && v.find('*').is_none_or(|i| i == v.len() - 1),
                 "{file}: env_keep entry `{v}` is a variable name, or a prefix ending in *"
             );
-            for bad in [
-                "NPM_CONFIG",
-                "CARGO_REGISTR",
-                "TWINE_",
-                "PIP_",
-                "UV_",
-                "LD_",
-                "DYLD_",
-                "VAHTA_",
-                "NODE_OPTIONS",
-                "RUSTFLAGS",
-                "GIT_",
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-            ] {
+            for bad in REDIRECTING_ENV {
                 assert!(
                     !upper.starts_with(bad),
                     "{file}: env_keep must not keep `{v}` (it can redirect or load code)"

@@ -24,7 +24,7 @@ mod category;
 mod evaluate;
 
 pub use category::{
-    Category, EnvBaseline, NetKind, SAFE_ENV, all, category, describe, is_downgrade, rules_in_sync,
-    suggest,
+    Category, EnvBaseline, NetKind, SAFE_ENV, all, category, describe, is_downgrade,
+    is_redirecting_env, rules_in_sync, suggest,
 };
 pub use evaluate::{Ctx, Verdict, evaluate, extra_args};

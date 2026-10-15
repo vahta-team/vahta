@@ -75,6 +75,15 @@ pub const SAFE_ENV: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TMPDIR", "TZ",
 ];
 
+include!("../redirecting_env.rs");
+
+/// Whether `name` could redirect or alter a program (a registry, a proxy, code
+/// to load): the variables the run window names when it drops one.
+pub fn is_redirecting_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    REDIRECTING_ENV.iter().any(|p| upper.starts_with(p))
+}
+
 fn listed(list: &[&str], name: &str) -> bool {
     list.iter().any(|item| match item.strip_suffix('*') {
         Some(prefix) => {
@@ -378,6 +387,25 @@ mod tests {
                     assert!(!v.to_ascii_uppercase().starts_with(bad), "{v}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn redirecting_names_are_recognised_in_any_case() {
+        for n in [
+            "NPM_CONFIG_REGISTRY",
+            "npm_config_registry",
+            "CARGO_REGISTRIES_X_INDEX",
+            "PIP_INDEX_URL",
+            "https_proxy",
+            "GIT_SSH_COMMAND",
+            "RUSTFLAGS",
+            "NODE_OPTIONS",
+        ] {
+            assert!(is_redirecting_env(n), "{n}");
+        }
+        for n in ["PATH", "HOME", "CARGO_HOME", "SOME_VAR"] {
+            assert!(!is_redirecting_env(n), "{n}");
         }
     }
 

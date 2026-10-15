@@ -243,23 +243,36 @@ impl Steering {
         }
     }
 
-    /// The window's lines for it.
+    /// The dropped names that could redirect or alter the program, and the
+    /// count of the rest.
+    fn split_dropped(&self) -> (Vec<&str>, usize) {
+        let (redirecting, other): (Vec<&str>, Vec<&str>) = self
+            .dropped
+            .iter()
+            .map(String::as_str)
+            .partition(|n| vahta_policy::is_redirecting_env(n));
+        (redirecting, other.len())
+    }
+
+    /// The window's lines for it: the redirecting names in full, as a
+    /// warning, and a count for the rest (a real shell has hundreds).
     fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         if !self.extra.is_empty() {
             out.push(format!("Extra arguments: {}", self.extra));
         }
-        if !self.dropped.is_empty() {
-            let shown: Vec<&str> = self.dropped.iter().take(200).map(String::as_str).collect();
-            let more = self.dropped.len() - shown.len();
+        let (redirecting, other) = self.split_dropped();
+        if !redirecting.is_empty() {
             out.push(format!(
-                "Environment variables not passed on: {}{}",
-                sanitize_for_message(&shown.join(", ")),
-                if more > 0 {
-                    format!(" and {more} more")
-                } else {
-                    String::new()
-                }
+                "Your environment tried to point this at another place: {} - not passed on.",
+                sanitize_for_message(&redirecting.join(", "))
+            ));
+        }
+        if other > 0 {
+            out.push(format!(
+                "{}{other} other variable{} not passed on",
+                if redirecting.is_empty() { "" } else { "and " },
+                if other == 1 { "" } else { "s" }
             ));
         }
         out
@@ -271,8 +284,12 @@ impl Steering {
         if !self.extra.is_empty() {
             out.push_str(&format!("; extra arguments: {}", self.extra));
         }
-        if !self.dropped.is_empty() {
-            out.push_str(&format!("; env dropped: {}", self.dropped.join(",")));
+        let (redirecting, other) = self.split_dropped();
+        if !redirecting.is_empty() {
+            out.push_str(&format!("; env dropped: {}", redirecting.join(",")));
+        }
+        if other > 0 {
+            out.push_str(&format!("; {other} other env variables dropped"));
         }
         out
     }

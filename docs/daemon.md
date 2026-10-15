@@ -177,8 +177,10 @@ vahta run --secret API_KEY --as API_KEY=SERVICE_TOKEN -- ./deploy.sh
   `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `TZ` pass (with several
   secrets, what every restricted category keeps), so
   `NPM_CONFIG_REGISTRY=https://evil npm publish` runs without the variable. The
-  run window and the journal list the names that were dropped (never the
-  values), and, for any secret, the arguments beyond the allowed prefix
+  run window warns about dropped variables that could redirect the program
+  (`NPM_CONFIG_*`, `CARGO_REGISTR*`, `PIP_*`, proxies and the like) by name and
+  counts the rest; the journal does the same (never values). For any secret it
+  also shows, for any secret, the arguments beyond the allowed prefix
   (`cargo publish --manifest-path /elsewhere/Cargo.toml` shows
   `Extra arguments: --manifest-path /elsewhere/Cargo.toml`). A program's own
   config files (`.npmrc`, `.cargo/config.toml`) can still redirect it; Vahta
