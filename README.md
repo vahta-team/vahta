@@ -193,6 +193,8 @@ name the Vahta vault already has refuses the whole import.
 
 - [docs/daemon.md](docs/daemon.md): commands, sessions, binding, the daemon, the
   watchdog, the alarm, detector rules, limits
+- [docs/connectors.md](docs/connectors.md): the keys of MCP servers your coding
+  agents start (`--connector`)
 - [docs/hooks.md](docs/hooks.md): tool output redaction and observe mode
 - [docs/agent-usage.md](docs/agent-usage.md): how an agent should use Vahta
 - [docs/team.md](docs/team.md): sharing a vault with teammates through a chat

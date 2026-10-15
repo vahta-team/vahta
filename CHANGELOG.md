@@ -18,6 +18,14 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   the owner), `vahta join FILE` (the member pins the owner after confirming the
   owner's words; an older package is refused) and `vahta share --to owner` for an
   editor to send one secret back. Roles limit what a member may do.
+
+- **The connectors vault** (`--connector`): one vault per user, in Vahta's data
+  directory, for the keys of the MCP servers Claude Code, Codex and Cursor start.
+  Each connector names its harnesses and its server command; `vahta run --connector`
+  starts it with no window while `vahta unlock --connector` is open, checks the
+  direct parent is a harness it is bound to, and refuses at once, visibly in
+  `vahta daemon status`, when there is no session. See docs/connectors.md.
+
 - **Hardening of rules.** `vahta check` compares the rules a category implies, not
   the literal `vahta.toml`; a `vahta run` or `vahta http` refused by a secret's rules
   counts for the injection alarm (a refused network tool, shell or interpreter at

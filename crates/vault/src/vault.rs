@@ -149,6 +149,8 @@ pub struct Peek {
     /// A member's package, not a vault: it opens with the member's identity
     /// and has no owner password (see `member::is_package`).
     pub package: bool,
+    /// The agent roles the person approved, covered by the owner's signature.
+    pub roles: Vec<AgentRole>,
 }
 
 impl Peek {
@@ -160,6 +162,13 @@ impl Peek {
             .retain(|b| crate::project::covers(&b.from, project));
         let names: Vec<&str> = self.bindings.iter().map(|b| b.name.as_str()).collect();
         self.entries.retain(|e| names.contains(&e.name.as_str()));
+        // A role that names a secret not visible from here is not either.
+        let entries = &self.entries;
+        self.roles.retain(|r| {
+            r.secrets
+                .iter()
+                .all(|s| entries.iter().any(|e| &e.name == s))
+        });
         self
     }
 }
@@ -395,6 +404,7 @@ fn peek_of(loaded: &Loaded) -> Peek {
         package: loaded
             .current()
             .is_some_and(|d| crate::member::is_package(&d.model)),
+        roles: loaded.roles(),
     }
 }
 

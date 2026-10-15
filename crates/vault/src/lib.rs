@@ -18,6 +18,7 @@ pub mod format;
 pub mod identity;
 pub mod ka;
 pub mod manifest;
+pub mod manifest_roles;
 pub mod member;
 pub mod project;
 pub mod rules;

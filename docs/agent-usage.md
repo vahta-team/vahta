@@ -154,6 +154,60 @@ asked again. Inside the rules you work freely; every `--ask` is a window.
 4. Then `vahta add` with all of it in one command. The reply repeats the
    category's checklist.
 
+## Proposing a role for a task
+
+A secret's rules say what may ever use it. A **role** says what *this task*
+needs, and nothing else: a named template you propose once, the person approves
+once, and then you (or a sub-agent you start) work inside it with no window. A
+role holds no key and can only narrow:
+
+```
+what runs  =  the secret's own rules  ∩  the role  ∩  the session you delegate from
+```
+
+1. Think of the narrowest role that does the task. Which secrets? Which
+   commands, with their arguments (`stripe balance`, not `stripe`)? Which folder?
+   No network (`network = "none"`) unless the task needs it, and then only the
+   vendor's hosts. How long (`for`), how many times (`uses`), and only the
+   actions it needs (`actions = ["run"]`; add `"http"` only for `vahta http`).
+   Put `ask = true` when the person should say yes to every use instead.
+2. Write it in `vahta.toml`:
+
+   ```toml
+   [roles.balance_check]
+   secrets = ["STRIPE_KEY"]
+   allow   = ["stripe balance"]
+   deny    = ["@shells"]
+   network = "hosts"
+   hosts   = ["api.stripe.com"]
+   for     = "2h"
+   uses    = 20
+   actions = ["run", "http"]
+   ```
+
+3. Run `vahta role balance_check --reason "why"`. If the role is wider than one
+   of its secrets' approved rules (a program, a host, a folder or a network the
+   secret does not give), the answer says exactly what is wider and no window
+   opens: narrow the role and run it again. Otherwise the person reads the role
+   in plain words and approves it once, with the password. Only that approved
+   copy counts: editing `vahta.toml` later changes nothing until
+   `vahta role NAME` is approved again, and `vahta check` reports the
+   difference.
+4. Work inside it: `vahta delegate --role balance_check -- COMMAND`. The new
+   session has the role's secrets that your session covers, lasts no longer than
+   the shortest of `--for`, the role's `for` and your own session, and may only
+   run commands (and `vahta http`) as the role says. Everything else is refused
+   with `RoleForbids`: `reveal`, `copy`, `add`, `bind`, `remove`, `unlock`,
+   `role`, `--ask`. A delegation from inside it keeps the role; another role
+   there is refused. The `uses` count includes the delegations below it. When
+   they are spent, ask the person for a new grant.
+5. If a step needs more than the role gives, do not look for a way around it:
+   propose a new role, or ask. `vahta role --remove NAME` withdraws one (the
+   person approves, and sessions limited to it end).
+
+The person can also open a role session for you with
+`vahta unlock --role balance_check`.
+
 ## What the agent must not do
 
 - Put a key or password in chat, a commit, a `.env` file or a command line.
@@ -174,6 +228,8 @@ asked again. Inside the rules you work freely; every `--ask` is a window.
 | `vahta add`, `reset`, `tier`, `remove` | Change the vault; password required |
 | `vahta reveal`, `vahta copy` | Show a value to the person only; always a fresh password |
 | `vahta add` (rules) / `vahta bind` (approval) | The agent proposes; the person approves |
+| `vahta role` (approval) | The agent proposes a role in `vahta.toml`; the person approves it once |
 
-A session is a *runner*: it can `run` and nothing else. `reveal`, `copy` and every
+A session is a *runner*: it can `run` and nothing else (a role session, less: only
+what its role allows). `reveal`, `copy` and every
 write need a fresh password even inside one.

@@ -96,12 +96,24 @@ fn status_text(s: &StatusInfo) -> String {
         text.push('\n');
         text.push_str(&alarm_text(at));
     }
+    for line in crate::connector_cmd::refusal_lines(&s.connector_refusals) {
+        text.push('\n');
+        text.push_str(&line);
+    }
     text
 }
 
 /// "alarm raised at 2026-10-08 12:34:56 UTC (sessions were locked or the
 /// agent was flagged; unlock again to clear this)".
 pub fn alarm_text(at: u64) -> String {
+    format!(
+        "alarm raised at {}; it stays until the next unlock",
+        utc_text(at)
+    )
+}
+
+/// Unix seconds as `2026-10-08 12:34:56 UTC`.
+pub fn utc_text(at: u64) -> String {
     let (days, rest) = (at / 86_400, at % 86_400);
     // Civil date from days since 1970-01-01 (Hinnant's algorithm).
     let z = days as i64 + 719_468;
@@ -114,7 +126,7 @@ pub fn alarm_text(at: u64) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!(
-        "alarm raised at {year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC; it stays until the next unlock",
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
         rest / 3600,
         rest % 3600 / 60,
         rest % 60
@@ -185,7 +197,10 @@ fn run_daemon(env: &Env, stderr: &mut dyn Write) -> i32 {
     }
 }
 
-fn running(env: &Env, stderr: &mut dyn Write) -> Result<Option<(Connector, Connection)>, i32> {
+pub(crate) fn running(
+    env: &Env,
+    stderr: &mut dyn Write,
+) -> Result<Option<(Connector, Connection)>, i32> {
     let connector = connector(env, false).map_err(|msg| {
         let _ = writeln!(stderr, "vahta daemon: error: {msg}");
         EXIT_DAEMON
@@ -200,7 +215,7 @@ fn running(env: &Env, stderr: &mut dyn Write) -> Result<Option<(Connector, Conne
     }
 }
 
-fn status_of(conn: &mut Connection) -> Result<StatusInfo, ClientError> {
+pub(crate) fn status_of(conn: &mut Connection) -> Result<StatusInfo, ClientError> {
     match conn.request(&ClientRequest::Status {})? {
         ClientReply::Status(s) => Ok(s),
         _ => Err(ClientError::Unavailable("unexpected reply".to_string())),
@@ -232,6 +247,7 @@ fn status(env: &Env, json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write)
                     "uptime_secs": s.uptime_secs,
                     "runtime_dir": s.runtime_dir,
                     "alarm_at": s.alarm_at,
+                    "connector_refusals": s.connector_refusals,
                 });
                 let _ = writeln!(
                     stdout,
@@ -422,6 +438,11 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::NoRules => "no approved rules yet; propose them with `vahta bind`",
         RefusalKind::HostNotAllowed => "not approved for this host",
         RefusalKind::NotFromHere => "not allowed from here",
+        RefusalKind::RoleForbids => "not allowed by the agent role this session is limited to",
+        RefusalKind::RoleTooWide => "wider than the secret's own approved rules",
+        RefusalKind::RoleExhausted => "the role's uses are spent",
+        RefusalKind::UnknownRole => "no such approved role",
+        RefusalKind::NotFromHarness => "not started by a harness this connector is bound to",
     }
 }
 

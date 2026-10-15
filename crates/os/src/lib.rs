@@ -113,6 +113,15 @@ pub fn exe_name(pid: u32) -> Option<String> {
     sys::exe_name(pid)
 }
 
+/// The command line of `pid`, its words joined by single spaces, if it can be
+/// read: `/proc/PID/cmdline` on Linux. `None` on macOS and Windows, where
+/// reading another process's arguments is not done here; a caller that needs
+/// it must then decide without. Used only to tell `node /x/claude-code/cli.js`
+/// from any other `node`.
+pub fn command_line(pid: u32) -> Option<String> {
+    sys::command_line(pid)
+}
+
 /// Whether `pid` runs as the user this process runs as. False when it cannot
 /// be told: unknown is not mine.
 pub fn owned_by_me(pid: u32) -> bool {

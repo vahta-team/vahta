@@ -24,6 +24,22 @@ pub fn scripted_from_env() -> Option<Box<dyn PromptSurface>> {
     }
 }
 
+/// In a test build, an executable name that counts as every harness for the
+/// check of `vahta run --connector`'s parent (`VAHTA_TEST_CONNECTOR_PARENT`),
+/// so a test can stand in for the harness. Always `None` in the shipped build.
+pub fn connector_parent_alias() -> Option<String> {
+    #[cfg(feature = "test-surface")]
+    {
+        std::env::var("VAHTA_TEST_CONNECTOR_PARENT")
+            .ok()
+            .filter(|v| !v.is_empty())
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
 /// In a test build, whether refusals by a secret's rules are kept out of the
 /// alarm (`VAHTA_TEST_MUTE_REFUSAL_ALARM` set). Always `false` in the shipped
 /// build.

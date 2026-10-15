@@ -36,6 +36,7 @@
 mod autostart;
 mod bind_cmd;
 mod config_cmd;
+mod connector_cmd;
 mod daemon_cmd;
 mod devices_cmd;
 mod guard_cmd;
@@ -44,6 +45,7 @@ mod http_cmd;
 mod members_cmd;
 mod output_cmd;
 mod remote_cmd;
+mod role_cmd;
 mod run_cmd;
 mod session_cmds;
 mod setup;
@@ -114,7 +116,8 @@ commands:
   http    one HTTPS request with a secret in a header or query, to bound hosts
   bind    say which commands may use a secret (the person approves)
   remote  `remote on|off`: let other projects use this vault (the person approves)
-  delegate  narrow your session for a sub-agent and run it
+  role    propose an agent role for a task, or `--remove` one (the person approves)
+  delegate  narrow your session for a sub-agent (or to a --role) and run it
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
   sessions  list sessions, or `kill ID` one (no password)
@@ -139,6 +142,10 @@ commands:
   daemon  run, inspect, stop or restart the daemon that owns the vault
 
 Run `vahta <command> --help` for the options.
+
+init, add, list, check, bind, unlock, run and remove also take --connector: they
+then work on the connectors vault (the keys of the MCP servers your coding agents
+start) instead of the project's. See docs/connectors.md.
 ";
 
 struct ScanArgs {
@@ -416,6 +423,9 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
     {
         setup::stale_notice(setup_env, stderr);
     }
+    if let Some(code) = connector_cmd::dispatch(args, env, stdout, stderr) {
+        return code;
+    }
     match args.first().map(String::as_str) {
         Some("setup") => setup::run(&args[1..], env, stdout, stderr),
         Some("scan") => run_scan(&args[1..], env, stdout, stderr),
@@ -441,6 +451,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         }
         Some("bind") => bind_cmd::run(&args[1..], env, stdout, stderr),
         Some("remote") => remote_cmd::run(&args[1..], env, stdout, stderr),
+        Some("role") => role_cmd::run(&args[1..], env, stdout, stderr),
         Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
         Some("http") => http_cmd::run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),

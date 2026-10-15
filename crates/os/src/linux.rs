@@ -64,6 +64,16 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
     }
 }
 
+pub(crate) fn command_line(pid: u32) -> Option<String> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let words: Vec<String> = bytes
+        .split(|b| *b == 0)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 pub(crate) fn process_cwd(pid: u32) -> io::Result<std::path::PathBuf> {
     // A directory that was removed reads as `/path (deleted)`; canonicalizing
     // it fails, which is the answer: no verified directory.

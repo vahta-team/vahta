@@ -191,7 +191,7 @@ fn fill(template: &str, names: &[String], values: &[(String, SecretValue)]) -> O
 }
 
 /// Whether `url` is a destination one of `rules` approves.
-fn host_allowed(rules: &[vahta_vault::HostRule], url: &Url) -> bool {
+pub(crate) fn host_allowed(rules: &[vahta_vault::HostRule], url: &Url) -> bool {
     rules.iter().any(|r| {
         let port_ok = r.port.is_none_or(|p| p == url.port);
         let ip = r.host.parse::<std::net::IpAddr>().is_ok();
@@ -371,6 +371,13 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
             return Err(unknown_name(n));
         }
     }
+    // A session limited to a role: the role must give `http` at all, before
+    // anything is said about hosts.
+    let found_session = run_ops::find_session(ctx, &peek, found.used_from.as_deref())?;
+    let role = crate::role_ops::active(ctx, found_session.as_ref().map(|f| f.0.as_str()))?;
+    if let Some(a) = &role {
+        crate::role_ops::require_action(ctx, a, vahta_vault::Action::Http, &peek, &declared)?;
+    }
     let destination = shown(&target);
     let mut lines: Vec<String> = Vec::new();
     let mut failing: Vec<String> = Vec::new();
@@ -430,7 +437,21 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
     }
 
     // --- The values: the session or the window, as for a run. ---------------
-    let found_session = run_ops::find_session(ctx, &peek, found.used_from.as_deref())?;
+    if let Some(a) = &role {
+        crate::role_ops::narrow_http(ctx, a, &peek, &declared, &destination, |hosts| {
+            host_allowed(hosts, &target)
+        })?;
+        crate::role_ops::check_uses(ctx, a, &peek, &declared)?;
+        crate::role_ops::ask_use(
+            ctx,
+            a,
+            &project,
+            &vault_path,
+            &peek,
+            &declared,
+            vec![format!("Request: {method} {destination}")],
+        )?;
+    }
     let (values, via) = run_ops::unlock_values(
         ctx,
         Unlock {
@@ -454,6 +475,11 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
             },
         },
     )?;
+
+    if let Some(a) = &role {
+        crate::role_ops::note_use(ctx, a);
+    }
+    let role_name = role.as_ref().map(|a| a.role.name.clone());
 
     // --- Fill in, send, scrub. ----------------------------------------------
     let unusable = || error("a secret's value cannot be put in a header or a query value");
@@ -512,6 +538,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
                 Entry::new("http_request")
                     .vault(&peek.vault_id)
                     .names(&declared)
+                    .role(role_name.as_deref())
                     .http(&method, &destination, None, None)
                     .result("error", Some(&format!("{message}; {via_text}"))),
             );
@@ -525,6 +552,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
         Entry::new("http_request")
             .vault(&peek.vault_id)
             .names(&declared)
+            .role(role_name.as_deref())
             .http(
                 &method,
                 &destination,

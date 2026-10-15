@@ -43,6 +43,9 @@ pub(crate) struct Ctx<'a> {
     /// The calling project, once the request turned out to be remote use of
     /// another project's vault: every window and journal line then names it.
     pub used_from: std::sync::Mutex<Option<PathBuf>>,
+    /// The request is for the connectors vault (`--connector`): every lookup
+    /// of "the vault" goes to it, and to nothing found from a directory.
+    pub connector: bool,
 }
 
 /// An early end: the reply to send.
@@ -106,6 +109,16 @@ pub(crate) fn vault_tier(tier: protocol::Tier) -> Tier {
 }
 
 impl Ctx<'_> {
+    /// The vault this request works on: the project's, found from `cwd`, or,
+    /// for a `--connector` request, the connectors vault and never a project's.
+    pub(crate) fn vault_for(&self, cwd: &str) -> Flow<(Project, PathBuf)> {
+        if self.connector {
+            crate::connector_ops::find(self)
+        } else {
+            find_vault(cwd)
+        }
+    }
+
     /// Who is asking, as the person should read it: the agent the request
     /// comes from (the anchor `unlock` would choose, e.g. `claude`), and the
     /// process that connected (usually `vahta` itself) when it is another.
@@ -197,6 +210,12 @@ impl Ctx<'_> {
     }
 
     pub(crate) fn panel(&self, title: &str, mut lines: Vec<String>) -> Panel {
+        if self.connector {
+            for line in lines.iter_mut().filter(|l| l.starts_with("Project: ")) {
+                *line =
+                    "Vault: the connectors vault (your own connections, not a project)".to_string();
+            }
+        }
         // Remote use names both ends: `Vault: <vault> · used from <project>`.
         if let Some(from) = self.used_from() {
             for line in lines.iter_mut().filter(|l| l.starts_with("Vault: ")) {
@@ -228,6 +247,14 @@ pub(crate) fn find_vault(cwd: &str) -> Flow<(Project, PathBuf)> {
     };
     let vault = project.vault_path();
     if !vault.is_file() {
+        return Err(refused(
+            RefusalKind::NoVault,
+            "this project has no vault yet; run `vahta init`",
+        ));
+    }
+    // The connectors vault answers no lookup by directory, even if its file
+    // was copied into a project.
+    if crate::connector_ops::is_connectors_vault(&vault) {
         return Err(refused(
             RefusalKind::NoVault,
             "this project has no vault yet; run `vahta init`",
@@ -393,7 +420,10 @@ pub(crate) fn store(
 ) -> Flow<ClientReply> {
     let name = what.name;
     check_name(name)?;
-    let (project, vault_path) = find_vault(cwd)?;
+    let (project, vault_path) = ctx.vault_for(cwd)?;
+    if ctx.connector {
+        crate::connector_ops::check_add(mode == StoreMode::Add, &what)?;
+    }
     // The plain index says whether the name is there, so the wrong command is
     // refused before a window opens and costs the person nothing.
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
@@ -549,9 +579,12 @@ pub(crate) fn store(
                 args: proposal_args.as_ref().unwrap_or(&default_args),
                 reason: what.rules.as_ref().and_then(|r| r.reason.as_deref()),
                 root: &project.root,
+                harnesses: what.rules.as_ref().map_or(&[], |r| r.harnesses.as_slice()),
             },
         )?;
-        tier = o.tier;
+        // A connector's server starts with no window, so only a session can
+        // open its secret.
+        tier = if ctx.connector { Tier::Session } else { o.tier };
         offered = Some(o.rule_set);
     } else if tier == Tier::Session && matches!(class, Class::Payment | Class::Cloud) {
         // A key that moves money or opens an account is worth the password
@@ -933,7 +966,7 @@ pub(crate) fn set_tier(ctx: &Ctx<'_>, cwd: &str, name: &str, tier: Tier) -> Flow
 
 pub(crate) fn remove(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> {
     check_name(name)?;
-    let (project, vault_path) = find_vault(cwd)?;
+    let (project, vault_path) = ctx.vault_for(cwd)?;
     ensure_known(&vault_path, name)?;
     let mut window = ctx.window("Remove a secret")?;
     let mut lines = lines_for(&project, &vault_path);
