@@ -11,7 +11,7 @@
 //! before anything else is looked at, so a future file never gets as far as a
 //! misleading "damaged" error.
 //!
-//! Each released format has its own frozen module (`v1.rs` to `v4.rs`). A file of an older
+//! Each released format has its own frozen module (`v1.rs` to `v5.rs`). A file of an older
 //! format is read by its own module and, on an owner unlock, carried forward by
 //! the chain in `upgrade.rs` to [`current`]. A file of the current format needs
 //! no chain. There is no way to write an older format: only the current module
@@ -22,6 +22,7 @@ pub mod v1;
 pub mod v2;
 pub mod v3;
 pub mod v4;
+pub mod v5;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -30,7 +31,7 @@ use crate::{Error, RecoveryKey};
 
 /// The module of the format this build writes. The in-memory vault is made of
 /// its types.
-pub use v4 as current;
+pub use v5 as current;
 
 pub const MAGIC: &[u8; 8] = b"VAHTAVLT";
 /// The format this build writes.
@@ -76,7 +77,7 @@ pub fn read_version(bytes: &[u8]) -> Result<u16, Error> {
 /// is the pseudo-format that exercises the upgrade chain.
 fn is_known(format: u16) -> bool {
     match format {
-        1..=4 => true,
+        1..=5 => true,
         #[cfg(test)]
         0 => true,
         _ => false,
@@ -114,6 +115,7 @@ pub enum Loaded {
     V2(v2::Decoded),
     V3(v3::Decoded),
     V4(v4::Decoded),
+    V5(v5::Decoded),
     /// The test pseudo-format: the same layout as format 1 under another
     /// number, to prove the chain before a real second format exists.
     #[cfg(test)]
@@ -128,6 +130,7 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, Error> {
         2 => Ok(Loaded::V2(v2::decode(&frame)?)),
         3 => Ok(Loaded::V3(v3::decode(&frame)?)),
         4 => Ok(Loaded::V4(v4::decode(&frame)?)),
+        5 => Ok(Loaded::V5(v5::decode(&frame)?)),
         #[cfg(test)]
         0 => Ok(Loaded::V0(v1::decode_as(&frame, 0)?)),
         _ => Err(Error::NotAVault),
@@ -141,6 +144,7 @@ impl Loaded {
             Loaded::V2(_) => 2,
             Loaded::V3(_) => 3,
             Loaded::V4(_) => 4,
+            Loaded::V5(_) => 5,
             #[cfg(test)]
             Loaded::V0(_) => 0,
         }
@@ -153,6 +157,7 @@ impl Loaded {
             Loaded::V2(d) => &d.model.header,
             Loaded::V3(d) => &d.model.header,
             Loaded::V4(d) => &d.model.header,
+            Loaded::V5(d) => &d.model.header,
             #[cfg(test)]
             Loaded::V0(d) => &d.model.header,
         }
@@ -164,6 +169,7 @@ impl Loaded {
             Loaded::V2(d) => &d.model.owner,
             Loaded::V3(d) => &d.model.owner,
             Loaded::V4(d) => &d.model.owner,
+            Loaded::V5(d) => &d.model.owner,
             #[cfg(test)]
             Loaded::V0(d) => &d.model.owner,
         }
@@ -175,6 +181,7 @@ impl Loaded {
             Loaded::V2(d) => &d.model.index,
             Loaded::V3(d) => &d.model.index,
             Loaded::V4(d) => &d.model.index,
+            Loaded::V5(d) => &d.model.index,
             #[cfg(test)]
             Loaded::V0(d) => &d.model.index,
         }
@@ -186,6 +193,7 @@ impl Loaded {
             Loaded::V2(d) => d.model.recipients.len(),
             Loaded::V3(d) => d.model.recipients.len(),
             Loaded::V4(d) => d.model.recipients.len(),
+            Loaded::V5(d) => d.model.recipients.len(),
             #[cfg(test)]
             Loaded::V0(d) => d.model.recipients.len(),
         }
@@ -193,10 +201,11 @@ impl Loaded {
 
     /// The approved rules, in the current format's type (an older format's
     /// bindings read as rule sets with `Network::App`).
-    pub fn rule_sets(&self) -> Vec<v4::RuleSet> {
-        let up = |sets: &[v2::RuleSet]| sets.iter().map(v4::RuleSet::from_v2).collect();
+    pub fn rule_sets(&self) -> Vec<v5::RuleSet> {
+        let up = |sets: &[v2::RuleSet]| sets.iter().map(v5::RuleSet::from_v2).collect();
         match self {
-            Loaded::V4(d) => d.model.bindings.clone(),
+            Loaded::V5(d) => d.model.bindings.clone(),
+            Loaded::V4(d) => d.model.bindings.iter().map(v5::RuleSet::from_v4).collect(),
             Loaded::V3(d) => up(&d.model.bindings),
             Loaded::V2(d) => up(&d.model.bindings),
             Loaded::V1(d) => up(&d
@@ -223,6 +232,7 @@ impl Loaded {
             Loaded::V2(d) => d.model.slots.clone(),
             Loaded::V3(d) => d.model.slots.clone(),
             Loaded::V4(d) => d.model.slots.clone(),
+            Loaded::V5(d) => d.model.slots.clone(),
             Loaded::V1(d) => older(d),
             #[cfg(test)]
             Loaded::V0(d) => older(d),
@@ -234,6 +244,7 @@ impl Loaded {
         match self {
             Loaded::V3(d) => d.model.successors.clone(),
             Loaded::V4(d) => d.model.successors.clone(),
+            Loaded::V5(d) => d.model.successors.clone(),
             _ => Vec::new(),
         }
     }
@@ -244,6 +255,7 @@ impl Loaded {
             Loaded::V2(d) => d.model.devices.clone(),
             Loaded::V3(d) => d.model.devices.clone(),
             Loaded::V4(d) => d.model.devices.clone(),
+            Loaded::V5(d) => d.model.devices.clone(),
             _ => Vec::new(),
         }
     }
@@ -254,15 +266,16 @@ impl Loaded {
             Loaded::V2(d) => d.signer,
             Loaded::V3(d) => d.signer,
             Loaded::V4(d) => d.signer,
+            Loaded::V5(d) => d.signer,
             #[cfg(test)]
             Loaded::V0(d) => d.signer,
         }
     }
 
     /// The file as the current format, when it is one.
-    pub fn current(&self) -> Option<&v4::Decoded> {
+    pub fn current(&self) -> Option<&v5::Decoded> {
         match self {
-            Loaded::V4(d) => Some(d),
+            Loaded::V5(d) => Some(d),
             _ => None,
         }
     }
@@ -270,7 +283,19 @@ impl Loaded {
     /// Whether the person has opted this vault in to use from other projects
     /// (off in every older format).
     pub fn remote(&self) -> bool {
-        matches!(self, Loaded::V4(d) if d.model.remote)
+        match self {
+            Loaded::V5(d) => d.model.remote,
+            Loaded::V4(d) => d.model.remote,
+            _ => false,
+        }
+    }
+
+    /// What the vault is for (every older format is a `Project` vault).
+    pub fn kind(&self) -> v5::VaultKind {
+        match self {
+            Loaded::V5(d) => d.model.kind,
+            _ => v5::VaultKind::Project,
+        }
     }
 
     pub fn upgrade_pending(&self) -> bool {
@@ -310,6 +335,19 @@ pub struct OwnerOpen {
 /// is provided.
 pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpen, Error> {
     let unlocked = match (loaded, &access) {
+        (Loaded::V5(d), _) => {
+            let u = match access {
+                OwnerAccess::Password(pw) => v5::unlock_password(d, pw)?,
+                OwnerAccess::Recovery(k) => v5::unlock_recovery(d, k)?,
+                OwnerAccess::Slot(id, kek) => v5::unlock_slot(d, id, kek)?,
+            };
+            return Ok(OwnerOpen {
+                state: OwnerState::Current(u),
+                from: None,
+            });
+        }
+        // Formats 2 to 4 carry forward with no key needed beyond the unlock
+        // itself.
         (Loaded::V4(d), _) => {
             let u = match access {
                 OwnerAccess::Password(pw) => v4::unlock_password(d, pw)?,
@@ -317,12 +355,10 @@ pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpe
                 OwnerAccess::Slot(id, kek) => v4::unlock_slot(d, id, kek)?,
             };
             return Ok(OwnerOpen {
-                state: OwnerState::Current(u),
-                from: None,
+                state: OwnerState::Current(upgrade::upgrade_v4_to_v5(&u)?),
+                from: Some(4),
             });
         }
-        // Formats 2 and 3 carry forward with no key needed beyond the unlock
-        // itself.
         (Loaded::V3(d), _) => {
             let u = match access {
                 OwnerAccess::Password(pw) => v3::unlock_password(d, pw)?,
@@ -330,7 +366,9 @@ pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpe
                 OwnerAccess::Slot(id, kek) => v3::unlock_slot(d, id, kek)?,
             };
             return Ok(OwnerOpen {
-                state: OwnerState::Current(upgrade::upgrade_v3_to_v4(&u)?),
+                state: OwnerState::Current(upgrade::upgrade_v4_to_v5(&upgrade::upgrade_v3_to_v4(
+                    &u,
+                )?)?),
                 from: Some(3),
             });
         }
@@ -341,8 +379,8 @@ pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpe
                 OwnerAccess::Slot(id, kek) => v2::unlock_slot(d, id, kek)?,
             };
             return Ok(OwnerOpen {
-                state: OwnerState::Current(upgrade::upgrade_v3_to_v4(&upgrade::upgrade_v2_to_v3(
-                    &u,
+                state: OwnerState::Current(upgrade::upgrade_v4_to_v5(&upgrade::upgrade_v3_to_v4(
+                    &upgrade::upgrade_v2_to_v3(&u)?,
                 )?)?),
                 from: Some(2),
             });
@@ -383,7 +421,7 @@ pub fn unlock_owner(loaded: &Loaded, access: OwnerAccess<'_>) -> Result<OwnerOpe
 pub struct RecipientOpen {
     pub fmt: u16,
     pub model: current::Model,
-    pub recipient: v2::Recipient,
+    pub recipient: v5::Recipient,
 }
 
 pub fn unlock_recipient(
@@ -392,20 +430,25 @@ pub fn unlock_recipient(
     enc_sk: &[u8; 32],
 ) -> Result<RecipientOpen, Error> {
     match loaded {
-        Loaded::V4(d) => Ok(RecipientOpen {
+        Loaded::V5(d) => Ok(RecipientOpen {
             fmt: d.fmt,
             model: d.model.clone(),
-            recipient: v4::check_recipient(d, recipient_id, enc_sk)?,
+            recipient: v5::check_recipient(d, recipient_id, enc_sk)?,
+        }),
+        Loaded::V4(d) => Ok(RecipientOpen {
+            fmt: d.fmt,
+            model: v5::Model::from_v4(&d.model),
+            recipient: v5::Recipient::from_v1(&v4::check_recipient(d, recipient_id, enc_sk)?),
         }),
         Loaded::V3(d) => Ok(RecipientOpen {
             fmt: d.fmt,
-            model: v4::Model::from_v3(&d.model),
-            recipient: v3::check_recipient(d, recipient_id, enc_sk)?,
+            model: v5::Model::from_v3(&d.model),
+            recipient: v5::Recipient::from_v1(&v3::check_recipient(d, recipient_id, enc_sk)?),
         }),
         Loaded::V2(d) => Ok(RecipientOpen {
             fmt: d.fmt,
-            model: v4::Model::from_v2(&d.model),
-            recipient: v2::check_recipient(d, recipient_id, enc_sk)?,
+            model: v5::Model::from_v2(&d.model),
+            recipient: v5::Recipient::from_v1(&v2::check_recipient(d, recipient_id, enc_sk)?),
         }),
         Loaded::V1(d) => older_recipient(d, recipient_id, enc_sk),
         #[cfg(test)]
@@ -421,7 +464,7 @@ fn older_recipient(
     let recipient = v1::check_recipient(d, recipient_id, enc_sk)?;
     Ok(RecipientOpen {
         fmt: d.fmt,
-        model: v4::Model::from_v1(&d.model),
-        recipient,
+        model: v5::Model::from_v1(&d.model),
+        recipient: v5::Recipient::from_v1(&recipient),
     })
 }

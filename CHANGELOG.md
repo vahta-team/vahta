@@ -32,7 +32,7 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   daemon reads the caller's directory from the kernel instead of trusting the
   client. Sessions bind to the pair (vault, calling project). Vault format 4;
   protocol 16.
-- **The vault** (`vault.vht`, format 4; older files upgrade on the owner's
+- **The vault** (`vault.vht`, format 5; older files upgrade on the owner's
   unlock and the original is kept as `vault.vht.vN.bak`): Argon2id for the password,
   XChaCha20-Poly1305 for every sealed value, a per-secret key wrapped for the
   owner and each recipient, and an Ed25519-signed, plaintext name index so names

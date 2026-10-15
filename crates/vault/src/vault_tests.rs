@@ -339,6 +339,7 @@ fn entry(
         sign_pk: keys.sign_pk,
         added: 1,
         added_by,
+        expires_at: None,
         cert: current::Sig([0; 64]),
     };
     r.certify(&v.vault_id(), issuer);
@@ -1395,7 +1396,7 @@ fn a_rekey_writes_a_successor_the_old_key_signed() {
     let t = t();
     let (_, _, _) = rekeyed_on_a(&t);
     let peek = Vault::peek(&t.path).unwrap();
-    assert_eq!(peek.format, 4);
+    assert_eq!(peek.format, CURRENT);
     assert_eq!(peek.successors.len(), 1);
     let s = &peek.successors[0];
     assert_eq!(s.new_owner_sign_pub, peek.owner_sign_pk);
@@ -1716,4 +1717,452 @@ fn peek_shows_slots_and_devices_without_a_key() {
     let view = peek.slots.iter().find(|s| s.info.slot_id == lost).unwrap();
     assert_eq!(view.params, vec![1, 2, 3]);
     assert_eq!(peek.devices.len(), 1);
+}
+
+// --- Format 5: kind, roles, member expiry, harnesses ---------------------------
+
+fn sample_role(name: &str, secrets: &[&str]) -> AgentRole {
+    AgentRole {
+        name: name.to_string(),
+        secrets: secrets.iter().map(|s| s.to_string()).collect(),
+        allow: sample_binding("x").allow,
+        deny: sample_binding("x").deny,
+        network: Some(current::Network::None),
+        dirs: Vec::new(),
+        max_for_secs: Some(600),
+        max_uses: Some(3),
+        actions: vec![current::Action::Run],
+        ask_each_use: false,
+        approved_at: 1_700_000_000,
+    }
+}
+
+fn resigned_role_file(v: &Vault, roles: Vec<AgentRole>) -> Vec<u8> {
+    let mut m = model(v);
+    m.roles = roles;
+    resigned(v, &m)
+}
+
+#[test]
+fn kind_and_roles_round_trip_through_save_and_load() {
+    let t = t();
+    assert_eq!(
+        Vault::create(PW, KdfParams::TEST).unwrap().0.kind(),
+        VaultKind::Project
+    );
+    let (mut v, _) = Vault::create_with_kind(PW, KdfParams::TEST, VaultKind::Connectors).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.set("B", b"fake-two", Kind::Env, Tier::Session).unwrap();
+    v.set_role(sample_role("reader", &["A"])).unwrap();
+    v.set_role(sample_role("writer", &["A", "B"])).unwrap();
+    // Same name: replaced, not added.
+    let mut again = sample_role("reader", &["B"]);
+    again.ask_each_use = true;
+    v.set_role(again.clone()).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!((peek.format, peek.kind), (CURRENT, VaultKind::Connectors));
+    let v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(v.kind(), VaultKind::Connectors);
+    assert_eq!(v.roles().len(), 2);
+    assert_eq!(v.roles()[0], again);
+    assert_eq!(v.roles()[1].secrets, ["A", "B"]);
+
+    // Removing a secret takes it out of the roles; removing a role is final.
+    let mut v = v;
+    v.remove("B").unwrap();
+    assert!(
+        v.roles()
+            .iter()
+            .all(|r| !r.secrets.contains(&"B".to_string()))
+    );
+    v.remove_role("writer").unwrap();
+    assert!(matches!(v.remove_role("writer"), Err(Error::NotFound(_))));
+    v.save(&t.path, &t.store).unwrap();
+    let v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(v.roles().len(), 1);
+    assert_eq!(v.kind(), VaultKind::Connectors);
+}
+
+#[test]
+fn role_limits_are_enforced_on_set_and_on_parse() {
+    let t = t();
+    let (mut v, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+
+    let bad = |f: &dyn Fn(&mut AgentRole)| {
+        let mut r = sample_role("r", &["A"]);
+        f(&mut r);
+        r
+    };
+    let cases = [
+        bad(&|r| r.name = "not a name".into()),
+        bad(&|r| r.name = String::new()),
+        bad(&|r| r.name = "N".repeat(crate::MAX_NAME_LEN + 1)),
+        bad(&|r| r.secrets = vec!["A".into(), "A".into()]),
+        bad(&|r| r.secrets = vec!["bad name".into()]),
+        bad(&|r| {
+            r.secrets = (0..=current::MAX_ROLE_SECRETS)
+                .map(|i| format!("S{i}"))
+                .collect()
+        }),
+        bad(&|r| r.max_uses = Some(0)),
+        bad(&|r| r.max_for_secs = Some(0)),
+        bad(&|r| r.actions = vec![current::Action::Run, current::Action::Run]),
+        bad(&|r| r.network = Some(current::Network::Hosts(Vec::new()))),
+    ];
+    for r in &cases {
+        assert!(v.set_role(r.clone()).is_err(), "{r:?}");
+        // The same role in a signed file is refused by the reader too (the
+        // checks that need the vault's secrets aside).
+        let file = resigned_role_file(&v, vec![r.clone()]);
+        if r.secrets.iter().all(|s| crate::valid_name(s)) {
+            assert!(
+                matches!(Vault::peek_bytes(&file), Err(Error::Corrupt("roles"))),
+                "{r:?}"
+            );
+        }
+    }
+    // A secret the vault does not have.
+    assert!(matches!(
+        v.set_role(sample_role("r", &["NOPE"])),
+        Err(Error::NotFound(_))
+    ));
+    assert!(v.roles().is_empty());
+
+    // Too many roles: the limit itself is fine, one more is not.
+    let many: Vec<AgentRole> = (0..=current::MAX_ROLES)
+        .map(|i| sample_role(&format!("R{i}"), &[]))
+        .collect();
+    assert!(
+        Vault::peek_bytes(&resigned_role_file(&v, many[..current::MAX_ROLES].to_vec())).is_ok()
+    );
+    assert!(matches!(
+        Vault::peek_bytes(&resigned_role_file(&v, many.clone())),
+        Err(Error::Corrupt("roles"))
+    ));
+    for r in &many[..current::MAX_ROLES] {
+        v.set_role(r.clone()).unwrap();
+    }
+    assert!(v.set_role(many[current::MAX_ROLES].clone()).is_err());
+    assert_eq!(v.roles().len(), current::MAX_ROLES);
+    // Replacing one at the limit still works.
+    v.set_role(sample_role("R0", &["A"])).unwrap();
+
+    // Two roles with one name in a file.
+    let dup = resigned_role_file(&v, vec![sample_role("D", &[]), sample_role("D", &[])]);
+    assert!(matches!(
+        Vault::peek_bytes(&dup),
+        Err(Error::Corrupt("roles"))
+    ));
+    v.save(&t.path, &t.store).unwrap();
+}
+
+#[test]
+fn only_the_owner_sets_roles() {
+    let t = t();
+    let (_, [_, (_, edit, edit_k), _]) = built(&t);
+    let mut v = Vault::open_as_recipient(&t.path, &edit, &edit_k, &t.store).unwrap();
+    assert!(matches!(
+        v.set_role(sample_role("r", &[])),
+        Err(Error::NotPermitted)
+    ));
+    assert!(matches!(v.remove_role("r"), Err(Error::NotPermitted)));
+}
+
+#[test]
+fn harnesses_belong_to_connectors_vaults() {
+    let t = t();
+    let with = |harnesses: &[&str]| RuleSet {
+        harnesses: harnesses.iter().map(|h| h.to_string()).collect(),
+        ..sample_binding("A")
+    };
+
+    let (mut project, _) = Vault::create(PW, KdfParams::TEST).unwrap();
+    project
+        .set("A", b"fake-one", Kind::Env, Tier::Session)
+        .unwrap();
+    assert!(matches!(
+        project.set_bindings("A", Some(with(&["claude"]))),
+        Err(Error::Invalid("harnesses"))
+    ));
+    project.set_bindings("A", Some(with(&[]))).unwrap();
+    // The same in a signed file is refused as well.
+    let mut m = model(&project);
+    m.bindings[0].harnesses = vec!["claude".into()];
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&project, &m)),
+        Err(Error::Corrupt("bindings"))
+    ));
+
+    let (mut conn, _) =
+        Vault::create_with_kind(PW, KdfParams::TEST, VaultKind::Connectors).unwrap();
+    conn.set("A", b"fake-one", Kind::Env, Tier::Session)
+        .unwrap();
+    for bad in [
+        &["vim"][..],
+        &["claude", "claude"],
+        &["claude", "codex", "cursor", "claude"],
+    ] {
+        assert!(conn.set_bindings("A", Some(with(bad))).is_err(), "{bad:?}");
+    }
+    conn.set_bindings("A", Some(with(&["claude", "cursor"])))
+        .unwrap();
+    // Harnesses alone are a rule set; without them it is nothing.
+    let only = RuleSet {
+        name: "A".into(),
+        harnesses: vec!["codex".into()],
+        ..RuleSet::default()
+    };
+    conn.set_bindings("A", Some(only)).unwrap();
+    conn.save(&t.path, &t.store).unwrap();
+    let again = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(again.bindings()[0].harnesses, ["codex"]);
+    assert_eq!(
+        Vault::peek(&t.path).unwrap().bindings[0].harnesses,
+        ["codex"]
+    );
+}
+
+#[test]
+fn tampering_with_a_recipients_expiry_without_resigning_fails() {
+    let t = t();
+    let (mut v, [_, _, (_, run, _)]) = built(&t);
+    // No expiry, then an expiry set through the API: both verify.
+    assert!(Vault::peek_bytes(&resigned(&v, &model(&v))).is_ok());
+    v.set_recipient_expiry(&run, Some(1_900_000_000)).unwrap();
+    assert!(Vault::peek_bytes(&resigned(&v, &model(&v))).is_ok());
+
+    let tamper = |expires_at: Option<u64>| {
+        let mut m = model(&v);
+        m.recipients
+            .iter_mut()
+            .find(|r| r.id == run)
+            .unwrap()
+            .expires_at = expires_at;
+        resigned(&v, &m)
+    };
+    for changed in [None, Some(1_900_000_001), Some(0), Some(u64::MAX)] {
+        assert!(
+            matches!(
+                Vault::peek_bytes(&tamper(changed)),
+                Err(Error::BadSignature)
+            ),
+            "{changed:?}"
+        );
+    }
+    // Setting one on a member that had none, without the issuer's signature.
+    let (v2, [_, (_, edit, _), _]) = built(&self::t());
+    let mut m = model(&v2);
+    m.recipients
+        .iter_mut()
+        .find(|r| r.id == edit)
+        .unwrap()
+        .expires_at = Some(5);
+    assert!(matches!(
+        Vault::peek_bytes(&resigned(&v2, &m)),
+        Err(Error::BadSignature)
+    ));
+}
+
+#[test]
+fn recipient_expiry_is_signed_by_whoever_may_add_the_member() {
+    let t = t();
+    let (mut v, [(_, adm, adm_k), (_, edit, _), (_, run, _)]) = built(&t);
+    // The owner sets, changes and clears an expiry; the file stays valid.
+    v.set_recipient_expiry(&run, Some(2_000_000_000)).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(
+        Vault::unlock_password(&t.path, PW, &t.store)
+            .unwrap()
+            .recipients()
+            .iter()
+            .find(|r| r.id == run)
+            .unwrap()
+            .expires_at,
+        Some(2_000_000_000)
+    );
+    v.set_recipient_expiry(&run, None).unwrap();
+    assert!(matches!(
+        v.set_recipient_expiry(&[9; 16], None),
+        Err(Error::UnknownRecipient)
+    ));
+    v.save(&t.path, &t.store).unwrap();
+
+    // An Admin the owner added may do it for an Editor, and then it is the
+    // admin's certificate; it may not for an Admin, and a non-admin never.
+    let store = LocalStore::new(t._dir.path().join("adm-store"));
+    let mut a = Vault::open_as_recipient(&t.path, &adm, &adm_k, &store).unwrap();
+    a.set_recipient_expiry(&edit, Some(3_000_000_000)).unwrap();
+    assert!(matches!(
+        a.set_recipient_expiry(&adm, Some(1)),
+        Err(Error::NotPermitted)
+    ));
+    a.save(&t.path, &t.store).unwrap();
+    let after = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    let e = after.recipients().iter().find(|r| r.id == edit).unwrap();
+    assert_eq!(
+        (e.expires_at, e.added_by),
+        (Some(3_000_000_000), Actor::Recipient(adm))
+    );
+
+    // The owner takes it over: re-certified by the owner, as the owner's own.
+    let mut o = after;
+    o.set_recipient_expiry(&edit, None).unwrap();
+    o.save(&t.path, &t.store).unwrap();
+    let last = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    let e = last.recipients().iter().find(|r| r.id == edit).unwrap();
+    assert_eq!((e.expires_at, e.added_by), (None, Actor::Owner));
+}
+
+#[test]
+fn an_editor_cannot_set_expiry() {
+    let t = t();
+    let (_, [_, (_, edit, edit_k), (_, run, _)]) = built(&t);
+    let mut v = Vault::open_as_recipient(&t.path, &edit, &edit_k, &t.store).unwrap();
+    assert!(matches!(
+        v.set_recipient_expiry(&run, Some(1)),
+        Err(Error::NotPermitted)
+    ));
+}
+
+/// A format 4 file, written the way format 4 wrote it: members certified
+/// without an expiry, a device, a rule set with `from`, the remote flag on.
+fn write_v4_file(path: &Path) -> (RecoveryKey, [u8; 16], RecipientSecret) {
+    use crate::format::v4;
+    let (mut u, recovery) = v4::create(4, PW, KdfParams::TEST, true).unwrap();
+    let recovery = recovery.unwrap();
+    let keys = RecipientSecret::generate().unwrap();
+    let public = keys.public().unwrap();
+    let owner_sign = current::owner_keys(&u.vk).sign;
+    let mut member = crate::format::v1::Recipient {
+        id: [5; 16],
+        name: "adm".into(),
+        kind: RecipientKind::Person,
+        role: Role::Admin,
+        enc_pk: public.enc_pk,
+        sign_pk: public.sign_pk,
+        added: 7,
+        added_by: Actor::Owner,
+        cert: current::Sig([0; 64]),
+    };
+    member.certify(&u.model.header.vault_id, &owner_sign);
+    u.model.recipients.push(member.clone());
+    for (n, (name, value)) in [("A", &b"fake-one"[..]), ("B", b"fake-two")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut sid = [0u8; 16];
+        sid[0] = n as u8 + 1;
+        let holders: Vec<&crate::format::v1::Recipient> = if name == "A" {
+            vec![&member]
+        } else {
+            Vec::new()
+        };
+        u.model.secrets.push(
+            v4::seal_secret(
+                4,
+                &u.model.header.vault_id,
+                sid,
+                &u.model.owner.enc_pk,
+                value,
+                &holders,
+            )
+            .unwrap(),
+        );
+        u.model.index.push(Entry {
+            secret_id: sid,
+            name: name.to_string(),
+            kind: Kind::Env,
+            tier: Tier::Session,
+            updated: 1,
+            changed_by: Actor::Owner,
+            class: None,
+        });
+    }
+    u.model.bindings.push(v4::RuleSet {
+        name: "A".into(),
+        allow: sample_binding("A").allow,
+        from: vec!["/work/app".into()],
+        ..v4::RuleSet::default()
+    });
+    u.model.devices.push(device(1));
+    u.model.remote = true;
+    u.model.header.generation = 4;
+    std::fs::write(path, v4::encode(&u.model, &owner_sign).unwrap()).unwrap();
+    (recovery, member.id, keys)
+}
+
+#[test]
+fn a_v4_vault_upgrades_to_v5_and_keeps_everything() {
+    let t = t();
+    let (_recovery, adm, adm_k) = write_v4_file(&t.path);
+    let original = std::fs::read(&t.path).unwrap();
+    assert_eq!(format::read_version(&original).unwrap(), 4);
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!((peek.format, peek.kind), (4, VaultKind::Project));
+    assert!(peek.upgrade_pending && peek.remote);
+
+    let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert!(v.upgrade_pending());
+    assert_eq!(v.kind(), VaultKind::Project);
+    assert!(v.roles().is_empty());
+    assert!(v.remote());
+    assert_eq!(v.bindings()[0].from, ["/work/app"]);
+    assert!(v.bindings()[0].harnesses.is_empty());
+    assert_eq!(v.devices().len(), 1);
+    assert_eq!(v.recipients()[0].expires_at, None);
+    // Opening wrote nothing.
+    assert_eq!(std::fs::read(&t.path).unwrap(), original);
+    assert!(!backup_path(&t.path, 4).exists());
+
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(std::fs::read(backup_path(&t.path, 4)).unwrap(), original);
+    let peek = Vault::peek(&t.path).unwrap();
+    assert_eq!(
+        (peek.format, peek.generation, peek.kind),
+        (CURRENT, 5, VaultKind::Project)
+    );
+    assert_eq!(peek.recipient_count, 1);
+
+    // The member's old certificate still verifies (the peek above checked it),
+    // it can open the new file and read what it holds, and it was not
+    // re-signed: it keeps the owner as issuer and the old certificate bytes.
+    let me = Vault::open_as_recipient(&t.path, &adm, &adm_k, &t.store).unwrap();
+    assert_eq!(me.get("A").unwrap().expose(), b"fake-one");
+    assert!(matches!(me.get("B"), Err(Error::NoAccess)));
+    let again = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+    assert_eq!(again.get("B").unwrap().expose(), b"fake-two");
+    assert_eq!(again.recipients()[0].added_by, Actor::Owner);
+    assert_eq!(again.recipients()[0].cert.0, v.recipients()[0].cert.0);
+    assert_eq!(again.devices(), v.devices());
+
+    // A second save and a later one leave the backup alone.
+    v.set("C", b"fake-three", Kind::Env, Tier::Session).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    assert_eq!(std::fs::read(backup_path(&t.path, 4)).unwrap(), original);
+
+    // Putting the v4 file back is a rollback.
+    std::fs::write(&t.path, &original).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&t.path, PW, &t.store),
+        Err(Error::RolledBack { .. })
+    ));
+}
+
+#[test]
+fn an_older_generation_of_a_v5_file_is_still_a_rollback() {
+    let t = t();
+    let (mut v, _) = Vault::create_with_kind(PW, KdfParams::TEST, VaultKind::Connectors).unwrap();
+    v.set("A", b"fake-one", Kind::Env, Tier::Session).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    let first = std::fs::read(&t.path).unwrap();
+    v.set_role(sample_role("r", &["A"])).unwrap();
+    v.save(&t.path, &t.store).unwrap();
+    std::fs::write(&t.path, &first).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&t.path, PW, &t.store),
+        Err(Error::RolledBack { found: 1, seen: 2 })
+    ));
 }

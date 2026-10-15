@@ -30,8 +30,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, KdfParams};
 use crate::format::current::{
-    self, Actor, Class, Device, Entry, Kind, NewSlot, Recipient, RecipientKind, Role, RuleSet,
-    SlotInfo, Tier,
+    self, Actor, AgentRole, Class, Device, Entry, Kind, NewSlot, Recipient, RecipientKind, Role,
+    RuleSet, SlotInfo, Tier, VaultKind,
 };
 use crate::format::upgrade::{self, AnyUnlocked};
 use crate::format::{self, CURRENT, Loaded, OwnerAccess, OwnerState};
@@ -144,6 +144,8 @@ pub struct Peek {
     pub successors: Vec<current::Successor>,
     /// The person's opt-in to use from other projects (false before format 4).
     pub remote: bool,
+    /// What the vault is for (`Project` before format 5).
+    pub kind: VaultKind,
 }
 
 impl Peek {
@@ -386,6 +388,7 @@ fn peek_of(loaded: &Loaded) -> Peek {
         devices: loaded.devices(),
         successors: loaded.successors(),
         remote: loaded.remote(),
+        kind: loaded.kind(),
     }
 }
 
@@ -482,7 +485,18 @@ impl Vault {
     /// A new, empty vault with a password slot and a recovery slot. The paper
     /// key is returned once and never stored. Nothing is written until `save`.
     pub fn create(pw: &[u8], kdf: KdfParams) -> Result<(Vault, RecoveryKey), Error> {
-        let (unlocked, recovery) = current::create(CURRENT, pw, kdf, true)?;
+        Vault::create_with_kind(pw, kdf, VaultKind::Project)
+    }
+
+    /// [`Vault::create`] for a vault of `kind`. The kind is fixed here: there
+    /// is no way to change it later, in memory or in the file.
+    pub fn create_with_kind(
+        pw: &[u8],
+        kdf: KdfParams,
+        kind: VaultKind,
+    ) -> Result<(Vault, RecoveryKey), Error> {
+        let (mut unlocked, recovery) = current::create(CURRENT, pw, kdf, true)?;
+        unlocked.model.kind = kind;
         let state_key = StateKey::owner(&unlocked.vk);
         let vault = Vault {
             access: Access::Owner(unlocked),
@@ -1015,6 +1029,9 @@ impl Vault {
         w.model.index.remove(i);
         w.model.secrets.remove(i);
         w.model.bindings.retain(|b| b.name != name);
+        for r in w.model.roles.iter_mut() {
+            r.secrets.retain(|s| s != &name);
+        }
         Ok(())
     }
 
@@ -1048,6 +1065,10 @@ impl Vault {
             Some(mut b) if !b.is_empty() => {
                 b.name = name.to_string();
                 current::check_binding_shapes(std::slice::from_ref(&b))?;
+                // Harnesses belong to a connectors vault.
+                if !b.harnesses.is_empty() && w.model.kind != VaultKind::Connectors {
+                    return Err(Error::Invalid("harnesses"));
+                }
                 Some(b)
             }
             _ => None,
@@ -1074,6 +1095,56 @@ impl Vault {
             return Err(Error::NotPermitted);
         }
         w.model.remote = on;
+        Ok(())
+    }
+
+    /// What the vault is for. Fixed when it is created.
+    pub fn kind(&self) -> VaultKind {
+        self.model().kind
+    }
+
+    /// The agent roles the person approved.
+    pub fn roles(&self) -> &[AgentRole] {
+        &self.model().roles
+    }
+
+    /// Add a role, or replace the one with the same name. Owner only, like
+    /// every approval. The shape is checked as a reader would check it, and
+    /// every secret it names must be in the vault; nothing changes on error.
+    pub fn set_role(&mut self, role: AgentRole) -> Result<(), Error> {
+        let w = self.writer()?;
+        if w.actor != Actor::Owner {
+            return Err(Error::NotPermitted);
+        }
+        current::check_role(&role)?;
+        if let Some(missing) = role
+            .secrets
+            .iter()
+            .find(|s| !w.model.index.iter().any(|e| &e.name == *s))
+        {
+            return Err(Error::not_found(missing));
+        }
+        let mut roles = w.model.roles.clone();
+        match roles.iter_mut().find(|r| r.name == role.name) {
+            Some(existing) => *existing = role,
+            None => roles.push(role),
+        }
+        current::check_roles(&roles).map_err(|_| Error::Invalid("roles"))?;
+        w.model.roles = roles;
+        Ok(())
+    }
+
+    /// Remove the role called `name`. Owner only.
+    pub fn remove_role(&mut self, name: &str) -> Result<(), Error> {
+        let w = self.writer()?;
+        if w.actor != Actor::Owner {
+            return Err(Error::NotPermitted);
+        }
+        let before = w.model.roles.len();
+        w.model.roles.retain(|r| r.name != name);
+        if w.model.roles.len() == before {
+            return Err(Error::not_found(name));
+        }
         Ok(())
     }
 
@@ -1149,11 +1220,47 @@ impl Vault {
             sign_pk: public.sign_pk,
             added: now(),
             added_by: w.actor,
+            expires_at: None,
             cert: current::Sig([0; 64]),
         };
         entry.certify(&w.vault_id(), &w.signer);
         w.model.recipients.push(entry);
         Ok(id)
+    }
+
+    /// Set when `id`'s membership ends, or clear it with `None`, and certify
+    /// the entry again, since the certificate covers it. Allowed to whoever
+    /// may add that member: the owner, or an Admin the owner added for an
+    /// Editor or a Runner. The writer becomes the entry's issuer.
+    pub fn set_recipient_expiry(
+        &mut self,
+        id: &[u8; 16],
+        expires_at: Option<u64>,
+    ) -> Result<(), Error> {
+        let w = self.writer()?;
+        let target_role = w
+            .model
+            .recipients
+            .iter()
+            .find(|r| &r.id == id)
+            .map(|r| r.role)
+            .ok_or(Error::UnknownRecipient)?;
+        match w.role {
+            None => {}
+            Some(Role::Admin) if w.added_by_owner && target_role != Role::Admin => {}
+            Some(_) => return Err(Error::NotPermitted),
+        }
+        let (vault_id, actor) = (w.vault_id(), w.actor);
+        let entry = w
+            .model
+            .recipients
+            .iter_mut()
+            .find(|r| &r.id == id)
+            .ok_or(Error::UnknownRecipient)?;
+        entry.expires_at = expires_at;
+        entry.added_by = actor;
+        entry.certify(&vault_id, &w.signer);
+        Ok(())
     }
 
     /// Remove a recipient and re-key every secret it held under a new DEK.
