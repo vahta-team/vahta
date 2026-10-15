@@ -14,7 +14,7 @@ use crate::{EXIT_CLEAN, EXIT_USAGE, Env};
 pub const BIND_USAGE: &str = "\
 usage: vahta bind NAME [--category C] [--allow RULE]... [--deny RULE]...
                        [--dir PATH]... [--net none|app|hosts:H[,H...]]
-                       [--reason TEXT] [--json]
+                       [--from PROJECT]... [--no-from] [--reason TEXT] [--json]
        vahta bind NAME --clear [--reason TEXT] [--json]
        vahta bind [--json]
 
@@ -56,6 +56,14 @@ options:
                     used (`PATH:ro` for read-only)
   --net WHAT        none, app, or hosts:H[,H...] (only these hosts, through
                     `vahta http`)
+  --from PROJECT    a project folder (absolute) this secret may also be used
+                    from, besides the vault's own project (repeatable; needs
+                    `vahta remote on`). The caller's project must be that
+                    folder or below it. Without --from the secret works only
+                    inside the vault's project. Given alone it changes only
+                    this; given with other rule options, the old --from stays
+                    unless --from is given again
+  --no-from         take every --from folder away
   --clear           remove NAME's rules: nothing may use it until new ones are
                     approved
   --reason TEXT     why, for the window; shown marked as unverified
@@ -70,6 +78,7 @@ struct Parsed {
     category: Option<String>,
     dirs: Vec<String>,
     net: Option<String>,
+    from: Option<Vec<String>>,
     clear: bool,
     reason: Option<String>,
     json: bool,
@@ -89,6 +98,7 @@ fn parse(args: &[String]) -> Args {
         category: None,
         dirs: Vec::new(),
         net: None,
+        from: None,
         clear: false,
         reason: None,
         json: false,
@@ -120,6 +130,15 @@ fn parse(args: &[String]) -> Args {
             "--category" => value("--category").map(|v| p.category = Some(v)),
             "--dir" => value("--dir").map(|v| p.dirs.push(v)),
             "--net" => value("--net").map(|v| p.net = Some(v)),
+            "--from" => value("--from").map(|v| p.from.get_or_insert_with(Vec::new).push(v)),
+            "--no-from" => {
+                if p.from.as_ref().is_some_and(|f| !f.is_empty()) {
+                    Err("--no-from and --from together".to_string())
+                } else {
+                    p.from = Some(Vec::new());
+                    Ok(())
+                }
+            }
             "--reason" => value("--reason").map(|v| p.reason = Some(v)),
             s if s.starts_with('-') => Err(format!("unrecognised option: {s}")),
             s if p.name.is_none() => {
@@ -138,6 +157,7 @@ fn parse(args: &[String]) -> Args {
             || !p.deny.is_empty()
             || p.category.is_some()
             || !p.dirs.is_empty()
+            || p.from.is_some()
             || p.net.is_some())
     {
         return Args::Error(
@@ -168,6 +188,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         category: parsed.category,
         dirs: parsed.dirs,
         net: parsed.net,
+        from: parsed.from,
         clear: parsed.clear,
         reason: parsed.reason,
         path: std::env::var_os("PATH").map(|p| p.to_string_lossy().into_owned()),

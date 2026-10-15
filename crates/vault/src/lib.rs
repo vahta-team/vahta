@@ -32,9 +32,9 @@ use zeroize::Zeroizing;
 
 pub use crypto::KdfParams;
 pub use format::current::{
-    Actor, ApprovedRule, Class, Device, DirRule, Entry, HostRule, Kind, Network, NewSlot,
+    Actor, ApprovedRule, Class, Device, DirRule, Entry, HostRule, Kind, MAX_FROM, Network, NewSlot,
     PasswordParams, Program, Recipient, RecipientKind, Role, RuleSet, SLOT_DEVICE, SLOT_PASSWORD,
-    SLOT_RECOVERY, SlotInfo, Successor, Tier, open_vault_key, seal_vault_key,
+    SLOT_RECOVERY, SlotInfo, Successor, Tier, open_vault_key, portable_absolute, seal_vault_key,
 };
 pub use session::SessionKeys;
 pub use vault::{

@@ -388,6 +388,10 @@ fn ask_to_extend(shared: &Arc<Shared>, ask: ExtensionAsk) {
         lines: vec![
             format!("Project: {}", ask.project.display()),
             format!("Secrets: {}", ask.scope.join(", ")),
+            match &ask.used_from {
+                Some(from) => format!("Used from: {}", from.display()),
+                None => "Used from: its own project".to_string(),
+            },
             format!("Belongs to: {} (pid {})", ask.anchor_exe, ask.anchor_pid),
             format!("It ends in {}.", human(left.as_secs())),
         ],
@@ -611,7 +615,17 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             exe: vahta_os::exe_name(peer.id.pid),
             pid: peer.id.pid,
             peer: peer.id,
+            used_from: std::sync::Mutex::new(None),
         };
+        // The client's `cwd` is a claim: believed only if the kernel agrees.
+        if let Some(cwd) = request.cwd_to_verify()
+            && let Err(reply) = ctx.check_cwd(cwd)
+        {
+            if write_frame(stream, &reply).is_err() {
+                return;
+            }
+            continue;
+        }
         let (reply, stop) = match request {
             ClientRequest::Status {} => (ClientReply::Status(shared.status()), false),
             ClientRequest::Stop {} => (ClientReply::Ok {}, true),
@@ -679,8 +693,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 names,
                 duration,
                 label,
+                vault,
             } => (
-                session_ops::unlock_session(&ctx, &cwd, names, duration, label)
+                session_ops::unlock_session(&ctx, &cwd, names, duration, label, vault)
                     .unwrap_or_else(|r| r),
                 false,
             ),
@@ -697,6 +712,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 label,
                 ask,
                 reason,
+                vault,
             } => {
                 // A run is the one request that goes on after its reply: the
                 // connection then carries the command's input and output.
@@ -711,6 +727,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                         label,
                         ask,
                         reason,
+                        vault,
                     },
                 ) {
                     Ok(prepared) => {
@@ -733,6 +750,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 max_response,
                 timeout_secs,
                 label,
+                vault,
             } => {
                 // Like a run, a request goes on after its reply: the body
                 // follows as output frames.
@@ -749,6 +767,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                         max_response,
                         timeout_secs,
                         label,
+                        vault,
                     },
                 ) {
                     Ok(answer) => {
@@ -769,6 +788,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 category,
                 dirs,
                 net,
+                from,
             } => (
                 bind_ops::bind(
                     &ctx,
@@ -783,6 +803,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                         category,
                         dirs,
                         net,
+                        from,
                     },
                 )
                 .unwrap_or_else(|r| r),
@@ -793,8 +814,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 names,
                 duration,
                 label,
+                vault,
             } => (
-                run_ops::delegate(&ctx, &cwd, names, duration, label).unwrap_or_else(|r| r),
+                run_ops::delegate(&ctx, &cwd, names, duration, label, vault).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::OutputScan {
@@ -840,10 +862,21 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 argv,
                 names,
                 path,
-            } => (run_ops::check(&ctx, &cwd, &argv, names, path), false),
-            ClientRequest::CheckHttp { cwd, url, names } => {
-                (crate::http_ops::check(&ctx, &cwd, &url, names), false)
-            }
+                vault,
+            } => (run_ops::check(&ctx, &cwd, &argv, names, path, vault), false),
+            ClientRequest::CheckHttp {
+                cwd,
+                url,
+                names,
+                vault,
+            } => (
+                crate::http_ops::check(&ctx, &cwd, &url, names, vault),
+                false,
+            ),
+            ClientRequest::Remote { cwd, on } => (
+                crate::remote_ops::remote(&ctx, &cwd, on).unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::OutputAllow { reference, reason } => (
                 output::allow(&ctx, &reference, reason).unwrap_or_else(|r| r),
                 false,

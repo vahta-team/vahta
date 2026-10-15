@@ -292,7 +292,7 @@ fn the_v2_fixture_carries_what_format_2_adds() {
     // Saving again keeps the unknown slot and the password still unlocks.
     let slots_before = v.slots();
     v.save(&path, &store).unwrap();
-    assert_eq!(Vault::peek(&path).unwrap().format, 3);
+    assert_eq!(Vault::peek(&path).unwrap().format, 4);
     assert!(Vault::peek(&path).unwrap().successors.is_empty());
     assert_eq!(
         std::fs::read(path.with_file_name("vault.vht.v2.bak")).unwrap(),
@@ -320,4 +320,129 @@ fn rollback_to_the_pre_upgrade_v2_file_is_detected() {
         Vault::unlock_password(&path, b"correct horse", &store),
         Err(Error::RolledBack { found: 1, seen: 2 })
     ));
+}
+
+/// The v3 fixture upgrades to format 4 on the first save: secrets, rules and
+/// the slot of an unknown kind come through intact, remote use is off and
+/// `from` is empty, and `.v3.bak` holds the original.
+#[test]
+fn the_v3_fixture_upgrades_to_v4_with_remote_off() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v3.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let peek = Vault::peek(&path).unwrap();
+    assert_eq!(peek.format, 3);
+    assert!(!peek.remote);
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(v.upgrade_pending());
+    assert!(!v.remote());
+    let before = v.bindings()[0].clone();
+    assert!(before.from.is_empty());
+    let slots_before = v.slots();
+
+    v.save(&path, &store).unwrap();
+    let after = Vault::peek(&path).unwrap();
+    assert_eq!(after.format, 4);
+    assert!(!after.remote);
+    assert_eq!(after.bindings[0], before);
+    assert_eq!(
+        std::fs::read(path.with_file_name("vault.vht.v3.bak")).unwrap(),
+        original
+    );
+    let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert_eq!(again.slots(), slots_before);
+    assert_eq!(again.get("BETA").unwrap().expose(), b"fake two lines\nx");
+    assert!(again.slots().iter().any(|s| s.kind == 0x7001));
+}
+
+/// Putting the pre-upgrade v3 file back is a rollback, not a downgrade the
+/// vault silently accepts.
+#[test]
+fn rollback_to_the_pre_upgrade_v3_file_is_detected() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v3.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    v.save(&path, &store).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&path, b"correct horse", &store),
+        Err(Error::RolledBack { found: 1, seen: 2 })
+    ));
+}
+
+/// The v4 fixture carries the flag and a `from` list; both survive a save, and
+/// turning the flag off is a signed edit.
+#[test]
+fn the_v4_fixture_carries_remote_and_from() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    std::fs::write(&path, std::fs::read(dir().join("v4.vht")).unwrap()).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    assert!(Vault::peek(&path).unwrap().remote);
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(!v.upgrade_pending());
+    assert!(v.remote());
+    assert_eq!(v.bindings()[0].from, vec!["/opt/fixture/project"]);
+    v.set_remote(false).unwrap();
+    v.save(&path, &store).unwrap();
+    assert!(!Vault::peek(&path).unwrap().remote);
+    let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(!again.remote());
+    assert_eq!(again.bindings()[0].from, vec!["/opt/fixture/project"]);
+}
+
+/// A format 4 file has no room for a field this build does not know: extra
+/// bytes in the body are refused, never silently dropped.
+#[test]
+fn a_v4_body_with_an_unknown_trailing_field_is_refused() {
+    let mut bytes = std::fs::read(dir().join("v4.vht")).unwrap();
+    // Grow body_len by one and add a byte after the body: the signature no
+    // longer covers what the body says, and the body no longer parses exactly.
+    let len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize + 1;
+    bytes[10..14].copy_from_slice(&(len as u32).to_le_bytes());
+    bytes.insert(14 + len - 1, 0);
+    assert!(format::decode(&bytes).is_err());
+}
+
+/// A relative or oversized `from` is refused when a rule set is stored.
+#[test]
+fn from_must_be_absolute_and_bounded() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let store = LocalStore::new(work.path().join("store"));
+    let (mut v, _) = Vault::create(b"correct horse", vahta_vault::KdfParams::TEST).unwrap();
+    v.set("ALPHA", b"x", Kind::Env, Tier::Session).unwrap();
+    let rules = |from: Vec<String>| vahta_vault::RuleSet {
+        name: "ALPHA".into(),
+        allow: vec![
+            vahta_vault::rules::parse_rule("tool run", true)
+                .unwrap()
+                .to_allow("/opt/tool".into()),
+        ],
+        from,
+        ..Default::default()
+    };
+    assert!(
+        v.set_bindings("ALPHA", Some(rules(vec!["rel/dir".into()])))
+            .is_err()
+    );
+    assert!(
+        v.set_bindings("ALPHA", Some(rules(vec!["/p".to_string(); 17])))
+            .is_err()
+    );
+    v.set_bindings("ALPHA", Some(rules(vec!["/work/app".into()])))
+        .unwrap();
+    v.save(&path, &store).unwrap();
+    assert_eq!(
+        Vault::peek(&path).unwrap().bindings[0].from,
+        vec!["/work/app"]
+    );
 }

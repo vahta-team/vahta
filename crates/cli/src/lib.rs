@@ -1,6 +1,8 @@
 //! `vahta` — the command line.
 //!
 //! `vahta setup` registers the hook with the coding agents (see `setup.rs`).
+//! `vahta remote on|off` (`remote_cmd.rs`) is the person's switch for using the
+//! vault from other projects (`--vault DIR`, see `run_cmd.rs`).
 //! `vahta list` and `vahta check` read the project's vault without a password
 //! (see `vault_cmds.rs`). Everything that opens a vault, runs a command with its
 //! secrets or holds a session goes through the daemon, which is the vault's only
@@ -40,6 +42,7 @@ mod guard_cmd;
 mod hooks_cmd;
 mod http_cmd;
 mod output_cmd;
+mod remote_cmd;
 mod run_cmd;
 mod session_cmds;
 mod setup;
@@ -105,9 +108,11 @@ commands:
   setup   register vahta-hook with Claude Code, Codex and Cursor
   list    list the secrets in this project's vault (names only)
   check   compare vahta.toml with the vault; for CI
+          (`list` and `check` take --vault DIR, like `run`)
   run     run a command with secrets in its environment, output scrubbed
   http    one HTTPS request with a secret in a header or query, to bound hosts
   bind    say which commands may use a secret (the person approves)
+  remote  `remote on|off`: let other projects use this vault (the person approves)
   delegate  narrow your session for a sub-agent and run it
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
@@ -429,6 +434,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
             EXIT_USAGE
         }
         Some("bind") => bind_cmd::run(&args[1..], env, stdout, stderr),
+        Some("remote") => remote_cmd::run(&args[1..], env, stdout, stderr),
         Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
         Some("http") => http_cmd::run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),

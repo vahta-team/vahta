@@ -78,7 +78,7 @@ const MAX_TRANSPORT_LEN: usize = 32;
 
 pub const MAX_DIRS: usize = 64;
 pub const MAX_HOSTS: usize = 64;
-const MAX_PATH_LEN: usize = 4096;
+pub(super) const MAX_PATH_LEN: usize = 4096;
 const MAX_HOST_LEN: usize = 253;
 const MAX_CATEGORY_LEN: usize = 64;
 
@@ -523,7 +523,7 @@ fn valid_category(c: &str) -> bool {
 /// Whether `p` is absolute in either convention: `/…`, `X:\…` or `X:/…`, or a
 /// UNC path `\\server\share…`. Judged by the text alone, so a file decodes the
 /// same on every OS.
-fn portable_absolute(p: &str) -> bool {
+pub fn portable_absolute(p: &str) -> bool {
     let b = p.as_bytes();
     if b.first() == Some(&b'/') {
         return true;

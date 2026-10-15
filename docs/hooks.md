@@ -197,7 +197,11 @@ approved for, and never carries a placeholder.
 of every secret named (`ClientRequest::CheckRun`): the secret exists, is
 session-tier, has approved rules, and the program (found on the caller's
 `PATH`, as a run finds it) and its arguments, the directory and the network
-all pass them. The hook then says "allow" out loud. Nothing else is ever
+all pass them. The hook then says "allow" out loud. With `--vault DIR` (another
+project's vault, see [daemon.md](daemon.md#using-a-vault-from-another-project))
+the hook passes the folder on, made absolute against the call's directory, and
+the daemon adds its own conditions: the vault has opted in and the secret names
+the calling project; otherwise the hook is silent. Nothing else is ever
 allowed by the hook: no other command, no each-use secret
 (that run opens a window whatever the harness thinks), no secret without rules.
 

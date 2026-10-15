@@ -22,12 +22,18 @@ pub(crate) struct Args {
     pub dirs: Vec<String>,
     pub net: Option<String>,
     pub path: Option<OsString>,
+    /// Project roots the secret may be used from, outside the vault's own.
+    pub from: Vec<String>,
 }
 
 impl Args {
     /// Nothing but (at most) a category: the default set is wanted.
     pub fn is_bare(&self) -> bool {
-        self.allow.is_empty() && self.deny.is_empty() && self.dirs.is_empty() && self.net.is_none()
+        self.allow.is_empty()
+            && self.deny.is_empty()
+            && self.dirs.is_empty()
+            && self.net.is_none()
+            && self.from.is_empty()
     }
 }
 
@@ -110,6 +116,47 @@ fn parse_dir(text: &str, root: &Path) -> Result<DirRule, String> {
         path: canon.to_string_lossy().into_owned(),
         write,
     })
+}
+
+/// An absolute project root a secret may be used from: it must exist, and is
+/// stored canonical (symlinks resolved, no `..`). The whole file system is no
+/// project.
+pub(crate) fn parse_from(text: &str) -> Result<String, String> {
+    let shown = text.trim();
+    if shown.is_empty() || shown.contains('\0') || shown.chars().any(char::is_control) {
+        return Err(format!("`{shown}` is not a project path"));
+    }
+    let given = Path::new(shown);
+    if !given.is_absolute() {
+        return Err(format!(
+            "--from `{shown}` must be an absolute path to a project folder"
+        ));
+    }
+    let canon = pathfind::canonical(given)
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| format!("project folder `{shown}` does not exist"))?;
+    if canon.parent().is_none() {
+        return Err("a project folder of `/` is no project".to_string());
+    }
+    Ok(canon.to_string_lossy().into_owned())
+}
+
+/// The `from` list of a proposal, canonical, in order, without repeats.
+pub(crate) fn parse_froms(texts: &[String]) -> Result<Vec<String>, String> {
+    if texts.len() > vahta_vault::MAX_FROM {
+        return Err(format!(
+            "too many --from folders (at most {})",
+            vahta_vault::MAX_FROM
+        ));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for t in texts {
+        let p = parse_from(t)?;
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    Ok(out)
 }
 
 fn parse_all(texts: &[String], allow: bool) -> Result<Vec<ParsedRule>, String> {
@@ -225,6 +272,7 @@ pub(crate) fn build(
         deny: denied,
         dirs,
         network,
+        from: parse_froms(&args.from)?,
     };
     if let Some(c) = category {
         c.check(&rule_set)?;
@@ -311,6 +359,7 @@ pub(crate) fn texts_of(rs: &RuleSet) -> RulesText {
             Network::Hosts(h) => h.iter().map(|h| h.text.clone()).collect(),
             _ => Vec::new(),
         },
+        from: rs.from.clone(),
     }
 }
 

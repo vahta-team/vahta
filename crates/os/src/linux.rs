@@ -64,6 +64,12 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
     }
 }
 
+pub(crate) fn process_cwd(pid: u32) -> io::Result<std::path::PathBuf> {
+    // A directory that was removed reads as `/path (deleted)`; canonicalizing
+    // it fails, which is the answer: no verified directory.
+    fs::canonicalize(fs::read_link(format!("/proc/{pid}/cwd"))?)
+}
+
 pub(crate) fn owned_by_me(pid: u32) -> bool {
     let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
         return false;
@@ -260,6 +266,13 @@ mod tests {
         assert_eq!(parse_stat(line), Some((7, 12345)));
         assert_eq!(parse_stat("42 (x) S 7"), None);
         assert_eq!(parse_stat("garbage"), None);
+    }
+
+    #[test]
+    fn a_process_cwd_is_read_from_the_kernel() {
+        let here = fs::canonicalize(std::env::current_dir().expect("cwd")).expect("canonical");
+        assert_eq!(process_cwd(std::process::id()).expect("cwd"), here);
+        assert!(process_cwd(u32::MAX).is_err());
     }
 
     #[test]

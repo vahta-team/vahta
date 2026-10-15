@@ -171,12 +171,16 @@ pub(crate) fn unlock_session(
     names: Option<Vec<String>>,
     duration: DurationSpec,
     label: Option<String>,
+    vault: Option<String>,
 ) -> Flow<ClientReply> {
-    let (project, vault_path) = find_vault(cwd)?;
+    let target = crate::remote::Target::resolve(ctx, cwd, vault.as_deref())?;
+    let (project, vault_path) = (target.project.clone(), target.vault_path.clone());
     crate::guard_ops::note_project(ctx, &project.root);
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     // A swapped owner or a rolled-back file is refused here, before a window.
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
+    // From another project, only the secrets that may be used from there.
+    let peek = target.view(peek);
     let names = match resolve_names(&peek, names) {
         Ok(names) => names,
         Err(reply) => {
@@ -259,6 +263,7 @@ pub(crate) fn unlock_session(
         vault_id,
         vault_path: vault_path.clone(),
         project: project.root.clone(),
+        used_from: target.used_from.clone(),
         scope: names.clone(),
         keys,
         forms,
@@ -282,7 +287,12 @@ pub(crate) fn unlock_session(
             .map_err(|_| crate::ops::error("the session table is unusable"))?;
         // A second unlock for the same process replaces the first.
         let replaced = sessions.end_where(
-            |s| s.parent.is_none() && s.anchor == anchor && s.vault_id == vault_id,
+            |s| {
+                s.parent.is_none()
+                    && s.anchor == anchor
+                    && s.vault_id == vault_id
+                    && s.used_from == target.used_from
+            },
             "replaced",
         );
         sessions.add(session);

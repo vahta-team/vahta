@@ -10,7 +10,7 @@
 //! "no_opinion", "check_http": ...}` is its answer to a `CheckRun` and a
 //! `CheckHttp`; it answers `Ok` to every
 //! other request, and a daemon of another version when `"version"` is given.
-//! `check_run`, when present, is the list of `{cwd, argv, names}` (`{cwd, url, names}` for http) the hook
+//! `check_run`, when present, is the list of `{cwd, argv, names[, vault]}` (`{cwd, url, names[, vault]}` for http) the hook
 //! must have asked it, in order.
 //! Secret-shaped values are never written in the files: `{{SECRET_ANTHROPIC}}`
 //! is replaced here, from pieces. `files` maps a relative path to its content;
@@ -139,12 +139,19 @@ impl FakeDaemon {
                     while let Ok(Some(request)) = read_frame::<ClientRequest>(&mut stream) {
                         let answer = match request {
                             ClientRequest::CheckRun {
-                                cwd, argv, names, ..
+                                cwd,
+                                argv,
+                                names,
+                                vault,
+                                ..
                             } => {
                                 if let Ok(mut l) = log.lock() {
-                                    l.push(serde_json::json!(
-                                        {"cwd": cwd, "argv": argv, "names": names}
-                                    ));
+                                    let mut asked = serde_json::json!({"cwd": cwd, "argv": argv, "names": names});
+                                    // Only a remote run names a vault.
+                                    if let Some(v) = vault {
+                                        asked["vault"] = v.into();
+                                    }
+                                    l.push(asked);
                                 }
                                 if allowed {
                                     ClientReply::Allowed {}
@@ -152,11 +159,19 @@ impl FakeDaemon {
                                     ClientReply::NoOpinion {}
                                 }
                             }
-                            ClientRequest::CheckHttp { cwd, url, names } => {
+                            ClientRequest::CheckHttp {
+                                cwd,
+                                url,
+                                names,
+                                vault,
+                            } => {
                                 if let Ok(mut l) = log.lock() {
-                                    l.push(serde_json::json!(
-                                        {"cwd": cwd, "url": url, "names": names}
-                                    ));
+                                    let mut asked =
+                                        serde_json::json!({"cwd": cwd, "url": url, "names": names});
+                                    if let Some(v) = vault {
+                                        asked["vault"] = v.into();
+                                    }
+                                    l.push(asked);
                                 }
                                 if http_allowed {
                                     ClientReply::Allowed {}
@@ -393,7 +408,7 @@ fn every_fixture_matches() {
             }
         }
     }
-    assert!(count >= 266, "only {count} fixtures found");
+    assert!(count >= 333, "only {count} fixtures found");
     assert!(
         failures.is_empty(),
         "{} of {count} failed:\n{}",

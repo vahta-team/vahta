@@ -119,6 +119,14 @@ pub fn owned_by_me(pid: u32) -> bool {
     sys::owned_by_me(pid)
 }
 
+/// The working directory of process `pid`, canonical, read from the kernel
+/// (`/proc/PID/cwd` on Linux, `proc_pidinfo` on macOS). `Unsupported` on
+/// Windows, where there is no such thing to read from outside. The daemon uses
+/// it to learn where a client really is, whatever the client says.
+pub fn process_cwd(pid: u32) -> io::Result<std::path::PathBuf> {
+    sys::process_cwd(pid)
+}
+
 /// This process's effective user id, where users have numeric ids (Unix).
 pub fn effective_uid() -> Option<u32> {
     sys::effective_uid()

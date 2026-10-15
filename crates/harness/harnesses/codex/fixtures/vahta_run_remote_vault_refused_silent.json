@@ -1,0 +1,35 @@
+{
+  "event": "permission_request",
+  "env": {},
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "daemon": {
+    "check_run": "no_opinion"
+  },
+  "stdin": {
+    "hook_event_name": "PermissionRequest",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "vahta run --vault /work/tools --secret API_KEY -- rm -rf build"
+    },
+    "cwd": "{{TMP}}/proj",
+    "session_id": "s1"
+  },
+  "stdout": null,
+  "exit": 0,
+  "check_run": [
+    {
+      "cwd": "{{TMP}}/proj",
+      "argv": [
+        "rm",
+        "-rf",
+        "build"
+      ],
+      "names": [
+        "API_KEY"
+      ],
+      "vault": "/work/tools"
+    }
+  ]
+}

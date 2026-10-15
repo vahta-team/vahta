@@ -1622,17 +1622,18 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
     // A session on the old daemon, opened over a connection that does not
     // replace it.
     s.script(&[r#"{"secret":"correct horse"}"#]);
-    let mut conn = connector(&s, false).connect_running().unwrap().unwrap();
-    let reply = conn
-        .request(&ClientRequest::Unlock {
+    let reply = raw_request(
+        &s,
+        &s.project(),
+        &ClientRequest::Unlock {
             cwd: s.project().to_string_lossy().into_owned(),
             names: None,
             duration: vahta_ipc::protocol::DurationSpec::Default {},
             label: None,
-        })
-        .unwrap();
+            vault: None,
+        },
+    );
     assert!(matches!(reply, ClientReply::Session(_)), "{reply:?}");
-    drop(conn);
 
     // A command that needs the daemon is told, and pointed at the way out.
     let out = s.vahta(&["add", "ZETA"]);
@@ -1655,6 +1656,58 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
         old.try_wait().unwrap().is_some()
     });
     assert!(s.sessions().is_empty());
+}
+
+// --- A raw client with a chosen real directory -----------------------------------------------
+
+/// Run by `raw_request` in a child process whose working directory is the one
+/// the test chose: it sends the request in `VAHTA_RAW_REQUEST` over the
+/// sandbox's socket as a raw frame and prints the reply. A no-op otherwise.
+#[test]
+fn raw_client_child() {
+    let Ok(request) = std::env::var("VAHTA_RAW_REQUEST") else {
+        return;
+    };
+    let request: ClientRequest = serde_json::from_str(&request).unwrap();
+    let paths = Paths::from_env(None).unwrap();
+    let connector = Connector {
+        paths,
+        version: vahta_daemon::VERSION.to_string(),
+        start: Some(vec![
+            env!("CARGO_BIN_EXE_vahta").into(),
+            "daemon".into(),
+            "run".into(),
+        ]),
+    };
+    // The daemon that runs is the one asked, whatever its version.
+    let mut conn = connector.connect_running().unwrap().unwrap();
+    let reply = conn.request(&request).unwrap();
+    println!("RAW_REPLY:{}", serde_json::to_string(&reply).unwrap());
+}
+
+/// Send `request` as a raw frame from a process whose real working directory is
+/// `real`; whatever directory the request claims is the request's own business.
+fn raw_request(s: &Sandbox, real: &Path, request: &ClientRequest) -> ClientReply {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .current_dir(real)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("VAHTA_DATA_DIR", s.root.join("data"))
+        .env("VAHTA_RUNTIME_DIR", s.root.join("run"))
+        .env("VAHTA_CONFIG_DIR", s.root.join("config"))
+        .env("VAHTA_TEST_SURFACE", s.root.join("script.jsonl"))
+        .env("VAHTA_TEST_SURFACE_LOG", s.root.join("surface.log"))
+        .env("HOME", s.root.join("home"))
+        .env("VAHTA_RAW_REQUEST", serde_json::to_string(request).unwrap())
+        .args(["raw_client_child", "--exact", "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("RAW_REPLY:"))
+        .unwrap_or_else(|| panic!("no reply: {stdout}{}", String::from_utf8_lossy(&out.stderr)));
+    serde_json::from_str(line).unwrap()
 }
 
 // --- run and delegate -----------------------------------------------------------------------
@@ -4878,6 +4931,7 @@ fn check_run(s: &Sandbox, names: &[&str], argv: &[&str], path: Option<&str>) -> 
         argv: argv.iter().map(|a| a.to_string()).collect(),
         names: names.iter().map(|n| n.to_string()).collect(),
         path: path.map(str::to_string),
+        vault: None,
     })
     .unwrap()
 }
@@ -4924,6 +4978,7 @@ fn check_run_says_allowed_only_for_a_command_the_rules_let_through_and_opens_not
             argv: vec!["printenv".into()],
             names: vec!["ZETA".into()],
             path: path.map(str::to_string),
+            vault: None,
         })
         .unwrap();
     assert_eq!(reply, none);
@@ -5750,6 +5805,7 @@ mod http {
             cwd: s.project().to_string_lossy().into_owned(),
             url: url.to_string(),
             names: names.iter().map(|n| n.to_string()).collect(),
+            vault: None,
         })
         .unwrap()
     }

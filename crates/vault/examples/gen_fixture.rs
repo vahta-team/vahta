@@ -79,10 +79,14 @@ fn main() {
                     subdomains: false,
                     port: Some(443),
                 }]),
+                // Format 4 also carries `from` on a rule set and the vault's
+                // remote-use flag.
+                from: vec!["/opt/fixture/project".into()],
                 ..Default::default()
             }),
         )
         .expect("bindings");
+    vault.set_remote(true).expect("remote");
     // Format 2 also carries a paired device and slots of kinds beyond the two
     // this build knows: the second is a kind no build has defined, which every
     // later build must carry through untouched.
@@ -130,7 +134,7 @@ fn main() {
         ));
     }
     json.push_str("  ],\n  \"classes\": {\"ALPHA\": \"payment\"},\n");
-    json.push_str("  \"bindings\": {\"BETA\": {\"allow\": [\"beta-tool push\"], \"deny\": [\"@network\"]}}\n}\n");
+    json.push_str("  \"bindings\": {\"BETA\": {\"allow\": [\"beta-tool push\"], \"deny\": [\"@network\"], \"from\": [\"/opt/fixture/project\"]}},\n  \"remote\": true\n}\n");
     std::fs::write(dir.join(format!("{name}.expected.json")), json).expect("write expected");
     eprintln!("wrote {}", path.display());
 }

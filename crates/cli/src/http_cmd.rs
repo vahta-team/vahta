@@ -12,7 +12,7 @@ use crate::daemon_cmd;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const USAGE: &str = "\
-usage: vahta http --secret NAME [--secret NAME]... [-H 'Name: value {NAME}']...
+usage: vahta http [--vault DIR] --secret NAME [--secret NAME]... [-H 'Name: value {NAME}']...
                   [--query key={NAME}]... [-X METHOD] [-d TEXT | -d @FILE]
                   [--json] [--timeout SECS] [--max-bytes N] [--label TEXT] URL
 
@@ -22,6 +22,12 @@ replaced by ***REDACTED(NAME)***.
 
   --secret NAME     a secret to use (repeatable); each must appear as {NAME} in
                     a header or --query value
+  --vault DIR       use the vault of the project at DIR (its root, the folder
+                    holding .vahta/) instead of this project's. Only for a vault
+                    the person set up for this (`vahta remote on`), and only
+                    for the secrets they named this project for (`vahta bind
+                    NAME --from`). A refusal means it is not allowed here:
+                    do not look for another way to the same secret
   -H, --header H    a header, `Name: value`; {NAME} in the value is replaced
   --query K=V       a query parameter, appended to the URL and percent-encoded;
                     {NAME} in V is replaced
@@ -58,6 +64,7 @@ struct Parsed {
     timeout: Option<u32>,
     max_bytes: Option<u64>,
     label: Option<String>,
+    vault: Option<String>,
     url: String,
 }
 
@@ -78,6 +85,7 @@ fn parse(args: &[String]) -> Args {
         timeout: None,
         max_bytes: None,
         label: None,
+        vault: None,
         url: String::new(),
     };
     let mut urls: Vec<String> = Vec::new();
@@ -148,6 +156,14 @@ fn parse(args: &[String]) -> Args {
                     .ok_or_else(|| "--max-bytes is a positive number".to_string())
             }),
             "--label" => value(a).map(|v| p.label = Some(v)),
+            "--vault" => value(a).and_then(|v| {
+                if v.is_empty() {
+                    Err("--vault expects the vault's project folder".to_string())
+                } else {
+                    p.vault = Some(v);
+                    Ok(())
+                }
+            }),
             other => Err(format!("unrecognised option: {other}")),
         };
         if let Err(e) = result {
@@ -195,6 +211,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         max_response: p.max_bytes,
         timeout_secs: p.timeout,
         label: p.label,
+        vault: p.vault.as_deref().map(|v| daemon_cmd::vault_arg(env, v)),
     };
     let mut conn = match daemon_cmd::connect(env, "http", stderr) {
         Ok(c) => c,

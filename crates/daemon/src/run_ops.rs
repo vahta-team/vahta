@@ -33,11 +33,12 @@ use vahta_policy::Verdict;
 use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, error, find_vault, from_vault, lines_for, refused, refused_names,
-    unknown_name, unlock_as,
+    Ctx, Flow, check_name, error, from_vault, lines_for, refused, refused_names, unknown_name,
+    unlock_as,
 };
 use crate::pathfind;
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
+use crate::remote::Target;
 use crate::run_ask;
 use crate::session::{DelegateRefusal, Role, Session, Sessions, ask_time, info_of};
 use crate::session_ops::duration_of;
@@ -305,6 +306,8 @@ pub(crate) struct RunArgs {
     pub label: Option<String>,
     pub ask: bool,
     pub reason: Option<String>,
+    /// `--vault DIR`: the vault's project, when it is not the caller's.
+    pub vault: Option<String>,
 }
 
 /// What every named secret's approved rules say about a command: the names
@@ -362,6 +365,7 @@ pub(crate) fn check(
     argv: &[String],
     names: Vec<String>,
     path: Option<String>,
+    vault: Option<String>,
 ) -> ClientReply {
     let allowed = (|| -> Option<()> {
         if argv.is_empty() || argv[0].is_empty() {
@@ -371,10 +375,12 @@ pub(crate) fn check(
         if !cwd_path.is_dir() {
             return None;
         }
-        let (project, vault_path) = find_vault(cwd).ok()?;
-        let peek = Vault::peek(&vault_path).ok()?;
+        let target = Target::for_check(ctx, cwd, vault.as_deref()).ok()?;
+        let (project, vault_path) = (&target.project, &target.vault_path);
+        let peek = Vault::peek(vault_path).ok()?;
         peek.verified(ctx.store()).ok()?;
-        let pairs = resolve(&peek, &project, Some(names), Vec::new()).ok()?;
+        let peek = target.view(peek);
+        let pairs = resolve(&peek, project, Some(names), Vec::new()).ok()?;
         let names: Vec<String> = pairs.into_iter().map(|(n, _)| n).collect();
         let each_use = names.iter().any(|n| {
             peek.entries
@@ -388,14 +394,7 @@ pub(crate) fn check(
         let client_path = path.map(OsString::from);
         let program = pathfind::locate(&argv[0], client_path.as_ref(), &cwd_path)?;
         let canonical_cwd = pathfind::canonical(&cwd_path).unwrap_or_else(|| cwd_path.clone());
-        let checked = check_rules(
-            &peek,
-            &project,
-            &names,
-            argv,
-            Some(&program),
-            &canonical_cwd,
-        );
+        let checked = check_rules(&peek, project, &names, argv, Some(&program), &canonical_cwd);
         (checked.missing.is_empty() && checked.verdicts.iter().all(|(_, v)| v.is_allowed()))
             .then_some(())
     })();
@@ -415,23 +414,27 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         label,
         ask,
         reason,
+        vault,
     } = args;
     let cwd = cwd.as_str();
     if argv.is_empty() || argv[0].is_empty() {
         return Err(error("no command to run"));
     }
-    let cwd_path = PathBuf::from(cwd);
-    if !cwd_path.is_dir() {
+    if !PathBuf::from(cwd).is_dir() {
         return Err(error("the current directory is not a directory"));
     }
-    let (project, vault_path) = find_vault(cwd)?;
+    let target = Target::resolve(ctx, cwd, vault.as_deref())?;
+    // With `--vault`, the directory the kernel says the caller is in.
+    let cwd_path = target.cwd.clone();
+    let (project, vault_path) = (target.project.clone(), target.vault_path.clone());
     crate::guard_ops::note_project(ctx, &project.root);
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
+    let peek = target.view(peek);
     let pairs = resolve(&peek, &project, names, renames)?;
     let names: Vec<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
 
-    let found = find_session(ctx, &peek)?;
+    let found = find_session(ctx, &peek, target.used_from.as_deref())?;
     // The program, found once. Its canonical path is what the command rules
     // are checked against and what is executed.
     let client_path: Option<OsString> = client_env
@@ -622,6 +625,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
 pub(crate) fn find_session(
     ctx: &Ctx<'_>,
     peek: &Peek,
+    used_from: Option<&std::path::Path>,
 ) -> Flow<Option<(String, Vec<String>, bool)>> {
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
     let sessions = ctx
@@ -630,7 +634,7 @@ pub(crate) fn find_session(
         .lock()
         .map_err(|_| error("the session table is unusable"))?;
     Ok(sessions
-        .find(&chain, &peek.vault_id)
+        .find(&chain, &peek.vault_id, used_from)
         .map(|s| (s.id.clone(), s.scope.clone(), s.parent.is_some())))
 }
 
@@ -951,9 +955,12 @@ pub(crate) fn delegate(
     names: Vec<String>,
     duration: DurationSpec,
     label: Option<String>,
+    vault: Option<String>,
 ) -> Flow<ClientReply> {
-    let (project, vault_path) = find_vault(cwd)?;
+    let target = Target::resolve(ctx, cwd, vault.as_deref())?;
+    let (project, vault_path) = (target.project.clone(), target.vault_path.clone());
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
+    let peek = target.view(peek);
     if names.is_empty() {
         return Err(refused(
             RefusalKind::NothingToDo,
@@ -974,7 +981,7 @@ pub(crate) fn delegate(
         .sessions
         .lock()
         .map_err(|_| error("the session table is unusable"))?;
-    let Some(parent) = sessions.find(&chain, &peek.vault_id) else {
+    let Some(parent) = sessions.find(&chain, &peek.vault_id, target.used_from.as_deref()) else {
         return Err(refused(
             RefusalKind::NoSession,
             "there is no session to narrow; run `vahta unlock` first",
@@ -1024,6 +1031,7 @@ pub(crate) fn delegate(
         vault_id: peek.vault_id,
         vault_path,
         project: project.root,
+        used_from: target.used_from.clone(),
         scope: wanted.clone(),
         keys,
         forms,

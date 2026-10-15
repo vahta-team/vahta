@@ -1395,7 +1395,7 @@ fn a_rekey_writes_a_successor_the_old_key_signed() {
     let t = t();
     let (_, _, _) = rekeyed_on_a(&t);
     let peek = Vault::peek(&t.path).unwrap();
-    assert_eq!(peek.format, 3);
+    assert_eq!(peek.format, 4);
     assert_eq!(peek.successors.len(), 1);
     let s = &peek.successors[0];
     assert_eq!(s.new_owner_sign_pub, peek.owner_sign_pk);

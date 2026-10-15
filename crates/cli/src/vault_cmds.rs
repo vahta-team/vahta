@@ -23,10 +23,16 @@ use vahta_vault::{Class, Entry, Kind, Peek, Tier, Vault, Verification};
 use crate::{EXIT_CLEAN, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const LIST_USAGE: &str = "\
-usage: vahta list [--json]
+usage: vahta list [--vault DIR] [--json]
 
 List the secrets in this project's vault: name, kind and tier. Reads the
 vault's signed name index; needs no password and prints no values.
+
+With --vault DIR (the folder holding another project's .vahta/) it lists that
+vault's secrets that may be used from this project, if the person set the vault
+up for it (`vahta remote on`, `vahta bind NAME --from`). Otherwise it fails as
+if there were no vault there: a refusal means it is not allowed, not
+'try another way'.
 
 When it is known, a class column says what a secret guards (payment, cloud or
 other, judged when it was added). A rules column says whether the secret has
@@ -37,39 +43,94 @@ approves them; only the vault's copy is enforced). The JSON adds `class`,
 `bound`, `category`, `network`, `dirs` and `rules_pending` to every secret.
 
 options:
+  --vault DIR            another project's vault (its root); see above
   --json                 machine-readable JSON instead of text
   -h, --help             show this help
 ";
 
 pub const CHECK_USAGE: &str = "\
-usage: vahta check [--json]
+usage: vahta check [--vault DIR] [--json]
 
 Compare the project's vahta.toml with its vault. Exit 1 when a required name is
 missing from the vault, or when vahta.toml proposes command rules (allow/deny)
 that the vault has not approved yet (`vahta bind`). With no vault (a CI run) only vahta.toml is validated.
-Optional names that are absent are listed, never a failure.
+Optional names that are absent are listed, never a failure. With --vault DIR it
+checks that vault's project, restricted like `vahta list --vault`.
 
 options:
+  --vault DIR            another project's vault (its root); see above
   --json                 machine-readable JSON instead of text
   -h, --help             show this help
 ";
 
 enum Args {
-    Run { json: bool },
+    Run { json: bool, vault: Option<String> },
     Help,
     Error(String),
 }
 
 fn parse(args: &[String]) -> Args {
     let mut json = false;
-    for a in args {
-        match a.as_str() {
+    let mut vault = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        match a {
             "--json" => json = true,
+            "--vault" => match args.get(i) {
+                Some(v) if !v.is_empty() => {
+                    vault = Some(v.clone());
+                    i += 1;
+                }
+                _ => return Args::Error("--vault expects the vault's project folder".to_string()),
+            },
             "-h" | "--help" => return Args::Help,
             other => return Args::Error(format!("unrecognised argument: {other}")),
         }
     }
-    Args::Run { json }
+    Args::Run { json, vault }
+}
+
+/// What a missing project says; also what a vault that has not opted in to
+/// remote use says, so the two cannot be told apart.
+const NO_PROJECT: &str = "no Vahta project here (no .vahta/ in this directory or above)";
+
+/// The vault a read command works on. Without `--vault`, the project holding
+/// the working directory. With it, the project at that folder: its own
+/// secrets when the caller is inside it, else only what the vault has opted
+/// in to share with this caller's project. `Err` is the message to print
+/// after `vahta <command>: `.
+fn vault_project(
+    env: &Env,
+    vault: Option<&str>,
+    find: fn(&Path) -> Option<Project>,
+    store: &LocalStore,
+) -> Result<(Project, Option<std::path::PathBuf>), String> {
+    let Some(dir) = vault else {
+        return find(&env.cwd)
+            .map(|p| (p, None))
+            .ok_or(NO_PROJECT.to_string());
+    };
+    let abs = if Path::new(dir).is_absolute() {
+        Path::new(dir).to_path_buf()
+    } else {
+        env.cwd.join(dir)
+    };
+    let root = std::fs::canonicalize(abs).map_err(|_| NO_PROJECT.to_string())?;
+    let project = Project { root: root.clone() };
+    if !project.vault_path().is_file() {
+        return Err(NO_PROJECT.to_string());
+    }
+    let here = std::fs::canonicalize(&env.cwd).map_err(|_| NO_PROJECT.to_string())?;
+    if here.starts_with(&root) {
+        return Ok((project, None));
+    }
+    let peek = Vault::peek(&project.vault_path()).map_err(|_| NO_PROJECT.to_string())?;
+    if peek.verified(store).is_err() || !peek.remote {
+        return Err(NO_PROJECT.to_string());
+    }
+    Ok((project, Some(vahta_vault::project::calling_project(&here))))
 }
 
 fn store(env: &Env) -> Option<LocalStore> {
@@ -133,7 +194,7 @@ fn rules_pending(project: &Project, peek: &Peek) -> Vec<String> {
 }
 
 pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
-    let json = match parse(args) {
+    let (json, remote) = match parse(args) {
         Args::Help => {
             let _ = stdout.write_all(LIST_USAGE.as_bytes());
             return EXIT_CLEAN;
@@ -142,30 +203,35 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
             let _ = write!(stderr, "vahta list: error: {msg}\n\n{LIST_USAGE}");
             return EXIT_USAGE;
         }
-        Args::Run { json } => json,
+        Args::Run { json, vault } => (json, vault),
     };
-    let Some(project) = Project::find(&env.cwd) else {
-        let _ = writeln!(
-            stderr,
-            "vahta list: no Vahta project here (no .vahta/ in this directory or above)"
-        );
+    let Some(store) = store(env) else {
+        let _ = writeln!(stderr, "vahta list: error: {NO_STORE}");
         return EXIT_FAILED;
+    };
+    let (project, used_from) = match vault_project(env, remote.as_deref(), Project::find, &store) {
+        Ok(found) => found,
+        Err(msg) => {
+            let _ = writeln!(stderr, "vahta list: {msg}");
+            return EXIT_FAILED;
+        }
     };
     let vault = project.vault_path();
     if !vault.exists() {
         let _ = writeln!(stderr, "vahta list: this project has no vault yet");
         return EXIT_FAILED;
     }
-    let Some(store) = store(env) else {
-        let _ = writeln!(stderr, "vahta list: error: {NO_STORE}");
-        return EXIT_FAILED;
-    };
     let (peek, verified) = match peek_verified(&vault, &store) {
         Ok(ok) => ok,
         Err(msg) => {
             let _ = writeln!(stderr, "vahta list: error: {msg}");
             return EXIT_FAILED;
         }
+    };
+    // From another project: only what may be used from here.
+    let peek = match &used_from {
+        Some(from) => peek.visible_from(from),
+        None => peek,
     };
     let entries = sorted(&peek.entries);
     let pending = rules_pending(&project, &peek);
@@ -303,7 +369,7 @@ pub fn run_check(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    let json = match parse(args) {
+    let (json, remote) = match parse(args) {
         Args::Help => {
             let _ = stdout.write_all(CHECK_USAGE.as_bytes());
             return EXIT_CLEAN;
@@ -312,7 +378,7 @@ pub fn run_check(
             let _ = write!(stderr, "vahta check: error: {msg}\n\n{CHECK_USAGE}");
             return EXIT_USAGE;
         }
-        Args::Run { json } => json,
+        Args::Run { json, vault } => (json, vault),
     };
 
     // One place for every failure: ka's shape in JSON, a line on stderr in text.
@@ -334,14 +400,27 @@ pub fn run_check(
         EXIT_FAILED
     };
 
-    let Some(project) = Project::find_contract(&env.cwd) else {
-        return fail(
-            stdout,
-            stderr,
-            None,
-            None,
-            "no Vahta project here (no .vahta/ or vahta.toml in this directory or above)",
-        );
+    let (project, used_from) = if remote.is_some() {
+        let Some(st) = store(env) else {
+            return fail(stdout, stderr, None, None, NO_STORE);
+        };
+        match vault_project(env, remote.as_deref(), Project::find_contract, &st) {
+            Ok(found) => found,
+            Err(msg) => return fail(stdout, stderr, None, None, &msg),
+        }
+    } else {
+        match Project::find_contract(&env.cwd) {
+            Some(p) => (p, None),
+            None => {
+                return fail(
+                    stdout,
+                    stderr,
+                    None,
+                    None,
+                    "no Vahta project here (no .vahta/ or vahta.toml in this directory or above)",
+                );
+            }
+        }
     };
     let manifest_path = project.manifest_path();
     if !manifest_path.is_file() {
@@ -357,7 +436,7 @@ pub fn run_check(
         }
         return EXIT_CLEAN;
     }
-    let manifest = match manifest::load(&manifest_path) {
+    let mut manifest = match manifest::load(&manifest_path) {
         Ok(m) => m,
         Err(e) => return fail(stdout, stderr, Some(&manifest_path), None, &e.to_string()),
     };
@@ -378,6 +457,16 @@ pub fn run_check(
             };
             match peek_verified(&vault_path, &store) {
                 Ok((peek, verified)) => {
+                    // From another project: only what may be used from here.
+                    let peek = match &used_from {
+                        Some(from) => peek.visible_from(from),
+                        None => peek,
+                    };
+                    if used_from.is_some() {
+                        manifest
+                            .secrets
+                            .retain(|n, _| peek.entries.iter().any(|e| &e.name == n));
+                    }
                     if verified == Verification::Unpinned && !json {
                         let _ = writeln!(
                             stderr,

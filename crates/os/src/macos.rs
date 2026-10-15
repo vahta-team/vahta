@@ -72,6 +72,39 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
         .map(str::to_string)
 }
 
+pub(crate) fn process_cwd(pid: u32) -> io::Result<std::path::PathBuf> {
+    let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::other("pid out of range"))?;
+    // SAFETY: `proc_vnodepathinfo` is plain data; all-zero bytes are a valid value.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // SAFETY: the buffer is `size` bytes of writable memory that outlives the
+    // call; the flavor asks for exactly a `proc_vnodepathinfo`.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast::<c_void>(),
+            size,
+        )
+    };
+    if got != size {
+        return Err(io::Error::other("proc_pidinfo failed"));
+    }
+    let raw = &info.pvi_cdir.vip_path;
+    // SAFETY: `vip_path` is a `[[c_char; 32]; 32]`, 1024 contiguous bytes that
+    // live as long as `info`; `u8` and `c_char` have the same size.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), std::mem::size_of_val(raw))
+    };
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    if end == 0 {
+        return Err(io::Error::other("no working directory"));
+    }
+    use std::os::unix::ffi::OsStrExt;
+    std::fs::canonicalize(std::ffi::OsStr::from_bytes(&bytes[..end]))
+}
+
 pub(crate) fn owned_by_me(pid: u32) -> bool {
     bsd_info(pid).is_ok_and(|i| i.pbi_uid == geteuid().as_raw())
 }

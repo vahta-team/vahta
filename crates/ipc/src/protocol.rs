@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 15;
+pub const PROTOCOL: u32 = 16;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -199,6 +199,47 @@ pub enum DurationSpec {
     Forever {},
 }
 
+impl ClientRequest {
+    /// The directory the daemon must verify against the kernel before serving
+    /// the request: the `cwd` of every request that carries one, except the
+    /// hook's (`CheckRun`, `CheckHttp`, `ToolCheck`, `OutputScan`, `HookReport`).
+    /// The hook is not the shell whose directory it reports, and what it sends
+    /// only answers a question or feeds the journal and the alarm.
+    pub fn cwd_to_verify(&self) -> Option<&str> {
+        use ClientRequest::*;
+        match self {
+            CheckRun { .. }
+            | CheckHttp { .. }
+            | ToolCheck { .. }
+            | OutputScan { .. }
+            | HookReport { .. } => None,
+            Init { cwd }
+            | Add { cwd, .. }
+            | Reset { cwd, .. }
+            | Remove { cwd, .. }
+            | SetTier { cwd, .. }
+            | Import { cwd, .. }
+            | Reveal { cwd, .. }
+            | Copy { cwd, .. }
+            | Unlock { cwd, .. }
+            | Lock { cwd, .. }
+            | Run { cwd, .. }
+            | Http { cwd, .. }
+            | Bind { cwd, .. }
+            | Delegate { cwd, .. }
+            | HooksPause { cwd, .. }
+            | Remote { cwd, .. }
+            | DevicesList { cwd }
+            | DevicesPair { cwd, .. }
+            | DevicesExtend { cwd, .. }
+            | DevicesRevoke { cwd, .. }
+            | DevicesLost { cwd, .. }
+            | Recover { cwd } => Some(cwd),
+            _ => None,
+        }
+    }
+}
+
 /// The rules a client proposes for a secret it adds. All of it is text: the
 /// daemon parses and resolves it and the person approves what comes out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +336,11 @@ pub enum ClientRequest {
         duration: DurationSpec,
         /// A description from the agent; sanitised and shown as unverified.
         label: Option<String>,
+        /// `--vault DIR`: use the vault whose project root is `DIR` from this
+        /// directory (remote use; see `docs/daemon.md`). `None`: the vault of
+        /// the project holding `cwd`, as always.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// End this project's sessions, or all of them. No password.
     Lock {
@@ -326,6 +372,11 @@ pub enum ClientRequest {
         ask: bool,
         /// `--reason`: why, for that window; shown marked as unverified.
         reason: Option<String>,
+        /// `--vault DIR`: use the vault whose project root is `DIR` from this
+        /// directory (remote use; see `docs/daemon.md`). `None`: the vault of
+        /// the project holding `cwd`, as always.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// `vahta http`: one HTTPS request with secrets put in headers or query
     /// values, made by the daemon. The reply is `HttpResponse`, after which
@@ -352,6 +403,11 @@ pub enum ClientRequest {
         max_response: Option<u64>,
         timeout_secs: Option<u32>,
         label: Option<String>,
+        /// `--vault DIR`: use the vault whose project root is `DIR` from this
+        /// directory (remote use; see `docs/daemon.md`). `None`: the vault of
+        /// the project holding `cwd`, as always.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// Propose command rules for a secret (or, with no name, approve what
     /// `vahta.toml` says for every name). Replies `Done`, `Refused` or
@@ -380,6 +436,12 @@ pub enum ClientRequest {
         /// `none`, `app` or `hosts:H[,H...]`.
         #[serde(default)]
         net: Option<String>,
+        /// Absolute project roots the secret may be used from, outside the
+        /// vault's own project (`--from`). `None` keeps what the secret has;
+        /// `Some` of an empty list takes the roots away (`--no-from`). With
+        /// `name` and nothing but this, the rest of the approved rules is kept.
+        #[serde(default)]
+        from: Option<Vec<String>>,
     },
     /// The hook, after a tool ran and before its output reaches the model:
     /// `texts` are the strings of that output (every one, in order), and
@@ -434,6 +496,11 @@ pub enum ClientRequest {
         /// `Default` is as long as the parent has.
         duration: DurationSpec,
         label: Option<String>,
+        /// `--vault DIR`: use the vault whose project root is `DIR` from this
+        /// directory (remote use; see `docs/daemon.md`). `None`: the vault of
+        /// the project holding `cwd`, as always.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// The hook asks, before a tool call runs, whether its text carries a
     /// value the daemon holds for this agent, in any of the forms it knows
@@ -458,6 +525,11 @@ pub enum ClientRequest {
         argv: Vec<String>,
         names: Vec<String>,
         path: Option<String>,
+        /// `--vault DIR`: as for `Run`; the hook asks about a run that uses the vault whose project root is `DIR` from this
+        /// directory (remote use; see `docs/daemon.md`). `None`: the vault of
+        /// the project holding `cwd`, as always.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// The same question for a `vahta http`: would a request to `url` with
     /// these secrets pass their approved host lists? Replies `Allowed` only if
@@ -467,6 +539,11 @@ pub enum ClientRequest {
         cwd: String,
         url: String,
         names: Vec<String>,
+        /// `--vault DIR`: use the vault whose project root is `DIR` from this
+        /// directory (remote use; see `docs/daemon.md`). `None`: the vault of
+        /// the project holding `cwd`, as always.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// `vahta hooks pause`: take Vahta's hook entries out of these harnesses
     /// (all that have them, when empty) for `secs` (at most 8 hours). A window
@@ -490,6 +567,13 @@ pub enum ClientRequest {
         harness: String,
         file: String,
         what: String,
+    },
+    /// `vahta remote on|off`: turn the vault's opt-in to be used from other
+    /// projects on or off. A window shows the vault and asks for the master
+    /// password; nothing changes without it. `on = None` only reports.
+    Remote {
+        cwd: String,
+        on: Option<bool>,
     },
     /// `vahta devices`: the phones this vault has paired. No password: the
     /// list is in the signed plain part of the file.
@@ -758,6 +842,10 @@ pub struct SessionInfo {
     pub parent: Option<String>,
     pub project: String,
     pub vault: String,
+    /// The project the session was opened from, when that is not the
+    /// vault's own (remote use); the session covers only that pair.
+    #[serde(default)]
+    pub used_from: Option<String>,
     pub names: Vec<String>,
     /// Always `runner`: a session runs commands and does nothing else.
     pub role: String,
@@ -808,6 +896,10 @@ pub enum RefusalKind {
     /// `vahta http`: the secret is not bound to the host the request goes to
     /// (no host list, the app's own network, or another host).
     HostNotAllowed,
+    /// Remote use of a vault that does not allow it from here. Sent only once
+    /// the vault has been found and has opted in; a vault that has not looks
+    /// exactly like a path with no vault (`NoVault`).
+    NotFromHere,
 }
 
 /// One name in a refusal and why.

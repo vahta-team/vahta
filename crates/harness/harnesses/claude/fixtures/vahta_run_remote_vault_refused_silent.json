@@ -1,0 +1,34 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "daemon": {
+    "check_run": "no_opinion"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "vahta run --vault /work/tools --secret API_KEY -- rm -rf build"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "check_run": [
+    {
+      "cwd": "{{TMP}}/proj",
+      "argv": [
+        "rm",
+        "-rf",
+        "build"
+      ],
+      "names": [
+        "API_KEY"
+      ],
+      "vault": "/work/tools"
+    }
+  ]
+}

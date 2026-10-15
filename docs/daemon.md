@@ -32,15 +32,16 @@ nothing was done.
 | `vahta import --ka PATH` / `--dotenv PATH` | Add the secrets of a ka vault or a `.env` file. The daemon reads the file itself. A name the vault already has refuses the whole import. | yes (and the ka password for `--ka`) |
 | `vahta reveal NAME` | Show the value in the window until a key is pressed or 60 seconds pass. | yes |
 | `vahta copy NAME` | Put the value on the clipboard; it is cleared after 30 seconds if it is unchanged. Needs `wl-copy`, `xclip`, `xsel`, `pbcopy` or `clip`. | yes |
-| `vahta unlock [--secret NAME]... [--for DURATION] [--label TEXT]` | Open a **session** (below). | yes |
+| `vahta unlock [--vault DIR] [--secret NAME]... [--for DURATION] [--label TEXT]` | Open a **session** (below). With `--vault`, a session for another project's vault, bound to the pair ([Using a vault from another project](#using-a-vault-from-another-project)). | yes |
 | `vahta lock [--all]` | End this project's sessions, or all of them. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
-| `vahta run [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
-| `vahta http --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
-| `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--clear] [--reason TEXT]` | Propose which commands may use a secret, or approve the rules in `vahta.toml`. The person approves in the window. | yes |
+| `vahta run [--vault DIR] [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
+| `vahta http [--vault DIR] --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
+| `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--from PROJECT]... [--no-from] [--clear] [--reason TEXT]` | Propose which commands may use a secret (and which other projects may use it), or approve the rules in `vahta.toml`. The person approves in the window. | yes |
+| `vahta remote [on\|off]` | Let this project's vault be used from other projects, or stop. Plain `remote` only says which. | yes, to change it |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
-| `vahta list`, `vahta check` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
+| `vahta list [--vault DIR]`, `vahta check [--vault DIR]` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta devices` | List the phones paired with this vault: name, id, when paired, when their access ends, when last used, and which unlock method is current. | no |
 | `vahta config unlock [--global] [password\|device NAME\|last\|default]` | Show or set which unlock method is tried first. See [The current unlock method](#the-current-unlock-method). | no |
 | `vahta devices pair NAME [--for DURATION]` / `extend ID [--for DURATION]` / `revoke ID` / `lost ID` | Pair a phone, give it more time, remove it, or remove it and change the vault's key. See [Devices](#devices-factors-re-keying-and-recovery). | the master password, always |
@@ -404,6 +405,75 @@ is relative to the **project root**; `@group` is for `deny` only. **Allow matche
 the file, not the name**: the program is resolved when you approve and again at
 run time, following symlinks, and the daemon starts the resolved path.
 
+### Using a vault from another project
+
+A tool vault such as `~/Projects/ai-tools/.vahta` should serve `cargo publish`
+run in `~/Projects/vahta`. A user-level or global vault is not the answer (that
+is what Vahta left behind), and a bare `--vault` would let an injected agent in
+any project ask for any vault on the machine. So three things must all hold, and
+the daemon checks each of them itself.
+
+1. **The vault opted in.** `vahta remote on` (run in the vault's own project)
+   sets a flag in the signed vault: off by default, changed only in a window
+   with the master password, journaled (`remote_set`). While it is off, a
+   request that names the vault from outside its project tree fails with the
+   same refusal as a path with no vault: no names, no counts, no hint that a
+   vault is there. Turning it off also ends the sessions opened from other
+   projects.
+2. **The secret names the caller.** Each secret has a `from` list in its rule
+   set: absolute, canonical project folders it may be used from, besides the
+   vault's own project. Set with `vahta bind NAME --from /abs/project`
+   (repeatable; `--no-from` clears) or `from = [...]` in `vahta.toml`, and
+   approved like any rule: the window shows it in words ("also usable from the
+   projects: ..."). The caller's project must be a listed folder or below it
+   (the calling project is the nearest folder above the caller's directory with
+   a `.vahta/`, `vahta.toml` or `.git`, else the directory itself). An empty
+   list means the secret works only inside the vault's own project, as before. A
+   secret the caller's project is not listed for is invisible to it: the
+   refusal is the one for a name the vault does not have. `from` is separate
+   from `dirs`, which stays about programs and work inside the vault's project;
+   a secret with `dirs` cannot be used from elsewhere, because the working
+   directory is outside them.
+3. **The daemon knows where the caller is.** The client's `cwd` is a claim,
+   and it is believed for no request. For every request that carries a `cwd`
+   the daemon takes the peer's process id from the socket (`SO_PEERCRED`,
+   `LOCAL_PEERPID`), checks it is the same process (start time, before and
+   after), and reads its working directory from the kernel (`/proc/PID/cwd`,
+   `proc_pidinfo` with `PROC_PIDVNODEPATHINFO`). The claim must equal it after
+   canonicalisation (`vahta` always sends its real directory; a subdirectory is
+   not accepted). Otherwise the request is refused (`not_from_here`), a
+   `cwd_refused` journal line marked `suspicious` is written, and it counts for
+   the injection alarm at once. The command runs in the verified directory. A
+   process whose directory cannot be read (it exited, or the system hides it)
+   is refused too. Exceptions: the hook's own messages (`CheckRun`,
+   `CheckHttp`, `ToolCheck`, `OutputScan`, `HookReport`) keep the claimed `cwd`,
+   because the hook is not the shell whose directory it reports and they only
+   answer a question or feed the journal. **Windows** has no working-directory
+   read yet: there the claim is believed, as before, and use of a vault from
+   another project is refused with that reason; use inside the vault's own
+   project works everywhere.
+
+A project is a directory here: an agent that can change into a listed folder
+is "in" that project for this purpose, as it is for every other per-project rule.
+The three conditions narrow what a compromised agent in an unrelated project can
+reach; they do not make a listed project safer than it is.
+
+Everything else is the same as local use. The secret's category rules (allow,
+deny, network, tier) apply in full; the windows and journal lines name both ends
+(`Vault: <vault> · used from <project>`; journal field `used_from`); a session
+opened with `--vault` belongs to the pair (vault, calling project) and covers
+neither the same vault from a third project nor use at home; `vahta sessions`
+lists the project it is used from. `vahta list --vault` and `check --vault`
+(which read the signed index with no daemon) apply the same gate and show only
+the secrets usable from the caller's project.
+
+The hook mirrors this. `CheckRun {cwd, argv, names, path, vault}` and
+`CheckHttp {cwd, url, names, vault}` carry the `--vault` of the command (made
+absolute against `cwd`); the hook says allow only when the daemon says the run
+would go. They are questions, not uses: nothing starts, and the daemon believes
+the claimed `cwd` (the hook's own directory is not the shell's); the run that
+follows is checked against the kernel.
+
 ### The hook's question (`CheckRun`)
 
 Before a harness asks the person to approve a `vahta run`, the hook asks the
@@ -437,6 +507,11 @@ network (or `NO RULES`); `vahta check` lists them for the names in the file.
   With only `--allow`/`--deny` and rules already approved, the category, folders and
   network stay as they are. `--clear` removes the rules (nothing may use the
   secret until new ones are approved).
+- `--from PROJECT` (repeatable) lists the other projects the secret may be used
+  from ([above](#using-a-vault-from-another-project)). Given alone it changes
+  only that and keeps the approved rules as they are; given with other rule
+  options, the old `from` stays unless `--from` is given again. A folder that
+  does not exist, a relative path and `/` are refused before any window.
 - `vahta bind` with no name approves `vahta.toml` as written for every name whose
   entry proposes rules and differs from the vault.
 - Nothing changes without the window and the password. An agent may call it; it
@@ -762,7 +837,7 @@ except `password_only`.
 
 **Other machines.** A machine that has opened the vault pinned its owner key.
 This machine's pin is moved to the new owner key by the re-key. The re-key also
-writes a **successor record** into the file (format 3): the old owner key signs
+writes a **successor record** into the file (format 3 and later): the old owner key signs
 "the owner is now this key, owner generation N". The last four records are kept,
 each starting where the one before ended. Another machine that pinned the old key
 then does not refuse the file for good, but it does not trust the record alone:

@@ -31,6 +31,8 @@ mod ops;
 mod output;
 mod pathfind;
 mod proposal;
+mod remote;
+mod remote_ops;
 mod report;
 mod run;
 mod run_ask;

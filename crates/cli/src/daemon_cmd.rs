@@ -44,6 +44,17 @@ pub fn paths(env: &Env) -> Result<Paths, String> {
 }
 
 /// How to reach the daemon, starting it if `start`.
+/// The value of `--vault`, as an absolute path (the daemon resolves it
+/// further): a relative one is relative to the directory the command runs in.
+pub fn vault_arg(env: &Env, dir: &str) -> String {
+    let p = std::path::Path::new(dir);
+    if p.is_absolute() {
+        dir.to_string()
+    } else {
+        env.cwd.join(p).to_string_lossy().into_owned()
+    }
+}
+
 pub fn connector(env: &Env, start: bool) -> Result<Connector, String> {
     let start = if start {
         let exe = std::env::current_exe()
@@ -409,6 +420,7 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::CommandNotAllowed => "this command is not allowed to use this secret",
         RefusalKind::NoRules => "no approved rules yet; propose them with `vahta bind`",
         RefusalKind::HostNotAllowed => "not approved for this host",
+        RefusalKind::NotFromHere => "not allowed from here",
     }
 }
 

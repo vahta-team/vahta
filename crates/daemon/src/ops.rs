@@ -40,6 +40,9 @@ pub(crate) struct Ctx<'a> {
     pub pid: u32,
     /// The peer, with its start time, for the session lookups.
     pub peer: vahta_os::ProcessId,
+    /// The calling project, once the request turned out to be remote use of
+    /// another project's vault: every window and journal line then names it.
+    pub used_from: std::sync::Mutex<Option<PathBuf>>,
 }
 
 /// An early end: the reply to send.
@@ -120,9 +123,73 @@ impl Ctx<'_> {
     }
 
     pub(crate) fn journal(&self, entry: Entry) {
-        self.shared
-            .journal
-            .record(entry.peer(self.exe.as_deref(), self.pid));
+        let entry = entry.peer(self.exe.as_deref(), self.pid);
+        let entry = match self.used_from() {
+            Some(from) => entry.used_from(&from),
+            None => entry,
+        };
+        self.shared.journal.record(entry);
+    }
+
+    /// The directory the peer process is really in, read from the kernel and
+    /// checked against pid reuse. `None` where that cannot be done.
+    pub(crate) fn peer_cwd(&self) -> Option<PathBuf> {
+        let same = || vahta_os::identity_of(self.pid).is_ok_and(|id| id == self.peer);
+        if !same() {
+            return None;
+        }
+        let cwd = vahta_os::process_cwd(self.pid).ok()?;
+        same().then_some(cwd)
+    }
+
+    /// The client's `cwd` is a claim; the kernel's account of where the peer
+    /// is wins. Equal after canonicalisation, or the request is refused,
+    /// journaled as suspicious and counted for the injection alarm. Where the
+    /// kernel cannot be asked (Windows) the claim is believed, as before.
+    pub(crate) fn check_cwd(&self, claimed: &str) -> Flow<PathBuf> {
+        let claimed_path = crate::pathfind::canonical(Path::new(claimed));
+        let Some(real) = self.peer_cwd() else {
+            if cfg!(windows) {
+                return Ok(claimed_path.unwrap_or_else(|| PathBuf::from(claimed)));
+            }
+            // On a system that can be asked, no answer is no trust.
+            return Err(self.cwd_refused(claimed, None));
+        };
+        if claimed_path.as_deref() == Some(real.as_path()) {
+            Ok(real)
+        } else {
+            Err(self.cwd_refused(claimed, Some(&real)))
+        }
+    }
+
+    fn cwd_refused(&self, claimed: &str, real: Option<&Path>) -> ClientReply {
+        let claimed: String = claimed
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(200)
+            .collect();
+        let real = real.map_or("unreadable".to_string(), |r| r.display().to_string());
+        self.journal(Entry::new("cwd_refused").result(
+            "refused",
+            Some(&format!(
+                "suspicious: the client claimed the directory {claimed} but runs in {real}"
+            )),
+        ));
+        crate::report::not_from_here(self, "a request naming a directory it is not in");
+        refused(
+            RefusalKind::NotFromHere,
+            "the working directory this request names is not where it runs; refused and noted",
+        )
+    }
+
+    pub(crate) fn used_from(&self) -> Option<PathBuf> {
+        self.used_from.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub(crate) fn set_used_from(&self, from: PathBuf) {
+        if let Ok(mut g) = self.used_from.lock() {
+            *g = Some(from);
+        }
     }
 
     pub(crate) fn store(&self) -> &LocalStore {
@@ -130,6 +197,12 @@ impl Ctx<'_> {
     }
 
     pub(crate) fn panel(&self, title: &str, mut lines: Vec<String>) -> Panel {
+        // Remote use names both ends: `Vault: <vault> · used from <project>`.
+        if let Some(from) = self.used_from() {
+            for line in lines.iter_mut().filter(|l| l.starts_with("Vault: ")) {
+                line.push_str(&format!(" · used from {}", from.display()));
+            }
+        }
         lines.push(format!("Requested by: {}", self.requested_by()));
         Panel {
             title: title.to_string(),
@@ -364,6 +437,7 @@ pub(crate) fn store(
         dirs: r.dirs.clone(),
         net: r.net.clone(),
         path: r.path.as_deref().map(std::ffi::OsString::from),
+        from: Vec::new(),
     });
     if mode == StoreMode::Add
         && let Some(a) = &proposal_args

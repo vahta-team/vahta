@@ -12,7 +12,7 @@
 //! `required` defaults to true, `description` to empty and `env` to the name.
 //! It never holds a value or a tier. It may hold `allow` and `deny` lists of
 //! command rules (see [`crate::rules`]) and the rest of a rule set (`category`,
-//! `dirs`, `network` = "none" | "app" | "hosts" with `hosts`), but those are a
+//! `dirs`, `from`, `network` = "none" | "app" | "hosts" with `hosts`), but those are a
 //! **proposal**: the
 //! file is in the repository, so anyone who can push can edit it. What the
 //! daemon enforces is the approved copy in the signed vault, which changes
@@ -46,6 +46,9 @@ pub struct SecretEntry {
     pub network: Option<String>,
     /// Proposed hosts, for `network = "hosts"`.
     pub hosts: Vec<crate::HostRule>,
+    /// Proposed project roots this secret may be used from, outside the
+    /// vault's own project (absolute paths, as written).
+    pub from: Vec<String>,
 }
 
 /// The rule-set part of a secret's entry, as texts, to write into the file.
@@ -59,6 +62,8 @@ pub struct RulesText {
     /// is not written.
     pub network: Option<String>,
     pub hosts: Vec<String>,
+    /// Project roots the secret may be used from, outside the vault's own.
+    pub from: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +121,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                 dirs: Vec::new(),
                 network: None,
                 hosts: Vec::new(),
+                from: Vec::new(),
             };
             for (k, v) in body {
                 match (k.as_str(), v) {
@@ -151,7 +157,18 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                             .collect::<Result<_, _>>()
                             .map_err(|e| bad(format!("[secrets.{name}].hosts: {e}")))?;
                     }
-                    ("allow" | "deny" | "dirs" | "hosts", _) => {
+                    ("from", toml::Value::Array(items)) => {
+                        entry.from = string_list(items, name, "from").map_err(bad)?;
+                        if entry.from.len() > crate::MAX_FROM
+                            || !entry.from.iter().all(|p| crate::portable_absolute(p))
+                        {
+                            return Err(bad(format!(
+                                "[secrets.{name}].from must be at most {} absolute project paths",
+                                crate::MAX_FROM
+                            )));
+                        }
+                    }
+                    ("allow" | "deny" | "dirs" | "hosts" | "from", _) => {
                         return Err(bad(format!(
                             "[secrets.{name}].{k} must be a list of strings"
                         )));
@@ -303,7 +320,7 @@ pub fn add_rule(text: &str, name: &str, allow: bool, rule: &str) -> Result<Strin
 }
 
 /// `text` with `[secrets.NAME]`'s rule keys (`allow`, `deny`, `category`,
-/// `dirs`, `network`, `hosts`) set to exactly these (a key with nothing to say
+/// `dirs`, `network`, `hosts`, `from`) set to exactly these (a key with nothing to say
 /// is removed). Everything else is kept.
 pub fn set_rules(text: &str, name: &str, rules: &RulesText) -> Result<String, Error> {
     let path = Path::new("vahta.toml");
@@ -326,6 +343,7 @@ pub fn set_rules(text: &str, name: &str, rules: &RulesText) -> Result<String, Er
         ("deny", &rules.deny),
         ("dirs", &rules.dirs),
         ("hosts", &rules.hosts),
+        ("from", &rules.from),
     ] {
         if items.is_empty() {
             table.remove(key);
@@ -417,7 +435,8 @@ pub fn rules_in_sync_with(
         && e.category.is_none()
         && e.dirs.is_empty()
         && e.network.is_none()
-        && e.hosts.is_empty();
+        && e.hosts.is_empty()
+        && e.from.is_empty();
     if proposes_nothing {
         return true;
     }
@@ -442,6 +461,7 @@ pub fn rules_in_sync_with(
         && e.dirs == b.dirs.iter().map(|d| d.text.clone()).collect::<Vec<_>>()
         && e.network.as_deref().unwrap_or(default_net) == network_word(&b.network)
         && e.hosts.iter().map(|h| h.text.clone()).collect::<Vec<_>>() == hosts_have
+        && e.from == b.from
 }
 
 /// The outcome of comparing a manifest with the names in a vault.
@@ -563,6 +583,7 @@ mod tests {
             dirs: vec!["./scripts".into()],
             network: Some("hosts".into()),
             hosts: vec!["api.stripe.com".into(), "*.stripe.com:443".into()],
+            from: vec!["/work/app".into()],
         };
         let text = set_rules("", "K", &rules).unwrap();
         let m = p(&text).unwrap();
@@ -572,6 +593,7 @@ mod tests {
         assert_eq!(e.network.as_deref(), Some("hosts"));
         assert_eq!(e.hosts.len(), 2);
         assert!(e.hosts[1].subdomains && e.hosts[1].port == Some(443));
+        assert_eq!(e.from, ["/work/app"]);
         // The vault's copy matches when it says the same; any difference shows.
         let mut approved = RuleSet {
             name: "K".into(),
@@ -588,9 +610,16 @@ mod tests {
                 write: true,
             }],
             network: Network::Hosts(e.hosts.clone()),
+            from: vec!["/work/app".into()],
             ..RuleSet::default()
         };
         assert!(rules_in_sync(Some(e), Some(&approved)));
+        // Where it may be used from is part of what is compared.
+        approved.from = vec!["/work/other".into()];
+        assert!(!rules_in_sync(Some(e), Some(&approved)));
+        approved.from.clear();
+        assert!(!rules_in_sync(Some(e), Some(&approved)));
+        approved.from = vec!["/work/app".into()];
         approved.network = Network::App;
         assert!(!rules_in_sync(Some(e), Some(&approved)));
         approved.network = Network::Hosts(e.hosts.clone());
@@ -626,6 +655,8 @@ mod tests {
             "[secrets.A]\nnetwork = \"everything\"\n",
             "[secrets.A]\ncategory = \"Pay ment\"\n",
             "[secrets.A]\ndirs = \"x\"\n",
+            "[secrets.A]\nfrom = \"/x\"\n",
+            "[secrets.A]\nfrom = [\"relative/dir\"]\n",
             "secrets = 3\n",
             "[other]\n",
             "= broken",

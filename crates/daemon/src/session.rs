@@ -53,6 +53,9 @@ pub struct Session {
     pub vault_id: [u8; 16],
     pub vault_path: PathBuf,
     pub project: PathBuf,
+    /// For a session opened from another project (remote use): that project.
+    /// The session covers the pair (vault, this project) and nothing else.
+    pub used_from: Option<PathBuf>,
     /// The names the session covers.
     pub scope: Vec<String>,
     pub keys: SessionKeys,
@@ -90,6 +93,7 @@ pub struct ExtensionAsk {
     pub length: Duration,
     pub scope: Vec<String>,
     pub project: PathBuf,
+    pub used_from: Option<PathBuf>,
     pub anchor_exe: String,
     pub anchor_pid: u32,
     pub vault_path: PathBuf,
@@ -173,10 +177,21 @@ impl Sessions {
     /// The session a caller belongs to for `vault_id`: one whose anchor is in
     /// the caller's chain of ancestors (the caller included), or one under
     /// which a process in the chain was launched. The deepest, that is the
-    /// narrowest, wins; of equals the newest.
-    pub fn find(&self, chain: &[ProcessId], vault_id: &[u8; 16]) -> Option<&Session> {
+    /// narrowest, wins; of equals the newest. A session opened from another
+    /// project (`used_from`) is found only from that project, and a local one
+    /// only locally.
+    pub fn find(
+        &self,
+        chain: &[ProcessId],
+        vault_id: &[u8; 16],
+        used_from: Option<&std::path::Path>,
+    ) -> Option<&Session> {
         let mut best: Option<(usize, &Session)> = None;
-        for s in self.items.iter().filter(|s| &s.vault_id == vault_id) {
+        for s in self
+            .items
+            .iter()
+            .filter(|s| &s.vault_id == vault_id && s.used_from.as_deref() == used_from)
+        {
             let matches = chain.contains(&s.anchor)
                 || chain
                     .iter()
@@ -321,6 +336,7 @@ impl Sessions {
                     length: s.length.unwrap_or(EXTEND_BY),
                     scope: s.scope.clone(),
                     project: s.project.clone(),
+                    used_from: s.used_from.clone(),
                     anchor_exe: s.anchor_exe.clone(),
                     anchor_pid: s.anchor.pid,
                     vault_path: s.vault_path.clone(),
@@ -381,6 +397,7 @@ pub fn info_of(s: &Session, now: Instant) -> SessionInfo {
         parent: s.parent.clone(),
         project: s.project.display().to_string(),
         vault: s.vault_path.display().to_string(),
+        used_from: s.used_from.as_ref().map(|p| p.display().to_string()),
         names: s.scope.clone(),
         role: match s.role {
             Role::Runner => "runner".to_string(),
@@ -469,6 +486,7 @@ mod tests {
             vault_id: [7; 16],
             vault_path: PathBuf::from("/p/.vahta/vault.vht"),
             project: PathBuf::from("/p"),
+            used_from: None,
             scope: names.iter().map(|n| n.to_string()).collect(),
             keys: k,
             forms: EncodedSet::default(),
@@ -538,6 +556,24 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_session_covers_only_its_own_pair() {
+        let mut s = Sessions::default();
+        let mut remote = session("remote", &["A"], 10, None, None);
+        remote.used_from = Some(PathBuf::from("/work/app"));
+        s.add(remote);
+        let vault = [7u8; 16];
+        let chain = [pid(11), pid(10)];
+        let app = std::path::Path::new("/work/app");
+        assert_eq!(s.find(&chain, &vault, Some(app)).unwrap().id, "remote");
+        // Not for local use, and not from a third project.
+        assert!(s.find(&chain, &vault, None).is_none());
+        assert!(
+            s.find(&chain, &vault, Some(std::path::Path::new("/work/other")))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn the_deepest_matching_session_wins_and_unrelated_ones_do_not_match() {
         let mut s = Sessions::default();
         s.add(session("root", &["A", "B"], 10, None, None));
@@ -548,25 +584,33 @@ mod tests {
         assert_eq!(s.depth("child"), 1);
         // A caller under the child (whose chain includes both anchors).
         let chain = [pid(30), pid(20), pid(10), pid(5)];
-        assert_eq!(s.find(&chain, &vault).unwrap().id, "child");
+        assert_eq!(s.find(&chain, &vault, None).unwrap().id, "child");
         // A caller under the root only.
-        assert_eq!(s.find(&[pid(31), pid(10)], &vault).unwrap().id, "root");
+        assert_eq!(
+            s.find(&[pid(31), pid(10)], &vault, None).unwrap().id,
+            "root"
+        );
         // A caller under neither, and one for another vault.
-        assert!(s.find(&[pid(31), pid(77)], &vault).is_none());
-        assert!(s.find(&chain, &[8u8; 16]).is_none());
+        assert!(s.find(&[pid(31), pid(77)], &vault, None).is_none());
+        assert!(s.find(&chain, &[8u8; 16], None).is_none());
         // A recycled pid (same number, another start time) is not the anchor.
         let recycled = ProcessId {
             pid: 10,
             start_time: 1,
         };
-        assert!(s.find(&[pid(31), recycled], &vault).is_none());
+        assert!(s.find(&[pid(31), recycled], &vault, None).is_none());
         // A process the daemon launched under the root carries the session.
         s.note_launch(pid(40), "root");
-        assert_eq!(s.find(&[pid(41), pid(40)], &vault).unwrap().id, "root");
+        assert_eq!(
+            s.find(&[pid(41), pid(40)], &vault, None).unwrap().id,
+            "root"
+        );
         // Launched under the child, it is the child's.
         s.note_launch(pid(50), "child");
         assert_eq!(
-            s.find(&[pid(51), pid(50), pid(40)], &vault).unwrap().id,
+            s.find(&[pid(51), pid(50), pid(40)], &vault, None)
+                .unwrap()
+                .id,
             "child"
         );
     }
@@ -588,7 +632,7 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert!(s.get("other").is_some_and(|o| !o.keys.is_wiped()));
         // What was launched under the dead sessions is forgotten.
-        assert!(s.find(&[pid(60)], &[7u8; 16]).is_none());
+        assert!(s.find(&[pid(60)], &[7u8; 16], None).is_none());
         assert!(s.end_tree("root", "killed").is_empty());
     }
 

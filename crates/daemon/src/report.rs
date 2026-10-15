@@ -260,6 +260,23 @@ pub(crate) fn rule_refusal(
     }
 }
 
+/// A client that claimed a working directory it is not in, or a use of another
+/// project's vault that is not allowed from here, counts for the alarm at once:
+/// an honest `vahta` never says either.
+pub(crate) fn not_from_here(ctx: &Ctx<'_>, what: &str) {
+    if crate::testing::refusal_alarm_muted() {
+        return;
+    }
+    let subject = subject_of(ctx, "", None);
+    if let Some(verdict) =
+        ctx.shared
+            .alarm
+            .record_scored(&subject, alarm::THRESHOLD, clean(what), Instant::now())
+    {
+        alarm::raise(ctx.shared, subject, verdict);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

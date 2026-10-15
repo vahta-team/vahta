@@ -150,6 +150,10 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
 
 /// ka's rule: a process this user can open for query is this user's; one it
 /// cannot is not (fail closed).
+pub(crate) fn process_cwd(_pid: u32) -> io::Result<std::path::PathBuf> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 pub(crate) fn owned_by_me(pid: u32) -> bool {
     open_process(pid).is_ok()
 }

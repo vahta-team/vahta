@@ -24,7 +24,7 @@ use crate::session_cmds::parse_duration;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const RUN_USAGE: &str = "\
-usage: vahta run [--secret NAME]... [--as NAME=VAR]... [--label TEXT]
+usage: vahta run [--vault DIR] [--secret NAME]... [--as NAME=VAR]... [--label TEXT]
                  [--ask [--reason TEXT]] [--] COMMAND [ARGS...]
 
 Run COMMAND with secrets in its environment. The daemon starts it, so this
@@ -33,6 +33,12 @@ replaced by ***REDACTED(NAME)***.
 
   --secret NAME     a secret to inject (repeatable); without it, every name in
                     vahta.toml that the vault holds
+  --vault DIR       use the vault of the project at DIR (its root, the folder
+                    holding .vahta/) instead of this project's. Only for a vault
+                    the person set up for this (`vahta remote on`), and only
+                    for the secrets they named this project for (`vahta bind
+                    NAME --from`). A refusal means it is not allowed here:
+                    do not look for another way to the same secret
   --as NAME=VAR     put NAME in the variable VAR (default: the `env` of NAME in
                     vahta.toml, else NAME itself)
   --label TEXT      a description for the window, shown marked as coming from
@@ -59,13 +65,15 @@ is the command's.
 ";
 
 pub const DELEGATE_USAGE: &str = "\
-usage: vahta delegate --secret NAME [--secret NAME]... [--for DURATION] [--label TEXT] [--] COMMAND [ARGS...]
+usage: vahta delegate [--vault DIR] --secret NAME [--secret NAME]... [--for DURATION]
+                      [--label TEXT] [--] COMMAND [ARGS...]
 
 Narrow your session for a sub-agent and run it. The new session covers only the
 named secrets, lasts no longer than yours (--for makes it shorter), belongs to
 this process, and ends when COMMAND exits. A secret your session does not
 cover, or a longer time, is refused with no window. `vahta run` from inside
-COMMAND uses the narrow session.
+COMMAND uses the narrow session. With --vault DIR (see `vahta run --help`) it
+narrows the session you opened for that vault from this project.
 ";
 
 struct Parsed {
@@ -75,6 +83,7 @@ struct Parsed {
     label: Option<String>,
     ask: bool,
     reason: Option<String>,
+    vault: Option<String>,
     command: Vec<String>,
 }
 
@@ -92,6 +101,7 @@ fn parse(args: &[String], delegate: bool) -> Args {
         label: None,
         ask: false,
         reason: None,
+        vault: None,
         command: Vec::new(),
     };
     let mut i = 0;
@@ -128,6 +138,14 @@ fn parse(args: &[String], delegate: bool) -> Args {
                 .and_then(|v| parse_duration(&v))
                 .map(|d| p.duration = d),
             "--label" => value("--label").map(|v| p.label = Some(v)),
+            "--vault" => value("--vault").and_then(|v| {
+                if v.is_empty() {
+                    Err("--vault expects the vault's project folder".to_string())
+                } else {
+                    p.vault = Some(v);
+                    Ok(())
+                }
+            }),
             "--ask" if !delegate => {
                 p.ask = true;
                 Ok(())
@@ -273,6 +291,10 @@ pub fn run_run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut 
         label: parsed.label,
         ask: parsed.ask,
         reason: parsed.reason,
+        vault: parsed
+            .vault
+            .as_deref()
+            .map(|v| daemon_cmd::vault_arg(env, v)),
     };
     let mut conn = match daemon_cmd::connect(env, "run", stderr) {
         Ok(c) => c,
@@ -322,6 +344,10 @@ pub fn run_delegate(
         names: parsed.names,
         duration: parsed.duration,
         label: parsed.label,
+        vault: parsed
+            .vault
+            .as_deref()
+            .map(|v| daemon_cmd::vault_arg(env, v)),
     };
     let mut conn = match daemon_cmd::connect(env, "delegate", stderr) {
         Ok(c) => c,
