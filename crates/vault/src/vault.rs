@@ -146,6 +146,9 @@ pub struct Peek {
     pub remote: bool,
     /// What the vault is for (`Project` before format 5).
     pub kind: VaultKind,
+    /// A member's package, not a vault: it opens with the member's identity
+    /// and has no owner password (see `member::is_package`).
+    pub package: bool,
     /// The agent roles the person approved, covered by the owner's signature.
     pub roles: Vec<AgentRole>,
 }
@@ -398,6 +401,9 @@ fn peek_of(loaded: &Loaded) -> Peek {
         successors: loaded.successors(),
         remote: loaded.remote(),
         kind: loaded.kind(),
+        package: loaded
+            .current()
+            .is_some_and(|d| crate::member::is_package(&d.model)),
         roles: loaded.roles(),
     }
 }
@@ -589,6 +595,13 @@ impl Vault {
         consent: Option<Consent<'_>>,
     ) -> Result<Vault, Error> {
         let loaded = format::decode(&read_file(path)?)?;
+        // A member's package has no owner password: say what it is.
+        if loaded
+            .current()
+            .is_some_and(|d| crate::member::is_package(&d.model))
+        {
+            return Err(Error::Package);
+        }
         let typed = match &access {
             OwnerAccess::Password(pw) => Some(Zeroizing::new(pw.to_vec())),
             OwnerAccess::Recovery(_) | OwnerAccess::Slot(..) => None,
@@ -785,6 +798,12 @@ impl Vault {
             Err(e) => return Err(e),
         };
         let open = format::unlock_recipient(&loaded, recipient_id, keys.enc_sk())?;
+        // The expiry is covered by the owner's certificate on the entry, so a
+        // member cannot move it. It is enforced here, by the member's own
+        // software: a member who patches this out still holds the keys.
+        if open.recipient.expires_at.is_some_and(|t| now() >= t) {
+            return Err(Error::MembershipExpired);
+        }
         if let (Some(change), Some(ask)) = (moved, consent) {
             if !ask(&change) {
                 return Err(Error::OwnerChanged);
@@ -1813,6 +1832,14 @@ impl Vault {
                 if loaded.header().vault_id != model.header.vault_id {
                     return Err(Error::Conflict);
                 }
+                // A vault is never written over a member's package.
+                if actor == Actor::Owner
+                    && loaded
+                        .current()
+                        .is_some_and(|d| crate::member::is_package(&d.model))
+                {
+                    return Err(Error::Package);
+                }
                 loaded.header().generation
             }
             None => 0,
@@ -1889,6 +1916,10 @@ fn write_backup(path: &Path, from: u16, bytes: &[u8]) -> Result<(), Error> {
         }),
     }
 }
+
+#[path = "vault_members.rs"]
+mod members;
+pub use members::{Transfer, TransferSender};
 
 #[cfg(test)]
 #[path = "vault_tests.rs"]

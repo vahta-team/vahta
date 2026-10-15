@@ -15,9 +15,11 @@
 
 pub mod crypto;
 pub mod format;
+pub mod identity;
 pub mod ka;
 pub mod manifest;
 pub mod manifest_roles;
+pub mod member;
 pub mod project;
 pub mod rules;
 pub mod session;
@@ -40,8 +42,8 @@ pub use format::current::{
 };
 pub use session::SessionKeys;
 pub use vault::{
-    Consent, KeptSlot, OwnerKeyChange, Peek, RecipientSecret, RecoveryPlan, RekeyOutcome, SlotView,
-    Vault, Verification, read_file,
+    Consent, KeptSlot, OwnerKeyChange, Peek, RecipientPublic, RecipientSecret, RecoveryPlan,
+    RekeyOutcome, SlotView, Transfer, TransferSender, Vault, Verification, read_file,
 };
 
 /// Names are env-var-like and short. Checked on every write and every read of
@@ -140,6 +142,12 @@ pub enum Error {
     /// a secret re-sealed, removed or moved to another tier, or the file
     /// replaced. The session's keys no longer open it.
     SessionStale,
+    /// The membership has ended: its expiry, which the owner's certificate
+    /// covers, has passed.
+    MembershipExpired,
+    /// The file is a member's package, not a vault the owner can open or
+    /// write over.
+    Package,
 }
 
 impl Error {
@@ -210,6 +218,12 @@ impl fmt::Display for Error {
             Error::UnknownDevice => f.write_str("no such device"),
             Error::SessionStale => f.write_str(
                 "changed since this session was opened; unlock again",
+            ),
+            Error::MembershipExpired => f.write_str(
+                "this membership has expired; ask the vault's owner for a new package",
+            ),
+            Error::Package => f.write_str(
+                "this file is a member's package, not a vault: it has no owner password",
             ),
         }
     }

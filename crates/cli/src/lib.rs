@@ -42,6 +42,7 @@ mod devices_cmd;
 mod guard_cmd;
 mod hooks_cmd;
 mod http_cmd;
+mod members_cmd;
 mod output_cmd;
 mod remote_cmd;
 mod role_cmd;
@@ -123,6 +124,11 @@ commands:
   config  `config unlock`: which unlock method is tried first (no password)
   devices  list, pair, extend, revoke or declare lost the phones that open the vault
   recover  forgot the password: use the recovery key and choose a new one
+  id      your own key for joining a team vault (`id --show` prints it again)
+  members list, add, extend or remove the people who share this vault
+  grant   let a member read a secret (`revoke` takes it back)
+  share   make a package for a member, or send a secret to the owner
+  join    install a package from the owner, or import a secret an editor sent
   hooks   `hooks pause` turns Vahta's hooks off for a while (the person approves)
   output  `output allow REF`: ask to see what was cut from a tool's output
   init    create this project's vault
@@ -455,6 +461,12 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("recover") => devices_cmd::run_recover(&args[1..], env, stdout, stderr),
         Some("lock") => session_cmds::run_lock(&args[1..], env, stdout, stderr),
         Some("sessions") => session_cmds::run_sessions(&args[1..], env, stdout, stderr),
+        Some("id") => members_cmd::run_id(&args[1..], env, stdout, stderr),
+        Some("members") => members_cmd::run_members(&args[1..], env, stdout, stderr),
+        Some("grant") => members_cmd::run_grant(true, &args[1..], env, stdout, stderr),
+        Some("revoke") => members_cmd::run_grant(false, &args[1..], env, stdout, stderr),
+        Some("share") => members_cmd::run_share(&args[1..], env, stdout, stderr),
+        Some("join") => members_cmd::run_join(&args[1..], env, stdout, stderr),
         Some("output") => output_cmd::run(&args[1..], env, stdout, stderr),
         // The prompt window, started by the daemon; not listed in the help.
         Some("_surface") => surface_cmd::run(&args[1..]),

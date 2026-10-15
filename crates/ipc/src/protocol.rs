@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 16;
+pub const PROTOCOL: u32 = 17;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -235,6 +235,7 @@ impl ClientRequest {
             | DevicesRevoke { cwd, .. }
             | DevicesLost { cwd, .. }
             | Recover { cwd }
+            | Members { cwd, .. }
             | UnlockRole { cwd, .. }
             | DelegateRole { cwd, .. }
             | Role { cwd, .. } => Some(cwd),
@@ -626,6 +627,12 @@ pub enum ClientRequest {
         harness: String,
         file: String,
         event: GuardEvent,
+    },
+    /// The team commands (`id`, `members`, `grant`, `revoke`, `share`,
+    /// `join`); see [`crate::members::MemberOp`].
+    Members {
+        cwd: String,
+        what: crate::members::MemberOp,
     },
     /// `vahta unlock --role NAME`: open a session limited to an approved agent
     /// role. The window names the role; the session covers the role's secrets
@@ -1129,6 +1136,13 @@ pub enum ClientReply {
     Devices {
         devices: Vec<DeviceInfo>,
         unlock: UnlockInfo,
+    },
+    /// The answer to [`crate::members::MemberOp::List`]: the owner's six
+    /// verification words (what a new member compares on joining) and the
+    /// members.
+    Members {
+        owner_words: String,
+        members: Vec<crate::members::MemberInfo>,
     },
 }
 
