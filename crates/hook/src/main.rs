@@ -346,13 +346,12 @@ fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
     let absolute = |v: Option<String>| {
         v.map(|v| {
             let p = std::path::Path::new(&v);
-            if p.is_absolute() {
+            // A rooted path ("/work/x") is kept as written on every system;
+            // `join` would graft a drive onto it on Windows.
+            if p.is_absolute() || p.has_root() {
                 v
             } else {
-                std::path::Path::new(cwd)
-                    .join(p)
-                    .to_string_lossy()
-                    .into_owned()
+                format!("{}/{v}", cwd.trim_end_matches(['/', '\\']))
             }
         })
     };

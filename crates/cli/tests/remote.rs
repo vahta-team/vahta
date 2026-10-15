@@ -84,7 +84,10 @@ impl Sandbox {
             .env("VAHTA_TEST_SURFACE", self.root.join("script.jsonl"))
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
             .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY");
+            .env_remove("WAYLAND_DISPLAY")
+            // A refused lie would otherwise open an alarm window in the
+            // background and race for the scripted answers.
+            .env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
         cmd
     }
 
