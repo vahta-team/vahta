@@ -45,6 +45,9 @@ pub(crate) fn rules_text(binding: &RuleSet) -> String {
             binding.from.join(", ")
         ));
     }
+    if !binding.harnesses.is_empty() {
+        parts.push(format!("only for: {}", binding.harnesses.join(", ")));
+    }
     let mut text = parts.join("; ");
     if let Some(c) = &binding.category {
         text = if text.is_empty() {

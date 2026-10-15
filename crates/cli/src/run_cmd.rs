@@ -181,7 +181,7 @@ fn parse(args: &[String], delegate: bool) -> Args {
 }
 
 /// The caller's environment as text, for the daemon to make the command's of.
-fn environment() -> Vec<(String, String)> {
+pub(crate) fn environment() -> Vec<(String, String)> {
     std::env::vars_os()
         .map(|(k, v)| {
             (
@@ -226,7 +226,7 @@ fn forward_signals(writer: Shared) {
 fn forward_signals(_writer: Shared) {}
 
 /// Relay a started run: input to the command, its output to ours.
-fn relay(stream: &mut Stream, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+pub(crate) fn relay(stream: &mut Stream, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let Ok(clone) = stream.try_clone() else {
         let _ = writeln!(stderr, "vahta run: error: cannot use the connection");
         return EXIT_DAEMON;

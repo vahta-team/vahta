@@ -72,7 +72,7 @@ pub(crate) fn nodes_of(ctx: &Ctx<'_>) -> Vec<Node> {
 /// Which names a request names, or the refusal that says why not: an each-use
 /// secret in an `unlock` refuses the whole request, as does an unknown name,
 /// before any window opens, so a mistaken agent can rebuild the command.
-fn resolve_names(peek: &Peek, requested: Option<Vec<String>>) -> Flow<Vec<String>> {
+pub(crate) fn resolve_names(peek: &Peek, requested: Option<Vec<String>>) -> Flow<Vec<String>> {
     let requested = requested.filter(|r| !r.is_empty());
     let Some(requested) = requested else {
         let mut all: Vec<String> = peek
@@ -138,7 +138,7 @@ fn resolve_names(peek: &Peek, requested: Option<Vec<String>>) -> Flow<Vec<String
     Err(refused_names(kind, &message, issues))
 }
 
-fn describe(d: Option<Duration>) -> String {
+pub(crate) fn describe(d: Option<Duration>) -> String {
     match d {
         None => "until revoked".to_string(),
         Some(d) => {

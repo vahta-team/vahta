@@ -18,6 +18,7 @@ mod authn;
 mod bind_ops;
 mod binding;
 mod clipboard;
+mod connector_ops;
 mod devices_ops;
 mod dotenv;
 mod encoded;
