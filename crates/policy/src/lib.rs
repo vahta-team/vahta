@@ -23,5 +23,5 @@
 mod category;
 mod evaluate;
 
-pub use category::{Category, NetKind, all, category, describe, is_downgrade, suggest};
+pub use category::{Category, NetKind, all, category, describe, is_downgrade, rules_in_sync, suggest};
 pub use evaluate::{Ctx, Verdict, evaluate};

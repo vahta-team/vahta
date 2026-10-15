@@ -806,7 +806,7 @@ pub(crate) fn unapproved_rules(
     names
         .iter()
         .filter(|n| {
-            !manifest::rules_in_sync(
+            !vahta_policy::rules_in_sync(
                 m.secrets.get(*n),
                 peek.bindings.iter().find(|b| &b.name == *n),
             )

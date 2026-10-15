@@ -77,6 +77,23 @@ pub fn category(id: &str) -> Option<&'static Category> {
     CATEGORIES.iter().find(|c| c.id == id)
 }
 
+/// Whether the rules `vahta.toml` proposes for a secret are the approved ones,
+/// compared as `bind` would store them: the proposal's category adds its own
+/// deny groups and default network first. `vahta.toml` itself is not changed.
+pub fn rules_in_sync(
+    entry: Option<&vahta_vault::manifest::SecretEntry>,
+    approved: Option<&RuleSet>,
+) -> bool {
+    vahta_vault::manifest::rules_in_sync_with(entry, approved, |id| {
+        category(id).map(|c| {
+            (
+                c.deny.iter().map(|g| (*g).to_string()).collect(),
+                c.default_network.word(),
+            )
+        })
+    })
+}
+
 /// The category a secret looks like, from the class its value showed (a
 /// vendor prefix) and the words of its name. The agent chose the name, but the
 /// result is only a suggestion and a floor for downgrade detection; of the

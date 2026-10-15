@@ -123,7 +123,7 @@ fn rules_pending(project: &Project, peek: &Peek) -> Vec<String> {
     peek.entries
         .iter()
         .filter(|e| {
-            !manifest::rules_in_sync(
+            !vahta_policy::rules_in_sync(
                 m.secrets.get(&e.name),
                 peek.bindings.iter().find(|b| b.name == e.name),
             )
