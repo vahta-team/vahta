@@ -330,6 +330,24 @@ fn before_tool(ev: &Event, explicit: bool) -> (Decision, Option<Signal>) {
     }
 }
 
+/// `dir` made absolute against `cwd` by the text alone, so it reads the same on
+/// every OS: a path absolute in either convention (`/x`, `C:\x`, `C:/x`,
+/// `\\server\share`) stays as it is, anything else is joined to `cwd` with `/`.
+fn absolute_in(cwd: &str, dir: String) -> String {
+    let b = dir.as_bytes();
+    let absolute = b.first() == Some(&b'/')
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
+        || dir.starts_with("\\\\");
+    if absolute {
+        dir
+    } else {
+        format!("{}/{dir}", cwd.trim_end_matches(['/', '\\']))
+    }
+}
+
 /// A call nothing refused. Silence (`Allow`), unless it is one `vahta run` (or
 /// `vahta http`) that the secret's own rules let through: then the harness is told so, and need
 /// not ask the person. Needs a shell call, a harness that can hear it, and a
@@ -343,18 +361,7 @@ fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
         return Decision::Allow;
     };
     // `--vault DIR` is relative to the directory the command runs in.
-    let absolute = |v: Option<String>| {
-        v.map(|v| {
-            let p = std::path::Path::new(&v);
-            // A rooted path ("/work/x") is kept as written on every system;
-            // `join` would graft a drive onto it on Windows.
-            if p.is_absolute() || p.has_root() {
-                v
-            } else {
-                format!("{}/{v}", cwd.trim_end_matches(['/', '\\']))
-            }
-        })
-    };
+    let absolute = |v: Option<String>| v.map(|v| absolute_in(cwd, v));
     let (names, allowed, what) = match call {
         runallow::Call::Run(c) => (
             c.names.clone(),
@@ -645,5 +652,27 @@ fn main() {
     let _ = std::io::stderr().write_all(&out.stderr);
     if out.exit_code != 0 {
         std::process::exit(out.exit_code);
+    }
+}
+
+#[cfg(test)]
+mod vault_path_tests {
+    use super::absolute_in;
+
+    #[test]
+    fn a_vault_path_is_made_absolute_by_its_text_on_every_os() {
+        for kept in [
+            "/work/tools",
+            "C:\\work\\tools",
+            "C:/work/tools",
+            "\\\\srv\\share",
+        ] {
+            assert_eq!(absolute_in("/p", kept.to_string()), kept);
+        }
+        assert_eq!(
+            absolute_in("/p/proj", "../tools".into()),
+            "/p/proj/../tools"
+        );
+        assert_eq!(absolute_in("C:/p/", "tools".into()), "C:/p/tools");
     }
 }

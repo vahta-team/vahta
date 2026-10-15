@@ -606,7 +606,6 @@ fn a_raw_client_claiming_another_projects_directory_for_a_plain_local_run_is_ref
         s.vahta(&s.tools, &["daemon", "restart"]).status.code(),
         Some(0)
     );
-    let asked = s.passwords();
     let req = |claimed: &Path| ClientRequest::Run {
         cwd: claimed.to_string_lossy().into_owned(),
         argv: vec!["printenv".into(), "ZETA".into()],
@@ -618,6 +617,12 @@ fn a_raw_client_claiming_another_projects_directory_for_a_plain_local_run_is_ref
         reason: None,
         vault: None,
     };
+    // Honest first, the same request is served (a window asks for the
+    // password). Later, a refusal's alarm window may take any scripted answer.
+    s.script(&[PW_ANSWER]);
+    let reply = raw_request(&s, &s.tools, &req(&s.tools));
+    assert!(matches!(reply, ClientReply::RunStarted {}), "{reply:?}");
+    let asked = s.passwords();
     let reply = raw_request(&s, &s.app, &req(&s.tools));
     let ClientReply::Refused(r) = reply else {
         panic!("a claimed directory was believed: {reply:?}");
@@ -625,10 +630,6 @@ fn a_raw_client_claiming_another_projects_directory_for_a_plain_local_run_is_ref
     assert_eq!(r.kind, RefusalKind::NotFromHere);
     assert_eq!(s.passwords(), asked);
     assert!(s.journal().contains("cwd_refused"));
-    // Honest, the same request is served (a window asks for the password).
-    s.script(&[PW_ANSWER]);
-    let reply = raw_request(&s, &s.tools, &req(&s.tools));
-    assert!(matches!(reply, ClientReply::RunStarted {}), "{reply:?}");
 }
 
 #[test]
