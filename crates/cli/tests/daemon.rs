@@ -59,6 +59,7 @@ impl Sandbox {
     }
 
     /// A sandbox whose daemon counts refusals by rules for the alarm.
+    #[cfg(unix)]
     fn counting_refusals() -> Sandbox {
         let mut s = Sandbox::new();
         s.refusal_alarm = true;
@@ -2480,6 +2481,7 @@ impl Sandbox {
     }
 }
 
+#[cfg(unix)]
 const STEERING: &[(&str, &str)] = &[
     ("NPM_CONFIG_REGISTRY", "https://registry.evil.invalid"),
     ("CARGO_REGISTRIES_EVIL_INDEX", "https://index.evil.invalid"),
