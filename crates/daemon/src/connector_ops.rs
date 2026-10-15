@@ -371,6 +371,7 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
         keys,
         forms,
         role: Role::Runner,
+        agent_role: None,
         anchor: me,
         anchor_exe: "connectors".to_string(),
         parent: None,

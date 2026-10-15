@@ -444,6 +444,25 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     } else {
         find_session(ctx, &peek, target.used_from.as_deref())?
     };
+    let role = crate::role_ops::active(ctx, found.as_ref().map(|f| f.0.as_str()))?;
+    if let Some(a) = &role {
+        crate::role_ops::require_action(ctx, a, vahta_vault::Action::Run, &peek, &names)?;
+        if ask {
+            return Err(crate::role_ops::forbid(
+                ctx,
+                a,
+                Some(&peek.vault_id),
+                &names,
+                RefusalKind::RoleForbids,
+                format!(
+                    "this session is limited to the role {}; the person is not asked to allow a \
+                     command outside it (--ask is not available). Nothing was run.",
+                    a.role.name
+                ),
+            ));
+        }
+        crate::role_ops::check_uses(ctx, a, &peek, &names)?;
+    }
     // The program, found once. Its canonical path is what the command rules
     // are checked against and what is executed.
     let client_path: Option<OsString> = client_env
@@ -476,7 +495,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         .cloned()
         .collect();
     // Any secret that wants no network cuts it for the whole run.
-    let isolate_network = verdicts.iter().any(|(_, v)| {
+    let mut isolate_network = verdicts.iter().any(|(_, v)| {
         matches!(
             v,
             Verdict::Allowed {
@@ -536,6 +555,27 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             delegated,
         )?;
     }
+    // The role narrows what the secrets' own rules allowed. The stricter
+    // network of the two is the run's.
+    if let Some(a) = &role {
+        let role_isolates = crate::role_ops::narrow_run(
+            ctx,
+            a,
+            &peek,
+            &names,
+            &vahta_policy::Ctx {
+                program: program.as_deref(),
+                argv: &argv,
+                cwd: &canonical_cwd,
+                project_root: &project.root,
+                network_isolation: vahta_os::network_isolation_available(),
+            },
+        )?;
+        if role_isolates && !isolate_network {
+            refuse_hidden_paths(&canonical_cwd, &argv)?;
+            isolate_network = true;
+        }
+    }
     let Some(program) = program else {
         return Err(error(format!(
             "cannot start {}: no such program (looked in the caller's PATH)",
@@ -556,6 +596,17 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             }
         })
         .collect();
+    if let Some(a) = &role {
+        crate::role_ops::ask_use(
+            ctx,
+            a,
+            &project,
+            &vault_path,
+            &peek,
+            &names,
+            vec![format!("Command: {}", command_text(&argv))],
+        )?;
+    }
     let (values, via) = unlock_values(
         ctx,
         Unlock {
@@ -584,6 +635,9 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         },
     )?;
 
+    if let Some(a) = &role {
+        crate::role_ops::note_use(ctx, a);
+    }
     let mut env: Vec<(OsString, OsString)> = filter_env(client_env)
         .into_iter()
         .filter(|(k, _)| steering.baseline.keeps(k))
@@ -609,6 +663,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         Entry::new("run")
             .vault(&peek.vault_id)
             .names(&names)
+            .role(role.as_ref().map(|a| a.role.name.as_str()))
             .result(
                 "started",
                 Some(&{
@@ -685,7 +740,14 @@ pub(crate) fn find_session(
         .map_err(|_| error("the session table is unusable"))?;
     Ok(sessions
         .find(&chain, &peek.vault_id, used_from)
-        .map(|s| (s.id.clone(), s.scope.clone(), s.parent.is_some())))
+        // A session limited to a role asks for nothing beyond it either.
+        .map(|s| {
+            (
+                s.id.clone(),
+                s.scope.clone(),
+                s.parent.is_some() || s.agent_role.is_some(),
+            )
+        }))
 }
 
 /// The values of [`unlock_values`], `(name, value)`, and the id of the session
@@ -1006,12 +1068,22 @@ pub(crate) fn delegate(
     duration: DurationSpec,
     label: Option<String>,
     vault: Option<String>,
+    role: Option<String>,
 ) -> Flow<ClientReply> {
     let target = Target::resolve(ctx, cwd, vault.as_deref())?;
     let (project, vault_path) = (target.project.clone(), target.vault_path.clone());
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
+    // A role is read from the file and enforced: the file must be the vault
+    // this machine knows.
+    if role.is_some() {
+        peek.verified(ctx.store()).map_err(from_vault)?;
+    }
     let peek = target.view(peek);
-    if names.is_empty() {
+    let asked_role = match &role {
+        Some(name) => Some(crate::role_ops::find_role(&peek, name)?),
+        None => None,
+    };
+    if names.is_empty() && asked_role.is_none() {
         return Err(refused(
             RefusalKind::NothingToDo,
             "name the secrets to delegate with --secret NAME",
@@ -1037,25 +1109,91 @@ pub(crate) fn delegate(
             "there is no session to narrow; run `vahta unlock` first",
         ));
     };
+    // A child of a role session keeps the parent's role as it was approved;
+    // asking for another one is refused below.
+    let eff_role = parent.agent_role.clone().or_else(|| asked_role.clone());
+    if wanted.is_empty()
+        && let Some(r) = &eff_role
+    {
+        wanted = r
+            .secrets
+            .iter()
+            .filter(|s| parent.scope.contains(s))
+            .cloned()
+            .collect();
+        if wanted.is_empty() {
+            let (parent_id, role_name) = (parent.id.clone(), r.name.clone());
+            drop(sessions);
+            ctx.journal(
+                Entry::new("delegate_refused")
+                    .session(&parent_id, None)
+                    .vault(&peek.vault_id)
+                    .role(Some(&role_name))
+                    .result("refused", Some("NotASubset")),
+            );
+            return Err(refused(
+                RefusalKind::NotASubset,
+                format!(
+                    "your session covers none of the secrets of the role {role_name}; nothing \
+                     was delegated"
+                ),
+            ));
+        }
+    }
     let lasts = match duration {
         // As long as the parent has.
         DurationSpec::Default {} => parent.deadline.map(|d| d.saturating_duration_since(now)),
         other => duration_of(other, 0)?,
     };
-    let deadline = match duration {
+    let mut deadline = match duration {
         DurationSpec::Default {} => parent.deadline,
         _ => lasts.map(|d| now + d),
     };
-    if let Err(refusal) = Sessions::check_delegate(parent, &wanted, deadline) {
+    if let Some(r) = &eff_role {
+        // With a role the deadline is the shortest of what was asked, the
+        // role's longest grant and the parent's end.
+        deadline = [
+            parent.deadline,
+            deadline.filter(|_| !matches!(duration, DurationSpec::Default {})),
+            r.max_for_secs
+                .map(|m| now + std::time::Duration::from_secs(m)),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+    }
+    if let Err(refusal) = Sessions::check_delegate(
+        parent,
+        &wanted,
+        deadline,
+        asked_role.as_ref().or(eff_role.as_ref()),
+    ) {
         let (kind, message, issues) = match refusal {
             DelegateRefusal::NotASubset(missing) => (
                 RefusalKind::NotASubset,
-                "a delegated session may only narrow its parent's; nothing was delegated",
+                "a delegated session may only narrow its parent's; nothing was delegated"
+                    .to_string(),
                 issue_list(&missing, RefusalKind::NotASubset),
             ),
             DelegateRefusal::LaterDeadline => (
                 RefusalKind::LaterDeadline,
-                "a delegated session cannot outlast its parent; nothing was delegated",
+                "a delegated session cannot outlast its parent; nothing was delegated".to_string(),
+                Vec::new(),
+            ),
+            DelegateRefusal::NotInRole(outside) => (
+                RefusalKind::NotASubset,
+                format!(
+                    "the role {} does not cover these secrets; nothing was delegated",
+                    eff_role.as_ref().map_or("", |r| r.name.as_str())
+                ),
+                issue_list(&outside, RefusalKind::NotASubset),
+            ),
+            DelegateRefusal::OtherRole(have) => (
+                RefusalKind::RoleForbids,
+                format!(
+                    "your session is limited to the role {have}; a delegated session keeps it and \
+                     cannot take another role. Nothing was delegated."
+                ),
                 Vec::new(),
             ),
         };
@@ -1066,6 +1204,7 @@ pub(crate) fn delegate(
                 .session(&parent_id, None)
                 .vault(&peek.vault_id)
                 .names(&wanted)
+                .role(eff_role.as_ref().map(|r| r.name.as_str()))
                 .result("refused", Some(&format!("{kind:?}"))),
         );
         return Err(refused_names(kind, message, issues));
@@ -1097,6 +1236,7 @@ pub(crate) fn delegate(
         extension_pending: false,
         label: label.as_deref().and_then(sanitize_label),
         uses: 0,
+        agent_role: eff_role.clone(),
     };
     let info = info_of(&session, now);
     sessions.add(session);
@@ -1106,6 +1246,7 @@ pub(crate) fn delegate(
             .session(&id, Some(&parent_id))
             .vault(&peek.vault_id)
             .names(&wanted)
+            .role(eff_role.as_ref().map(|r| r.name.as_str()))
             .result("ok", Some("delegated")),
     );
     Ok(ClientReply::Session(Box::new(info)))

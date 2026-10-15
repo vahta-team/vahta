@@ -44,6 +44,7 @@ mod hooks_cmd;
 mod http_cmd;
 mod output_cmd;
 mod remote_cmd;
+mod role_cmd;
 mod run_cmd;
 mod session_cmds;
 mod setup;
@@ -114,7 +115,8 @@ commands:
   http    one HTTPS request with a secret in a header or query, to bound hosts
   bind    say which commands may use a secret (the person approves)
   remote  `remote on|off`: let other projects use this vault (the person approves)
-  delegate  narrow your session for a sub-agent and run it
+  role    propose an agent role for a task, or `--remove` one (the person approves)
+  delegate  narrow your session for a sub-agent (or to a --role) and run it
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions (no password)
   sessions  list sessions, or `kill ID` one (no password)
@@ -443,6 +445,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         }
         Some("bind") => bind_cmd::run(&args[1..], env, stdout, stderr),
         Some("remote") => remote_cmd::run(&args[1..], env, stdout, stderr),
+        Some("role") => role_cmd::run(&args[1..], env, stdout, stderr),
         Some("run") => run_cmd::run_run(&args[1..], env, stdout, stderr),
         Some("http") => http_cmd::run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),

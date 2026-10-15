@@ -74,6 +74,8 @@ pub struct RulesText {
 pub struct Manifest {
     pub path: PathBuf,
     pub secrets: BTreeMap<String, SecretEntry>,
+    /// The roles the file proposes (`[roles.NAME]`, see `manifest_roles`).
+    pub roles: BTreeMap<String, crate::manifest_roles::RoleEntry>,
 }
 
 /// The largest `vahta.toml` read; a contract of names is small.
@@ -100,7 +102,12 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
         .map_err(|e: toml::de::Error| bad(format!("invalid TOML ({})", e.message())))?;
 
     let mut secrets = BTreeMap::new();
+    let mut roles = BTreeMap::new();
     for (key, value) in &root {
+        if key == "roles" {
+            roles = crate::manifest_roles::parse_roles(value).map_err(bad)?;
+            continue;
+        }
         if key != "secrets" {
             return Err(bad(format!("unknown top-level key `{key}`")));
         }
@@ -235,6 +242,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
     Ok(Manifest {
         path: path.to_path_buf(),
         secrets,
+        roles,
     })
 }
 
@@ -280,7 +288,7 @@ fn edit_error(path: &Path, why: impl std::fmt::Display) -> Error {
     Error::Manifest(format!("cannot update {}: {why}", path.display()))
 }
 
-fn parse_doc(text: &str) -> Result<toml_edit::DocumentMut, String> {
+pub(crate) fn parse_doc(text: &str) -> Result<toml_edit::DocumentMut, String> {
     text.parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("invalid TOML ({})", e.message()))
 }

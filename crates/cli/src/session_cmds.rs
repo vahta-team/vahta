@@ -16,6 +16,7 @@ use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const UNLOCK_USAGE: &str = "\
 usage: vahta unlock [--vault DIR] [--secret NAME]... [--for DURATION] [--label TEXT] [--json]
+       vahta unlock --role ROLE [--secret NAME]... [--for DURATION] [--label TEXT] [--json]
 
 Open a session. A window opens where you read what is being approved and type
 the vault password; then `vahta run` from this process tree (the agent that
@@ -37,6 +38,11 @@ called this, and everything it starts) uses the secrets with no window.
                     until revoked
   --label TEXT      a description for the window, shown marked as coming from
                     the agent and not verified (one line, 200 characters)
+  --role ROLE       limit the session to an agent role the person approved
+                    (`vahta role`): the window names it, the secrets are the
+                    role's (--secret narrows them), the time is capped by the
+                    role's longest grant, and the session may only run commands
+                    and send requests as the role says
   --json            machine-readable result, and refusals
 
 A session lets `vahta run` use secrets and nothing else: revealing, copying,
@@ -103,6 +109,7 @@ pub fn run_unlock(
     let mut duration = DurationSpec::Default {};
     let mut label = None;
     let mut vault: Option<String> = None;
+    let mut role: Option<String> = None;
     let mut json = false;
     let mut i = 0;
     while i < args.len() {
@@ -130,6 +137,7 @@ pub fn run_unlock(
                 .and_then(|v| parse_duration(&v))
                 .map(|d| duration = d),
             "--label" => value("--label").map(|v| label = Some(v)),
+            "--role" => value("--role").map(|v| role = Some(v)),
             "--vault" => value("--vault").and_then(|v| {
                 if v.is_empty() {
                     Err("--vault expects the vault's project folder".to_string())
@@ -145,12 +153,25 @@ pub fn run_unlock(
             return EXIT_USAGE;
         }
     }
-    let request = ClientRequest::Unlock {
-        cwd: env.cwd.to_string_lossy().into_owned(),
-        names: (!names.is_empty()).then_some(names),
-        duration,
-        label,
-        vault: vault.as_deref().map(|v| daemon_cmd::vault_arg(env, v)),
+    let cwd = env.cwd.to_string_lossy().into_owned();
+    let names = (!names.is_empty()).then_some(names);
+    let vault = vault.as_deref().map(|v| daemon_cmd::vault_arg(env, v));
+    let request = match role {
+        Some(role) => ClientRequest::UnlockRole {
+            cwd,
+            role,
+            names,
+            duration,
+            label,
+            vault,
+        },
+        None => ClientRequest::Unlock {
+            cwd,
+            names,
+            duration,
+            label,
+            vault,
+        },
     };
     let mut conn = match daemon_cmd::connect(env, "unlock", stderr) {
         Ok(c) => c,
@@ -167,6 +188,13 @@ pub fn run_unlock(
                     info.id,
                     info.names.join(", ")
                 );
+                if let Some(role) = &info.agent_role {
+                    let _ = writeln!(
+                        stdout,
+                        "limited to the role {role}: it may run commands and send requests as the \
+                         role says, and nothing else"
+                    );
+                }
                 if let Some(from) = &info.used_from {
                     let _ = writeln!(
                         stdout,
@@ -225,6 +253,7 @@ fn list_text(sessions: &[SessionInfo]) -> String {
     if sessions.is_empty() {
         return "no sessions".to_string();
     }
+    let with_role = sessions.iter().any(|s| s.agent_role.is_some());
     let mut rows = vec![vec![
         "ID".to_string(),
         "PARENT".to_string(),
@@ -235,6 +264,9 @@ fn list_text(sessions: &[SessionInfo]) -> String {
         "PROJECT".to_string(),
         "USED FROM".to_string(),
     ]];
+    if with_role {
+        rows[0].push("ROLE".to_string());
+    }
     for s in sessions {
         rows.push(vec![
             s.id.clone(),
@@ -246,8 +278,11 @@ fn list_text(sessions: &[SessionInfo]) -> String {
             s.project.clone(),
             s.used_from.clone().unwrap_or_else(|| "-".to_string()),
         ]);
+        if with_role && let Some(row) = rows.last_mut() {
+            row.push(s.agent_role.clone().unwrap_or_else(|| "-".to_string()));
+        }
     }
-    let widths: Vec<usize> = (0..8)
+    let widths: Vec<usize> = (0..rows[0].len())
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
     rows.iter()

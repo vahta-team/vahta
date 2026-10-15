@@ -17,6 +17,7 @@ pub mod crypto;
 pub mod format;
 pub mod ka;
 pub mod manifest;
+pub mod manifest_roles;
 pub mod project;
 pub mod rules;
 pub mod session;

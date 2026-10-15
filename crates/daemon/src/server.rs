@@ -631,6 +631,14 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             }
             continue;
         }
+        // In a session limited to an agent role only the role's own requests
+        // go on; the rest is refused here, whatever it is.
+        if let Some(reply) = crate::role_ops::forbids(&ctx, &request) {
+            if write_frame(stream, &reply).is_err() {
+                return;
+            }
+            continue;
+        }
         let (reply, stop) = match request {
             ClientRequest::Status {} => (ClientReply::Status(shared.status()), false),
             ClientRequest::Stop {} => (ClientReply::Ok {}, true),
@@ -700,7 +708,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 label,
                 vault,
             } => (
-                session_ops::unlock_session(&ctx, &cwd, names, duration, label, vault)
+                session_ops::unlock_session(&ctx, &cwd, names, duration, label, vault, None)
                     .unwrap_or_else(|r| r),
                 false,
             ),
@@ -822,7 +830,8 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 label,
                 vault,
             } => (
-                run_ops::delegate(&ctx, &cwd, names, duration, label, vault).unwrap_or_else(|r| r),
+                run_ops::delegate(&ctx, &cwd, names, duration, label, vault, None)
+                    .unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::OutputScan {
@@ -946,6 +955,50 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ClientRequest::SessionKill { id } => {
                 (session_ops::kill(&ctx, &id).unwrap_or_else(|r| r), false)
             }
+            ClientRequest::UnlockRole {
+                cwd,
+                role,
+                names,
+                duration,
+                label,
+                vault,
+            } => (
+                session_ops::unlock_session(&ctx, &cwd, names, duration, label, vault, Some(role))
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::DelegateRole {
+                cwd,
+                role,
+                names,
+                duration,
+                label,
+                vault,
+            } => (
+                run_ops::delegate(&ctx, &cwd, names, duration, label, vault, Some(role))
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::Role {
+                cwd,
+                name,
+                remove,
+                reason,
+                path,
+            } => (
+                crate::role_ops::role(
+                    &ctx,
+                    crate::role_ops::RoleArgs {
+                        cwd,
+                        name,
+                        remove,
+                        reason,
+                        path,
+                    },
+                )
+                .unwrap_or_else(|r| r),
+                false,
+            ),
             ClientRequest::Connector { cmd } => match crate::connector_ops::handle(&ctx, cmd) {
                 crate::connector_ops::Handled::Reply(reply) => (reply, false),
                 // Like a run: the connection then carries the server's input

@@ -57,6 +57,9 @@ pub struct Entry {
     /// Remote use of a vault: the calling project (the vault is `vault`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub used_from: Option<String>,
+    /// The agent role the session behind this line is limited to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 fn now() -> u64 {
@@ -124,6 +127,11 @@ impl Entry {
 
     pub fn used_from(mut self, project: &Path) -> Entry {
         self.used_from = Some(project.display().to_string());
+        self
+    }
+
+    pub fn role(mut self, role: Option<&str>) -> Entry {
+        self.role = role.map(str::to_string);
         self
     }
 

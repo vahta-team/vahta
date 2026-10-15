@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use vahta_os::ProcessId;
-use vahta_vault::SessionKeys;
+use vahta_vault::{AgentRole, SessionKeys};
 
 use crate::encoded::EncodedSet;
 use crate::protocol::SessionInfo;
@@ -76,6 +76,10 @@ pub struct Session {
     pub extension_pending: bool,
     pub label: Option<String>,
     pub uses: u64,
+    /// The approved agent role this session is limited to, as it was when the
+    /// session was opened. A child of a role session keeps it. Such a session
+    /// runs and sends requests as the role says and does nothing else.
+    pub agent_role: Option<AgentRole>,
 }
 
 /// A session that has ended, its keys already overwritten.
@@ -113,6 +117,10 @@ pub enum DelegateRefusal {
     NotASubset(Vec<String>),
     /// A deadline later than the parent's (or none, under a parent that has one).
     LaterDeadline,
+    /// Names the role does not cover.
+    NotInRole(Vec<String>),
+    /// The parent session is limited to another role than the one asked for.
+    OtherRole(String),
 }
 
 /// When to ask about extending a session that ends at `deadline`: two minutes
@@ -221,12 +229,70 @@ impl Sessions {
             .collect()
     }
 
+    /// The ids of session `id` and of every session above it.
+    fn lineage(&self, id: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = self.get(id);
+        while let Some(s) = current {
+            if out.len() > self.items.len() {
+                break;
+            }
+            out.push(s.id.clone());
+            current = s.parent.as_deref().and_then(|p| self.get(p));
+        }
+        out
+    }
+
+    /// Whether one more use under session `id` would pass a role's limit:
+    /// the role of the session or of one above it has had all its uses. A use
+    /// under a child counts against the parent's role too, so delegating
+    /// again does not buy more.
+    pub fn role_spent(&self, id: &str) -> Option<String> {
+        self.lineage(id).iter().find_map(|sid| {
+            let s = self.get(sid)?;
+            let role = s.agent_role.as_ref()?;
+            let max = role.max_uses?;
+            (s.uses >= u64::from(max)).then(|| role.name.clone())
+        })
+    }
+
+    /// Count one use under `id` against every session above it that carries
+    /// a role (the session itself has counted its own).
+    pub fn count_above(&mut self, id: &str) {
+        for sid in self.lineage(id).into_iter().skip(1) {
+            if let Some(s) = self.get_mut(&sid)
+                && s.agent_role.is_some()
+            {
+                s.uses += 1;
+            }
+        }
+    }
+
     /// Whether a child with `names` and `deadline` may be made under `parent`.
+    ///
+    /// With a `role`, the names must also be the role's, and a parent that is
+    /// itself limited to a role may only be narrowed to that same role.
     pub fn check_delegate(
         parent: &Session,
         names: &[String],
         deadline: Option<Instant>,
+        role: Option<&AgentRole>,
     ) -> Result<(), DelegateRefusal> {
+        if let (Some(have), Some(want)) = (&parent.agent_role, role)
+            && have.name != want.name
+        {
+            return Err(DelegateRefusal::OtherRole(have.name.clone()));
+        }
+        if let Some(role) = role {
+            let outside: Vec<String> = names
+                .iter()
+                .filter(|n| !role.secrets.contains(n))
+                .cloned()
+                .collect();
+            if !outside.is_empty() {
+                return Err(DelegateRefusal::NotInRole(outside));
+            }
+        }
         let missing: Vec<String> = names
             .iter()
             .filter(|n| !parent.scope.contains(n))
@@ -409,6 +475,7 @@ pub fn info_of(s: &Session, now: Instant) -> SessionInfo {
             .map(|d| d.saturating_duration_since(now).as_secs()),
         uses: s.uses,
         label: s.label.clone(),
+        agent_role: s.agent_role.as_ref().map(|r| r.name.clone()),
     }
 }
 
@@ -500,6 +567,7 @@ mod tests {
             extension_pending: false,
             label: None,
             uses: 0,
+            agent_role: None,
         }
     }
 
@@ -516,21 +584,98 @@ mod tests {
         let names = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         let later = Some(now + Duration::from_secs(60));
         assert_eq!(
-            Sessions::check_delegate(&parent, &names(&["A"]), later),
+            Sessions::check_delegate(&parent, &names(&["A"]), later, None),
             Ok(())
         );
         assert_eq!(
-            Sessions::check_delegate(&parent, &names(&["A", "B"]), later),
+            Sessions::check_delegate(&parent, &names(&["A", "B"]), later, None),
             Ok(())
         );
         assert_eq!(
-            Sessions::check_delegate(&parent, &names(&["A", "C"]), later),
+            Sessions::check_delegate(&parent, &names(&["A", "C"]), later, None),
             Err(DelegateRefusal::NotASubset(names(&["C"])))
         );
         assert_eq!(
-            Sessions::check_delegate(&parent, &names(&["D", "C"]), later),
+            Sessions::check_delegate(&parent, &names(&["D", "C"]), later, None),
             Err(DelegateRefusal::NotASubset(names(&["D", "C"])))
         );
+    }
+
+    fn role(name: &str, secrets: &[&str], max_uses: Option<u32>) -> AgentRole {
+        AgentRole {
+            name: name.to_string(),
+            secrets: secrets.iter().map(|s| s.to_string()).collect(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            network: None,
+            dirs: Vec::new(),
+            max_for_secs: None,
+            max_uses,
+            actions: vec![vahta_vault::Action::Run],
+            ask_each_use: false,
+            approved_at: 1,
+        }
+    }
+
+    #[test]
+    fn a_role_delegation_stays_inside_the_role_and_the_parents_role() {
+        let now = Instant::now();
+        let end = Some(now + Duration::from_secs(600));
+        let names = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let plain = session("p", &["A", "B"], 10, None, end);
+        let ab = role("ab", &["A", "B"], None);
+        let only_a = role("only_a", &["A"], None);
+        // Inside the role: fine. A name the role does not cover: refused.
+        assert_eq!(
+            Sessions::check_delegate(&plain, &names(&["A"]), end, Some(&only_a)),
+            Ok(())
+        );
+        assert_eq!(
+            Sessions::check_delegate(&plain, &names(&["A", "B"]), end, Some(&only_a)),
+            Err(DelegateRefusal::NotInRole(names(&["B"])))
+        );
+        // A parent that has a role passes it on: the same role is fine,
+        // another is not.
+        let mut limited = session("l", &["A", "B"], 11, None, end);
+        limited.agent_role = Some(ab.clone());
+        assert_eq!(
+            Sessions::check_delegate(&limited, &names(&["A"]), end, Some(&ab)),
+            Ok(())
+        );
+        assert_eq!(
+            Sessions::check_delegate(&limited, &names(&["A"]), end, None),
+            Ok(())
+        );
+        assert_eq!(
+            Sessions::check_delegate(&limited, &names(&["A"]), end, Some(&only_a)),
+            Err(DelegateRefusal::OtherRole("ab".to_string()))
+        );
+    }
+
+    #[test]
+    fn uses_are_counted_against_the_role_and_the_roles_above() {
+        let mut s = Sessions::default();
+        let mut root = session("root", &["A"], 10, None, None);
+        root.agent_role = Some(role("two", &["A"], Some(2)));
+        let mut child = session("child", &["A"], 11, Some("root"), None);
+        child.agent_role = root.agent_role.clone();
+        s.add(root);
+        s.add(child);
+        assert_eq!(s.role_spent("child"), None);
+        // A use under the child: it counts its own, the daemon counts above.
+        s.get_mut("child").unwrap().uses += 1;
+        s.count_above("child");
+        assert_eq!(s.get("root").unwrap().uses, 1);
+        assert_eq!(s.role_spent("child"), None);
+        s.get_mut("child").unwrap().uses += 1;
+        s.count_above("child");
+        // The parent has had both: spent for the child, and for the parent.
+        assert_eq!(s.role_spent("child"), Some("two".to_string()));
+        assert_eq!(s.role_spent("root"), Some("two".to_string()));
+        // A session with no role never runs out.
+        s.add(session("free", &["A"], 12, None, None));
+        s.get_mut("free").unwrap().uses = 99;
+        assert_eq!(s.role_spent("free"), None);
     }
 
     #[test]
@@ -539,20 +684,26 @@ mod tests {
         let end = now + Duration::from_secs(600);
         let parent = session("p", &["A"], 10, None, Some(end));
         let a = vec!["A".to_string()];
-        assert_eq!(Sessions::check_delegate(&parent, &a, Some(end)), Ok(()));
         assert_eq!(
-            Sessions::check_delegate(&parent, &a, Some(end + Duration::from_secs(1))),
+            Sessions::check_delegate(&parent, &a, Some(end), None),
+            Ok(())
+        );
+        assert_eq!(
+            Sessions::check_delegate(&parent, &a, Some(end + Duration::from_secs(1)), None),
             Err(DelegateRefusal::LaterDeadline)
         );
         // "Forever" under a parent that has an end is later than it.
         assert_eq!(
-            Sessions::check_delegate(&parent, &a, None),
+            Sessions::check_delegate(&parent, &a, None, None),
             Err(DelegateRefusal::LaterDeadline)
         );
         // A parent that lasts until revoked allows any.
         let forever = session("f", &["A"], 11, None, None);
-        assert_eq!(Sessions::check_delegate(&forever, &a, None), Ok(()));
-        assert_eq!(Sessions::check_delegate(&forever, &a, Some(end)), Ok(()));
+        assert_eq!(Sessions::check_delegate(&forever, &a, None, None), Ok(()));
+        assert_eq!(
+            Sessions::check_delegate(&forever, &a, Some(end), None),
+            Ok(())
+        );
     }
 
     #[test]

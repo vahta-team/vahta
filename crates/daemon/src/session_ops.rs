@@ -38,6 +38,7 @@ impl Shared {
                     .session(&e.session.id, e.session.parent.as_deref())
                     .vault(&e.session.vault_id)
                     .names(&e.session.scope)
+                    .role(e.session.agent_role.as_ref().map(|r| r.name.as_str()))
                     .result("ended", Some(e.reason))
                     .uses(e.session.uses),
             );
@@ -172,6 +173,7 @@ pub(crate) fn unlock_session(
     duration: DurationSpec,
     label: Option<String>,
     vault: Option<String>,
+    role: Option<String>,
 ) -> Flow<ClientReply> {
     let target = crate::remote::Target::resolve(ctx, cwd, vault.as_deref())?;
     let (project, vault_path) = (target.project.clone(), target.vault_path.clone());
@@ -181,6 +183,41 @@ pub(crate) fn unlock_session(
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     // From another project, only the secrets that may be used from there.
     let peek = target.view(peek);
+    // A role is the vault's approved copy, never the toml's.
+    let role = match &role {
+        Some(name) => Some(crate::role_ops::find_role(&peek, name)?),
+        None => None,
+    };
+    let names = match &role {
+        Some(r) => {
+            let asked = names.filter(|n| !n.is_empty());
+            let outside: Vec<NameIssue> = asked
+                .iter()
+                .flatten()
+                .filter(|n| !r.secrets.contains(n))
+                .map(|n| NameIssue {
+                    name: if valid_name(n) {
+                        n.clone()
+                    } else {
+                        "<not a valid name>".to_string()
+                    },
+                    why: RefusalKind::NotASubset,
+                })
+                .collect();
+            if !outside.is_empty() {
+                return Err(refused_names(
+                    RefusalKind::NotASubset,
+                    format!(
+                        "the role {} does not cover these secrets; nothing was opened",
+                        r.name
+                    ),
+                    outside,
+                ));
+            }
+            Some(asked.unwrap_or_else(|| r.secrets.clone()))
+        }
+        None => names,
+    };
     let names = match resolve_names(&peek, names) {
         Ok(names) => names,
         Err(reply) => {
@@ -202,6 +239,11 @@ pub(crate) fn unlock_session(
         check_name(n)?;
     }
     let lasts = duration_of(duration, ctx.shared.options.config.session_minutes)?;
+    // A role's longest grant caps the session, whatever was asked.
+    let lasts = match &role {
+        Some(r) => crate::role_ops::capped(lasts, r),
+        None => lasts,
+    };
 
     let nodes = nodes_of(ctx);
     let anchor_index = anchor::select(&nodes, vahta_os::MIN_PID).map_err(|_| {
@@ -222,11 +264,21 @@ pub(crate) fn unlock_session(
         "Belongs to: {anchor_exe} (pid {}), and everything it starts",
         anchor.pid
     ));
-    lines.push(
-        "Allows: running commands with these secrets, with no window. Not revealing, copying, \
-         exporting or changing anything."
-            .to_string(),
-    );
+    match &role {
+        Some(r) => {
+            lines.extend(crate::role_ops::describe(r));
+            lines.push(
+                "Allows: only what the role says, inside each secret's own rules, with no \
+                 window. Not revealing, copying, exporting or changing anything."
+                    .to_string(),
+            );
+        }
+        None => lines.push(
+            "Allows: running commands with these secrets, with no window. Not revealing, \
+             copying, exporting or changing anything."
+                .to_string(),
+        ),
+    }
     let mut panel = ctx.panel("Open a session", lines);
     panel.agent_note = label.as_deref().and_then(sanitize_label);
     let action = Action::Unlock {
@@ -273,10 +325,14 @@ pub(crate) fn unlock_session(
         parent: None,
         deadline,
         length: deadline.map(|d| d.saturating_duration_since(now)),
-        ask_at: deadline.map(|d| ask_time(now, d)),
+        // A role caps how long one grant lasts, so it is not extended by a question.
+        ask_at: deadline
+            .filter(|_| role.as_ref().is_none_or(|r| r.max_for_secs.is_none()))
+            .map(|d| ask_time(now, d)),
         extension_pending: false,
         label: panel.agent_note.clone(),
         uses: 0,
+        agent_role: role.clone(),
     };
     let info = info_of(&session, now);
     let replaced = {
@@ -306,6 +362,7 @@ pub(crate) fn unlock_session(
             .session(&id, None)
             .vault(&vault_id)
             .names(&names)
+            .role(role.as_ref().map(|r| r.name.as_str()))
             .result(
                 "ok",
                 Some(&format!(

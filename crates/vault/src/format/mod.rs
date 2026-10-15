@@ -298,6 +298,14 @@ impl Loaded {
         }
     }
 
+    /// The approved agent roles (none before format 5).
+    pub fn roles(&self) -> Vec<v5::AgentRole> {
+        match self {
+            Loaded::V5(d) => d.model.roles.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn upgrade_pending(&self) -> bool {
         self.format() != CURRENT
     }

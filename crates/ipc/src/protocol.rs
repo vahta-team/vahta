@@ -234,7 +234,10 @@ impl ClientRequest {
             | DevicesExtend { cwd, .. }
             | DevicesRevoke { cwd, .. }
             | DevicesLost { cwd, .. }
-            | Recover { cwd } => Some(cwd),
+            | Recover { cwd }
+            | UnlockRole { cwd, .. }
+            | DelegateRole { cwd, .. }
+            | Role { cwd, .. } => Some(cwd),
             Connector {
                 cmd: ConnectorCmd::Run { cwd, .. },
             } => Some(cwd),
@@ -624,6 +627,43 @@ pub enum ClientRequest {
         file: String,
         event: GuardEvent,
     },
+    /// `vahta unlock --role NAME`: open a session limited to an approved agent
+    /// role. The window names the role; the session covers the role's secrets
+    /// (or the `names` among them) and allows only what the role allows.
+    UnlockRole {
+        cwd: String,
+        role: String,
+        names: Option<Vec<String>>,
+        duration: DurationSpec,
+        label: Option<String>,
+        #[serde(default)]
+        vault: Option<String>,
+    },
+    /// `vahta delegate --role NAME`: narrow the caller's session to an
+    /// approved agent role. With no `names`, the scope is the role's secrets
+    /// the caller's session covers; the deadline is the shortest of the
+    /// requested one, the role's longest and the parent's. Refused without a
+    /// window when it would widen anything.
+    DelegateRole {
+        cwd: String,
+        role: String,
+        names: Vec<String>,
+        duration: DurationSpec,
+        label: Option<String>,
+        #[serde(default)]
+        vault: Option<String>,
+    },
+    /// `vahta role`: propose an agent role from `vahta.toml` for the person's
+    /// approval, or with `remove` take one away. A role wider than one of its
+    /// secrets' approved rules is refused before any window.
+    Role {
+        cwd: String,
+        name: Option<String>,
+        remove: bool,
+        reason: Option<String>,
+        /// The caller's `PATH`, where programs named in `allow` are looked up.
+        path: Option<String>,
+    },
     /// The connectors vault (`--connector`): one per user, in Vahta's own data
     /// directory, never found by a working directory. See [`ConnectorCmd`].
     Connector {
@@ -928,6 +968,9 @@ pub struct SessionInfo {
     pub remaining_secs: Option<u64>,
     pub uses: u64,
     pub label: Option<String>,
+    /// The agent role the session is limited to, if any.
+    #[serde(default)]
+    pub agent_role: Option<String>,
 }
 
 /// Why a request was refused outright, before any window.
@@ -973,6 +1016,16 @@ pub enum RefusalKind {
     /// the vault has been found and has opted in; a vault that has not looks
     /// exactly like a path with no vault (`NoVault`).
     NotFromHere,
+    /// The caller's session belongs to an agent role, and the role does not
+    /// give this request (an action it is not for, or a command or network
+    /// that the role does not allow).
+    RoleForbids,
+    /// A proposed role is wider than one of its secrets' approved rules.
+    RoleTooWide,
+    /// The role's uses are all spent.
+    RoleExhausted,
+    /// No such role is approved in this vault.
+    UnknownRole,
     /// `vahta run --connector` whose direct parent is not one of the harnesses
     /// the connector is bound to.
     NotFromHarness,
