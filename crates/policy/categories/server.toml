@@ -12,6 +12,8 @@ allow_required = true
 programs = ["aws", "gcloud", "az", "ssh", "kubectl", "terraform", "doctl", "hcloud"]
 words = []
 class = "cloud"
+# env_keep is absent: a command gets the caller's environment (minus the loader
+# variables), as before. Only publish and payment cut it down.
 checklist = [
   "Allow the provider CLIs by name with the leading arguments you need (`aws s3`, `kubectl get`), not the whole tool when a subcommand will do.",
   "Do not allow a tool with a shell escape or a way to run code (ssh to run any command, `kubectl exec`, `terraform` with local-exec): allow the exact subcommand.",

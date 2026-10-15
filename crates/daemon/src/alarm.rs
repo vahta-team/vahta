@@ -97,8 +97,7 @@ pub fn refusal_weight(secrets: &[String], program: Option<&str>, no_rules: bool)
     });
     let risky = !no_rules
         && file.as_deref().is_some_and(|f| {
-            vahta_vault::rules::in_group("@network", f)
-                || vahta_vault::rules::runs_anything(f)
+            vahta_vault::rules::in_group("@network", f) || vahta_vault::rules::runs_anything(f)
         });
     let of = match program {
         Some(p) => format!("`{}`", p.chars().take(60).collect::<String>()),

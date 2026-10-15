@@ -63,6 +63,63 @@ pub struct Category {
     pub class: Option<Class>,
     /// What the agent should think through before it proposes rules.
     pub checklist: &'static [&'static str],
+    /// `Some`: a command run with a secret of this category gets only these
+    /// variables (a name, or a prefix ending in `*`), the injected secret
+    /// variables and [`SAFE_ENV`]. `None`: the caller's environment.
+    pub env_keep: Option<&'static [&'static str]>,
+}
+
+/// The variables every restricted run keeps: enough for a program to find
+/// itself, its home and the terminal, and nothing that names a server.
+pub const SAFE_ENV: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TMPDIR", "TZ",
+];
+
+fn listed(list: &[&str], name: &str) -> bool {
+    list.iter().any(|item| match item.strip_suffix('*') {
+        Some(prefix) => {
+            name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        }
+        None => name.eq_ignore_ascii_case(item),
+    })
+}
+
+/// Which of the caller's variables a run keeps, given the categories of its
+/// secrets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvBaseline {
+    lists: Vec<&'static [&'static str]>,
+}
+
+impl EnvBaseline {
+    /// The baseline for rule sets: restricted as soon as one secret's
+    /// category has an `env_keep`, and then only what every such category
+    /// keeps.
+    pub fn of<'a>(rule_sets: impl IntoIterator<Item = &'a RuleSet>) -> EnvBaseline {
+        let mut lists: Vec<&'static [&'static str]> = Vec::new();
+        for rs in rule_sets {
+            if let Some(keep) = rs
+                .category
+                .as_deref()
+                .and_then(category)
+                .and_then(|c| c.env_keep)
+                && !lists.contains(&keep)
+            {
+                lists.push(keep);
+            }
+        }
+        EnvBaseline { lists }
+    }
+
+    /// Whether the run's environment is cut down at all.
+    pub fn restricts(&self) -> bool {
+        !self.lists.is_empty()
+    }
+
+    /// Whether the variable `name` of the caller reaches the program.
+    pub fn keeps(&self, name: &str) -> bool {
+        !self.restricts() || listed(SAFE_ENV, name) || self.lists.iter().all(|l| listed(l, name))
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/categories_data.rs"));
@@ -284,6 +341,83 @@ pub fn describe(rule_set: &RuleSet, tier: Tier) -> String {
 mod tests {
     use super::*;
     use vahta_vault::HostRule;
+
+    fn rules_of(category: &str) -> RuleSet {
+        RuleSet {
+            name: "K".into(),
+            category: Some(category.into()),
+            ..RuleSet::default()
+        }
+    }
+
+    #[test]
+    fn env_keep_comes_from_the_compiled_data_and_only_publish_and_payment_cut_the_environment() {
+        let publish = category("publish").unwrap().env_keep.unwrap();
+        for want in [
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+            "CARGO_TARGET_DIR",
+        ] {
+            assert!(publish.contains(&want), "{want}");
+        }
+        assert_eq!(category("payment").unwrap().env_keep, Some(&[][..]));
+        for id in ["ordinary", "server", "database", "local-only"] {
+            assert!(category(id).unwrap().env_keep.is_none(), "{id}");
+        }
+        // Nothing that names a server or loads code is on any list.
+        for c in all() {
+            for v in c.env_keep.unwrap_or(&[]) {
+                for bad in [
+                    "NPM_CONFIG",
+                    "CARGO_REGISTR",
+                    "TWINE_",
+                    "PIP_",
+                    "NODE_OPTIONS",
+                ] {
+                    assert!(!v.to_ascii_uppercase().starts_with(bad), "{v}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_baseline_keeps_the_safe_core_the_list_and_nothing_else() {
+        let b = EnvBaseline::of([&rules_of("publish")]);
+        assert!(b.restricts());
+        for kept in [
+            "PATH",
+            "HOME",
+            "USER",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "TMPDIR",
+            "TZ",
+            "CARGO_HOME",
+        ] {
+            assert!(b.keeps(kept), "{kept}");
+        }
+        for dropped in [
+            "NPM_CONFIG_REGISTRY",
+            "npm_config_registry",
+            "CARGO_REGISTRIES_EVIL_INDEX",
+            "CARGO_REGISTRY_TOKEN",
+            "TWINE_REPOSITORY_URL",
+            "PIP_INDEX_URL",
+            "SOME_VAR",
+        ] {
+            assert!(!b.keeps(dropped), "{dropped}");
+        }
+        // Payment keeps the core only, and a mixed set keeps what both keep.
+        let pay = EnvBaseline::of([&rules_of("payment")]);
+        assert!(pay.keeps("PATH") && !pay.keeps("CARGO_HOME"));
+        let mixed = EnvBaseline::of([&rules_of("publish"), &rules_of("payment")]);
+        assert!(mixed.keeps("PATH") && !mixed.keeps("CARGO_HOME"));
+        // Other categories, and no category, pass everything.
+        let open = EnvBaseline::of([&rules_of("ordinary"), &RuleSet::default()]);
+        assert!(!open.restricts() && open.keeps("NPM_CONFIG_REGISTRY"));
+    }
 
     #[test]
     fn the_six_categories_are_there_with_distinct_ranks() {

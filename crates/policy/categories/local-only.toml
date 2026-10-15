@@ -10,6 +10,8 @@ dirs = true
 allow_required = true
 programs = ["gpg", "age", "sops", "openssl", "ssh-keygen"]
 words = ["SIGNING", "SIGN", "ENCRYPTION", "ENCRYPT", "PASSPHRASE", "GPG", "PGP", "SOPS", "AGE", "KEYSTORE", "MASTER"]
+# env_keep is absent: a command gets the caller's environment (minus the loader
+# variables), as before. Only publish and payment cut it down.
 checklist = [
   "Name the exact program and its leading arguments (`gpg --decrypt`); this secret exists for one local job.",
   "On Linux the program runs with no network, so it cannot send the key out. Where that cannot be had (macOS, Windows, or user namespaces off), only programs that are not shells, interpreters or network tools run, which is weaker.",

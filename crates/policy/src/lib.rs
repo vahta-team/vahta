@@ -23,5 +23,8 @@
 mod category;
 mod evaluate;
 
-pub use category::{Category, NetKind, all, category, describe, is_downgrade, rules_in_sync, suggest};
-pub use evaluate::{Ctx, Verdict, evaluate};
+pub use category::{
+    Category, EnvBaseline, NetKind, SAFE_ENV, all, category, describe, is_downgrade, rules_in_sync,
+    suggest,
+};
+pub use evaluate::{Ctx, Verdict, evaluate, extra_args};

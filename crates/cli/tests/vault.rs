@@ -412,7 +412,9 @@ fn check_compares_the_effective_rules_not_the_literal_file() {
     // Approved publish rules carry @shells, @interpreters and @network; the
     // file says only the command and the category.
     s.bind_zeta_category("publish", "cargo publish", vahta_vault::Network::App);
-    s.manifest("[secrets.ZETA]\nallow = [\"cargo publish\"]\ncategory = \"publish\"\n[secrets.ALPHA]\n");
+    s.manifest(
+        "[secrets.ZETA]\nallow = [\"cargo publish\"]\ncategory = \"publish\"\n[secrets.ALPHA]\n",
+    );
     let out = s.run(&["check"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(!text(&out.stderr).contains("Rules not approved"));
@@ -426,7 +428,9 @@ fn check_compares_the_effective_rules_not_the_literal_file() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // A real difference still fails: another command, or another network.
     s.bind_zeta_category("publish", "cargo publish", vahta_vault::Network::App);
-    s.manifest("[secrets.ZETA]\nallow = [\"cargo yank\"]\ncategory = \"publish\"\n[secrets.ALPHA]\n");
+    s.manifest(
+        "[secrets.ZETA]\nallow = [\"cargo yank\"]\ncategory = \"publish\"\n[secrets.ALPHA]\n",
+    );
     let out = s.run(&["check"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("Rules not approved: ZETA"));

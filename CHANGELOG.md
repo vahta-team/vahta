@@ -10,6 +10,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Hardening of rules.** `vahta check` compares the rules a category implies, not
+  the literal `vahta.toml`; a `vahta run` or `vahta http` refused by a secret's rules
+  counts for the injection alarm (a refused network tool, shell or interpreter at
+  once, any two refusals otherwise); `publish` and `payment` runs get a fixed
+  environment (`env_keep` in the category data), and the run window shows the
+  arguments beyond the allowed prefix and the variables dropped.
+
 - **Rules for every secret** (`vahta-policy`): six compiled-in categories (payment,
   server, ordinary, database, publish, local-only), mandatory rule sets (a secret with
   none is refused), folders, a network axis (none, hosts, app; no network on Linux),

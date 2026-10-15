@@ -196,6 +196,88 @@ fn issue_list(names: &[String], why: RefusalKind) -> Vec<NameIssue> {
         .collect()
 }
 
+/// What a run's secrets add to the window, the journal and the environment:
+/// the arguments beyond the allowed prefix, and the variables of the caller
+/// that the secrets' categories keep out of the program.
+struct Steering {
+    /// The arguments the allow rule does not name, as one line (empty: none).
+    extra: String,
+    /// The caller's variable names that were dropped, never their values.
+    dropped: Vec<String>,
+    baseline: vahta_policy::EnvBaseline,
+}
+
+impl Steering {
+    fn of(
+        verdicts: &[(&vahta_vault::RuleSet, Verdict)],
+        argv: &[String],
+        program: Option<&std::path::Path>,
+        env: &[(String, String)],
+        injected: &[&str],
+    ) -> Steering {
+        let baseline = vahta_policy::EnvBaseline::of(verdicts.iter().map(|(b, _)| *b));
+        let extra = verdicts
+            .iter()
+            .filter_map(|(b, _)| vahta_policy::extra_args(b, program, argv))
+            .max_by_key(|e| e.len())
+            .map(command_text)
+            .unwrap_or_default();
+        let mut dropped: Vec<String> = env
+            .iter()
+            .map(|(k, _)| k)
+            .filter(|k| {
+                !is_reserved_env(k)
+                    && !k.is_empty()
+                    && !k.contains('=')
+                    && !baseline.keeps(k)
+                    && !injected.contains(&k.as_str())
+            })
+            .cloned()
+            .collect();
+        dropped.sort();
+        dropped.dedup();
+        Steering {
+            extra,
+            dropped,
+            baseline,
+        }
+    }
+
+    /// The window's lines for it.
+    fn lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.extra.is_empty() {
+            out.push(format!("Extra arguments: {}", self.extra));
+        }
+        if !self.dropped.is_empty() {
+            let shown: Vec<&str> = self.dropped.iter().take(200).map(String::as_str).collect();
+            let more = self.dropped.len() - shown.len();
+            out.push(format!(
+                "Environment variables not passed on: {}{}",
+                sanitize_for_message(&shown.join(", ")),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        out
+    }
+
+    /// The journal's words for it: names and arguments, never a value.
+    fn journal_text(&self) -> String {
+        let mut out = String::new();
+        if !self.extra.is_empty() {
+            out.push_str(&format!("; extra arguments: {}", self.extra));
+        }
+        if !self.dropped.is_empty() {
+            out.push_str(&format!("; env dropped: {}", self.dropped.join(",")));
+        }
+        out
+    }
+}
+
 /// What a `Run` request asked for.
 pub(crate) struct RunArgs {
     pub cwd: String,
@@ -373,16 +455,15 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         Verdict::Allowed { note: Some(n), .. } => Some(n.clone()),
         _ => None,
     });
+    let injected: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
+    let steering = Steering::of(&verdicts, &argv, program.as_deref(), &client_env, &injected);
     if !failures.is_empty() {
         if !ask {
             let refused: Vec<String> = failures.iter().map(|(b, _)| b.name.clone()).collect();
             let shown = program
                 .as_deref()
                 .and_then(|p| p.file_name())
-                .map_or_else(
-                    || argv[0].clone(),
-                    |f| f.to_string_lossy().into_owned(),
-                );
+                .map_or_else(|| argv[0].clone(), |f| f.to_string_lossy().into_owned());
             crate::report::rule_refusal(ctx, &refused, Some(&shown), false);
             return Err(not_allowed(
                 ctx,
@@ -413,6 +494,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             &failures,
             format!("Secrets: {}", shown.join(", ")),
             format!("Command: {}", command_text(&argv)),
+            steering.lines(),
             reason.as_deref(),
             delegated,
         )?;
@@ -443,11 +525,15 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             names: &names,
             found,
             title: "Run a command",
-            lines: vec![
-                format!("Secrets: {}", shown.join(", ")),
-                format!("Command: {}", command_text(&argv)),
-                "This run only; no session is opened.".to_string(),
-            ],
+            lines: {
+                let mut lines = vec![
+                    format!("Secrets: {}", shown.join(", ")),
+                    format!("Command: {}", command_text(&argv)),
+                ];
+                lines.extend(steering.lines());
+                lines.push("This run only; no session is opened.".to_string());
+                lines
+            },
             label: label.as_deref(),
             refused_event: "run_refused",
             nothing: "nothing was run",
@@ -460,6 +546,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
 
     let mut env: Vec<(OsString, OsString)> = filter_env(client_env)
         .into_iter()
+        .filter(|(k, _)| steering.baseline.keeps(k))
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .collect();
     for ((name, var), (_, value)) in pairs.iter().zip(&values) {
@@ -489,10 +576,11 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
                         Some(id) => format!("session {id}"),
                         None => "password".to_string(),
                     };
-                    match &unisolated_note {
+                    let how = match &unisolated_note {
                         Some(_) => format!("{how}; network not cut (not available here)"),
                         None => how,
-                    }
+                    };
+                    format!("{how}{}", steering.journal_text())
                 }),
             ),
     );

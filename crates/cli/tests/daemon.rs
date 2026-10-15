@@ -2424,6 +2424,182 @@ fn a_bound_secret_runs_only_the_commands_on_its_list_and_the_refusal_has_no_wind
     assert_eq!(out.status.code(), Some(3));
 }
 
+#[cfg(unix)]
+impl Sandbox {
+    /// Like `bind_directly`, with a category (its deny groups and no network
+    /// limit), as `vahta bind --category` stores it.
+    fn bind_category(&self, name: &str, category: &str, allow: &[&str]) {
+        use vahta_vault::rules::parse_rule;
+        let cat = vahta_policy::category(category).unwrap();
+        let mut vault = self.open_vault();
+        let allow = allow
+            .iter()
+            .map(|rule| {
+                let parsed = parse_rule(rule, true).unwrap();
+                let vahta_vault::rules::ProgramSpec::Bare(n) = &parsed.program else {
+                    panic!("test rules use bare names");
+                };
+                let program = Sandbox::which(n);
+                parsed.to_allow(program.to_string_lossy().into_owned())
+            })
+            .collect();
+        vault
+            .set_bindings(
+                name,
+                Some(vahta_vault::RuleSet {
+                    name: name.to_string(),
+                    category: Some(category.to_string()),
+                    allow,
+                    deny: cat.required_deny(),
+                    network: vahta_vault::Network::App,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&self.vault_path(), &LocalStore::new(self.root.join("data")))
+            .unwrap();
+    }
+
+    /// `vahta run` with these variables added to the caller's environment.
+    fn run_with_env(&self, vars: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut cmd = self.command(&self.project());
+        // Only the sandbox's variables and PATH, so the window's list of what
+        // was dropped is the test's own and short.
+        let own: Vec<_> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|v| (k.to_os_string(), v.to_os_string())))
+            .collect();
+        cmd.env_clear().envs(own);
+        cmd.env("PATH", std::env::var_os("PATH").unwrap());
+        cmd.args(args);
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("run vahta")
+    }
+}
+
+const STEERING: &[(&str, &str)] = &[
+    ("NPM_CONFIG_REGISTRY", "https://registry.evil.invalid"),
+    ("CARGO_REGISTRIES_EVIL_INDEX", "https://index.evil.invalid"),
+    ("CARGO_HOME", "/home/x/.cargo"),
+    ("SOME_ORDINARY_VAR", "ordinary-value"),
+];
+
+// Runs commands that only a Unix has (printenv).
+#[cfg(unix)]
+#[test]
+fn a_publish_run_gets_the_baseline_environment_and_an_ordinary_run_gets_all_of_it() {
+    let s = sandbox_with_secrets();
+    s.bind_category("ZETA", "publish", &["printenv"]);
+    s.bind_directly("BETA", &["printenv"], &[]);
+    s.unlock_session();
+
+    let out = s.run_with_env(STEERING, &["run", "--secret", "ZETA", "--", "printenv"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let env = text(&out.stdout);
+    let has = |name: &str| env.lines().any(|l| l.starts_with(&format!("{name}=")));
+    assert!(has("PATH") && has("HOME"), "{env}");
+    assert!(has("CARGO_HOME"), "{env}");
+    assert!(has("ZETA"), "the injected variable is kept: {env}");
+    assert!(!has("NPM_CONFIG_REGISTRY"), "{env}");
+    assert!(!has("CARGO_REGISTRIES_EVIL_INDEX"), "{env}");
+    assert!(!has("SOME_ORDINARY_VAR"), "{env}");
+    assert!(!has("VAHTA_DATA_DIR"));
+
+    // An ordinary secret keeps today's behaviour: everything but the loader
+    // and Vahta's own variables.
+    let out = s.run_with_env(STEERING, &["run", "--secret", "BETA", "--", "printenv"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let env = text(&out.stdout);
+    for (name, _) in STEERING {
+        assert!(
+            env.lines().any(|l| l.starts_with(&format!("{name}="))),
+            "{name} in {env}"
+        );
+    }
+    // A mixed run is cut down as soon as one secret's category cuts it.
+    let out = s.run_with_env(
+        STEERING,
+        &[
+            "run", "--secret", "ZETA", "--secret", "BETA", "--", "printenv",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains("NPM_CONFIG_REGISTRY"));
+}
+
+// Runs commands that only a Unix has (printenv).
+#[cfg(unix)]
+#[test]
+fn the_run_window_lists_extra_arguments_and_dropped_variables_and_the_journal_has_names_only() {
+    let s = sandbox_with_secrets();
+    // ALPHA is each-use, so every run asks, and the person sees this first.
+    s.bind_category("ALPHA", "publish", &["printenv HOME"]);
+    s.script(&[PW_ANSWER]);
+    let out = s.run_with_env(
+        STEERING,
+        &[
+            "run",
+            "--secret",
+            "ALPHA",
+            "--",
+            "printenv",
+            "HOME",
+            "--manifest-path=/elsewhere",
+        ],
+    );
+    // printenv ignores what it does not know; what matters is the window.
+    let _ = out;
+    let log = s.window_log();
+    let panel = log
+        .iter()
+        .filter_map(|e| e["panel"]["lines"].as_array())
+        .map(|l| Value::Array(l.clone()).to_string())
+        .find(|l| l.contains("Command: printenv HOME"))
+        .expect("the run window");
+    assert!(
+        panel.contains("Extra arguments: --manifest-path=/elsewhere"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains("NPM_CONFIG_REGISTRY") && panel.contains("CARGO_REGISTRIES_EVIL_INDEX"),
+        "{panel}"
+    );
+    assert!(panel.contains("SOME_ORDINARY_VAR"), "{panel}");
+    assert!(
+        !panel.contains("CARGO_HOME"),
+        "a kept variable is not listed: {panel}"
+    );
+    assert!(!panel.contains("evil.invalid") && !panel.contains("ordinary-value"));
+
+    let journal = s.journal();
+    assert!(
+        journal.contains("extra arguments: --manifest-path=/elsewhere")
+            && journal.contains("env dropped: CARGO_REGISTRIES_EVIL_INDEX,NPM_CONFIG_REGISTRY"),
+        "{journal}"
+    );
+    assert!(!journal.contains("evil.invalid") && !journal.contains("ordinary-value"));
+
+    // An ordinary secret with an exact rule shows the extra arguments too, and
+    // nothing about the environment.
+    s.bind_directly("BETA", &["printenv"], &[]);
+    s.unlock_session();
+    let before = s.window_log().len();
+    let out = s.run_with_env(
+        STEERING,
+        &["run", "--secret", "BETA", "--", "printenv", "HOME"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.journal().contains("extra arguments: HOME"));
+    assert_eq!(
+        s.window_log().len(),
+        before,
+        "a session run opens no window"
+    );
+}
+
 // Runs commands that only a Unix has (sh, printenv, cat, true).
 #[cfg(unix)]
 #[test]

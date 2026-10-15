@@ -137,6 +137,27 @@ fn shown(path: &Path, root: &Path) -> String {
     }
 }
 
+/// The arguments of `argv` beyond the allowed prefix: the words after the
+/// program that the `allow` rule matching the resolved `program` does not
+/// itself name. `None` when no allow rule matched (a directory, or no list):
+/// there is no prefix to go beyond. Of several matching rules, the one that
+/// names the most arguments.
+pub fn extra_args<'a>(
+    rules: &RuleSet,
+    program: Option<&Path>,
+    argv: &'a [String],
+) -> Option<&'a [String]> {
+    let resolved = program?;
+    rules
+        .allow
+        .iter()
+        .filter(|r| matches!(&r.program, Program::Path(p) if Path::new(p) == resolved))
+        .filter(|r| args_match(r, argv))
+        .map(|r| r.args.len())
+        .max()
+        .map(|n| &argv[1 + n..])
+}
+
 /// Check the command in `ctx` against `rules`.
 pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
     let argv = ctx.argv;
@@ -308,6 +329,32 @@ mod tests {
             check(&b, None, &["stripe"]),
             Verdict::NotAllowed { .. }
         ));
+    }
+
+    #[test]
+    fn extra_arguments_are_those_beyond_the_allowed_prefix() {
+        let git = Path::new("/usr/bin/git");
+        let b = binding(vec![allow("git push", "/usr/bin/git")], vec![]);
+        let a = argv(&["git", "push", "--force", "origin"]);
+        assert_eq!(extra_args(&b, Some(git), &a), Some(&a[2..]));
+        let exact = argv(&["git", "push"]);
+        assert_eq!(extra_args(&b, Some(git), &exact), Some(&exact[2..]));
+        // A bare rule allows any arguments: all of them are extra.
+        let bare = binding(vec![allow("git", "/usr/bin/git")], vec![]);
+        assert_eq!(extra_args(&bare, Some(git), &a), Some(&a[1..]));
+        // The rule that names more arguments wins.
+        let both = binding(
+            vec![
+                allow("git", "/usr/bin/git"),
+                allow("git push", "/usr/bin/git"),
+            ],
+            vec![],
+        );
+        assert_eq!(extra_args(&both, Some(git), &a), Some(&a[2..]));
+        // No rule matched (another program, or arguments that differ).
+        assert_eq!(extra_args(&b, Some(Path::new("/bin/git")), &a), None);
+        assert_eq!(extra_args(&b, Some(git), &argv(&["git", "pull"])), None);
+        assert_eq!(extra_args(&b, None, &a), None);
     }
 
     #[test]

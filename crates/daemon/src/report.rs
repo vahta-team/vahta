@@ -236,6 +236,30 @@ pub(crate) fn feed_spooled(shared: &Arc<Shared>, lines: Spooled) {
     }
 }
 
+/// A `vahta run` or `vahta http` that a secret's rules refused counts for the
+/// alarm: one aimed at a network tool, shell or interpreter at once, anything
+/// else on repetition (see `alarm.rs`). The agent's reply is unchanged.
+pub(crate) fn rule_refusal(
+    ctx: &Ctx<'_>,
+    secrets: &[String],
+    program: Option<&str>,
+    no_rules: bool,
+) {
+    if crate::testing::refusal_alarm_muted() {
+        return;
+    }
+    let subject = subject_of(ctx, "", None);
+    let (weight, what) = alarm::refusal_weight(secrets, program, no_rules);
+    let what = clean(&what);
+    if let Some(verdict) = ctx
+        .shared
+        .alarm
+        .record_scored(&subject, weight, what, Instant::now())
+    {
+        alarm::raise(ctx.shared, subject, verdict);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,29 +278,5 @@ mod tests {
             "claude; an API token; rule gitleaks.github-pat; hidden as base64; agent session abc"
         );
         assert!(!d.contains('\u{1b}'));
-    }
-}
-
-/// A `vahta run` or `vahta http` that a secret's rules refused counts for the
-/// alarm: one aimed at a network tool, shell or interpreter at once, anything
-/// else on repetition (see `alarm.rs`). The agent's reply is unchanged.
-pub(crate) fn rule_refusal(
-    ctx: &Ctx<'_>,
-    secrets: &[String],
-    program: Option<&str>,
-    no_rules: bool,
-) {
-    if crate::testing::refusal_alarm_muted() {
-        return;
-    }
-    let subject = subject_of(ctx, "", None);
-    let (weight, what) = alarm::refusal_weight(secrets, program, no_rules);
-    let what = clean(&what);
-    if let Some(verdict) =
-        ctx.shared
-            .alarm
-            .record_scored(&subject, weight, what, Instant::now())
-    {
-        alarm::raise(ctx.shared, subject, verdict);
     }
 }
