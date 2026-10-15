@@ -14,6 +14,8 @@ dirs = true
 allow_required = true
 programs = ["psql", "mysql", "pg_dump", "pg_restore", "redis-cli", "mongosh", "sqlite3"]
 words = ["DATABASE", "DB", "POSTGRES", "POSTGRESQL", "PG", "MYSQL", "MARIADB", "MONGO", "MONGODB", "REDIS", "DSN", "SQL"]
+# env_keep is absent: a command gets the caller's environment (minus the loader
+# variables), as before. Only publish and payment cut it down.
 checklist = [
   "Name the client and the arguments you need (`psql -f migrations/`, `pg_dump`); the key is then usable only that way.",
   "psql has a shell escape (`\\!`) and COPY ... TO PROGRAM; prefer `-f FILE` with a reviewed file and a read-only database role.",

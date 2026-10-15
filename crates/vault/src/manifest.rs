@@ -388,6 +388,21 @@ pub fn network_word(network: &crate::Network) -> &'static str {
 /// about network proposes `app`. A file that proposes no rules for the secret
 /// never differs: only a proposal can be pending, and clearing is `bind --clear`.
 pub fn rules_in_sync(entry: Option<&SecretEntry>, approved: Option<&crate::RuleSet>) -> bool {
+    rules_in_sync_with(entry, approved, |_| None)
+}
+
+/// What a category adds to a proposal that does not spell it out: its deny
+/// groups (put in front, as `bind` does) and its default network word.
+pub type Implied = (Vec<String>, &'static str);
+
+/// [`rules_in_sync`] on the effective rules: `implied` maps a category id to
+/// what `bind` would add to the proposal, so a file that leaves out the
+/// category's own denies or network still matches what was approved.
+pub fn rules_in_sync_with(
+    entry: Option<&SecretEntry>,
+    approved: Option<&crate::RuleSet>,
+    implied: impl Fn(&str) -> Option<Implied>,
+) -> bool {
     let texts = |rules: &[ParsedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
     let approved_texts =
         |rules: &[crate::ApprovedRule]| rules.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
@@ -413,11 +428,19 @@ pub fn rules_in_sync(entry: Option<&SecretEntry>, approved: Option<&crate::RuleS
         crate::Network::Hosts(h) => h.iter().map(|h| h.text.clone()).collect(),
         _ => Vec::new(),
     };
+    let (deny, default_net) = match e.category.as_deref().and_then(&implied) {
+        Some((groups, net)) => {
+            let mut deny = groups.clone();
+            deny.extend(texts(&e.deny).into_iter().filter(|t| !groups.contains(t)));
+            (deny, net)
+        }
+        None => (texts(&e.deny), "app"),
+    };
     texts(&e.allow) == approved_texts(&b.allow)
-        && texts(&e.deny) == approved_texts(&b.deny)
+        && deny == approved_texts(&b.deny)
         && e.category == b.category
         && e.dirs == b.dirs.iter().map(|d| d.text.clone()).collect::<Vec<_>>()
-        && e.network.as_deref().unwrap_or("app") == network_word(&b.network)
+        && e.network.as_deref().unwrap_or(default_net) == network_word(&b.network)
         && e.hosts.iter().map(|h| h.text.clone()).collect::<Vec<_>>() == hosts_have
 }
 

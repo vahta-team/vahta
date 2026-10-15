@@ -9,6 +9,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+include!("redirecting_env.rs");
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
@@ -26,6 +28,9 @@ struct Raw {
     words: Vec<String>,
     class: Option<String>,
     checklist: Vec<String>,
+    /// Present: a run gets only these variables, the injected ones and the
+    /// safe core. Absent: the caller's environment, as always.
+    env_keep: Option<Vec<String>>,
 }
 
 fn q(s: &str) -> String {
@@ -87,6 +92,28 @@ fn main() {
                 "{file}: unknown group {g}"
             );
         }
+        // The list is how a category keeps a run from being steered by the
+        // environment, so a name that redirects a program must never be on it.
+        for v in c.env_keep.iter().flatten() {
+            let upper = v.to_ascii_uppercase();
+            assert!(
+                !v.is_empty()
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'*')
+                    && v.find('*').is_none_or(|i| i == v.len() - 1),
+                "{file}: env_keep entry `{v}` is a variable name, or a prefix ending in *"
+            );
+            for bad in REDIRECTING_ENV {
+                assert!(
+                    !upper.starts_with(bad),
+                    "{file}: env_keep must not keep `{v}` (it can redirect or load code)"
+                );
+            }
+        }
+        let env_keep = match &c.env_keep {
+            None => "None".to_string(),
+            Some(list) => format!("Some(&[{}])", strs(list)),
+        };
         let tier = match c.tier.as_str() {
             "each-use" => "Tier::EachUse",
             "session" => "Tier::Session",
@@ -103,7 +130,7 @@ fn main() {
             body,
             "    Category {{ id: {}, name: {}, description: {}, rank: {}, tier: {tier}, \
              networks: &[{}], default_network: {}, deny: &[{}], dirs: {}, allow_required: {}, \
-             programs: &[{}], words: &[{}], class: {class}, checklist: &[{}] }},",
+             programs: &[{}], words: &[{}], class: {class}, checklist: &[{}], env_keep: {env_keep} }},",
             q(&c.id),
             q(&c.name),
             q(&c.description),

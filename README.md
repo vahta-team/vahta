@@ -104,7 +104,8 @@ is [docs/agent-usage.md](docs/agent-usage.md).
   holds no keys and only watches the three harnesses' hook settings. If the hooks
   disappear it asks you before putting them back;
 - **raises an injection alarm**: refusals are scored per agent, and several in a
-  few minutes (a secret retried in base64, a touch of Vahta's files) open a
+  few minutes (a secret retried in base64, a touch of Vahta's files, a network tool
+  refused by a secret's rules) open a
   window offering to lock every session, or lock them at once with
   `alarm = "lock"`.
 

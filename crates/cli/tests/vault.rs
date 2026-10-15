@@ -379,6 +379,65 @@ impl Sandbox {
     }
 }
 
+impl Sandbox {
+    /// Give ZETA approved rules as `bind` stores them: the category's own deny
+    /// groups in front, and the given network.
+    fn bind_zeta_category(&self, category: &str, allow: &str, network: vahta_vault::Network) {
+        use vahta_vault::rules::parse_rule;
+        let cat = vahta_policy::category(category).unwrap();
+        let mut v = Vault::unlock_password(&self.vault_path(), PW, &self.store()).unwrap();
+        let rule = parse_rule(allow, true)
+            .unwrap()
+            .to_allow("/opt/fake/tool".to_string());
+        v.set_bindings(
+            "ZETA",
+            Some(vahta_vault::RuleSet {
+                name: "ZETA".into(),
+                category: Some(category.to_string()),
+                allow: vec![rule],
+                deny: cat.required_deny(),
+                network,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        v.save(&self.vault_path(), &self.store()).unwrap();
+    }
+}
+
+#[test]
+fn check_compares_the_effective_rules_not_the_literal_file() {
+    let s = Sandbox::new();
+    s.with_vault(&items());
+    // Approved publish rules carry @shells, @interpreters and @network; the
+    // file says only the command and the category.
+    s.bind_zeta_category("publish", "cargo publish", vahta_vault::Network::App);
+    s.manifest(
+        "[secrets.ZETA]\nallow = [\"cargo publish\"]\ncategory = \"publish\"\n[secrets.ALPHA]\n",
+    );
+    let out = s.run(&["check"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("Rules not approved"));
+    // The file spelling the denies out is the same thing.
+    s.manifest("[secrets.ZETA]\nallow = [\"cargo publish\"]\ncategory = \"publish\"\ndeny = [\"@network\", \"@shells\", \"@interpreters\"]\n[secrets.ALPHA]\n");
+    assert_eq!(s.run(&["check"]).status.code(), Some(0));
+    // The same for local-only (no network by default).
+    s.bind_zeta_category("local-only", "tool", vahta_vault::Network::None);
+    s.manifest("[secrets.ZETA]\nallow = [\"tool\"]\ncategory = \"local-only\"\n[secrets.ALPHA]\n");
+    let out = s.run(&["check"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // A real difference still fails: another command, or another network.
+    s.bind_zeta_category("publish", "cargo publish", vahta_vault::Network::App);
+    s.manifest(
+        "[secrets.ZETA]\nallow = [\"cargo yank\"]\ncategory = \"publish\"\n[secrets.ALPHA]\n",
+    );
+    let out = s.run(&["check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("Rules not approved: ZETA"));
+    s.manifest("[secrets.ZETA]\nallow = [\"cargo publish\"]\ncategory = \"publish\"\ndeny = [\"git\"]\n[secrets.ALPHA]\n");
+    assert_eq!(s.run(&["check"]).status.code(), Some(1));
+}
+
 #[test]
 fn list_shows_the_class_and_whether_the_rules_are_approved() {
     let s = Sandbox::new();

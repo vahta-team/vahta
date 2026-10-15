@@ -1843,6 +1843,7 @@ dependencies = [
  "vahta-mobile",
  "vahta-net",
  "vahta-os",
+ "vahta-policy",
  "vahta-scan",
  "vahta-setup",
  "vahta-vault",

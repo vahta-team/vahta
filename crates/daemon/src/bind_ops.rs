@@ -328,7 +328,7 @@ fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) ->
     for entry in &peek.entries {
         let proposed = manifest.secrets.get(&entry.name);
         let approved = peek.bindings.iter().find(|b| b.name == entry.name);
-        if manifest::rules_in_sync(proposed, approved) {
+        if vahta_policy::rules_in_sync(proposed, approved) {
             continue;
         }
         let fail = |e: String| error(format!("{}: {e}", entry.name));

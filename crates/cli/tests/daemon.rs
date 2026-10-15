@@ -34,6 +34,10 @@ struct Sandbox {
     /// reaches phones over the real phone link (LAN transport) instead of the
     /// loopback phones kept in files.
     phone_addr: Option<String>,
+    /// Whether the daemon counts refusals by a secret's rules for the alarm.
+    /// Off in most tests, which refuse several commands in a row and count
+    /// windows; the alarm tests turn it on.
+    refusal_alarm: bool,
 }
 
 impl Sandbox {
@@ -50,7 +54,16 @@ impl Sandbox {
         Sandbox {
             root,
             phone_addr: None,
+            refusal_alarm: false,
         }
+    }
+
+    /// A sandbox whose daemon counts refusals by rules for the alarm.
+    #[cfg(unix)]
+    fn counting_refusals() -> Sandbox {
+        let mut s = Sandbox::new();
+        s.refusal_alarm = true;
+        s
     }
 
     fn project(&self) -> PathBuf {
@@ -91,6 +104,11 @@ impl Sandbox {
             .env_remove("VAHTA_TEST_PHONE_ADDR");
         if let Some(addr) = &self.phone_addr {
             cmd.env("VAHTA_TEST_PHONE_ADDR", addr);
+        }
+        if self.refusal_alarm {
+            cmd.env_remove("VAHTA_TEST_MUTE_REFUSAL_ALARM");
+        } else {
+            cmd.env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
         }
         cmd
     }
@@ -1169,7 +1187,10 @@ fn hook_reports_and_the_spool_reach_the_journal_without_values() {
 
 /// A vault with a session-tier ZETA and BETA and an each-use ALPHA.
 fn sandbox_with_secrets() -> Sandbox {
-    let s = Sandbox::new();
+    sandbox_with_secrets_in(Sandbox::new())
+}
+
+fn sandbox_with_secrets_in(s: Sandbox) -> Sandbox {
     s.with_vault(&[
         ("ZETA", "fake-one", "session"),
         ("BETA", "fake-two", "session"),
@@ -2402,6 +2423,209 @@ fn a_bound_secret_runs_only_the_commands_on_its_list_and_the_refusal_has_no_wind
     // One bound name is enough to refuse a mixed run.
     let out = s.vahta(&["run", "--secret", "BETA", "--secret", "ZETA", "--", "true"]);
     assert_eq!(out.status.code(), Some(3));
+}
+
+#[cfg(unix)]
+impl Sandbox {
+    /// Like `bind_directly`, with a category (its deny groups and no network
+    /// limit), as `vahta bind --category` stores it.
+    fn bind_category(&self, name: &str, category: &str, allow: &[&str]) {
+        use vahta_vault::rules::parse_rule;
+        let cat = vahta_policy::category(category).unwrap();
+        let mut vault = self.open_vault();
+        let allow = allow
+            .iter()
+            .map(|rule| {
+                let parsed = parse_rule(rule, true).unwrap();
+                let vahta_vault::rules::ProgramSpec::Bare(n) = &parsed.program else {
+                    panic!("test rules use bare names");
+                };
+                let program = Sandbox::which(n);
+                parsed.to_allow(program.to_string_lossy().into_owned())
+            })
+            .collect();
+        vault
+            .set_bindings(
+                name,
+                Some(vahta_vault::RuleSet {
+                    name: name.to_string(),
+                    category: Some(category.to_string()),
+                    allow,
+                    deny: cat.required_deny(),
+                    network: vahta_vault::Network::App,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&self.vault_path(), &LocalStore::new(self.root.join("data")))
+            .unwrap();
+    }
+
+    /// `vahta run` with these variables added to the caller's environment.
+    fn run_with_env(&self, vars: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut cmd = self.command(&self.project());
+        // Only the sandbox's variables and PATH, so the window's list of what
+        // was dropped is the test's own and short.
+        let own: Vec<_> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|v| (k.to_os_string(), v.to_os_string())))
+            .collect();
+        cmd.env_clear().envs(own);
+        cmd.env("PATH", std::env::var_os("PATH").unwrap());
+        cmd.args(args);
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("run vahta")
+    }
+}
+
+#[cfg(unix)]
+const STEERING: &[(&str, &str)] = &[
+    ("NPM_CONFIG_REGISTRY", "https://registry.evil.invalid"),
+    ("CARGO_REGISTRIES_EVIL_INDEX", "https://index.evil.invalid"),
+    ("CARGO_HOME", "/home/x/.cargo"),
+    ("SOME_ORDINARY_VAR", "ordinary-value"),
+];
+
+// Runs commands that only a Unix has (printenv).
+#[cfg(unix)]
+#[test]
+fn a_publish_run_gets_the_baseline_environment_and_an_ordinary_run_gets_all_of_it() {
+    let s = sandbox_with_secrets();
+    s.bind_category("ZETA", "publish", &["printenv"]);
+    s.bind_directly("BETA", &["printenv"], &[]);
+    s.unlock_session();
+
+    let out = s.run_with_env(STEERING, &["run", "--secret", "ZETA", "--", "printenv"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let env = text(&out.stdout);
+    let has = |name: &str| env.lines().any(|l| l.starts_with(&format!("{name}=")));
+    assert!(has("PATH") && has("HOME"), "{env}");
+    assert!(has("CARGO_HOME"), "{env}");
+    assert!(has("ZETA"), "the injected variable is kept: {env}");
+    assert!(!has("NPM_CONFIG_REGISTRY"), "{env}");
+    assert!(!has("CARGO_REGISTRIES_EVIL_INDEX"), "{env}");
+    assert!(!has("SOME_ORDINARY_VAR"), "{env}");
+    assert!(!has("VAHTA_DATA_DIR"));
+
+    // An ordinary secret keeps today's behaviour: everything but the loader
+    // and Vahta's own variables.
+    let out = s.run_with_env(STEERING, &["run", "--secret", "BETA", "--", "printenv"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let env = text(&out.stdout);
+    for (name, _) in STEERING {
+        assert!(
+            env.lines().any(|l| l.starts_with(&format!("{name}="))),
+            "{name} in {env}"
+        );
+    }
+    // A mixed run is cut down as soon as one secret's category cuts it.
+    let out = s.run_with_env(
+        STEERING,
+        &[
+            "run", "--secret", "ZETA", "--secret", "BETA", "--", "printenv",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains("NPM_CONFIG_REGISTRY"));
+}
+
+// Runs commands that only a Unix has (printenv).
+#[cfg(unix)]
+#[test]
+fn the_run_window_lists_extra_arguments_and_dropped_variables_and_the_journal_has_names_only() {
+    let s = sandbox_with_secrets();
+    // ALPHA is each-use, so every run asks, and the person sees this first.
+    s.bind_category("ALPHA", "publish", &["printenv HOME"]);
+    s.script(&[PW_ANSWER]);
+    let out = s.run_with_env(
+        STEERING,
+        &[
+            "run",
+            "--secret",
+            "ALPHA",
+            "--",
+            "printenv",
+            "HOME",
+            "--manifest-path=/elsewhere",
+        ],
+    );
+    // printenv ignores what it does not know; what matters is the window.
+    let _ = out;
+    let log = s.window_log();
+    let panel = log
+        .iter()
+        .filter_map(|e| e["panel"]["lines"].as_array())
+        .map(|l| Value::Array(l.clone()).to_string())
+        .find(|l| l.contains("Command: printenv HOME"))
+        .expect("the run window");
+    assert!(
+        panel.contains("Extra arguments: --manifest-path=/elsewhere"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains("NPM_CONFIG_REGISTRY") && panel.contains("CARGO_REGISTRIES_EVIL_INDEX"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains("tried to point this at another place") && panel.contains("other variable"),
+        "{panel}"
+    );
+    // The rest is a count, not a list.
+    assert!(!panel.contains("SOME_ORDINARY_VAR"), "{panel}");
+    assert!(
+        !panel.contains("CARGO_HOME"),
+        "a kept variable is not listed: {panel}"
+    );
+    assert!(!panel.contains("evil.invalid") && !panel.contains("ordinary-value"));
+
+    let journal = s.journal();
+    assert!(
+        journal.contains("extra arguments: --manifest-path=/elsewhere")
+            && journal.contains("env dropped: CARGO_REGISTRIES_EVIL_INDEX,NPM_CONFIG_REGISTRY")
+            && journal.contains("other env variables dropped"),
+        "{journal}"
+    );
+    assert!(!journal.contains("SOME_ORDINARY_VAR"), "{journal}");
+    assert!(!journal.contains("evil.invalid") && !journal.contains("ordinary-value"));
+
+    // With nothing that redirects, only the count is shown.
+    s.script(&[PW_ANSWER]);
+    s.run_with_env(
+        &[("SOME_ORDINARY_VAR", "ordinary-value")],
+        &["run", "--secret", "ALPHA", "--", "printenv", "HOME"],
+    );
+    let panels: Vec<String> = s
+        .window_log()
+        .iter()
+        .filter_map(|e| e["panel"]["lines"].as_array())
+        .map(|l| Value::Array(l.clone()).to_string())
+        .filter(|l| l.contains("Command: printenv HOME"))
+        .collect();
+    let last = panels.last().unwrap();
+    assert!(
+        last.contains("other variable") && !last.contains("tried to point"),
+        "{last}"
+    );
+
+    // An ordinary secret with an exact rule shows the extra arguments too, and
+    // nothing about the environment.
+    s.bind_directly("BETA", &["printenv"], &[]);
+    s.unlock_session();
+    let before = s.window_log().len();
+    let out = s.run_with_env(
+        STEERING,
+        &["run", "--secret", "BETA", "--", "printenv", "HOME"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.journal().contains("extra arguments: HOME"));
+    assert_eq!(
+        s.window_log().len(),
+        before,
+        "a session run opens no window"
+    );
 }
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).
@@ -4422,6 +4646,79 @@ fn with_no_window_to_ask_in_the_alarm_locks() {
     }
     wait_until("the headless alarm to lock", 10, || s.sessions().is_empty());
     assert!(s.journal().contains("the question could not be asked"));
+}
+
+/// A bound ZETA (only `printenv` may use it) and a session, with the alarm's
+/// answer scripted to "ignore" so the session stays and the window is logged.
+#[cfg(unix)]
+fn sandbox_for_refusals() -> Sandbox {
+    let s = sandbox_with_secrets_in(Sandbox::counting_refusals());
+    s.unlock_session();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    s.script(&[r#"{"choose":1}"#]);
+    s
+}
+
+#[cfg(unix)]
+fn refused_run(s: &Sandbox, program: &str) {
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", program]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    // The agent's reply is the ordinary refusal with its hint.
+    let err = text(&out.stderr);
+    assert!(err.contains("--ask") && !err.contains("injection"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn one_refused_network_tool_raises_the_alarm_naming_the_secret_and_the_program() {
+    let s = sandbox_for_refusals();
+    refused_run(&s, "curl");
+    wait_until("the alarm to ask", 10, || {
+        s.windows_titled("Suspicious agent behaviour") == 1
+    });
+    let log = s.window_log();
+    let ask = log
+        .iter()
+        .rev()
+        .find(|e| e["ask"] == "choose")
+        .expect("the alarm asked");
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("prompt injection") && lines.contains("ZETA") && lines.contains("curl"),
+        "{lines}"
+    );
+    assert!(s.journal().contains("\"event\":\"alarm\""));
+    assert!(!lines.contains("fake-"));
+}
+
+#[cfg(unix)]
+#[test]
+fn two_refused_ordinary_programs_raise_the_alarm_and_one_does_not() {
+    let s = sandbox_for_refusals();
+    refused_run(&s, "true");
+    // One refusal of a program that is no network tool, shell or interpreter
+    // is an honest mistake.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(s.windows_titled("Suspicious agent behaviour"), 0);
+    assert!(!s.journal().contains("\"event\":\"alarm\""));
+    refused_run(&s, "env");
+    wait_until("the alarm to ask", 10, || {
+        s.windows_titled("Suspicious agent behaviour") == 1
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn with_alarm_lock_a_refused_network_tool_ends_the_sessions() {
+    let s = sandbox_with_secrets_in(Sandbox::counting_refusals());
+    fs::write(s.root.join("config/config.toml"), "alarm = \"lock\"\n").unwrap();
+    assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+    s.unlock_session();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    assert_eq!(s.sessions().len(), 1);
+    refused_run(&s, "curl");
+    wait_until("the sessions to be locked", 10, || s.sessions().is_empty());
+    assert!(s.journal().contains("the alarm is set to lock"));
 }
 
 #[test]

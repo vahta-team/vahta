@@ -11,6 +11,8 @@ dirs = true
 allow_required = false
 programs = []
 words = []
+# env_keep is absent: a command gets the caller's environment (minus the loader
+# variables), as before. Only publish and payment cut it down.
 checklist = [
   "Prefer `--net hosts:API.HOST` and `vahta http`: then nothing that runs can send the key elsewhere.",
   "If an application needs the network itself, name it with its first arguments (`python app.py`), not a bare interpreter.",

