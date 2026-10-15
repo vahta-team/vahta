@@ -101,7 +101,7 @@ generation continuing. Slots keep their creation time through re-keys, password
 changes and a device slot's rewrap, because "the last enrolled unlock method" is read
 from it. See `docs/daemon.md` ("Devices, factors, re-keying and recovery").
 
-Format 4 (current) adds `remote` to the signed body (the person's opt-in that the vault
+Format 4 adds `remote` to the signed body (the person's opt-in that the vault
 may be used from other projects; off) and `from` to every rule set (absolute, canonical
 project folders the secret may be used from outside the vault's own project; empty).
 `v4.rs` re-exports format 3 and redefines the rule set, the body and the model; the
@@ -111,6 +111,18 @@ once as `<vault>.v3.bak`. The body is postcard, so a field this build does not k
 not carried: a file with extra or missing bytes is refused (`Corrupt`), and a newer format
 number is refused before that (`NewerFormat`). See `docs/daemon.md` ("Using a vault from
 another project").
+
+Format 5 (current) adds four things to the signed body: `kind` (`Project`, or
+`Connectors` for a vault of the person's own connections; fixed at creation), `roles`
+(named agent grants: secrets, command rules, directories, network, limits and the
+allowed actions, each with the time the person approved it), `expires_at` on every
+member (covered by the member's certificate, so it cannot change without the issuer),
+and `harnesses` on a rule set (`claude`, `codex`, `cursor`; only a `Connectors` vault
+may have any). `v5.rs` re-exports format 4 and redefines the member, the rule set, the
+body and the model. A format 4 file is read as it is and upgraded by an owner unlock
+(kind `Project`, no roles, no expiries, no harnesses), the original kept once as
+`<vault>.v4.bak`; a member without an expiry is certified exactly as before, so no
+certificate needs re-signing.
 
 ## Sessions and anchors
 

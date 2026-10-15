@@ -12,7 +12,7 @@
 //! `required` defaults to true, `description` to empty and `env` to the name.
 //! It never holds a value or a tier. It may hold `allow` and `deny` lists of
 //! command rules (see [`crate::rules`]) and the rest of a rule set (`category`,
-//! `dirs`, `from`, `network` = "none" | "app" | "hosts" with `hosts`), but those are a
+//! `dirs`, `from`, `harnesses`, `network` = "none" | "app" | "hosts" with `hosts`), but those are a
 //! **proposal**: the
 //! file is in the repository, so anyone who can push can edit it. What the
 //! daemon enforces is the approved copy in the signed vault, which changes
@@ -49,6 +49,8 @@ pub struct SecretEntry {
     /// Proposed project roots this secret may be used from, outside the
     /// vault's own project (absolute paths, as written).
     pub from: Vec<String>,
+    /// Proposed harnesses (`claude`, `codex`, `cursor`), for a connectors vault.
+    pub harnesses: Vec<String>,
 }
 
 /// The rule-set part of a secret's entry, as texts, to write into the file.
@@ -64,6 +66,8 @@ pub struct RulesText {
     pub hosts: Vec<String>,
     /// Project roots the secret may be used from, outside the vault's own.
     pub from: Vec<String>,
+    /// Harnesses the secret is bound to, in a connectors vault.
+    pub harnesses: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +126,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                 network: None,
                 hosts: Vec::new(),
                 from: Vec::new(),
+                harnesses: Vec::new(),
             };
             for (k, v) in body {
                 match (k.as_str(), v) {
@@ -168,7 +173,15 @@ pub fn parse(text: &str, path: &Path) -> Result<Manifest, Error> {
                             )));
                         }
                     }
-                    ("allow" | "deny" | "dirs" | "hosts" | "from", _) => {
+                    ("harnesses", toml::Value::Array(items)) => {
+                        entry.harnesses = string_list(items, name, "harnesses").map_err(bad)?;
+                        if !crate::valid_harnesses(&entry.harnesses) {
+                            return Err(bad(format!(
+                                "[secrets.{name}].harnesses must be some of \"claude\", \"codex\", \"cursor\", each once"
+                            )));
+                        }
+                    }
+                    ("allow" | "deny" | "dirs" | "hosts" | "from" | "harnesses", _) => {
                         return Err(bad(format!(
                             "[secrets.{name}].{k} must be a list of strings"
                         )));
@@ -320,7 +333,7 @@ pub fn add_rule(text: &str, name: &str, allow: bool, rule: &str) -> Result<Strin
 }
 
 /// `text` with `[secrets.NAME]`'s rule keys (`allow`, `deny`, `category`,
-/// `dirs`, `network`, `hosts`, `from`) set to exactly these (a key with nothing to say
+/// `dirs`, `network`, `hosts`, `from`, `harnesses`) set to exactly these (a key with nothing to say
 /// is removed). Everything else is kept.
 pub fn set_rules(text: &str, name: &str, rules: &RulesText) -> Result<String, Error> {
     let path = Path::new("vahta.toml");
@@ -344,6 +357,7 @@ pub fn set_rules(text: &str, name: &str, rules: &RulesText) -> Result<String, Er
         ("dirs", &rules.dirs),
         ("hosts", &rules.hosts),
         ("from", &rules.from),
+        ("harnesses", &rules.harnesses),
     ] {
         if items.is_empty() {
             table.remove(key);
@@ -436,7 +450,8 @@ pub fn rules_in_sync_with(
         && e.dirs.is_empty()
         && e.network.is_none()
         && e.hosts.is_empty()
-        && e.from.is_empty();
+        && e.from.is_empty()
+        && e.harnesses.is_empty();
     if proposes_nothing {
         return true;
     }
@@ -462,6 +477,7 @@ pub fn rules_in_sync_with(
         && e.network.as_deref().unwrap_or(default_net) == network_word(&b.network)
         && e.hosts.iter().map(|h| h.text.clone()).collect::<Vec<_>>() == hosts_have
         && e.from == b.from
+        && e.harnesses == b.harnesses
 }
 
 /// The outcome of comparing a manifest with the names in a vault.
@@ -584,6 +600,7 @@ mod tests {
             network: Some("hosts".into()),
             hosts: vec!["api.stripe.com".into(), "*.stripe.com:443".into()],
             from: vec!["/work/app".into()],
+            harnesses: vec!["claude".into(), "cursor".into()],
         };
         let text = set_rules("", "K", &rules).unwrap();
         let m = p(&text).unwrap();
@@ -594,6 +611,7 @@ mod tests {
         assert_eq!(e.hosts.len(), 2);
         assert!(e.hosts[1].subdomains && e.hosts[1].port == Some(443));
         assert_eq!(e.from, ["/work/app"]);
+        assert_eq!(e.harnesses, ["claude", "cursor"]);
         // The vault's copy matches when it says the same; any difference shows.
         let mut approved = RuleSet {
             name: "K".into(),
@@ -611,9 +629,14 @@ mod tests {
             }],
             network: Network::Hosts(e.hosts.clone()),
             from: vec!["/work/app".into()],
+            harnesses: vec!["claude".into(), "cursor".into()],
             ..RuleSet::default()
         };
         assert!(rules_in_sync(Some(e), Some(&approved)));
+        // So are the harnesses.
+        approved.harnesses = vec!["claude".into()];
+        assert!(!rules_in_sync(Some(e), Some(&approved)));
+        approved.harnesses = vec!["claude".into(), "cursor".into()];
         // Where it may be used from is part of what is compared.
         approved.from = vec!["/work/other".into()];
         assert!(!rules_in_sync(Some(e), Some(&approved)));
@@ -657,6 +680,9 @@ mod tests {
             "[secrets.A]\ndirs = \"x\"\n",
             "[secrets.A]\nfrom = \"/x\"\n",
             "[secrets.A]\nfrom = [\"relative/dir\"]\n",
+            "[secrets.A]\nharnesses = [\"vim\"]\n",
+            "[secrets.A]\nharnesses = [\"claude\", \"claude\"]\n",
+            "[secrets.A]\nharnesses = \"claude\"\n",
             "secrets = 3\n",
             "[other]\n",
             "= broken",
