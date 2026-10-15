@@ -111,6 +111,12 @@ accepted by `run`, `http`, `unlock`, `delegate`, `list` and `check`.
   project): it does not cover the same vault from another project, nor use of
   the vault at home. `vahta sessions` shows both.
 - `vahta list --vault` shows only the secrets you may use from here.
+- A secret whose network is `none` or `hosts` runs the command with `/run`,
+  `/var/run` and `/tmp/.X11-unix` empty (so no local daemon socket gives it a
+  way out). `/run/media` and `/run/mnt` (mounted SD cards and sticks) are kept.
+  A working directory or absolute path argument elsewhere under `/run` is
+  refused up front, because files written there would vanish; put them
+  somewhere else. A path the program builds itself is not checked.
 
 ## Designing the rules
 

@@ -184,6 +184,26 @@ pub fn isolate_network(cmd: &mut Command) -> Result<(), Unsupported> {
     sys::isolate_network(cmd)
 }
 
+/// As [`isolate_network`], also keeping the given directories under `/run`
+/// visible, as `/run/media` is. Exists so tests can exercise the passthrough
+/// without root; not for use by the daemon.
+#[doc(hidden)]
+pub fn isolate_network_passing(
+    cmd: &mut Command,
+    extra: &[&std::path::Path],
+) -> Result<(), Unsupported> {
+    sys::isolate_network_passing(cmd, extra)
+}
+
+/// Whether a command started by [`isolate_network`] would see `path` replaced
+/// by an empty directory, so that a write there would be lost: under `/run`,
+/// `/var/run` or `/tmp/.X11-unix` and not in the removable-media trees that are
+/// passed through (`/run/media`, `/run/mnt`). The path may not exist yet.
+/// Always false where there is no such isolation.
+pub fn hidden_by_isolation(path: &std::path::Path) -> bool {
+    sys::hidden_path(path)
+}
+
 /// Whether [`isolate_network`] will work here (Linux with unprivileged user
 /// namespaces allowed). Probed once, in a forked child, and remembered.
 pub fn network_isolation_available() -> bool {

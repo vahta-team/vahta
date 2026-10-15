@@ -22,7 +22,7 @@
 //! else is a hard refusal with no window.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use vahta_vault::manifest;
@@ -471,6 +471,9 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             }
         )
     });
+    if isolate_network {
+        refuse_hidden_paths(&canonical_cwd, &argv)?;
+    }
     let unisolated_note = verdicts.iter().find_map(|(_, v)| match v {
         Verdict::Allowed { note: Some(n), .. } => Some(n.clone()),
         _ => None,
@@ -617,6 +620,36 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         program,
         isolate_network,
     })
+}
+
+/// With no network the command sees `/run`, `/var/run` and `/tmp/.X11-unix`
+/// empty (removable media under `/run/media` excepted). A working directory or
+/// an absolute path argument inside them would have its writes lost without a
+/// word, so the run is refused instead.
+fn refuse_hidden_paths(cwd: &Path, argv: &[String]) -> Result<(), ClientReply> {
+    let hidden = |p: &Path| p.is_absolute() && vahta_os::hidden_by_isolation(p);
+    let culprit = if hidden(cwd) {
+        Some(cwd.display().to_string())
+    } else {
+        // `/path` and `--flag=/path`.
+        argv.iter().skip(1).find_map(|a| {
+            let path = if a.starts_with('/') {
+                a.as_str()
+            } else {
+                a.split_once('=').map_or("", |(_, v)| v)
+            };
+            hidden(Path::new(path)).then(|| path.to_string())
+        })
+    };
+    match culprit {
+        None => Ok(()),
+        Some(path) => Err(error(format!(
+            "refused: {} is not visible to a command that must run without network access \
+             (/run, /var/run and /tmp/.X11-unix are empty for it, except /run/media and \
+             /run/mnt), so anything written there would be lost; use a path elsewhere",
+            sanitize_for_message(&path)
+        ))),
+    }
 }
 
 /// The caller's session, if any: the deepest one whose anchor is among its
