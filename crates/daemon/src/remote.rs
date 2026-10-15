@@ -68,6 +68,16 @@ impl Target {
     }
 
     fn find(ctx: &Ctx<'_>, cwd: &str, vault: Option<&str>, verify: bool) -> Flow<Target> {
+        if ctx.connector {
+            // The one connectors vault; `--vault` has no meaning for it.
+            let (project, vault_path) = ctx.vault_for(cwd)?;
+            return Ok(Target {
+                project,
+                vault_path,
+                used_from: None,
+                cwd: PathBuf::from(cwd),
+            });
+        }
         let Some(vault) = vault else {
             let (project, vault_path) = find_vault(cwd)?;
             return Ok(Target {
@@ -102,7 +112,10 @@ impl Target {
         let root = root.ok_or_else(no_vault)?;
         let project = Project { root: root.clone() };
         let vault_path = project.vault_path();
-        if !root.join(DIR_NAME).is_dir() || !vault_path.is_file() {
+        if !root.join(DIR_NAME).is_dir()
+            || !vault_path.is_file()
+            || crate::connector_ops::is_connectors_vault(&vault_path)
+        {
             return Err(no_vault());
         }
         if real.starts_with(&root) {

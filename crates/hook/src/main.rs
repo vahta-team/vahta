@@ -249,7 +249,13 @@ fn deny_hook_tamper(t: &hookguard::Tampering) -> Decision {
 
 /// Refusing a Vahta command that is for the person only.
 fn deny_vahta_command(invocation: &str) -> Decision {
-    let msg = if invocation.ends_with("_surface") {
+    let msg = if invocation.ends_with("--connector") {
+        format!(
+            "vahta blocked `{invocation}`: the connectors vault is set up by the person in their \
+             own terminal. The harness starts a connector's server itself; do not run it from \
+             here. Ask the person if a connector needs a change."
+        )
+    } else if invocation.ends_with("_surface") {
         format!(
             "vahta blocked `{invocation}`: it is Vahta's prompt window, which only Vahta opens, for \
              the person. Do not run it."

@@ -36,6 +36,8 @@ pub(crate) struct Inputs<'a> {
     pub args: &'a Args,
     pub reason: Option<&'a str>,
     pub root: &'a Path,
+    /// The harnesses of a connector (empty for a project secret).
+    pub harnesses: &'a [String],
 }
 
 pub(crate) fn offer(window: &mut dyn Window, panel: &Panel, i: &Inputs<'_>) -> Flow<Offer> {
@@ -69,6 +71,7 @@ pub(crate) fn offer(window: &mut dyn Window, panel: &Panel, i: &Inputs<'_>) -> F
     if down {
         built.rule_set.downgraded_from = Some(detected.id.to_string());
     }
+    built.rule_set.harnesses = i.harnesses.to_vec();
 
     // The alternative: the category's defaults, the detected one on a downgrade.
     let target = if down { detected } else { chosen };
@@ -100,6 +103,11 @@ pub(crate) fn offer(window: &mut dyn Window, panel: &Panel, i: &Inputs<'_>) -> F
     let mut shown = panel.clone();
     shown.lines.push(describe(&built.rule_set, tier));
     shown.lines.push(format!("Category: {}", chosen.id));
+    if !i.harnesses.is_empty() {
+        shown
+            .lines
+            .push(format!("Only for: {}", i.harnesses.join(", ")));
+    }
     for (text, program) in &built.resolved {
         shown
             .lines
@@ -135,8 +143,9 @@ pub(crate) fn offer(window: &mut dyn Window, panel: &Panel, i: &Inputs<'_>) -> F
         Err(DefaultErr::NeedHosts) => Some(ask_hosts(window, &shown, target)?),
         _ => None,
     };
-    let alt = proposal::default_set(i.name, target, i.args, hosts, i.root)
+    let mut alt = proposal::default_set(i.name, target, i.args, hosts, i.root)
         .map_err(|e| error(default_err(e)))?;
+    alt.rule_set.harnesses = i.harnesses.to_vec();
     Ok(Offer {
         rule_set: alt.rule_set,
         tier: target.tier,

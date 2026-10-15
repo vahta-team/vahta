@@ -6,6 +6,10 @@
 //! an agent, it could answer a window meant for the person. Each one asks for
 //! the password, but an agent asking the person to approve them is exactly the
 //! approval fatigue Vahta exists to remove, and none of them has an agent use.
+//! The connectors vault is the person's alone: `init`, `add`, `bind`, `remove`,
+//! `unlock` and `run` with `--connector` are refused too. The harness starts
+//! `vahta run --connector` itself; an agent that runs it from its Bash tool is
+//! not the harness. (`list` and `check` with `--connector` only read names.)
 //! Every other `vahta` command may be run by an agent: outside `vahta run` in a
 //! session, each asks for the password or an approval in the window anyway.
 //!
@@ -22,6 +26,9 @@ use crate::readguard::{Tok, WRAPPERS, is_assignment, tokenize};
 
 /// Subcommands an agent may not run.
 const FORBIDDEN: &[&str] = &["reveal", "copy", "_surface"];
+
+/// Subcommands that are refused when they carry `--connector`.
+const CONNECTOR_FORBIDDEN: &[&str] = &["init", "add", "bind", "remove", "unlock", "run"];
 
 /// Shells whose `-c` argument is a command line of its own.
 const SHELLS: &[&str] = &[
@@ -82,9 +89,15 @@ fn in_words(words: &[String], depth: usize) -> Option<String> {
     let rest = &words[i + 1..];
     if is_vahta(prog) {
         let sub = rest.iter().find(|a| !a.starts_with('-'))?;
-        return FORBIDDEN
-            .contains(&sub.as_str())
-            .then(|| format!("{} {sub}", base_name(prog)));
+        if FORBIDDEN.contains(&sub.as_str()) {
+            return Some(format!("{} {sub}", base_name(prog)));
+        }
+        // The words before a `--` are Vahta's own; after it, the command's.
+        let own = rest.iter().take_while(|a| a.as_str() != "--");
+        if CONNECTOR_FORBIDDEN.contains(&sub.as_str()) && own.clone().any(|a| a == "--connector") {
+            return Some(format!("{} {sub} --connector", base_name(prog)));
+        }
+        return None;
     }
     if depth >= MAX_NESTING {
         return None;
@@ -160,6 +173,47 @@ mod tests {
             "pwsh -Command 'vahta copy X'",
         ] {
             assert!(forbidden_command(cmd).is_some(), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_connectors_vault_commands_are_for_the_person() {
+        for sub in ["init", "add", "bind", "remove", "unlock", "run"] {
+            for cmd in [
+                format!("vahta {sub} --connector"),
+                format!("vh {sub} --connector NAME"),
+                format!("vahta {sub} NAME --connector --harness claude"),
+                format!("/home/u/.local/bin/vahta {sub} --connector"),
+                format!("bash -c 'cd /tmp && vahta {sub} --connector'"),
+                format!("FOO=1 vahta --quiet {sub} --connector"),
+            ] {
+                let hit = forbidden_command(&cmd);
+                assert_eq!(
+                    hit.as_deref().map(|h| h.ends_with("--connector")),
+                    Some(true),
+                    "{cmd}"
+                );
+            }
+        }
+        assert_eq!(
+            forbidden_command("vahta run --connector --secret A -- npx -y x").as_deref(),
+            Some("vahta run --connector")
+        );
+    }
+
+    #[test]
+    fn connector_reads_and_the_commands_own_words_are_allowed() {
+        for cmd in [
+            "vahta list --connector",
+            "vahta check --connector",
+            "vahta run --secret A -- tool --connector",
+            "vahta run -- vahta-tool --connector",
+            "vahta add NAME",
+            "vahta unlock --secret A",
+            "echo vahta run --connector",
+            "git commit -m 'vahta unlock --connector'",
+        ] {
+            assert_eq!(forbidden_command(cmd), None, "{cmd}");
         }
     }
 

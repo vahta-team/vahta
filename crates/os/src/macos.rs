@@ -72,6 +72,11 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Not read here (see `vahta_os::command_line`).
+pub(crate) fn command_line(_pid: u32) -> Option<String> {
+    None
+}
+
 pub(crate) fn process_cwd(pid: u32) -> io::Result<std::path::PathBuf> {
     let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::other("pid out of range"))?;
     // SAFETY: `proc_vnodepathinfo` is plain data; all-zero bytes are a valid value.
