@@ -4730,10 +4730,11 @@ fn one_refused_network_tool_raises_the_alarm_naming_the_secret_and_the_program()
         s.windows_titled("Suspicious agent behaviour") == 1
     });
     let log = s.window_log();
+    // Another window may follow the alarm's; pick the alarm by its options.
     let ask = log
         .iter()
         .rev()
-        .find(|e| e["ask"] == "choose")
+        .find(|e| e["ask"] == "choose" && e["options"][0] == "Lock all sessions")
         .expect("the alarm asked");
     let lines = ask["panel"]["lines"].to_string();
     assert!(
