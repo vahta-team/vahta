@@ -142,6 +142,46 @@ impl Ctx<'_> {
         same().then_some(cwd)
     }
 
+    /// The client's `cwd` is a claim; the kernel's account of where the peer
+    /// is wins. Equal after canonicalisation, or the request is refused,
+    /// journaled as suspicious and counted for the injection alarm. Where the
+    /// kernel cannot be asked (Windows) the claim is believed, as before.
+    pub(crate) fn check_cwd(&self, claimed: &str) -> Flow<PathBuf> {
+        let claimed_path = crate::pathfind::canonical(Path::new(claimed));
+        let Some(real) = self.peer_cwd() else {
+            if cfg!(windows) {
+                return Ok(claimed_path.unwrap_or_else(|| PathBuf::from(claimed)));
+            }
+            // On a system that can be asked, no answer is no trust.
+            return Err(self.cwd_refused(claimed, None));
+        };
+        if claimed_path.as_deref() == Some(real.as_path()) {
+            Ok(real)
+        } else {
+            Err(self.cwd_refused(claimed, Some(&real)))
+        }
+    }
+
+    fn cwd_refused(&self, claimed: &str, real: Option<&Path>) -> ClientReply {
+        let claimed: String = claimed
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(200)
+            .collect();
+        let real = real.map_or("unreadable".to_string(), |r| r.display().to_string());
+        self.journal(Entry::new("cwd_refused").result(
+            "refused",
+            Some(&format!(
+                "suspicious: the client claimed the directory {claimed} but runs in {real}"
+            )),
+        ));
+        crate::report::not_from_here(self, "a request naming a directory it is not in");
+        refused(
+            RefusalKind::NotFromHere,
+            "the working directory this request names is not where it runs; refused and noted",
+        )
+    }
+
     pub(crate) fn used_from(&self) -> Option<PathBuf> {
         self.used_from.lock().ok().and_then(|g| g.clone())
     }

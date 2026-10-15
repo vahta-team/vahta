@@ -121,6 +121,15 @@ impl Sandbox {
             .collect()
     }
 
+    /// Passwords asked for: the alarm may raise a window of its own, but a
+    /// refused request never asks for a password.
+    fn passwords(&self) -> usize {
+        self.window_log()
+            .iter()
+            .filter(|e| e["ask"] == "password")
+            .count()
+    }
+
     fn asks(&self) -> usize {
         self.window_log()
             .iter()
@@ -206,6 +215,56 @@ impl Drop for Sandbox {
             .status();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+// --- A raw client with a chosen real directory -----------------------------------------------
+
+/// Run by `raw_request` in a child process whose working directory is the one
+/// the test chose: it sends the request in `VAHTA_RAW_REQUEST` over the
+/// sandbox's socket as a raw frame and prints the reply. A no-op otherwise.
+#[test]
+fn raw_client_child() {
+    let Ok(request) = std::env::var("VAHTA_RAW_REQUEST") else {
+        return;
+    };
+    let request: ClientRequest = serde_json::from_str(&request).unwrap();
+    let paths = Paths::from_env(None).unwrap();
+    let connector = Connector {
+        paths,
+        version: vahta_daemon::VERSION.to_string(),
+        start: Some(vec![
+            env!("CARGO_BIN_EXE_vahta").into(),
+            "daemon".into(),
+            "run".into(),
+        ]),
+    };
+    let reply = connector.connect().unwrap().request(&request).unwrap();
+    println!("RAW_REPLY:{}", serde_json::to_string(&reply).unwrap());
+}
+
+/// Send `request` as a raw frame from a process whose real working directory is
+/// `real`; whatever directory the request claims is the request's own business.
+fn raw_request(s: &Sandbox, real: &Path, request: &ClientRequest) -> ClientReply {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .current_dir(real)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("VAHTA_DATA_DIR", s.root.join("data"))
+        .env("VAHTA_RUNTIME_DIR", s.root.join("run"))
+        .env("VAHTA_CONFIG_DIR", s.root.join("config"))
+        .env("VAHTA_TEST_SURFACE", s.root.join("script.jsonl"))
+        .env("VAHTA_TEST_SURFACE_LOG", s.root.join("surface.log"))
+        .env("HOME", s.root.join("home"))
+        .env("VAHTA_RAW_REQUEST", serde_json::to_string(request).unwrap())
+        .args(["raw_client_child", "--exact", "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("RAW_REPLY:"))
+        .unwrap_or_else(|| panic!("no reply: {stdout}{}", String::from_utf8_lossy(&out.stderr)));
+    serde_json::from_str(line).unwrap()
 }
 
 #[test]
@@ -486,48 +545,87 @@ fn remote_on_needs_the_window_and_the_password_and_plain_remote_only_reports() {
 fn a_client_that_claims_a_directory_it_is_not_in_is_refused_and_noted() {
     let s = Sandbox::new();
     s.share(&["ZETA"], &[&s.app], true);
-    let mut conn = s.connector().connect().expect("connect");
-    let asked = s.asks();
+    // Make sure a daemon is up before the children look for it.
+    assert_eq!(
+        s.vahta(&s.tools, &["daemon", "restart"]).status.code(),
+        Some(0)
+    );
+    let asked = s.passwords();
     let tools = s.tools.to_string_lossy().into_owned();
-    // This test process runs in the cli crate's directory; it says it is in
-    // `app/`, which the secret names, and asks for a run there.
+    let run = |claimed: &Path, vault: Option<String>| ClientRequest::Run {
+        cwd: claimed.to_string_lossy().into_owned(),
+        argv: vec!["printenv".into(), "ZETA".into()],
+        env: vec![("PATH".into(), std::env::var("PATH").unwrap_or_default())],
+        names: Some(vec!["ZETA".into()]),
+        renames: vec![],
+        label: None,
+        ask: false,
+        reason: None,
+        vault,
+    };
+    // A process in `other/` says it is in `app/`, which the secret names, or
+    // in the vault's own folder.
     for claimed in [&s.app, &s.tools] {
-        let reply = conn
-            .request(&ClientRequest::Run {
-                cwd: claimed.to_string_lossy().into_owned(),
-                argv: vec!["printenv".into(), "ZETA".into()],
-                env: vec![("PATH".into(), std::env::var("PATH").unwrap_or_default())],
-                names: Some(vec!["ZETA".into()]),
-                renames: vec![],
-                label: None,
-                ask: false,
-                reason: None,
-                vault: Some(tools.clone()),
-            })
-            .unwrap();
+        let reply = raw_request(&s, &s.other, &run(claimed, Some(tools.clone())));
         let ClientReply::Refused(r) = reply else {
             panic!("a spoofed directory was served: {reply:?}");
         };
         assert_eq!(r.kind, RefusalKind::NotFromHere);
     }
-    // Unlock and the hook's question are no different for a run in progress.
-    let reply = conn
-        .request(&ClientRequest::Unlock {
+    let reply = raw_request(
+        &s,
+        &s.other,
+        &ClientRequest::Unlock {
             cwd: s.app.to_string_lossy().into_owned(),
             names: None,
             duration: DurationSpec::Default {},
             label: None,
             vault: Some(tools),
-        })
-        .unwrap();
+        },
+    );
     assert!(matches!(reply, ClientReply::Refused(_)), "{reply:?}");
-    assert_eq!(s.asks(), asked, "no window for a spoof");
+    assert_eq!(s.passwords(), asked, "no window for a spoof");
     assert!(s.sessions().is_empty());
     let journal = s.journal();
     assert!(
-        journal.contains("remote_refused") && journal.contains("suspicious"),
+        journal.contains("cwd_refused") && journal.contains("suspicious"),
         "{journal}"
     );
+}
+
+#[test]
+fn a_raw_client_claiming_another_projects_directory_for_a_plain_local_run_is_refused() {
+    let s = Sandbox::new();
+    // The vault has not opted in to remote use at all; a lie about the
+    // directory must not turn that into local use.
+    s.share(&["ZETA"], &[], false);
+    assert_eq!(
+        s.vahta(&s.tools, &["daemon", "restart"]).status.code(),
+        Some(0)
+    );
+    let asked = s.passwords();
+    let req = |claimed: &Path| ClientRequest::Run {
+        cwd: claimed.to_string_lossy().into_owned(),
+        argv: vec!["printenv".into(), "ZETA".into()],
+        env: vec![("PATH".into(), std::env::var("PATH").unwrap_or_default())],
+        names: Some(vec!["ZETA".into()]),
+        renames: vec![],
+        label: None,
+        ask: false,
+        reason: None,
+        vault: None,
+    };
+    let reply = raw_request(&s, &s.app, &req(&s.tools));
+    let ClientReply::Refused(r) = reply else {
+        panic!("a claimed directory was believed: {reply:?}");
+    };
+    assert_eq!(r.kind, RefusalKind::NotFromHere);
+    assert_eq!(s.passwords(), asked);
+    assert!(s.journal().contains("cwd_refused"));
+    // Honest, the same request is served (a window asks for the password).
+    s.script(&[PW_ANSWER]);
+    let reply = raw_request(&s, &s.tools, &req(&s.tools));
+    assert!(matches!(reply, ClientReply::RunStarted {}), "{reply:?}");
 }
 
 #[test]

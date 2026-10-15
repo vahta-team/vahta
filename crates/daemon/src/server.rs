@@ -617,6 +617,15 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             peer: peer.id,
             used_from: std::sync::Mutex::new(None),
         };
+        // The client's `cwd` is a claim: believed only if the kernel agrees.
+        if let Some(cwd) = request.cwd_to_verify()
+            && let Err(reply) = ctx.check_cwd(cwd)
+        {
+            if write_frame(stream, &reply).is_err() {
+                return;
+            }
+            continue;
+        }
         let (reply, stop) = match request {
             ClientRequest::Status {} => (ClientReply::Status(shared.status()), false),
             ClientRequest::Stop {} => (ClientReply::Ok {}, true),

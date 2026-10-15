@@ -199,6 +199,47 @@ pub enum DurationSpec {
     Forever {},
 }
 
+impl ClientRequest {
+    /// The directory the daemon must verify against the kernel before serving
+    /// the request: the `cwd` of every request that carries one, except the
+    /// hook's (`CheckRun`, `CheckHttp`, `ToolCheck`, `OutputScan`, `HookReport`).
+    /// The hook is not the shell whose directory it reports, and what it sends
+    /// only answers a question or feeds the journal and the alarm.
+    pub fn cwd_to_verify(&self) -> Option<&str> {
+        use ClientRequest::*;
+        match self {
+            CheckRun { .. }
+            | CheckHttp { .. }
+            | ToolCheck { .. }
+            | OutputScan { .. }
+            | HookReport { .. } => None,
+            Init { cwd }
+            | Add { cwd, .. }
+            | Reset { cwd, .. }
+            | Remove { cwd, .. }
+            | SetTier { cwd, .. }
+            | Import { cwd, .. }
+            | Reveal { cwd, .. }
+            | Copy { cwd, .. }
+            | Unlock { cwd, .. }
+            | Lock { cwd, .. }
+            | Run { cwd, .. }
+            | Http { cwd, .. }
+            | Bind { cwd, .. }
+            | Delegate { cwd, .. }
+            | HooksPause { cwd, .. }
+            | Remote { cwd, .. }
+            | DevicesList { cwd }
+            | DevicesPair { cwd, .. }
+            | DevicesExtend { cwd, .. }
+            | DevicesRevoke { cwd, .. }
+            | DevicesLost { cwd, .. }
+            | Recover { cwd } => Some(cwd),
+            _ => None,
+        }
+    }
+}
+
 /// The rules a client proposes for a secret it adds. All of it is text: the
 /// daemon parses and resolves it and the person approves what comes out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

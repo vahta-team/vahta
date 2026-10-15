@@ -434,17 +434,24 @@ the daemon checks each of them itself.
    from `dirs`, which stays about programs and work inside the vault's project;
    a secret with `dirs` cannot be used from elsewhere, because the working
    directory is outside them.
-3. **The daemon knows where the caller is.** The client's `cwd` is a claim. The
-   daemon takes the peer's process id from the socket (`SO_PEERCRED`,
+3. **The daemon knows where the caller is.** The client's `cwd` is a claim,
+   and it is believed for no request. For every request that carries a `cwd`
+   the daemon takes the peer's process id from the socket (`SO_PEERCRED`,
    `LOCAL_PEERPID`), checks it is the same process (start time, before and
    after), and reads its working directory from the kernel (`/proc/PID/cwd`,
-   `proc_pidinfo` with `PROC_PIDVNODEPATHINFO`). A request whose claimed `cwd`
-   is not where the process is gets a refusal and a `remote_refused` journal
-   line marked `suspicious`; the command, if there is one, runs in the verified
-   directory. Where the kernel cannot be asked (Windows) `--vault` works only
-   for the vault's own project; use from another project is refused with that
-   reason. The check applies whenever `--vault` is given; a request without it
-   is the local use of old, which trusts its `cwd` as before.
+   `proc_pidinfo` with `PROC_PIDVNODEPATHINFO`). The claim must equal it after
+   canonicalisation (`vahta` always sends its real directory; a subdirectory is
+   not accepted). Otherwise the request is refused (`not_from_here`), a
+   `cwd_refused` journal line marked `suspicious` is written, and it counts for
+   the injection alarm at once. The command runs in the verified directory. A
+   process whose directory cannot be read (it exited, or the system hides it)
+   is refused too. Exceptions: the hook's own messages (`CheckRun`,
+   `CheckHttp`, `ToolCheck`, `OutputScan`, `HookReport`) keep the claimed `cwd`,
+   because the hook is not the shell whose directory it reports and they only
+   answer a question or feed the journal. **Windows** has no working-directory
+   read yet: there the claim is believed, as before, and use of a vault from
+   another project is refused with that reason; use inside the vault's own
+   project works everywhere.
 
 A project is a directory here: an agent that can change into a listed folder
 is "in" that project for this purpose, as it is for every other per-project rule.

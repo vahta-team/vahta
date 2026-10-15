@@ -30,7 +30,6 @@ use std::path::{Path, PathBuf};
 use vahta_vault::Peek;
 use vahta_vault::project::{DIR_NAME, Project, calling_project};
 
-use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, find_vault, refused};
 use crate::pathfind;
 use crate::protocol::RefusalKind;
@@ -82,44 +81,23 @@ impl Target {
         let root = pathfind::canonical(Path::new(vault)).filter(|r| r.is_dir());
         let inside = |dir: &Path| root.as_ref().is_some_and(|r| dir.starts_with(r));
 
-        // Where the caller is, from the kernel.
+        // Where the caller is. A request is only served from the directory
+        // the kernel says the peer is in (checked for every request before it
+        // gets here); the hook's question is believed, see the module notes.
         let real = if verify {
-            match ctx.peer_cwd() {
-                Some(real) => {
-                    if claimed.as_deref() != Some(real.as_path()) {
-                        ctx.journal(Entry::new("remote_refused").result(
-                            "refused",
-                            Some(&format!(
-                                "suspicious: the client claimed the directory {} but runs in {}",
-                                sanitize(cwd),
-                                real.display()
-                            )),
-                        ));
-                        return Err(refused(
-                            RefusalKind::NotFromHere,
-                            "the working directory this request names is not where it runs; \
-                             refused and noted",
-                        ));
-                    }
-                    real
-                }
-                // The kernel cannot say. A claimed directory inside the
-                // vault's own project is plain local use; anything else would
-                // be remote use that cannot be checked.
-                None => match claimed {
-                    Some(c) if inside(&c) => c,
-                    _ => {
-                        return Err(refused(
-                            RefusalKind::NotFromHere,
-                            "using a vault from another project is not available here: the \
-                             daemon cannot tell where the caller runs on this system",
-                        ));
-                    }
-                },
-            }
+            ctx.check_cwd(cwd)?
         } else {
             claimed.ok_or_else(no_vault)?
         };
+        // Where the kernel cannot be asked (Windows), a claim outside the
+        // vault's own project would be remote use that cannot be checked.
+        if verify && ctx.peer_cwd().is_none() && !inside(&real) {
+            return Err(refused(
+                RefusalKind::NotFromHere,
+                "using a vault from another project is not available here: the daemon cannot \
+                 tell where the caller runs on this system",
+            ));
+        }
 
         let root = root.ok_or_else(no_vault)?;
         let project = Project { root: root.clone() };
@@ -167,12 +145,4 @@ impl Target {
 
 fn peek_of(path: &Path) -> Option<Peek> {
     vahta_vault::Vault::peek(path).ok()
-}
-
-/// A client-sent string as a journal line may carry it.
-fn sanitize(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .take(200)
-        .collect()
 }
