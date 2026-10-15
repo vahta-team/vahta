@@ -199,6 +199,10 @@ pub mod scripted {
     //!   such line next in the script is not logged and shows nothing: the
     //!   phone is asked as if the window could not show it.
     //!
+    //! Any answer may carry `"after_ms": N`: the window then holds the answer
+    //! back for N milliseconds after the question is logged (with the script
+    //! unlocked, so other windows go on), as a person who takes their time.
+    //!
     //! Every question is appended to the log (`VAHTA_TEST_SURFACE_LOG`) with
     //! what the window would have shown: its lines, warning and agent note, and
     //! for something revealed the value itself, because the log stands for the
@@ -269,13 +273,14 @@ pub mod scripted {
 
         /// The next answer, removed from the script.
         fn pop(&self) -> Result<Value, SurfaceError> {
-            let _guard = self.io.lock().map_err(|_| unavailable("poisoned"))?;
+            let guard = self.io.lock().map_err(|_| unavailable("poisoned"))?;
             let text = std::fs::read_to_string(&self.script)
                 .map_err(|_| unavailable("the scripted surface has no script"))?;
             let mut lines = text.lines().filter(|l| !l.trim().is_empty());
             let Some(first) = lines.next() else {
                 return Err(unavailable("the scripted surface has no answer left"));
             };
+            let first = first.to_string();
             let rest: Vec<&str> = lines.collect();
             let mut remaining = rest.join("\n");
             if !remaining.is_empty() {
@@ -283,7 +288,13 @@ pub mod scripted {
             }
             std::fs::write(&self.script, remaining)
                 .map_err(|_| unavailable("cannot update the script"))?;
-            serde_json::from_str(first).map_err(|_| unavailable("a bad line in the script"))
+            drop(guard);
+            let answer: Value = serde_json::from_str(&first)
+                .map_err(|_| unavailable("a bad line in the script"))?;
+            if let Some(ms) = answer.get("after_ms").and_then(Value::as_u64) {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            Ok(answer)
         }
     }
 
