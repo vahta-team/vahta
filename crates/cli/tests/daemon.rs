@@ -34,6 +34,10 @@ struct Sandbox {
     /// reaches phones over the real phone link (LAN transport) instead of the
     /// loopback phones kept in files.
     phone_addr: Option<String>,
+    /// Whether the daemon counts refusals by a secret's rules for the alarm.
+    /// Off in most tests, which refuse several commands in a row and count
+    /// windows; the alarm tests turn it on.
+    refusal_alarm: bool,
 }
 
 impl Sandbox {
@@ -50,7 +54,15 @@ impl Sandbox {
         Sandbox {
             root,
             phone_addr: None,
+            refusal_alarm: false,
         }
+    }
+
+    /// A sandbox whose daemon counts refusals by rules for the alarm.
+    fn counting_refusals() -> Sandbox {
+        let mut s = Sandbox::new();
+        s.refusal_alarm = true;
+        s
     }
 
     fn project(&self) -> PathBuf {
@@ -91,6 +103,11 @@ impl Sandbox {
             .env_remove("VAHTA_TEST_PHONE_ADDR");
         if let Some(addr) = &self.phone_addr {
             cmd.env("VAHTA_TEST_PHONE_ADDR", addr);
+        }
+        if self.refusal_alarm {
+            cmd.env_remove("VAHTA_TEST_MUTE_REFUSAL_ALARM");
+        } else {
+            cmd.env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
         }
         cmd
     }
@@ -1169,7 +1186,10 @@ fn hook_reports_and_the_spool_reach_the_journal_without_values() {
 
 /// A vault with a session-tier ZETA and BETA and an each-use ALPHA.
 fn sandbox_with_secrets() -> Sandbox {
-    let s = Sandbox::new();
+    sandbox_with_secrets_in(Sandbox::new())
+}
+
+fn sandbox_with_secrets_in(s: Sandbox) -> Sandbox {
     s.with_vault(&[
         ("ZETA", "fake-one", "session"),
         ("BETA", "fake-two", "session"),
@@ -4422,6 +4442,79 @@ fn with_no_window_to_ask_in_the_alarm_locks() {
     }
     wait_until("the headless alarm to lock", 10, || s.sessions().is_empty());
     assert!(s.journal().contains("the question could not be asked"));
+}
+
+/// A bound ZETA (only `printenv` may use it) and a session, with the alarm's
+/// answer scripted to "ignore" so the session stays and the window is logged.
+#[cfg(unix)]
+fn sandbox_for_refusals() -> Sandbox {
+    let s = sandbox_with_secrets_in(Sandbox::counting_refusals());
+    s.unlock_session();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    s.script(&[r#"{"choose":1}"#]);
+    s
+}
+
+#[cfg(unix)]
+fn refused_run(s: &Sandbox, program: &str) {
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", program]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    // The agent's reply is the ordinary refusal with its hint.
+    let err = text(&out.stderr);
+    assert!(err.contains("--ask") && !err.contains("injection"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn one_refused_network_tool_raises_the_alarm_naming_the_secret_and_the_program() {
+    let s = sandbox_for_refusals();
+    refused_run(&s, "curl");
+    wait_until("the alarm to ask", 10, || {
+        s.windows_titled("Suspicious agent behaviour") == 1
+    });
+    let log = s.window_log();
+    let ask = log
+        .iter()
+        .rev()
+        .find(|e| e["ask"] == "choose")
+        .expect("the alarm asked");
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("prompt injection") && lines.contains("ZETA") && lines.contains("curl"),
+        "{lines}"
+    );
+    assert!(s.journal().contains("\"event\":\"alarm\""));
+    assert!(!lines.contains("fake-"));
+}
+
+#[cfg(unix)]
+#[test]
+fn two_refused_ordinary_programs_raise_the_alarm_and_one_does_not() {
+    let s = sandbox_for_refusals();
+    refused_run(&s, "true");
+    // One refusal of a program that is no network tool, shell or interpreter
+    // is an honest mistake.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(s.windows_titled("Suspicious agent behaviour"), 0);
+    assert!(!s.journal().contains("\"event\":\"alarm\""));
+    refused_run(&s, "env");
+    wait_until("the alarm to ask", 10, || {
+        s.windows_titled("Suspicious agent behaviour") == 1
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn with_alarm_lock_a_refused_network_tool_ends_the_sessions() {
+    let s = sandbox_with_secrets_in(Sandbox::counting_refusals());
+    fs::write(s.root.join("config/config.toml"), "alarm = \"lock\"\n").unwrap();
+    assert_eq!(s.vahta(&["daemon", "restart"]).status.code(), Some(0));
+    s.unlock_session();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    assert_eq!(s.sessions().len(), 1);
+    refused_run(&s, "curl");
+    wait_until("the sessions to be locked", 10, || s.sessions().is_empty());
+    assert!(s.journal().contains("the alarm is set to lock"));
 }
 
 #[test]

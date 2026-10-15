@@ -24,6 +24,20 @@ pub fn scripted_from_env() -> Option<Box<dyn PromptSurface>> {
     }
 }
 
+/// In a test build, whether refusals by a secret's rules are kept out of the
+/// alarm (`VAHTA_TEST_MUTE_REFUSAL_ALARM` set). Always `false` in the shipped
+/// build.
+pub fn refusal_alarm_muted() -> bool {
+    #[cfg(feature = "test-surface")]
+    {
+        std::env::var_os("VAHTA_TEST_MUTE_REFUSAL_ALARM").is_some()
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        false
+    }
+}
+
 /// In a test build, how often the hook watchdog looks at its files
 /// (`VAHTA_TEST_GUARD_POLL_MS`); the shipped build polls every two seconds.
 pub fn guard_poll() -> Option<std::time::Duration> {

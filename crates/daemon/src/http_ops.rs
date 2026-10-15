@@ -401,6 +401,10 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
         }
     }
     if !failing.is_empty() {
+        let no_rules = failing
+            .iter()
+            .all(|n| !peek.bindings.iter().any(|b| &b.name == n));
+        crate::report::rule_refusal(ctx, &failing, None, no_rules);
         ctx.journal(
             Entry::new("http_refused")
                 .vault(&peek.vault_id)

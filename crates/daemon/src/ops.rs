@@ -10,6 +10,7 @@
 //! file changed since it was loaded, so two writers cannot clobber each other.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use vahta_auth::Action;
@@ -34,7 +35,7 @@ pub const REVEAL_SECONDS: u32 = 60;
 
 /// Who asked: the kernel's account of the peer, for the window and the journal.
 pub(crate) struct Ctx<'a> {
-    pub shared: &'a Shared,
+    pub shared: &'a Arc<Shared>,
     pub exe: Option<String>,
     pub pid: u32,
     /// The peer, with its start time, for the session lookups.

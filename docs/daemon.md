@@ -867,10 +867,17 @@ score per agent: the harness's session id when its payload has one, else the
 agent process. Weights: a refused secret 1, one let through in observe mode
 0.5, a refused secret that was hidden (base64, concatenation, hex, percent-encoding) 4, a held
 value in a tool call 6, a touch of Vahta's own files 3, a command for the person
-(`reveal`, `copy`) 2, a change to the hook settings 4. The score is the sum over
+(`reveal`, `copy`) 2, a change to the hook settings 4, a `vahta run` or
+`vahta http` refused by a secret's rules 3 (6 when the refused program is a
+network tool, a shell or an interpreter). The score is the sum over
 the last 10 minutes. At 6 the alarm goes off, at most once per agent per 10
 minutes. A held value in a tool call is enough alone; so are two disguised
-secrets.
+secrets, one refused `curl` (or shell, or interpreter) and any two refusals by
+rules. A secret that has no rules yet is a setup issue, not an attack: that
+refusal only ever counts as one of the two. A run refused for rules is shown to
+the person as "a run of `curl` with NAME (refused by its rules)"; the agent's
+reply is the usual refusal and hint, nothing about the alarm. A run the person
+declined in an `--ask` window does not count.
 
 ### What happens
 

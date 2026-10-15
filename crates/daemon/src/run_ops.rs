@@ -350,6 +350,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         &canonical_cwd,
     );
     if !checked.missing.is_empty() {
+        crate::report::rule_refusal(ctx, &checked.missing, Some(&argv[0]), true);
         return Err(no_rules(ctx, &peek, &checked.missing));
     }
     let verdicts = checked.verdicts;
@@ -374,6 +375,15 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     });
     if !failures.is_empty() {
         if !ask {
+            let refused: Vec<String> = failures.iter().map(|(b, _)| b.name.clone()).collect();
+            let shown = program
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map_or_else(
+                    || argv[0].clone(),
+                    |f| f.to_string_lossy().into_owned(),
+                );
+            crate::report::rule_refusal(ctx, &refused, Some(&shown), false);
             return Err(not_allowed(
                 ctx,
                 &peek,
