@@ -342,15 +342,29 @@ fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
     let (Some(call), Some(cwd)) = (runallow::parse(&ev.text), ev.cwd.as_deref()) else {
         return Decision::Allow;
     };
+    // `--vault DIR` is relative to the directory the command runs in.
+    let absolute = |v: Option<String>| {
+        v.map(|v| {
+            let p = std::path::Path::new(&v);
+            if p.is_absolute() {
+                v
+            } else {
+                std::path::Path::new(cwd)
+                    .join(p)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        })
+    };
     let (names, allowed, what) = match call {
         runallow::Call::Run(c) => (
             c.names.clone(),
-            daemon::run_allowed(cwd, c.argv, c.names),
+            daemon::run_allowed(cwd, c.argv, c.names, absolute(c.vault)),
             "the command is within",
         ),
         runallow::Call::Http(c) => (
             c.names.clone(),
-            daemon::http_allowed(cwd, c.url, c.names),
+            daemon::http_allowed(cwd, c.url, c.names, absolute(c.vault)),
             "the request goes to a host within",
         ),
     };

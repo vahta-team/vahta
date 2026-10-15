@@ -28,6 +28,7 @@ const ACTIONS: &[&str] = &[
     "guard_choice",
     "devices",
     "recover",
+    "remote",
     "other",
 ];
 const NEEDS: &[&str] = &[

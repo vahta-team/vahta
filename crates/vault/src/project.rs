@@ -75,6 +75,24 @@ impl Project {
     }
 }
 
+/// Whether a project at `project` is one of the `roots` or below one: the
+/// test behind a secret's `from` list.
+pub fn covers(roots: &[String], project: &Path) -> bool {
+    roots.iter().any(|r| project.starts_with(Path::new(r)))
+}
+
+/// The project a directory belongs to for remote use: the nearest directory
+/// from `cwd` upward with a `.vahta/`, a `vahta.toml` or a `.git`, else `cwd`
+/// itself.
+pub fn calling_project(cwd: &Path) -> PathBuf {
+    cwd.ancestors()
+        .find(|d| {
+            d.join(DIR_NAME).is_dir() || d.join(MANIFEST_NAME).is_file() || d.join(".git").exists()
+        })
+        .unwrap_or(cwd)
+        .to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +113,25 @@ mod tests {
         // A nearer project wins.
         Project::init(&root.join("b")).unwrap();
         assert_eq!(Project::find(&deep).unwrap().root, root.join("b"));
+    }
+
+    #[test]
+    fn a_calling_project_is_the_nearest_marked_directory_and_covers_means_at_or_below() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("app");
+        let deep = root.join("src").join("bin");
+        fs::create_dir_all(&deep).unwrap();
+        // No marker anywhere: the directory itself.
+        assert_eq!(calling_project(&deep), deep);
+        fs::write(root.join(MANIFEST_NAME), "").unwrap();
+        assert_eq!(calling_project(&deep), root);
+        let roots = vec![root.display().to_string()];
+        assert!(covers(&roots, &root));
+        assert!(covers(&roots, &deep));
+        // Whole components, not a string prefix.
+        assert!(!covers(&roots, &tmp.path().join("app2")));
+        assert!(!covers(&roots, tmp.path()));
+        assert!(!covers(&[], &root));
     }
 
     #[test]

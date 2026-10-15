@@ -34,6 +34,8 @@ extend        = "presence"
 guard_choice  = "presence"
 devices       = "password_only"
 recover       = "password_only"
+# Letting other projects use this vault's secrets (or stopping it).
+remote        = "password_only"
 other         = "knowledge"
 
 # Per category: a row overrides the action's row for secrets of that category.

@@ -15,7 +15,7 @@ use crate::daemon_cmd;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 pub const UNLOCK_USAGE: &str = "\
-usage: vahta unlock [--secret NAME]... [--for DURATION] [--label TEXT] [--json]
+usage: vahta unlock [--vault DIR] [--secret NAME]... [--for DURATION] [--label TEXT] [--json]
 
 Open a session. A window opens where you read what is being approved and type
 the vault password; then `vahta run` from this process tree (the agent that
@@ -25,6 +25,13 @@ called this, and everything it starts) uses the secrets with no window.
                     session-tier secret in the project's vault. Naming an
                     each-use secret, or one that does not exist, refuses the
                     whole request (exit 3) before any window opens.
+  --vault DIR       use the vault of the project at DIR (its root, the folder
+                    holding .vahta/) instead of this project's. Only for a vault
+                    the person set up for this (`vahta remote on`), and only
+                    for the secrets they named this project for (`vahta bind
+                    NAME --from`). The session belongs to this vault used
+                    from this project, and covers nothing else. A refusal means
+                    it is not allowed here, not 'try another way'
   --for DURATION    how long: 30m (default; session_minutes in config.toml),
                     2h, 90s, 1h30m, a clock (1:30:00), or `forever` for
                     until revoked
@@ -95,6 +102,7 @@ pub fn run_unlock(
     let mut names: Vec<String> = Vec::new();
     let mut duration = DurationSpec::Default {};
     let mut label = None;
+    let mut vault: Option<String> = None;
     let mut json = false;
     let mut i = 0;
     while i < args.len() {
@@ -122,6 +130,14 @@ pub fn run_unlock(
                 .and_then(|v| parse_duration(&v))
                 .map(|d| duration = d),
             "--label" => value("--label").map(|v| label = Some(v)),
+            "--vault" => value("--vault").and_then(|v| {
+                if v.is_empty() {
+                    Err("--vault expects the vault's project folder".to_string())
+                } else {
+                    vault = Some(v);
+                    Ok(())
+                }
+            }),
             other => Err(format!("unrecognised argument: {other}")),
         };
         if let Err(msg) = result {
@@ -134,6 +150,7 @@ pub fn run_unlock(
         names: (!names.is_empty()).then_some(names),
         duration,
         label,
+        vault: vault.as_deref().map(|v| daemon_cmd::vault_arg(env, v)),
     };
     let mut conn = match daemon_cmd::connect(env, "unlock", stderr) {
         Ok(c) => c,
@@ -150,6 +167,13 @@ pub fn run_unlock(
                     info.id,
                     info.names.join(", ")
                 );
+                if let Some(from) = &info.used_from {
+                    let _ = writeln!(
+                        stdout,
+                        "for the vault {} used from {from}, and for nothing else",
+                        info.project
+                    );
+                }
                 let _ = writeln!(
                     stdout,
                     "belongs to {} (pid {}) and everything it starts; {}",
@@ -209,6 +233,7 @@ fn list_text(sessions: &[SessionInfo]) -> String {
         "LEFT".to_string(),
         "USES".to_string(),
         "PROJECT".to_string(),
+        "USED FROM".to_string(),
     ]];
     for s in sessions {
         rows.push(vec![
@@ -219,9 +244,10 @@ fn list_text(sessions: &[SessionInfo]) -> String {
             left_text(s),
             s.uses.to_string(),
             s.project.clone(),
+            s.used_from.clone().unwrap_or_else(|| "-".to_string()),
         ]);
     }
-    let widths: Vec<usize> = (0..7)
+    let widths: Vec<usize> = (0..8)
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
     rows.iter()

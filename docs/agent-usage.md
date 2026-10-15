@@ -33,7 +33,7 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
    harness either (Claude Code, and Codex after `vahta setup --codex`; Cursor
    once its live test is done). That works for one plain command only:
    `vahta run [options] -- PROGRAM ARGS...` with `--secret`, `--as`, `--label`,
-   `--ask`, `--reason`, or one `vahta http --secret ... URL` to a host the
+   `--ask`, `--reason`, `--vault DIR`, or one `vahta http --secret ... URL` to a host the
    secret is approved for, and nothing else in the Bash call (not a call that
    asks to run outside the sandbox either). Write it that way:
    no `&&`, `;` or pipe, no `cd` first (the call's directory is what counts),
@@ -76,6 +76,41 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
 8. If the hook cut something out of a tool's output that is needed,
    `vahta output allow REF --reason "..."` asks the person to show it
    ([hooks.md](hooks.md)).
+
+## Using a vault from another project
+
+A tool vault (say `~/Projects/ai-tools`, holding a registry token) can serve
+commands run in a different project, but only when the person has set it up for
+that. Two switches, both the person's: the **vault** says it may be used from
+other projects (`vahta remote on`), and each **secret** names the projects it
+may be used from (`vahta bind NAME --from /abs/project`, or `from = [...]` in
+`vahta.toml`, approved with `vahta bind`).
+
+```bash
+vahta run --vault ~/Projects/ai-tools --secret CARGO_REGISTRY_TOKEN -- cargo publish
+vahta unlock --vault ~/Projects/ai-tools --secret CARGO_REGISTRY_TOKEN --for 30m
+vahta list --vault ~/Projects/ai-tools
+```
+
+`--vault DIR` is the vault's project folder (the one holding `.vahta/`); it is
+accepted by `run`, `http`, `unlock`, `delegate`, `list` and `check`.
+
+- Use `--vault` only for a vault the person set up for this. Do not go looking
+  for other vaults on the machine, and do not ask the person to enable one you
+  were not told about.
+- A refusal means it is not allowed, not "try another way". A vault that has not
+  opted in answers exactly like a folder with no vault, and a secret the vault
+  does not name your project for answers like a name it does not have. Do not
+  probe, copy the file, or reach the value some other way: the daemon works out
+  where you run from the kernel (not from what the client says), notes a client
+  that lies about it, and the injection alarm counts it.
+- The category rules of the secret apply in full: programs, folders, network,
+  tier. The command runs in your directory, not the vault's, so a secret
+  restricted to folders of its own project (`dirs`) cannot be used this way.
+- A session opened with `--vault` belongs to the pair (that vault, this
+  project): it does not cover the same vault from another project, nor use of
+  the vault at home. `vahta sessions` shows both.
+- `vahta list --vault` shows only the secrets you may use from here.
 
 ## Designing the rules
 

@@ -83,6 +83,11 @@ pub enum Action {
     Other {
         what: String,
     },
+    /// `vahta remote on|off`: let this vault's secrets be used from other
+    /// projects (or stop). Appended last so no existing variant moves.
+    Remote {
+        on: bool,
+    },
 }
 
 impl Action {
@@ -109,6 +114,7 @@ impl Action {
             Action::Devices { .. } => "devices",
             Action::Recover => "recover",
             Action::Other { .. } => "other",
+            Action::Remote { .. } => "remote",
         }
     }
 }

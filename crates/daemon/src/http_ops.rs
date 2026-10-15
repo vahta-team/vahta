@@ -39,9 +39,7 @@ use vahta_net::{Url, encode_component};
 use vahta_vault::{Network, SecretValue, Vault};
 
 use crate::journal::Entry;
-use crate::ops::{
-    Ctx, Flow, check_name, error, find_vault, from_vault, refused, refused_names, unknown_name,
-};
+use crate::ops::{Ctx, Flow, check_name, error, from_vault, refused, refused_names, unknown_name};
 use crate::protocol::{ClientReply, NameIssue, RefusalKind, b64_decode};
 use crate::run_ops::{self, Unlock};
 use crate::scrub::Scrubber;
@@ -66,6 +64,8 @@ pub(crate) struct HttpArgs {
     pub max_response: Option<u64>,
     pub timeout_secs: Option<u32>,
     pub label: Option<String>,
+    /// `--vault DIR`: the vault's project, when it is not the caller's.
+    pub vault: Option<String>,
 }
 
 /// The reply and the body that follows it.
@@ -222,15 +222,22 @@ fn shown(url: &Url) -> String {
 /// secret whose approved network rule lists a host matching the URL (the very
 /// function a request uses). Anything else is `NoOpinion`, and the request
 /// itself says why. Nothing is journaled or opened.
-pub(crate) fn check(ctx: &Ctx<'_>, cwd: &str, url: &str, names: Vec<String>) -> ClientReply {
+pub(crate) fn check(
+    ctx: &Ctx<'_>,
+    cwd: &str,
+    url: &str,
+    names: Vec<String>,
+    vault: Option<String>,
+) -> ClientReply {
     let allowed = (|| -> Option<()> {
         if !cfg!(feature = "http") || names.is_empty() || mentions(url, &names) {
             return None;
         }
         let target = Url::parse(url).ok()?;
-        let (_, vault_path) = find_vault(cwd).ok()?;
-        let peek = Vault::peek(&vault_path).ok()?;
+        let found = crate::remote::Target::for_check(ctx, cwd, vault.as_deref()).ok()?;
+        let peek = Vault::peek(&found.vault_path).ok()?;
         peek.verified(ctx.store()).ok()?;
+        let peek = found.view(peek);
         names
             .iter()
             .all(|n| {
@@ -279,6 +286,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
         max_response,
         timeout_secs,
         label,
+        vault,
     } = args;
 
     // --- The request, checked before anything is opened. -------------------
@@ -352,10 +360,12 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
     }
 
     // --- The vault, and where each secret is approved to go. ----------------
-    let (project, vault_path) = find_vault(&cwd)?;
+    let found = crate::remote::Target::resolve(ctx, &cwd, vault.as_deref())?;
+    let (project, vault_path) = (found.project.clone(), found.vault_path.clone());
     crate::guard_ops::note_project(ctx, &project.root);
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
+    let peek = found.view(peek);
     for n in &declared {
         if !peek.entries.iter().any(|e| &e.name == n) {
             return Err(unknown_name(n));
@@ -420,7 +430,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
     }
 
     // --- The values: the session or the window, as for a run. ---------------
-    let found = run_ops::find_session(ctx, &peek)?;
+    let found_session = run_ops::find_session(ctx, &peek, found.used_from.as_deref())?;
     let (values, via) = run_ops::unlock_values(
         ctx,
         Unlock {
@@ -428,7 +438,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
             vault_path: &vault_path,
             peek: &peek,
             names: &declared,
-            found,
+            found: found_session,
             title: "Send a request",
             lines: vec![
                 format!("Secrets: {}", declared.join(", ")),

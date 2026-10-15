@@ -54,6 +54,9 @@ pub struct Entry {
     pub status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// Remote use of a vault: the calling project (the vault is `vault`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_from: Option<String>,
 }
 
 fn now() -> u64 {
@@ -116,6 +119,11 @@ impl Entry {
         self.host = Some(host.to_string());
         self.status = status;
         self.bytes = bytes;
+        self
+    }
+
+    pub fn used_from(mut self, project: &Path) -> Entry {
+        self.used_from = Some(project.display().to_string());
         self
     }
 

@@ -142,6 +142,21 @@ pub struct Peek {
     pub devices: Vec<Device>,
     /// The owner successor chain (empty before format 3), oldest first.
     pub successors: Vec<current::Successor>,
+    /// The person's opt-in to use from other projects (false before format 4).
+    pub remote: bool,
+}
+
+impl Peek {
+    /// The vault as seen from another project (remote use): only the secrets
+    /// whose `from` list covers `project`, with their rules. Any other name is
+    /// simply not there.
+    pub fn visible_from(mut self, project: &Path) -> Peek {
+        self.bindings
+            .retain(|b| crate::project::covers(&b.from, project));
+        let names: Vec<&str> = self.bindings.iter().map(|b| b.name.as_str()).collect();
+        self.entries.retain(|e| names.contains(&e.name.as_str()));
+        self
+    }
 }
 
 /// A slot as a reader without a key sees it: its description and its public
@@ -370,6 +385,7 @@ fn peek_of(loaded: &Loaded) -> Peek {
             .collect(),
         devices: loaded.devices(),
         successors: loaded.successors(),
+        remote: loaded.remote(),
     }
 }
 
@@ -1042,6 +1058,22 @@ impl Vault {
         let e = &mut w.model.index[i];
         e.updated = now();
         e.changed_by = actor;
+        Ok(())
+    }
+
+    /// Whether the person opted this vault in to use from projects other than
+    /// its own.
+    pub fn remote(&self) -> bool {
+        self.model().remote
+    }
+
+    /// Turn the remote-use opt-in on or off. Signed like every edit.
+    pub fn set_remote(&mut self, on: bool) -> Result<(), Error> {
+        let w = self.writer()?;
+        if w.actor != Actor::Owner {
+            return Err(Error::NotPermitted);
+        }
+        w.model.remote = on;
         Ok(())
     }
 

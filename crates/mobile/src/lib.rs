@@ -530,6 +530,13 @@ pub fn request_summary(request: Vec<u8>) -> Result<RequestView, String> {
         Action::GuardChoice { what } | Action::Devices { what } | Action::Other { what } => {
             detail = Some(what.clone());
         }
+        Action::Remote { on } => {
+            detail = Some(if *on {
+                "let other projects use this vault".to_string()
+            } else {
+                "stop other projects using this vault".to_string()
+            });
+        }
         _ => {}
     }
     Ok(RequestView {

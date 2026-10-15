@@ -40,6 +40,9 @@ pub(crate) struct Ctx<'a> {
     pub pid: u32,
     /// The peer, with its start time, for the session lookups.
     pub peer: vahta_os::ProcessId,
+    /// The calling project, once the request turned out to be remote use of
+    /// another project's vault: every window and journal line then names it.
+    pub used_from: std::sync::Mutex<Option<PathBuf>>,
 }
 
 /// An early end: the reply to send.
@@ -120,9 +123,33 @@ impl Ctx<'_> {
     }
 
     pub(crate) fn journal(&self, entry: Entry) {
-        self.shared
-            .journal
-            .record(entry.peer(self.exe.as_deref(), self.pid));
+        let entry = entry.peer(self.exe.as_deref(), self.pid);
+        let entry = match self.used_from() {
+            Some(from) => entry.used_from(&from),
+            None => entry,
+        };
+        self.shared.journal.record(entry);
+    }
+
+    /// The directory the peer process is really in, read from the kernel and
+    /// checked against pid reuse. `None` where that cannot be done.
+    pub(crate) fn peer_cwd(&self) -> Option<PathBuf> {
+        let same = || vahta_os::identity_of(self.pid).is_ok_and(|id| id == self.peer);
+        if !same() {
+            return None;
+        }
+        let cwd = vahta_os::process_cwd(self.pid).ok()?;
+        same().then_some(cwd)
+    }
+
+    pub(crate) fn used_from(&self) -> Option<PathBuf> {
+        self.used_from.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub(crate) fn set_used_from(&self, from: PathBuf) {
+        if let Ok(mut g) = self.used_from.lock() {
+            *g = Some(from);
+        }
     }
 
     pub(crate) fn store(&self) -> &LocalStore {
@@ -130,6 +157,12 @@ impl Ctx<'_> {
     }
 
     pub(crate) fn panel(&self, title: &str, mut lines: Vec<String>) -> Panel {
+        // Remote use names both ends: `Vault: <vault> · used from <project>`.
+        if let Some(from) = self.used_from() {
+            for line in lines.iter_mut().filter(|l| l.starts_with("Vault: ")) {
+                line.push_str(&format!(" · used from {}", from.display()));
+            }
+        }
         lines.push(format!("Requested by: {}", self.requested_by()));
         Panel {
             title: title.to_string(),
@@ -364,6 +397,7 @@ pub(crate) fn store(
         dirs: r.dirs.clone(),
         net: r.net.clone(),
         path: r.path.as_deref().map(std::ffi::OsString::from),
+        from: Vec::new(),
     });
     if mode == StoreMode::Add
         && let Some(a) = &proposal_args

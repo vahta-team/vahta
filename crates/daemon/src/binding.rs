@@ -39,6 +39,12 @@ pub(crate) fn rules_text(binding: &RuleSet) -> String {
         }
         Network::App => {}
     }
+    if !binding.from.is_empty() {
+        parts.push(format!(
+            "also usable from the projects: {}",
+            binding.from.join(", ")
+        ));
+    }
     let mut text = parts.join("; ");
     if let Some(c) = &binding.category {
         text = if text.is_empty() {

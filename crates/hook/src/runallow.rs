@@ -28,6 +28,9 @@ pub struct RunCall {
     pub names: Vec<String>,
     /// The command after `--`.
     pub argv: Vec<String>,
+    /// `--vault DIR`, as written: the project of a vault that is not the
+    /// caller's own.
+    pub vault: Option<String>,
 }
 
 /// A `vahta http` read in full: the secrets and where the request goes.
@@ -35,6 +38,7 @@ pub struct RunCall {
 pub struct HttpCall {
     pub names: Vec<String>,
     pub url: String,
+    pub vault: Option<String>,
 }
 
 /// What the hook understood the command to be.
@@ -127,10 +131,15 @@ pub fn parse(cmd: &str) -> Option<Call> {
     }
 }
 
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 /// The options of `vahta http`, read as it reads them (`http_cmd.rs`).
 fn parse_http(rest: &[String]) -> Option<HttpCall> {
     let mut names = Vec::new();
     let mut urls: Vec<String> = Vec::new();
+    let mut vault = None;
     let mut i = 0;
     while let Some(a) = rest.get(i) {
         i += 1;
@@ -142,6 +151,10 @@ fn parse_http(rest: &[String]) -> Option<HttpCall> {
             "--json" => {}
             "--secret" => {
                 names.push(rest.get(i)?.clone());
+                i += 1;
+            }
+            "--vault" => {
+                vault = Some(non_empty(rest.get(i)?)?);
                 i += 1;
             }
             "-H" | "--header" | "--query" | "-X" | "--request" | "-d" | "--data" | "--timeout"
@@ -159,11 +172,13 @@ fn parse_http(rest: &[String]) -> Option<HttpCall> {
     Some(HttpCall {
         names,
         url: urls.remove(0),
+        vault,
     })
 }
 
 fn parse_run(rest: &[String]) -> Option<RunCall> {
     let mut names = Vec::new();
+    let mut vault = None;
     let mut ask = false;
     let mut reason = false;
     let mut i = 0;
@@ -179,6 +194,10 @@ fn parse_run(rest: &[String]) -> Option<RunCall> {
             "--ask" => ask = true,
             "--secret" => {
                 names.push(rest.get(i)?.clone());
+                i += 1;
+            }
+            "--vault" => {
+                vault = Some(non_empty(rest.get(i)?)?);
                 i += 1;
             }
             "--label" => {
@@ -213,7 +232,7 @@ fn parse_run(rest: &[String]) -> Option<RunCall> {
     if program.is_empty() || is_vahta_word(program.rsplit('/').next().unwrap_or(program)) {
         return None;
     }
-    Some(RunCall { names, argv })
+    Some(RunCall { names, argv, vault })
 }
 
 #[cfg(test)]
@@ -238,6 +257,7 @@ mod tests {
         Some(RunCall {
             names: names.iter().map(|s| s.to_string()).collect(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
+            vault: None,
         })
     }
 
@@ -273,6 +293,35 @@ mod tests {
         );
         // The program may be quoted too.
         assert_eq!(parse_run("vahta run -- 'ls' -l"), call(&[], &["ls", "-l"]));
+    }
+
+    #[test]
+    fn a_vault_option_is_read_for_a_run_and_a_request() {
+        assert_eq!(
+            parse_run("vahta run --vault /work/tools --secret A -- cargo publish"),
+            Some(RunCall {
+                names: vec!["A".into()],
+                argv: vec!["cargo".into(), "publish".into()],
+                vault: Some("/work/tools".into()),
+            })
+        );
+        assert_eq!(
+            parse_http("vahta http --vault ../tools --secret A -H 'X: {A}' https://h.example/"),
+            Some(HttpCall {
+                names: vec!["A".into()],
+                url: "https://h.example/".into(),
+                vault: Some("../tools".into()),
+            })
+        );
+        for cmd in [
+            "vahta run --vault -- true",
+            "vahta run --vault '' -- true",
+            "vahta run --secret A --vault",
+            "vahta run --vault=/x -- true",
+            "vahta http --vault '' --secret A https://h.example/",
+        ] {
+            assert!(parse(cmd).is_none(), "{cmd}");
+        }
     }
 
     #[test]
@@ -374,6 +423,7 @@ mod tests {
         Some(HttpCall {
             names: names.iter().map(|s| s.to_string()).collect(),
             url: url.to_string(),
+            vault: None,
         })
     }
 

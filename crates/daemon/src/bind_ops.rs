@@ -41,6 +41,8 @@ pub(crate) struct BindArgs {
     pub category: Option<String>,
     pub dirs: Vec<String>,
     pub net: Option<String>,
+    /// `None` keeps the secret's roots; `Some` replaces them.
+    pub from: Option<Vec<String>>,
     pub clear: bool,
     pub reason: Option<String>,
     pub path: Option<String>,
@@ -277,18 +279,38 @@ fn change_for(
         || args.category.is_some()
         || !args.dirs.is_empty()
         || args.net.is_some();
-    if args.clear && any_rule {
+    if args.clear && (any_rule || args.from.is_some()) {
         return Err(error("--clear takes no rule options"));
     }
-    if !args.clear && !any_rule {
+    if !args.clear && !any_rule && args.from.is_none() {
         return Err(error(
-            "nothing to bind: give --category, --allow, --deny, --dir, --net or --clear",
+            "nothing to bind: give --category, --allow, --deny, --dir, --net, --from or --clear",
         ));
     }
     if args.clear {
         return Ok(change_of(name, peek, None, "the agent"));
     }
     let old = peek.bindings.iter().find(|b| b.name == name);
+    // Only `--from`: the approved rules stay exactly as they are (their
+    // programs are not resolved again) and the roots are replaced.
+    if !any_rule {
+        let Some(o) = old else {
+            return Err(error(
+                "--from changes where an approved secret may be used from; this one has no \
+                 rules yet, so give its rules too (--category, --allow, ...)",
+            ));
+        };
+        let mut rs = o.clone();
+        rs.from = proposal::parse_froms(args.from.as_deref().unwrap_or_default()).map_err(error)?;
+        return Ok(Change {
+            name: name.to_string(),
+            old: Some(o.clone()),
+            new: Some(rs),
+            resolved: Vec::new(),
+            warnings: Vec::new(),
+            downgrade: None,
+        });
+    }
     let only_commands = args.category.is_none() && args.dirs.is_empty() && args.net.is_none();
     let mut a = Args {
         category: args.category.clone(),
@@ -297,6 +319,12 @@ fn change_for(
         dirs: args.dirs.clone(),
         net: args.net.clone(),
         path: path.cloned(),
+        // Rules given again keep where the secret may be used from, unless
+        // `--from` says otherwise.
+        from: args
+            .from
+            .clone()
+            .unwrap_or_else(|| old.map(|o| o.from.clone()).unwrap_or_default()),
     };
     let category = match (&args.category, old) {
         (Some(c), _) => Some(proposal::find_category(c).map_err(error)?),
@@ -338,7 +366,8 @@ fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) ->
                     && e.deny.is_empty()
                     && e.category.is_none()
                     && e.dirs.is_empty()
-                    && e.network.is_none()) =>
+                    && e.network.is_none()
+                    && e.from.is_empty()) =>
             {
                 let category = match &e.category {
                     Some(c) => Some(proposal::find_category(c).map_err(fail)?),
@@ -361,6 +390,7 @@ fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) ->
                         other => other.map(str::to_string),
                     },
                     path: path.cloned(),
+                    from: e.from.clone(),
                 };
                 Some(proposal::build(&entry.name, category, &a, &project.root).map_err(fail)?)
             }

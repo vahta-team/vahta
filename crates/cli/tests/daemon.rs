@@ -1629,6 +1629,7 @@ fn a_daemon_of_another_version_holding_sessions_is_not_replaced() {
             names: None,
             duration: vahta_ipc::protocol::DurationSpec::Default {},
             label: None,
+            vault: None,
         })
         .unwrap();
     assert!(matches!(reply, ClientReply::Session(_)), "{reply:?}");
@@ -4878,6 +4879,7 @@ fn check_run(s: &Sandbox, names: &[&str], argv: &[&str], path: Option<&str>) -> 
         argv: argv.iter().map(|a| a.to_string()).collect(),
         names: names.iter().map(|n| n.to_string()).collect(),
         path: path.map(str::to_string),
+        vault: None,
     })
     .unwrap()
 }
@@ -4924,6 +4926,7 @@ fn check_run_says_allowed_only_for_a_command_the_rules_let_through_and_opens_not
             argv: vec!["printenv".into()],
             names: vec!["ZETA".into()],
             path: path.map(str::to_string),
+            vault: None,
         })
         .unwrap();
     assert_eq!(reply, none);
@@ -5750,6 +5753,7 @@ mod http {
             cwd: s.project().to_string_lossy().into_owned(),
             url: url.to_string(),
             names: names.iter().map(|n| n.to_string()).collect(),
+            vault: None,
         })
         .unwrap()
     }

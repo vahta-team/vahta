@@ -17,6 +17,10 @@
 //!   [`Error::UpgradeNeedsRecoveryKey`]; the caller keeps the vault open in its
 //!   old format, readable, and refuses to save until the key is provided.
 //!
+//! Format 3 to 4 adds the remote-use flag (off) and an empty `from` list to
+//! every rule set, and re-seals the secrets under the new number; it changes no
+//! slot either.
+//!
 //! Format 2 to 3 adds the (empty) successor chain and re-seals the secrets under
 //! the new number; it changes no slot either.
 //!
@@ -27,7 +31,7 @@
 //! before that, so the chain, the backup, the generation continuity and the
 //! recovery-key rule are exercised for real.
 
-use super::{v1, v2, v3};
+use super::{v1, v2, v3, v4};
 use crate::{Error, RecoveryKey};
 
 /// An unlocked vault of any supported format.
@@ -109,15 +113,45 @@ pub fn upgrade_v2_to_v3(old: &v2::Unlocked) -> Result<v3::Unlocked, Error> {
     })
 }
 
+/// Format 3 to 4: the vault gets the remote-use flag (off) and every rule set an
+/// empty `from` list; every secret is re-sealed under the new format number,
+/// for the owner and for each holder.
+pub fn upgrade_v3_to_v4(old: &v3::Unlocked) -> Result<v4::Unlocked, Error> {
+    let vault_id = old.model.header.vault_id;
+    let keys = v3::owner_keys(&old.vk);
+    let mut model = v4::Model::from_v3(&old.model);
+    for sealed in &mut model.secrets {
+        let value = v3::open_value(old.fmt, &vault_id, &keys.enc_sk, sealed)?;
+        let holders: Vec<&v2::Recipient> = sealed
+            .wraps
+            .iter()
+            .filter_map(|w| model.recipients.iter().find(|r| r.id == w.recipient_id))
+            .collect();
+        *sealed = v4::seal_secret(
+            v4::FORMAT,
+            &vault_id,
+            sealed.secret_id,
+            &model.owner.enc_pk,
+            value.expose(),
+            &holders,
+        )?;
+    }
+    Ok(v4::Unlocked {
+        fmt: v4::FORMAT,
+        vk: old.vk.clone(),
+        model,
+    })
+}
+
 /// Run the chain from whatever `unlocked` is to the current format.
 #[cfg_attr(not(test), allow(unused_variables))]
 pub fn to_current(
     unlocked: &AnyUnlocked,
     typed: Option<&[u8]>,
     recovery: Option<&RecoveryKey>,
-) -> Result<v3::Unlocked, Error> {
+) -> Result<v4::Unlocked, Error> {
     match unlocked {
-        AnyUnlocked::V1(u) => upgrade_v2_to_v3(&upgrade_v1_to_v2(u)?),
+        AnyUnlocked::V1(u) => upgrade_v3_to_v4(&upgrade_v2_to_v3(&upgrade_v1_to_v2(u)?)?),
         #[cfg(test)]
         AnyUnlocked::V0(u) => to_current(
             &AnyUnlocked::V1(super::testing::upgrade_v0_to_v1(u, typed, recovery)?),

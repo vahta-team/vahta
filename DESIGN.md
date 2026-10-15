@@ -83,7 +83,7 @@ first save writes the upgraded file and, before that, the original byte for byte
 `<vault>.v1.bak` (mode 0600, never overwritten). The generation continues, so the
 rollback check is unaffected.
 
-Format 3 (current) adds one list to the signed body, `successors`: the owner
+Format 3 adds one list to the signed body, `successors`: the owner
 successor chain. A re-key (new vault key, so new owner signing key) appends a record
 `{old_owner_sign_pub, new_owner_sign_pub, generation, created_at, signature_by_old}`,
 signed by the old owner key over `"vahta/successor" ‖ vault_id ‖ old ‖ new ‖
@@ -100,6 +100,17 @@ same way as 1 to 2: an owner unlock, the original kept once as `<vault>.v2.bak`,
 generation continuing. Slots keep their creation time through re-keys, password
 changes and a device slot's rewrap, because "the last enrolled unlock method" is read
 from it. See `docs/daemon.md` ("Devices, factors, re-keying and recovery").
+
+Format 4 (current) adds `remote` to the signed body (the person's opt-in that the vault
+may be used from other projects; off) and `from` to every rule set (absolute, canonical
+project folders the secret may be used from outside the vault's own project; empty).
+`v4.rs` re-exports format 3 and redefines the rule set, the body and the model; the
+sealed secrets are sealed again under the number 4. A format 3 file is read as it is and
+upgraded by an owner unlock with the flag off and every `from` empty, the original kept
+once as `<vault>.v3.bak`. The body is postcard, so a field this build does not know is
+not carried: a file with extra or missing bytes is refused (`Corrupt`), and a newer format
+number is refused before that (`NewerFormat`). See `docs/daemon.md` ("Using a vault from
+another project").
 
 ## Sessions and anchors
 
