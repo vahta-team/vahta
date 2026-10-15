@@ -36,6 +36,7 @@
 mod autostart;
 mod bind_cmd;
 mod config_cmd;
+mod connector_cmd;
 mod daemon_cmd;
 mod devices_cmd;
 mod guard_cmd;
@@ -133,6 +134,10 @@ commands:
   daemon  run, inspect, stop or restart the daemon that owns the vault
 
 Run `vahta <command> --help` for the options.
+
+init, add, list, check, bind, unlock, run and remove also take --connector: they
+then work on the connectors vault (the keys of the MCP servers your coding agents
+start) instead of the project's. See docs/connectors.md.
 ";
 
 struct ScanArgs {
@@ -409,6 +414,9 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         && let Some(setup_env) = &env.setup
     {
         setup::stale_notice(setup_env, stderr);
+    }
+    if let Some(code) = connector_cmd::dispatch(args, env, stdout, stderr) {
+        return code;
     }
     match args.first().map(String::as_str) {
         Some("setup") => setup::run(&args[1..], env, stdout, stderr),

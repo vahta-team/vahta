@@ -568,6 +568,19 @@ mod tests {
     }
 
     #[test]
+    fn the_connectors_vault_is_under_the_data_dir_and_so_protected() {
+        let Some(root) = data_root() else { return };
+        for rel in [
+            "connectors",
+            "connectors/vault.vht",
+            "connectors/vahta.toml",
+        ] {
+            let p = root.join(rel);
+            assert!(is_vahta_path(&p.to_string_lossy(), None), "{rel}");
+        }
+    }
+
+    #[test]
     fn readers_and_their_file_arguments() {
         assert_eq!(c("cat .env"), [".env"]);
         assert_eq!(c("grep -r x .env"), ["x", ".env"]);

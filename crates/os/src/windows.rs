@@ -150,6 +150,11 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
 
 /// ka's rule: a process this user can open for query is this user's; one it
 /// cannot is not (fail closed).
+/// Not read here (see `vahta_os::command_line`).
+pub(crate) fn command_line(_pid: u32) -> Option<String> {
+    None
+}
+
 pub(crate) fn process_cwd(_pid: u32) -> io::Result<std::path::PathBuf> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }

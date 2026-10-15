@@ -23,8 +23,8 @@ use vahta_vault::{Network, Peek, RuleSet, Vault};
 use crate::binding;
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, class_by_name, error, find_vault, from_surface, from_vault, lines_for,
-    refused, unknown_name, unlock_expecting,
+    Ctx, Flow, check_name, class_by_name, error, from_surface, from_vault, lines_for, refused,
+    unknown_name, unlock_expecting,
 };
 use crate::proposal::{self, Args, Built};
 use crate::protocol::{ClientReply, RefusalKind};
@@ -46,6 +46,8 @@ pub(crate) struct BindArgs {
     pub clear: bool,
     pub reason: Option<String>,
     pub path: Option<String>,
+    /// The harnesses a connector is bound to; empty keeps what it has.
+    pub harnesses: Vec<String>,
 }
 
 /// One secret's change: what it has, what it would have, and (for the window)
@@ -123,7 +125,14 @@ fn change_of(name: &str, peek: &Peek, built: Option<Built>, who: &str) -> Change
 }
 
 pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
-    let (project, vault_path) = find_vault(&args.cwd)?;
+    let (project, vault_path) = ctx.vault_for(&args.cwd)?;
+    if ctx.connector {
+        crate::connector_ops::check_bind(&args)?;
+    } else if !args.harnesses.is_empty() {
+        return Err(error(
+            "harnesses belong to the connectors vault: use `vahta bind --connector`",
+        ));
+    }
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     let path: Option<OsString> = args.path.as_deref().map(OsString::from);
@@ -131,6 +140,11 @@ pub(crate) fn bind(ctx: &Ctx<'_>, args: BindArgs) -> Flow<ClientReply> {
         Some(name) => vec![change_for(&args, name, &peek, &project, path.as_ref())?],
         None => changes_from_file(&peek, &project, path.as_ref())?,
     };
+    if ctx.connector {
+        for c in &changes {
+            crate::connector_ops::check_rule_set(c.new.as_ref())?;
+        }
+    }
     if changes.is_empty() {
         return Ok(ClientReply::Done {
             message: "nothing to approve: vahta.toml and the vault have the same rules".to_string(),
@@ -279,10 +293,10 @@ fn change_for(
         || args.category.is_some()
         || !args.dirs.is_empty()
         || args.net.is_some();
-    if args.clear && (any_rule || args.from.is_some()) {
+    if args.clear && (any_rule || args.from.is_some() || !args.harnesses.is_empty()) {
         return Err(error("--clear takes no rule options"));
     }
-    if !args.clear && !any_rule && args.from.is_none() {
+    if !args.clear && !any_rule && args.from.is_none() && args.harnesses.is_empty() {
         return Err(error(
             "nothing to bind: give --category, --allow, --deny, --dir, --net, --from or --clear",
         ));
@@ -291,17 +305,23 @@ fn change_for(
         return Ok(change_of(name, peek, None, "the agent"));
     }
     let old = peek.bindings.iter().find(|b| b.name == name);
-    // Only `--from`: the approved rules stay exactly as they are (their
-    // programs are not resolved again) and the roots are replaced.
+    // Only `--from` or the harnesses: the approved rules stay exactly as they
+    // are (their programs are not resolved again) and the roots or harnesses
+    // are replaced.
     if !any_rule {
         let Some(o) = old else {
             return Err(error(
-                "--from changes where an approved secret may be used from; this one has no \
+                "--from and the harnesses change an approved secret; this one has no \
                  rules yet, so give its rules too (--category, --allow, ...)",
             ));
         };
         let mut rs = o.clone();
-        rs.from = proposal::parse_froms(args.from.as_deref().unwrap_or_default()).map_err(error)?;
+        if let Some(from) = &args.from {
+            rs.from = proposal::parse_froms(from).map_err(error)?;
+        }
+        if !args.harnesses.is_empty() {
+            rs.harnesses = args.harnesses.clone();
+        }
         return Ok(Change {
             name: name.to_string(),
             old: Some(o.clone()),
@@ -336,7 +356,13 @@ fn change_for(
         }
         (None, _) => Some(detected_for(peek, name)),
     };
-    let built = proposal::build(name, category, &a, &project.root).map_err(error)?;
+    let mut built = proposal::build(name, category, &a, &project.root).map_err(error)?;
+    // Rules given again keep the harnesses, unless new ones are given.
+    built.rule_set.harnesses = if args.harnesses.is_empty() {
+        old.map(|o| o.harnesses.clone()).unwrap_or_default()
+    } else {
+        args.harnesses.clone()
+    };
     Ok(change_of(name, peek, Some(built), "the agent"))
 }
 
@@ -367,7 +393,8 @@ fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) ->
                     && e.category.is_none()
                     && e.dirs.is_empty()
                     && e.network.is_none()
-                    && e.from.is_empty()) =>
+                    && e.from.is_empty()
+                    && e.harnesses.is_empty()) =>
             {
                 let category = match &e.category {
                     Some(c) => Some(proposal::find_category(c).map_err(fail)?),
@@ -392,7 +419,10 @@ fn changes_from_file(peek: &Peek, project: &Project, path: Option<&OsString>) ->
                     path: path.cloned(),
                     from: e.from.clone(),
                 };
-                Some(proposal::build(&entry.name, category, &a, &project.root).map_err(fail)?)
+                let mut built =
+                    proposal::build(&entry.name, category, &a, &project.root).map_err(fail)?;
+                built.rule_set.harnesses = e.harnesses.clone();
+                Some(built)
             }
             _ => None,
         };

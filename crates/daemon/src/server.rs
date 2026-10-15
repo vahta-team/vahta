@@ -122,6 +122,8 @@ pub(crate) struct Shared {
     pub(crate) outputs: Mutex<Outputs>,
     /// What agents have tried, weighed (see `alarm.rs`).
     pub(crate) alarm: crate::alarm::Alarm,
+    /// The last refused launch of each connector's server (`connector_ops.rs`).
+    pub(crate) connector_refusals: Mutex<Vec<vahta_ipc::protocol::ConnectorRefusal>>,
     /// The ways to unlock a vault.
     pub(crate) unlockers: vahta_auth::Registry,
     /// How devices are reached.
@@ -171,6 +173,7 @@ impl Shared {
             uptime_secs: self.started.elapsed().as_secs(),
             runtime_dir: self.options.paths.runtime.display().to_string(),
             alarm_at: self.alarm.raised_at(),
+            connector_refusals: self.connector_refusals(),
         }
     }
 }
@@ -267,6 +270,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
         alarm: crate::alarm::Alarm::default(),
+        connector_refusals: Mutex::new(Vec::new()),
         unlockers: vahta_auth::Registry::standard(),
         links,
         started: Instant::now(),
@@ -616,6 +620,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             pid: peer.id.pid,
             peer: peer.id,
             used_from: std::sync::Mutex::new(None),
+            connector: false,
         };
         // The client's `cwd` is a claim: believed only if the kernel agrees.
         if let Some(cwd) = request.cwd_to_verify()
@@ -804,6 +809,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                         dirs,
                         net,
                         from,
+                        harnesses: Vec::new(),
                     },
                 )
                 .unwrap_or_else(|r| r),
@@ -940,6 +946,17 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ClientRequest::SessionKill { id } => {
                 (session_ops::kill(&ctx, &id).unwrap_or_else(|r| r), false)
             }
+            ClientRequest::Connector { cmd } => match crate::connector_ops::handle(&ctx, cmd) {
+                crate::connector_ops::Handled::Reply(reply) => (reply, false),
+                // Like a run: the connection then carries the server's input
+                // and output.
+                crate::connector_ops::Handled::Run(prepared) => {
+                    if write_frame(stream, &ClientReply::RunStarted {}).is_ok() {
+                        run::execute(shared, stream, *prepared, (ctx.exe.clone(), ctx.pid));
+                    }
+                    return;
+                }
+            },
         };
         if write_frame(stream, &reply).is_err() {
             return;

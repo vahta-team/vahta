@@ -235,6 +235,9 @@ impl ClientRequest {
             | DevicesRevoke { cwd, .. }
             | DevicesLost { cwd, .. }
             | Recover { cwd } => Some(cwd),
+            Connector {
+                cmd: ConnectorCmd::Run { cwd, .. },
+            } => Some(cwd),
             _ => None,
         }
     }
@@ -259,6 +262,9 @@ pub struct RuleArgs {
     pub reason: Option<String>,
     /// The caller's `PATH`, to resolve the programs of the rules.
     pub path: Option<String>,
+    /// The harnesses (`claude`, `codex`, `cursor`) that may launch the server
+    /// that uses the secret; only for a connectors vault.
+    pub harnesses: Vec<String>,
 }
 
 /// What a client may ask. No variant has a field for a value or a password:
@@ -618,6 +624,73 @@ pub enum ClientRequest {
         file: String,
         event: GuardEvent,
     },
+    /// The connectors vault (`--connector`): one per user, in Vahta's own data
+    /// directory, never found by a working directory. See [`ConnectorCmd`].
+    Connector {
+        cmd: ConnectorCmd,
+    },
+}
+
+/// What `--connector` asks of the connectors vault. The vault is not looked up
+/// from a directory: there is one, and these are the only requests that reach
+/// it. As everywhere, no field holds a value or a password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConnectorCmd {
+    /// Create the vault.
+    Init {},
+    /// Add a secret; its value is typed in the window. The rules and the
+    /// harnesses are shown after the value and stored in the same save.
+    Add {
+        name: String,
+        tier: Option<Tier>,
+        rules: RuleArgs,
+    },
+    Remove {
+        name: String,
+    },
+    /// Propose the rules and the harnesses of a secret (the person approves).
+    Bind {
+        name: String,
+        harnesses: Vec<String>,
+        allow: Vec<String>,
+        deny: Vec<String>,
+        clear: bool,
+        reason: Option<String>,
+        path: Option<String>,
+        category: Option<String>,
+        dirs: Vec<String>,
+        net: Option<String>,
+    },
+    /// Open the connectors session: the password once, then
+    /// `vahta run --connector` needs no window until it ends.
+    Unlock {
+        duration: DurationSpec,
+        label: Option<String>,
+    },
+    /// Run the server of one connector. The reply is `RunStarted`, then the
+    /// connection carries [`RunInput`] and [`RunOutput`] as for `Run`.
+    Run {
+        /// Where the client is; checked against the kernel.
+        cwd: String,
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        name: String,
+        label: Option<String>,
+    },
+}
+
+/// A launch of a connector's server that was refused, as `vahta status`
+/// shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorRefusal {
+    pub name: String,
+    /// Unix seconds.
+    pub at: u64,
+    pub kind: RefusalKind,
+    /// What the person does about it.
+    pub hint: String,
 }
 
 /// What the person chose when the watchdog asked.
@@ -900,6 +973,9 @@ pub enum RefusalKind {
     /// the vault has been found and has opted in; a vault that has not looks
     /// exactly like a path with no vault (`NoVault`).
     NotFromHere,
+    /// `vahta run --connector` whose direct parent is not one of the harnesses
+    /// the connector is bound to.
+    NotFromHarness,
 }
 
 /// One name in a refusal and why.
@@ -1049,6 +1125,9 @@ pub struct StatusInfo {
     /// unlock.
     #[serde(default)]
     pub alarm_at: Option<u64>,
+    /// The last refused launches of connector servers, newest last.
+    #[serde(default)]
+    pub connector_refusals: Vec<ConnectorRefusal>,
 }
 
 // --- Surface messages --------------------------------------------------------------------

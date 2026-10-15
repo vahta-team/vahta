@@ -17,6 +17,23 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The connectors vault's directory under a data directory: the one place a
+/// `--connector` command works on. It is never found from a working directory.
+pub fn connectors_dir(data: &Path) -> PathBuf {
+    data.join("connectors")
+}
+
+/// The connectors vault itself.
+pub fn connectors_vault(data: &Path) -> PathBuf {
+    connectors_dir(data).join("vault.vht")
+}
+
+/// The proposals for the connectors vault, next to it (what `vahta.toml` is to
+/// a project).
+pub fn connectors_manifest(data: &Path) -> PathBuf {
+    connectors_dir(data).join("vahta.toml")
+}
+
 /// The longest socket path accepted. `sun_path` is 104 bytes on macOS and 108
 /// on Linux; the margin keeps the check the same on both.
 const MAX_SOCKET_PATH: usize = 100;
@@ -130,6 +147,11 @@ impl Paths {
             Ok(f) => matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)),
             Err(_) => false,
         }
+    }
+
+    /// See [`connectors_dir`].
+    pub fn connectors_dir(&self) -> PathBuf {
+        connectors_dir(&self.data)
     }
 
     pub fn journal_file(&self) -> PathBuf {

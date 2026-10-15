@@ -427,14 +427,23 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     // With `--vault`, the directory the kernel says the caller is in.
     let cwd_path = target.cwd.clone();
     let (project, vault_path) = (target.project.clone(), target.vault_path.clone());
-    crate::guard_ops::note_project(ctx, &project.root);
+    if !ctx.connector {
+        crate::guard_ops::note_project(ctx, &project.root);
+    }
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     let peek = target.view(peek);
     let pairs = resolve(&peek, &project, names, renames)?;
     let names: Vec<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
 
-    let found = find_session(ctx, &peek, target.used_from.as_deref())?;
+    // A connector's server is started by its harness, and by the connectors
+    // session alone: no ancestor, no window.
+    let found = if ctx.connector {
+        crate::connector_ops::check_harness(ctx, &peek, &names)?;
+        crate::connector_ops::session_of(ctx, &peek)?
+    } else {
+        find_session(ctx, &peek, target.used_from.as_deref())?
+    };
     // The program, found once. Its canonical path is what the command rules
     // are checked against and what is executed.
     let client_path: Option<OsString> = client_env
@@ -451,9 +460,14 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         program.as_deref(),
         &canonical_cwd,
     );
-    if !checked.missing.is_empty() {
-        crate::report::rule_refusal(ctx, &checked.missing, Some(&argv[0]), true);
-        return Err(no_rules(ctx, &peek, &checked.missing));
+    let unruled = if ctx.connector {
+        crate::connector_ops::unruled(&peek, &names)
+    } else {
+        checked.missing.clone()
+    };
+    if !unruled.is_empty() {
+        crate::report::rule_refusal(ctx, &unruled, Some(&argv[0]), true);
+        return Err(no_rules(ctx, &peek, &unruled));
     }
     let verdicts = checked.verdicts;
     let failures: Vec<(&vahta_vault::RuleSet, Verdict)> = verdicts
@@ -528,6 +542,9 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             sanitize_for_message(&argv[0])
         )));
     };
+    if ctx.connector {
+        crate::connector_ops::require_session(ctx, &peek, &names, &found)?;
+    }
 
     let shown: Vec<String> = pairs
         .iter()
@@ -814,7 +831,7 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
 }
 
 /// A program name as a message may carry it: one plain line.
-fn sanitize_for_message(text: &str) -> String {
+pub(crate) fn sanitize_for_message(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(120)
