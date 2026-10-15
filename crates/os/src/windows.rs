@@ -198,6 +198,17 @@ pub(crate) fn isolate_network(_cmd: &mut Command) -> Result<(), crate::Unsupport
     Err(crate::Unsupported)
 }
 
+pub(crate) fn isolate_network_passing(
+    _cmd: &mut Command,
+    _extra: &[&std::path::Path],
+) -> Result<(), crate::Unsupported> {
+    Err(crate::Unsupported)
+}
+
+pub(crate) fn hidden_path(_path: &std::path::Path) -> bool {
+    false
+}
+
 pub(crate) fn network_isolation_available() -> bool {
     false
 }

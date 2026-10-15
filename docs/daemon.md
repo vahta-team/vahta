@@ -581,6 +581,21 @@ program names.
   runtime directory and X11 are not there for it. Abstract Unix sockets belong to
   the network namespace, so they are gone as well. `/tmp` itself is untouched,
   since the project or temp files may live there.
+- **Passed through: `/run/media` and `/run/mnt`.** These two are put back, with
+  every mount below them, so a script that writes to a mounted SD card or USB
+  stick (udisks mounts them at `/run/media/<user>/<label>`) keeps its files. They
+  are safe to pass because they hold only mount points of block-device file
+  systems, never a daemon socket (those are in `/run/user`, `/run/dbus`,
+  `/run/systemd`, `/run/docker.sock` and the like, which stay empty), and a socket
+  file on a stick has no listener behind it. This is an allowlist on purpose: a
+  list of sockets to hide would leave open any that nobody listed. Nothing else
+  under `/run` is passed.
+- **Nothing is lost silently.** Under `/run` (outside the two above),
+  `/var/run` or `/tmp/.X11-unix` a write would land in the empty directory and
+  disappear. A run with no network is therefore refused, with a message, when its
+  working directory or an absolute path argument (`/path` or `--flag=/path`) lies
+  there. A path built inside the program cannot be checked: that program sees
+  the empty directory.
 - **What it does not cut.** A pathname Unix socket anywhere else is still
   reachable: in the project, in `/tmp`, in the home directory (some tools keep an
   agent or control socket there). It is not a file-system sandbox. If the mount
