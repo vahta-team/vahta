@@ -38,6 +38,7 @@ Python 3 standard library only; Docker for everything that touches Vahta.
 | `hookcall.py`, `vaultsetup.py`, `llm.py` | Claude Code payloads to `vahta-hook`; vault and session setup in a container; model clients |
 | `docker/Dockerfile` | Builds Vahta from this checkout, then a slim runtime image |
 | `regression/specs.jsonl` | A fixed set of cases that runs with no model |
+| `mcp/` | MCP stdio bench, below |
 | `out/`, `corpus/`, `findings/` | Local only, git-ignored: run logs and transcripts, generated corpora, unfixed evasions |
 
 ## Build and the regression check (no model, no network)
@@ -248,6 +249,46 @@ afterwards: the repository guard scans `bench/out`.
 Not covered: Claude Code's own telemetry hosts (they fail on the closed network, and
 `DISABLE_TELEMETRY` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are set); the model's context is itself an
 outbound channel to Anthropic, which is why "shown to the model" is scored as exposure.
+
+## MCP stdio bench (`bench/mcp/`, no Docker, no model, no network)
+
+Measures whether `vahta run -- python3 server.py` is a usable way to start a stdio MCP
+server: the scrubber's effect on newline-delimited JSON-RPC, latency, stalls, leaks, the
+lifecycle, and what the approval window does when several servers start at once.
+
+```bash
+python3 bench/mcp/run.py t1 --quick     # framing, latency, leakage, lifecycle (about 25 s)
+python3 bench/mcp/run.py t2 --quick     # windows and refusals with the scripted surface
+python3 bench/mcp/run.py all            # the full run: about 3 minutes, most of it T2 waiting
+```
+
+It builds a test build (`cargo build --release -p vahta-cli --features vahta-daemon/test-surface`;
+`--no-build` reuses `target/<profile>/vahta`, `--vahta PATH` names one, `--profile debug` is
+slower). Each part gets its own temp HOME and its own `VAHTA_DATA_DIR`, `VAHTA_RUNTIME_DIR` and
+`VAHTA_CONFIG_DIR`, a project with a vault, canaries built at run time (plain, with a `"`,
+and adversarial ones that start with `}` or a line break, or are one repeated byte), and a rule
+allowing `python3 <abs>/fake_server.py`. The daemon is stopped at the end; the real HOME, daemon
+and vault are never touched. The caller becomes the session's anchor, so run it from a normal
+shell, not from a bare init child.
+
+| File | Role |
+|---|---|
+| `mcp/fake_server.py` | The server: `initialize`, `tools/list`, `tools/call` with `echo`, `big`, `env_echo` (raw, base64, hex, url, reversed, json, split over two messages), `dribble` (one byte per write); optional start delay |
+| `mcp/driver.py` | Plays the harness: spawns the server direct or under `vahta run`, timestamps replies, finds forms of a canary |
+| `mcp/sandbox.py` | Temp world and vault; the scripted prompt surface |
+| `mcp/t1.py`, `mcp/t2.py` | The cases; `run.py` ties them together |
+
+T1 cases: sequential latency (direct against under `vahta run`, with a session), response sizes
+up to 5 MiB, 50 requests in flight, one-byte writes, the canary echoed in each encoding
+(recorded as scrubbed or passed through; a passed-through form does not fail the run),
+adversarial canaries (a stall is a finding), close-stdin, SIGKILL and SIGTERM. T2 cases: N = 1, 3,
+8 clients with no session and the window answering after 0, 5, 35 s; a client killed at 10 s
+and 30 s while the window waits; refusals (no `.vahta/`, command not allowed, unknown secret,
+stale and expired session) with exit code, text and time.
+
+The scripted surface answers can carry `"after_ms": N` (test builds only) to hold an answer
+back. `bench/out/mcp-<timestamp>/report.json` holds names, counts, times and forms, never a
+canary value; `bench/out/` is not committed.
 
 ## What stays local
 
