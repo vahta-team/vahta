@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use vahta_vault::rules::parse_rule;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{
-    Class, Device, DirRule, HostRule, KdfParams, Kind, Network, NewSlot, RuleSet, Tier, Vault,
-    seal_vault_key,
+    Action, AgentRole, Class, Device, DirRule, HostRule, KdfParams, Kind, Network, NewSlot,
+    RecipientKind, RecipientSecret, Role, RuleSet, Tier, Vault, seal_vault_key,
 };
 
 const PHRASE: &str = "correct horse";
@@ -59,6 +59,7 @@ fn main() {
     let allow = parse_rule("beta-tool push", true)
         .expect("rule")
         .to_allow("/opt/fixture/beta-tool".to_string());
+    let role_allow = allow.clone();
     let deny = parse_rule("@network", false).expect("rule").to_deny();
     vault
         .set_bindings(
@@ -87,6 +88,38 @@ fn main() {
         )
         .expect("bindings");
     vault.set_remote(true).expect("remote");
+    // Format 5 also carries the vault kind (a project vault here), agent roles
+    // and a member's expiry.
+    vault
+        .set_role(AgentRole {
+            name: "READER".into(),
+            secrets: vec!["BETA".into()],
+            allow: vec![role_allow],
+            deny: Vec::new(),
+            network: Some(Network::None),
+            dirs: Vec::new(),
+            max_for_secs: Some(3600),
+            max_uses: Some(5),
+            actions: vec![Action::Run, Action::Http],
+            ask_each_use: true,
+            approved_at: 1_700_000_000,
+        })
+        .expect("role");
+    let member = RecipientSecret::generate()
+        .expect("keys")
+        .public()
+        .expect("public keys");
+    let member_id = vault
+        .add_recipient(
+            "fixture member",
+            RecipientKind::Person,
+            Role::Runner,
+            &member,
+        )
+        .expect("recipient");
+    vault
+        .set_recipient_expiry(&member_id, Some(1_900_000_000))
+        .expect("expiry");
     // Format 2 also carries a paired device and slots of kinds beyond the two
     // this build knows: the second is a kind no build has defined, which every
     // later build must carry through untouched.
@@ -134,7 +167,7 @@ fn main() {
         ));
     }
     json.push_str("  ],\n  \"classes\": {\"ALPHA\": \"payment\"},\n");
-    json.push_str("  \"bindings\": {\"BETA\": {\"allow\": [\"beta-tool push\"], \"deny\": [\"@network\"], \"from\": [\"/opt/fixture/project\"]}},\n  \"remote\": true\n}\n");
+    json.push_str("  \"bindings\": {\"BETA\": {\"allow\": [\"beta-tool push\"], \"deny\": [\"@network\"], \"from\": [\"/opt/fixture/project\"]}},\n  \"remote\": true,\n  \"kind\": \"project\",\n  \"roles\": [\"READER\"],\n  \"member_expires_at\": 1900000000\n}\n");
     std::fs::write(dir.join(format!("{name}.expected.json")), json).expect("write expected");
     eprintln!("wrote {}", path.display());
 }

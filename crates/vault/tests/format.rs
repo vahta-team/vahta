@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 use vahta_json::Value;
 use vahta_vault::store::LocalStore;
-use vahta_vault::{Error, Kind, Network, SLOT_PASSWORD, SLOT_RECOVERY, Tier, Vault, format};
+use vahta_vault::{
+    Error, Kind, Network, SLOT_PASSWORD, SLOT_RECOVERY, Tier, Vault, VaultKind, format,
+};
 
 struct Expected {
     phrase: String,
@@ -292,7 +294,7 @@ fn the_v2_fixture_carries_what_format_2_adds() {
     // Saving again keeps the unknown slot and the password still unlocks.
     let slots_before = v.slots();
     v.save(&path, &store).unwrap();
-    assert_eq!(Vault::peek(&path).unwrap().format, 4);
+    assert_eq!(Vault::peek(&path).unwrap().format, format::CURRENT);
     assert!(Vault::peek(&path).unwrap().successors.is_empty());
     assert_eq!(
         std::fs::read(path.with_file_name("vault.vht.v2.bak")).unwrap(),
@@ -345,7 +347,7 @@ fn the_v3_fixture_upgrades_to_v4_with_remote_off() {
 
     v.save(&path, &store).unwrap();
     let after = Vault::peek(&path).unwrap();
-    assert_eq!(after.format, 4);
+    assert_eq!(after.format, format::CURRENT);
     assert!(!after.remote);
     assert_eq!(after.bindings[0], before);
     assert_eq!(
@@ -388,7 +390,7 @@ fn the_v4_fixture_carries_remote_and_from() {
 
     assert!(Vault::peek(&path).unwrap().remote);
     let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
-    assert!(!v.upgrade_pending());
+    assert!(v.upgrade_pending());
     assert!(v.remote());
     assert_eq!(v.bindings()[0].from, vec!["/opt/fixture/project"]);
     v.set_remote(false).unwrap();
@@ -445,4 +447,92 @@ fn from_must_be_absolute_and_bounded() {
         Vault::peek(&path).unwrap().bindings[0].from,
         vec!["/work/app"]
     );
+}
+
+/// The v4 fixture upgrades to format 5 on the first save: secrets, rules, the
+/// device, the slot of an unknown kind and the remote flag come through, the
+/// kind is `Project`, there are no roles, and `.v4.bak` holds the original,
+/// written once.
+#[test]
+fn the_v4_fixture_upgrades_to_v5_as_a_project_vault() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v4.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let peek = Vault::peek(&path).unwrap();
+    assert_eq!((peek.format, peek.kind), (4, VaultKind::Project));
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(v.upgrade_pending());
+    assert_eq!(v.kind(), VaultKind::Project);
+    assert!(v.roles().is_empty() && v.remote());
+    assert!(v.bindings()[0].harnesses.is_empty());
+    let (rules, devices, slots) = (v.bindings().to_vec(), v.devices().to_vec(), v.slots());
+    assert!(!path.with_file_name("vault.vht.v4.bak").exists());
+
+    v.save(&path, &store).unwrap();
+    let after = Vault::peek(&path).unwrap();
+    assert_eq!(
+        (after.format, after.kind),
+        (format::CURRENT, VaultKind::Project)
+    );
+    assert!(after.remote);
+    assert_eq!(after.bindings, rules);
+    assert_eq!(after.devices, devices);
+    let bak = path.with_file_name("vault.vht.v4.bak");
+    assert_eq!(std::fs::read(&bak).unwrap(), original);
+
+    // Later saves leave the backup alone.
+    v.set("DELTA", b"fake-four", Kind::Env, Tier::Session)
+        .unwrap();
+    v.save(&path, &store).unwrap();
+    assert_eq!(std::fs::read(&bak).unwrap(), original);
+    let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert_eq!(again.slots(), slots);
+    assert_eq!(again.get("BETA").unwrap().expose(), b"fake two lines\nx");
+    assert!(again.slots().iter().any(|s| s.kind == 0x7001));
+}
+
+/// Putting the pre-upgrade v4 file back is a rollback.
+#[test]
+fn rollback_to_the_pre_upgrade_v4_file_is_detected() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    let original = std::fs::read(dir().join("v4.vht")).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    v.save(&path, &store).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    assert!(matches!(
+        Vault::unlock_password(&path, b"correct horse", &store),
+        Err(Error::RolledBack { found: 1, seen: 2 })
+    ));
+}
+
+/// The v5 fixture carries a role and a member with an expiry; both survive a
+/// save, and a format 4 build's field layout is not what is read here.
+#[test]
+fn the_v5_fixture_carries_roles_and_member_expiry() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("vault.vht");
+    std::fs::write(&path, std::fs::read(dir().join("v5.vht")).unwrap()).unwrap();
+    let store = LocalStore::new(work.path().join("store"));
+
+    let peek = Vault::peek(&path).unwrap();
+    assert_eq!((peek.format, peek.kind), (5, VaultKind::Project));
+    let mut v = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert!(!v.upgrade_pending());
+    assert_eq!(v.roles().len(), 1);
+    assert_eq!(v.roles()[0].name, "READER");
+    assert_eq!(v.roles()[0].secrets, ["BETA"]);
+    assert_eq!(v.roles()[0].max_uses, Some(5));
+    assert_eq!(v.recipients().len(), 1);
+    assert_eq!(v.recipients()[0].expires_at, Some(1_900_000_000));
+    v.save(&path, &store).unwrap();
+    let again = Vault::unlock_password(&path, b"correct horse", &store).unwrap();
+    assert_eq!(again.roles(), v.roles());
+    assert_eq!(again.recipients()[0].expires_at, Some(1_900_000_000));
 }

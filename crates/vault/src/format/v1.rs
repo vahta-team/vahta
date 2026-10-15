@@ -59,7 +59,7 @@ const SLOT_PASSWORD: u8 = 0;
 const SLOT_RECOVERY: u8 = 1;
 
 pub(super) const MAX_ENTRIES: usize = 100_000;
-const MAX_RECIPIENTS: usize = 4096;
+pub(super) const MAX_RECIPIENTS: usize = 4096;
 pub(super) const WRAPPED_KEY_LEN: usize = KEY_LEN + TAG_LEN;
 
 /// An Ed25519 signature. `serde` has no impl for 64-byte arrays, so this

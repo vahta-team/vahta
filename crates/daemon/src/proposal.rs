@@ -273,6 +273,7 @@ pub(crate) fn build(
         dirs,
         network,
         from: parse_froms(&args.from)?,
+        harnesses: Vec::new(),
     };
     if let Some(c) = category {
         c.check(&rule_set)?;
@@ -360,6 +361,7 @@ pub(crate) fn texts_of(rs: &RuleSet) -> RulesText {
             _ => Vec::new(),
         },
         from: rs.from.clone(),
+        harnesses: rs.harnesses.clone(),
     }
 }
 
