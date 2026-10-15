@@ -67,6 +67,8 @@ is the command's.
 pub const DELEGATE_USAGE: &str = "\
 usage: vahta delegate [--vault DIR] --secret NAME [--secret NAME]... [--for DURATION]
                       [--label TEXT] [--] COMMAND [ARGS...]
+       vahta delegate [--vault DIR] --role ROLE [--secret NAME]... [--for DURATION]
+                      [--label TEXT] [--] COMMAND [ARGS...]
 
 Narrow your session for a sub-agent and run it. The new session covers only the
 named secrets, lasts no longer than yours (--for makes it shorter), belongs to
@@ -74,6 +76,15 @@ this process, and ends when COMMAND exits. A secret your session does not
 cover, or a longer time, is refused with no window. `vahta run` from inside
 COMMAND uses the narrow session. With --vault DIR (see `vahta run --help`) it
 narrows the session you opened for that vault from this project.
+
+With --role ROLE (an agent role the person approved with `vahta role`) the new
+session is limited to that role: its secrets are the role's that your session
+covers (--secret narrows them further), it lasts no longer than the shortest of
+--for, the role's longest grant and your session, and it may only run commands
+and send requests as the role says, inside each secret's own rules. Everything
+else (revealing, copying, adding, binding, unlocking) is refused for it. A
+session that already has a role passes it on to what it delegates; another role
+there is refused.
 ";
 
 struct Parsed {
@@ -84,6 +95,7 @@ struct Parsed {
     ask: bool,
     reason: Option<String>,
     vault: Option<String>,
+    role: Option<String>,
     command: Vec<String>,
 }
 
@@ -102,6 +114,7 @@ fn parse(args: &[String], delegate: bool) -> Args {
         ask: false,
         reason: None,
         vault: None,
+        role: None,
         command: Vec::new(),
     };
     let mut i = 0;
@@ -138,6 +151,7 @@ fn parse(args: &[String], delegate: bool) -> Args {
                 .and_then(|v| parse_duration(&v))
                 .map(|d| p.duration = d),
             "--label" => value("--label").map(|v| p.label = Some(v)),
+            "--role" if delegate => value("--role").map(|v| p.role = Some(v)),
             "--vault" => value("--vault").and_then(|v| {
                 if v.is_empty() {
                     Err("--vault expects the vault's project folder".to_string())
@@ -339,15 +353,27 @@ pub fn run_delegate(
         }
         Args::Run(p) => p,
     };
-    let request = ClientRequest::Delegate {
-        cwd: env.cwd.to_string_lossy().into_owned(),
-        names: parsed.names,
-        duration: parsed.duration,
-        label: parsed.label,
-        vault: parsed
-            .vault
-            .as_deref()
-            .map(|v| daemon_cmd::vault_arg(env, v)),
+    let cwd = env.cwd.to_string_lossy().into_owned();
+    let vault = parsed
+        .vault
+        .as_deref()
+        .map(|v| daemon_cmd::vault_arg(env, v));
+    let request = match parsed.role {
+        Some(role) => ClientRequest::DelegateRole {
+            cwd,
+            role,
+            names: parsed.names,
+            duration: parsed.duration,
+            label: parsed.label,
+            vault,
+        },
+        None => ClientRequest::Delegate {
+            cwd,
+            names: parsed.names,
+            duration: parsed.duration,
+            label: parsed.label,
+            vault,
+        },
     };
     let mut conn = match daemon_cmd::connect(env, "delegate", stderr) {
         Ok(c) => c,

@@ -3210,6 +3210,569 @@ fn a_hand_edited_toml_is_only_a_proposal_until_vahta_bind_approves_it() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
+// --- agent roles ---------------------------------------------------------------------
+
+#[cfg(unix)]
+impl Sandbox {
+    fn write_toml(&self, text: &str) {
+        fs::write(self.project().join("vahta.toml"), text).unwrap();
+    }
+
+    /// `vahta role NAME`, approved through the window.
+    fn approve_role(&self, name: &str) {
+        self.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+        let out = self.vahta(&["role", name]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+
+    /// Change what a secret's approved rules say about the network.
+    fn set_network(&self, name: &str, network: vahta_vault::Network) {
+        let mut vault = self.open_vault();
+        let mut rules = vault
+            .bindings()
+            .iter()
+            .find(|b| b.name == name)
+            .cloned()
+            .unwrap();
+        rules.network = network;
+        vault.set_bindings(name, Some(rules)).unwrap();
+        vault
+            .save(&self.vault_path(), &LocalStore::new(self.root.join("data")))
+            .unwrap();
+    }
+
+    /// A vault with ZETA and BETA bound to `printenv` and `env`, and a session
+    /// from the test's own process, which the delegations below narrow.
+    fn with_roles_ready() -> Sandbox {
+        let s = sandbox_with_secrets();
+        s.bind_directly("ZETA", &["printenv", "env"], &[]);
+        s.bind_directly("BETA", &["printenv", "env"], &[]);
+        s.script(&[PW_ANSWER]);
+        assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+        s
+    }
+}
+
+/// How a refusal inside a role session reads.
+#[cfg(unix)]
+const LIMITED: &str = "limited to the role";
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_role_wider_than_its_secret_is_refused_and_no_window_opens() {
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &["printenv"], &[]);
+    let asked = s.asks();
+    // A program the secret's own rules do not allow.
+    s.write_toml("[roles.wide]\nsecrets = [\"ZETA\"]\nallow = [\"env\"]\n");
+    let out = s.vahta(&["role", "wide"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("allow `env` is wider than ZETA's own rules") && err.contains("No window"),
+        "{err}"
+    );
+    // A network wider than the secret's.
+    s.set_network("ZETA", vahta_vault::Network::None);
+    s.write_toml("[roles.wide]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\nnetwork = \"app\"\n");
+    let out = s.vahta(&["role", "wide"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("network app is wider than ZETA's network (none)"),
+        "{}",
+        text(&out.stderr)
+    );
+    s.write_toml(
+        "[roles.wide]\nsecrets = [\"ZETA\"]\nnetwork = \"hosts\"\nhosts = [\"api.example.test\"]\n",
+    );
+    let out = s.vahta(&["role", "wide"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(text(&out.stderr).contains("host"), "{}", text(&out.stderr));
+    // A secret that is not there, and one with no rules.
+    s.write_toml("[roles.wide]\nsecrets = [\"NOPE\"]\n");
+    assert_eq!(s.vahta(&["role", "wide"]).status.code(), Some(3));
+    s.write_toml("[roles.wide]\nsecrets = [\"BETA\"]\n");
+    let mut vault = s.open_vault();
+    vault.set_bindings("BETA", None).unwrap();
+    vault
+        .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+        .unwrap();
+    let out = s.vahta(&["role", "wide"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no approved rules"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Nor is there a proposal for a name the file does not have.
+    assert_eq!(s.vahta(&["role", "nothing"]).status.code(), Some(3));
+    assert_eq!(s.asks(), asked, "none of this opened a window");
+    assert!(s.open_vault().roles().is_empty());
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn an_approved_role_lets_delegate_run_what_it_allows_and_nothing_else() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml(
+        "[roles.show]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\ndeny = [\"@shells\"]\nuses = 5\n",
+    );
+    // Not approved yet: a role the vault does not have.
+    let out = s.vahta(&["delegate", "--role", "show", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        text(&out.stderr).contains("no approved role"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&["role", "show", "--reason", "read the env"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let choice = s.last_ask("choose");
+    let lines = choice["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("Role: show")
+            && lines.contains("Secrets: ZETA")
+            && lines.contains("Commands: only `printenv`")
+            && lines.contains("Never: `@shells`")
+            && lines.contains("at most 5 uses")
+            && lines.contains("It is not approved yet."),
+        "{lines}"
+    );
+    assert_eq!(choice["panel"]["agent_note"], "read the env");
+    let roles = s.open_vault().roles().to_vec();
+    assert_eq!(roles.len(), 1);
+    assert!(roles[0].approved_at > 0 && roles[0].secrets == ["ZETA"]);
+
+    let asks = s.asks();
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "ZETA", "--", "printenv",
+        "ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "***REDACTED(ZETA)***\n");
+    // `env` is in the secret's own rules but not in the role's.
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "ZETA", "--", "env",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(LIMITED), "{}", text(&out.stderr));
+    // A shell is denied by the role even before the allow list is looked at.
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "ZETA", "--", "sh", "-c",
+        "true",
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    // BETA is not the role's.
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "BETA", "--", "printenv",
+        "BETA",
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(s.asks(), asks, "no window inside a role");
+
+    // The child shows its role, and the journal does.
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "sessions", "--json",
+    ]);
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let child = doc["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["parent"].is_string())
+        .unwrap()
+        .clone();
+    assert_eq!(child["agent_role"], "show");
+    assert_eq!(child["names"], serde_json::json!(["ZETA"]));
+    let journal = s.journal();
+    assert!(
+        journal.contains("\"event\":\"role_approved\"")
+            && journal.contains("\"event\":\"run\"")
+            && journal.contains("\"role\":\"show\""),
+        "{journal}"
+    );
+    assert!(!journal.contains("fake-") && !journal.contains("correct horse"));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_role_session_refuses_everything_but_the_actions_of_its_role() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml("[roles.show]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\n");
+    s.approve_role("show");
+    let asks = s.asks();
+    for args in [
+        vec!["reveal", "ZETA"],
+        vec!["copy", "ZETA"],
+        vec!["add", "NEWONE"],
+        vec!["bind", "ZETA", "--allow", "env"],
+        vec!["remove", "ZETA"],
+        vec!["unlock"],
+        vec!["unlock", "--role", "show"],
+        vec!["role", "show"],
+        vec!["role", "--remove", "show"],
+        vec!["remote", "on"],
+    ] {
+        let mut full = vec!["delegate", "--role", "show", "--", VAHTA];
+        full.extend(&args);
+        let out = s.vahta(&full);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(
+            text(&out.stderr).contains(LIMITED),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    // `http` is an action the role does not list; the refusal is the role's,
+    // not a host question.
+    let out = s.vahta(&[
+        "delegate",
+        "--role",
+        "show",
+        "--",
+        VAHTA,
+        "http",
+        "--secret",
+        "ZETA",
+        "-H",
+        "Authorization: {ZETA}",
+        "https://api.example.test/x",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("does not let it send requests"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(s.asks(), asks, "refused before any window");
+    assert_eq!(s.open_vault().roles().len(), 1);
+    assert!(s.journal().contains("\"event\":\"role_refused\""));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_role_gives_a_limited_number_of_uses_and_a_nested_delegation_does_not_add_any() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml("[roles.two]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\nuses = 2\n");
+    s.approve_role("two");
+    let run = format!("'{VAHTA}' run --secret ZETA -- printenv ZETA >/dev/null");
+    let script = format!("{run}; echo first=$?; {run}; echo second=$?; {run}; echo third=$?");
+    let out = s.vahta(&["delegate", "--role", "two", "--", "sh", "-c", &script]);
+    let said = text(&out.stdout);
+    assert!(
+        said.contains("first=0") && said.contains("second=0") && said.contains("third=3"),
+        "{said} / {}",
+        text(&out.stderr)
+    );
+    assert!(s.journal().contains("RoleExhausted"));
+    // A new grant is a fresh count; a use under a nested delegation counts
+    // against the parent's role as well.
+    let nested = format!(
+        "'{VAHTA}' delegate --secret ZETA -- '{VAHTA}' run --secret ZETA -- printenv ZETA >/dev/null"
+    );
+    let script = format!("{run}; echo first=$?; {nested}; echo nested=$?; {run}; echo third=$?");
+    let out = s.vahta(&["delegate", "--role", "two", "--", "sh", "-c", &script]);
+    let said = text(&out.stdout);
+    assert!(
+        said.contains("first=0") && said.contains("nested=0") && said.contains("third=3"),
+        "{said} / {}",
+        text(&out.stderr)
+    );
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_roles_longest_grant_caps_the_deadline_of_delegate_and_unlock() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml("[roles.short]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\nfor = \"1m\"\n");
+    s.approve_role("short");
+    let child_of = |out: &Output| -> Value {
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        doc["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["agent_role"] == "short")
+            .unwrap()
+            .clone()
+    };
+    // Asked for two hours (more than the parent has): capped, not refused.
+    let out = s.vahta(&[
+        "delegate", "--role", "short", "--for", "2h", "--", VAHTA, "sessions", "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let left = child_of(&out)["remaining_secs"].as_u64().unwrap();
+    assert!((1..=60).contains(&left), "{left}");
+    // Without --for it is the shortest of the parent's time and the role's.
+    let out = s.vahta(&[
+        "delegate", "--role", "short", "--", VAHTA, "sessions", "--json",
+    ]);
+    assert!(child_of(&out)["remaining_secs"].as_u64().unwrap() <= 60);
+    // A plain delegation still refuses a later deadline than the parent's.
+    let out = s.vahta(&["delegate", "--secret", "ZETA", "--for", "2h", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+
+    // `unlock --role` with `forever` is capped too, and the window names the role.
+    assert_eq!(s.vahta(&["lock"]).status.code(), Some(0));
+    s.script(&[PW_ANSWER]);
+    let out = s.vahta(&["unlock", "--role", "short", "--for", "forever", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let info: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let left = info["session"]["remaining_secs"].as_u64().unwrap();
+    assert!((1..=60).contains(&left), "{left}");
+    assert_eq!(info["session"]["agent_role"], "short");
+    let lines = s.last_ask("password")["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("Role: short") && lines.contains("Secrets: ZETA"),
+        "{lines}"
+    );
+    // The test process itself is now in the role session: it runs what the
+    // role allows and is refused the rest.
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "env"]);
+    assert_eq!(out.status.code(), Some(3));
+    let out = s.vahta(&["reveal", "ZETA"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(LIMITED), "{}", text(&out.stderr));
+    let out = s.vahta(&["unlock", "--role", "nope"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(s.vahta(&["lock"]).status.code(), Some(0));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_changed_toml_does_not_take_effect_until_it_is_approved_again() {
+    let s = Sandbox::with_roles_ready();
+    let secret = "[secrets.ZETA]\nallow = [\"printenv\", \"env\"]\n\n";
+    let role = "[roles.show]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\n";
+    s.write_toml(role);
+    s.approve_role("show");
+    // In sync: check is clean and says which roles there are; list too.
+    s.write_toml(&format!("{secret}{role}"));
+    let out = s.vahta(&["check"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stdout).contains("Roles:") && text(&out.stdout).contains("show: secrets ZETA"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(text(&s.vahta(&["list"]).stdout).contains("Roles:"));
+
+    // Someone widens the role in the file. `env` is allowed by the secret
+    // too, but the role in the vault does not allow it, and BETA is not in it.
+    s.write_toml(&format!(
+        "{secret}[roles.show]\nsecrets = [\"ZETA\", \"BETA\"]\nallow = [\"printenv\", \"env\"]\n"
+    ));
+    let out = s.vahta(&["check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("Roles not approved: show"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = s.vahta(&["check", "--json"]);
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["roles_pending"], serde_json::json!(["show"]));
+    assert!(text(&s.vahta(&["list"]).stdout).contains("toml differs"));
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "ZETA", "--", "env",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "the vault's copy applies");
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "BETA", "--", "printenv",
+        "BETA",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "BETA is not in the approved role"
+    );
+
+    // `vahta role` shows what the person already approved next to the new
+    // text; approving makes the new text effective.
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&["role"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let lines = s.last_ask("choose")["panel"]["lines"].to_string();
+    assert!(lines.contains("It replaces the approved role"), "{lines}");
+    let out = s.vahta(&[
+        "delegate", "--role", "show", "--", VAHTA, "run", "--secret", "ZETA", "--", "env",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.vahta(&["check"]).status.code(), Some(0));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_delegation_below_a_role_session_keeps_the_role_and_cannot_widen() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml(
+        "[roles.pair]\nsecrets = [\"ZETA\", \"BETA\"]\nallow = [\"printenv\"]\n\n\
+         [roles.other]\nsecrets = [\"ZETA\"]\n",
+    );
+    s.approve_role("pair");
+    s.approve_role("other");
+    // Narrower is fine, and the child still has the role: `env` is refused.
+    let inner = format!(
+        "'{v}' delegate --secret ZETA -- '{v}' run --secret ZETA -- printenv ZETA >/dev/null; \
+         echo narrow=$?; \
+         '{v}' delegate --secret ZETA -- '{v}' run --secret ZETA -- env >/dev/null 2>&1; \
+         echo role_kept=$?; \
+         '{v}' delegate --secret ALPHA -- true >/dev/null 2>&1; echo wider=$?; \
+         '{v}' delegate --role other -- true >/dev/null 2>&1; echo other_role=$?; \
+         '{v}' delegate --role pair --secret ZETA -- true >/dev/null 2>&1; echo same_role=$?",
+        v = VAHTA
+    );
+    let out = s.vahta(&["delegate", "--role", "pair", "--", "sh", "-c", &inner]);
+    let said = text(&out.stdout);
+    assert!(
+        said.contains("narrow=0")
+            && said.contains("role_kept=3")
+            && said.contains("wider=3")
+            && said.contains("other_role=3")
+            && said.contains("same_role=0"),
+        "{said} / {}",
+        text(&out.stderr)
+    );
+    // A name outside the role is refused for a role delegation.
+    let out = s.vahta(&[
+        "delegate", "--role", "other", "--secret", "BETA", "--", "true",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn a_role_that_asks_each_use_opens_a_window_per_use() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml("[roles.careful]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\nask = true\n");
+    s.approve_role("careful");
+    let asks = s.asks();
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "delegate", "--role", "careful", "--", VAHTA, "run", "--secret", "ZETA", "--", "printenv",
+        "ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.asks() > asks);
+    let lines = s.last_ask("choose")["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("Role: careful") && lines.contains("Command: printenv ZETA"),
+        "{lines}"
+    );
+    // A "no" is the person's answer: nothing runs.
+    s.script(&[r#"{"choose":1}"#]);
+    let out = s.vahta(&[
+        "delegate", "--role", "careful", "--", VAHTA, "run", "--secret", "ZETA", "--", "printenv",
+        "ZETA",
+    ]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+}
+
+// Runs commands that only a Unix has (sh, printenv, cat, true).
+#[cfg(unix)]
+#[test]
+fn removing_a_role_needs_the_person_and_takes_it_out_of_the_file() {
+    let s = Sandbox::with_roles_ready();
+    s.write_toml("[roles.show]\nsecrets = [\"ZETA\"]\nallow = [\"printenv\"]\n");
+    s.approve_role("show");
+    // No: the role stays.
+    s.script(&[r#"{"choose":1}"#]);
+    assert_eq!(
+        s.vahta(&["role", "--remove", "show"]).status.code(),
+        Some(4)
+    );
+    assert_eq!(s.open_vault().roles().len(), 1);
+    s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
+    let out = s.vahta(&["role", "--remove", "show"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.open_vault().roles().is_empty());
+    assert!(
+        !fs::read_to_string(s.project().join("vahta.toml"))
+            .unwrap()
+            .contains("roles")
+    );
+    let out = s.vahta(&["delegate", "--role", "show", "--", "true"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        s.vahta(&["role", "--remove", "show"]).status.code(),
+        Some(3)
+    );
+    assert!(s.journal().contains("role_removed"));
+}
+
+// Needs a network namespace for the command, which only Linux gives.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_role_with_network_none_runs_the_command_with_no_network_on_an_app_secret() {
+    let Some(python) = ["python3", "python"]
+        .into_iter()
+        .find(|p| std::process::Command::new(p).arg("-V").output().is_ok())
+    else {
+        eprintln!("skipped: no python on PATH to make a connection with");
+        return;
+    };
+    if !vahta_os::network_isolation_available() {
+        eprintln!("skipped: no unprivileged network namespaces here");
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let probe = format!(
+        "import socket; s = socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', {port})); print('connected')"
+    );
+    let s = sandbox_with_secrets();
+    s.bind_directly("ZETA", &[python], &[]);
+    s.script(&[PW_ANSWER]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    s.write_toml(&format!(
+        "[roles.offline]\nsecrets = [\"ZETA\"]\nallow = [\"{python}\"]\nnetwork = \"none\"\n\n\
+         [roles.online]\nsecrets = [\"ZETA\"]\nallow = [\"{python}\"]\n"
+    ));
+    s.approve_role("offline");
+    s.approve_role("online");
+    // The secret's own network is the program's: it connects, and so does a
+    // role that says nothing about the network.
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", python, "-c", &probe]);
+    assert_eq!(text(&out.stdout), "connected\n", "{}", text(&out.stderr));
+    let out = s.vahta(&[
+        "delegate", "--role", "online", "--", VAHTA, "run", "--secret", "ZETA", "--", python, "-c",
+        &probe,
+    ]);
+    assert_eq!(text(&out.stdout), "connected\n", "{}", text(&out.stderr));
+    // Role `none` on an `app` secret cuts the network like a `none` secret.
+    let out = s.vahta(&[
+        "delegate", "--role", "offline", "--", VAHTA, "run", "--secret", "ZETA", "--", python,
+        "-c", &probe,
+    ]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!text(&out.stdout).contains("connected"));
+    drop(listener);
+}
+
 // --- class and the add hint ----------------------------------------------------------
 
 #[cfg(unix)]

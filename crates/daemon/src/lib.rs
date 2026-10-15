@@ -34,6 +34,7 @@ mod proposal;
 mod remote;
 mod remote_ops;
 mod report;
+mod role_ops;
 mod run;
 mod run_ask;
 mod run_ops;

@@ -421,6 +421,10 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::NoRules => "no approved rules yet; propose them with `vahta bind`",
         RefusalKind::HostNotAllowed => "not approved for this host",
         RefusalKind::NotFromHere => "not allowed from here",
+        RefusalKind::RoleForbids => "not allowed by the agent role this session is limited to",
+        RefusalKind::RoleTooWide => "wider than the secret's own approved rules",
+        RefusalKind::RoleExhausted => "the role's uses are spent",
+        RefusalKind::UnknownRole => "no such approved role",
     }
 }
 

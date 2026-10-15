@@ -16,6 +16,7 @@ use std::path::Path;
 
 use serde_json::json;
 use vahta_vault::manifest::{self, CheckResult};
+use vahta_vault::manifest_roles;
 use vahta_vault::project::Project;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{Class, Entry, Kind, Peek, Tier, Vault, Verification};
@@ -193,6 +194,94 @@ fn rules_pending(project: &Project, peek: &Peek) -> Vec<String> {
         .collect()
 }
 
+/// Which roles `vahta.toml` proposes that the vault has not approved as
+/// written (a new one, or one that differs). Empty when the file is absent or
+/// unreadable.
+fn roles_pending(project: &Project, peek: &Peek) -> Vec<String> {
+    let path = project.manifest_path();
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let Ok(m) = manifest::load(&path) else {
+        return Vec::new();
+    };
+    m.roles
+        .values()
+        .filter(|e| {
+            !manifest_roles::role_in_sync(Some(e), peek.roles.iter().find(|r| r.name == e.name))
+        })
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+/// The approved roles, one line each, for `list` and `check`.
+fn role_lines(peek: &Peek, pending: &[String]) -> Vec<String> {
+    peek.roles
+        .iter()
+        .map(|r| {
+            let mut parts = vec![format!("secrets {}", r.secrets.join(","))];
+            parts.push(
+                r.actions
+                    .iter()
+                    .map(|a| match a {
+                        vahta_vault::Action::Run => "run",
+                        vahta_vault::Action::Http => "http",
+                    })
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            );
+            if let Some(n) = &r.network {
+                parts.push(format!("network {}", manifest::network_word(n)));
+            }
+            if let Some(s) = r.max_for_secs {
+                parts.push(format!("for {}", vahta_ipc::duration::human(s)));
+            }
+            if let Some(n) = r.max_uses {
+                parts.push(format!("{n} uses"));
+            }
+            if r.ask_each_use {
+                parts.push("asks each use".to_string());
+            }
+            let mut line = format!("  {}: {}", r.name, parts.join(", "));
+            if pending.contains(&r.name) {
+                line.push_str(" (toml differs; the approved role applies)");
+            }
+            line
+        })
+        .chain(
+            pending
+                .iter()
+                .filter(|n| !peek.roles.iter().any(|r| &r.name == *n))
+                .map(|n| {
+                    format!(
+                        "  {n}: NOT APPROVED (vahta.toml proposes it; it takes no effect until \
+                         the person runs `vahta role {n}`)"
+                    )
+                }),
+        )
+        .collect()
+}
+
+/// A role for `list --json`.
+fn role_json(r: &vahta_vault::AgentRole) -> serde_json::Value {
+    json!({
+        "name": r.name,
+        "secrets": r.secrets,
+        "allow": r.allow.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
+        "deny": r.deny.iter().map(|a| a.text.clone()).collect::<Vec<_>>(),
+        "network": r.network.as_ref().map(manifest::network_word),
+        "dirs": r.dirs.iter().map(|d| d.text.clone()).collect::<Vec<_>>(),
+        "for_secs": r.max_for_secs,
+        "uses": r.max_uses,
+        "actions": r.actions.iter().map(|a| match a {
+            vahta_vault::Action::Run => "run",
+            vahta_vault::Action::Http => "http",
+        }).collect::<Vec<_>>(),
+        "ask": r.ask_each_use,
+        "approved_at": r.approved_at,
+    })
+}
+
 pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let (json, remote) = match parse(args) {
         Args::Help => {
@@ -235,6 +324,7 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
     };
     let entries = sorted(&peek.entries);
     let pending = rules_pending(&project, &peek);
+    let role_pending = roles_pending(&project, &peek);
     let bound = |name: &str| peek.bindings.iter().any(|b| b.name == name);
 
     if json {
@@ -266,6 +356,8 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
             "verified": verified == Verification::Pinned,
             "upgrade_pending": peek.upgrade_pending,
             "secrets": secrets,
+            "roles": peek.roles.iter().map(role_json).collect::<Vec<_>>(),
+            "roles_pending": role_pending,
         });
         let _ = writeln!(
             stdout,
@@ -315,6 +407,13 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
                 let _ = writeln!(stdout, "{}", line.trim_end());
             }
         }
+        let lines = role_lines(&peek, &role_pending);
+        if !lines.is_empty() {
+            let _ = writeln!(stdout, "Roles:");
+            for line in lines {
+                let _ = writeln!(stdout, "{line}");
+            }
+        }
         if verified == Verification::Unpinned {
             let _ = writeln!(
                 stderr,
@@ -337,10 +436,11 @@ fn check_json(
     vault: Option<&Path>,
     r: &CheckResult,
     pending: &[String],
+    roles_pending: &[String],
     error: Option<&str>,
 ) -> String {
     let doc = json!({
-        "ok": r.ok && pending.is_empty() && error.is_none(),
+        "ok": r.ok && pending.is_empty() && roles_pending.is_empty() && error.is_none(),
         "manifest": manifest_path.map(|p| p.display().to_string()),
         "vault": vault.map(|p| p.display().to_string()),
         "required": r.required,
@@ -348,6 +448,7 @@ fn check_json(
         "missing": r.missing,
         "optional_absent": r.optional_absent,
         "rules_pending": pending,
+        "roles_pending": roles_pending,
         "error": error,
     });
     serde_json::to_string_pretty(&doc).unwrap_or_default()
@@ -392,7 +493,7 @@ pub fn run_check(
             let _ = writeln!(
                 stdout,
                 "{}",
-                check_json(manifest_path, vault, &empty_result(), &[], Some(msg))
+                check_json(manifest_path, vault, &empty_result(), &[], &[], Some(msg))
             );
         } else {
             let _ = writeln!(stderr, "vahta check: error: {msg}");
@@ -429,7 +530,7 @@ pub fn run_check(
             let _ = writeln!(
                 stdout,
                 "{}",
-                check_json(None, None, &empty_result(), &[], None)
+                check_json(None, None, &empty_result(), &[], &[], None)
             );
         } else {
             let _ = writeln!(stdout, "No vahta.toml found - nothing to check.");
@@ -444,6 +545,8 @@ pub fn run_check(
     let vault_path = project.vault_path();
     let has_vault = vault_path.is_file();
     let mut rules_lines: Vec<String> = Vec::new();
+    let mut role_pending: Vec<String> = Vec::new();
+    let mut role_text: Vec<String> = Vec::new();
     let (names, vault_shown, pending): (Option<Vec<String>>, Option<&Path>, Vec<String>) =
         if has_vault {
             let Some(store) = store(env) else {
@@ -487,6 +590,8 @@ pub fn run_check(
                             None => format!("  {}: NO RULES (nothing may use it yet)", e.name),
                         });
                     }
+                    role_pending = roles_pending(&project, &peek);
+                    role_text = role_lines(&peek, &role_pending);
                     (
                         Some(peek.entries.iter().map(|e| e.name.clone()).collect()),
                         Some(vault_path.as_path()),
@@ -525,7 +630,14 @@ pub fn run_check(
         let _ = writeln!(
             stdout,
             "{}",
-            check_json(Some(&manifest_path), vault_shown, &result, &pending, None)
+            check_json(
+                Some(&manifest_path),
+                vault_shown,
+                &result,
+                &pending,
+                &role_pending,
+                None
+            )
         );
     } else {
         let mut lines = vec![format!("Manifest: {}", manifest_path.display())];
@@ -563,17 +675,29 @@ pub fn run_check(
                 pending.join(", ")
             ));
         }
+        if !role_text.is_empty() {
+            lines.push("Roles:".to_string());
+            lines.extend(role_text.iter().cloned());
+        }
+        if !role_pending.is_empty() {
+            lines.push(format!(
+                "Roles not approved: {} (vahta.toml proposes roles that the vault has not \
+                 approved as written, and they take no effect; `vahta role NAME` shows and \
+                 approves them)",
+                role_pending.join(", ")
+            ));
+        }
         // One verdict, last, for everything above.
-        let ok = result.ok && pending.is_empty();
+        let ok = result.ok && pending.is_empty() && role_pending.is_empty();
         lines.push(if ok { "OK" } else { "FAIL" }.to_string());
         let text = lines.join("\n");
-        if result.ok && pending.is_empty() {
+        if ok {
             let _ = writeln!(stdout, "{text}");
         } else {
             let _ = writeln!(stderr, "{text}");
         }
     }
-    if result.ok && pending.is_empty() {
+    if result.ok && pending.is_empty() && role_pending.is_empty() {
         EXIT_CLEAN
     } else {
         EXIT_FAILED

@@ -40,6 +40,8 @@ nothing was done.
 | `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--from PROJECT]... [--no-from] [--clear] [--reason TEXT]` | Propose which commands may use a secret (and which other projects may use it), or approve the rules in `vahta.toml`. The person approves in the window. | yes |
 | `vahta remote [on\|off]` | Let this project's vault be used from other projects, or stop. Plain `remote` only says which. | yes, to change it |
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
+| `vahta delegate --role ROLE [--secret NAME]... [--for DURATION] -- COMMAND` | The same, limited to an approved agent role: only what the role allows, inside each secret's rules; the deadline is the shortest of `--for`, the role's `for` and the parent's. | no |
+| `vahta role [NAME] [--remove] [--reason TEXT]` | Propose the `[roles.NAME]` of `vahta.toml` (or remove one). Refused with no window when wider than a secret's rules; otherwise the person approves it once. See [agent-usage.md](agent-usage.md#proposing-a-role-for-a-task). | yes |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list [--vault DIR]`, `vahta check [--vault DIR]` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta devices` | List the phones paired with this vault: name, id, when paired, when their access ends, when last used, and which unlock method is current. | no |
