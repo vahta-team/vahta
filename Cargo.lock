@@ -1976,6 +1976,7 @@ dependencies = [
 name = "vahta-policy"
 version = "0.0.0"
 dependencies = [
+ "dunce",
  "serde",
  "toml",
  "vahta-vault",

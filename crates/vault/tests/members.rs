@@ -373,6 +373,7 @@ fn proposed_rules_ride_in_the_signed_transfer_and_apply_nothing() {
     assert!(v.read_transfer(&bad).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_package_carries_project_relative_rules_and_no_folders_of_the_owner() {
     use vahta_vault::rules::parse_rule;

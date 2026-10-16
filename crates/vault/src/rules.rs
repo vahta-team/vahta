@@ -44,7 +44,7 @@ pub fn is_project_path(p: &str) -> bool {
 /// The stored form of the absolute `path` if it is at or below `root`, with
 /// normal components only; `None` otherwise.
 pub fn to_project_path(path: &str, root: &Path) -> Option<String> {
-    let rel = Path::new(path).strip_prefix(root).ok()?;
+    let rel = strip_root(Path::new(path), root)?;
     let mut out = PROJECT_ROOT.to_string();
     for c in rel.components() {
         match c {
@@ -58,18 +58,46 @@ pub fn to_project_path(path: &str, root: &Path) -> Option<String> {
     Some(out)
 }
 
+/// `path` below `root`. On Windows the names are compared without regard to
+/// case, as the file system does; the rest keeps the spelling it has.
+fn strip_root<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Some(rel);
+    }
+    #[cfg(windows)]
+    {
+        let mut rest = path.components();
+        for r in root.components() {
+            let p = rest.next()?;
+            if !p
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&r.as_os_str().to_string_lossy())
+            {
+                return None;
+            }
+        }
+        return Some(rest.as_path());
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 /// `stored` as a path on this machine: `$PROJECT` forms are expanded from
 /// `root`, anything else is returned as it is.
 pub fn expand_project_path<'a>(stored: &'a str, root: &Path) -> Cow<'a, str> {
     if !is_project_path(stored) {
         return Cow::Borrowed(stored);
     }
-    let rest = stored[PROJECT_ROOT.len()..].trim_start_matches('/');
-    if rest.is_empty() {
-        Cow::Owned(root.to_string_lossy().into_owned())
-    } else {
-        Cow::Owned(root.join(rest).to_string_lossy().into_owned())
-    }
+    // Stored with `/`; joined part by part so the result has this machine's
+    // separators.
+    let mut path = root.to_path_buf();
+    path.extend(
+        stored[PROJECT_ROOT.len()..]
+            .split('/')
+            .filter(|p| !p.is_empty()),
+    );
+    Cow::Owned(path.to_string_lossy().into_owned())
 }
 
 /// `word` in its stored form if it is an absolute path inside one of `roots`.
@@ -395,6 +423,36 @@ pub fn parse_host(text: &str) -> Result<HostRule, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_paths_round_trip_with_this_machines_separators() {
+        let root = std::env::temp_dir().join("vahta-rules-root");
+        let inside = root.join("lib").join("x.py");
+        let inside_text = inside.to_string_lossy().into_owned();
+        let stored = to_project_path(&inside_text, &root).unwrap();
+        assert_eq!(stored, "$PROJECT/lib/x.py");
+        assert_eq!(
+            Path::new(expand_project_path(&stored, &root).as_ref()),
+            inside.as_path()
+        );
+        assert_eq!(
+            to_project_path(&root.to_string_lossy(), &root).unwrap(),
+            "$PROJECT"
+        );
+        assert_eq!(
+            Path::new(expand_project_path("$PROJECT", &root).as_ref()),
+            root.as_path()
+        );
+        // A sibling that merely shares a prefix is not inside.
+        let sibling = root.with_file_name("vahta-rules-root2").join("x");
+        assert!(to_project_path(&sibling.to_string_lossy(), &root).is_none());
+        // Windows names differ in case only.
+        #[cfg(windows)]
+        assert_eq!(
+            to_project_path(&inside_text.to_uppercase(), &root).unwrap(),
+            "$PROJECT/LIB/X.PY"
+        );
+    }
 
     #[test]
     fn parses_the_forms() {

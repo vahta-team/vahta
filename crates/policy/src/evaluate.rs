@@ -115,7 +115,7 @@ fn args_len(rule: &ApprovedRule, argv: &[String], root: &Path) -> Option<usize> 
         let resolved: Vec<String> = rest
             .iter()
             .map(|w| match Path::new(w) {
-                p if p.is_absolute() => std::fs::canonicalize(p)
+                p if p.is_absolute() => dunce::canonicalize(p)
                     .map_or_else(|_| w.clone(), |c| c.to_string_lossy().into_owned()),
                 _ => w.clone(),
             })
@@ -133,7 +133,7 @@ fn args_match(rule: &ApprovedRule, argv: &[String], root: &Path) -> bool {
 /// The project root as the file system resolves it, which is what resolved
 /// program paths are compared with.
 fn canonical_root(root: &Path) -> PathBuf {
-    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// The names deny matching looks at: what the caller typed and what it
@@ -721,6 +721,8 @@ mod tests {
         assert!(matches!(check(&b, None, &[]), Verdict::NotAllowed { .. }));
     }
 
+    // Literal Unix paths: the Windows form is covered in `vahta_vault::rules`.
+    #[cfg(unix)]
     #[test]
     fn project_relative_rules_are_expanded_from_the_runners_own_root() {
         let rules = RuleSet {
@@ -779,6 +781,8 @@ mod tests {
         ));
     }
 
+    // Literal Unix paths: the Windows form is covered in `vahta_vault::rules`.
+    #[cfg(unix)]
     #[test]
     fn a_package_runner_rule_and_a_project_path_rule_work_in_one_set() {
         let b = binding(
