@@ -1,0 +1,28 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "daemon": {
+    "known": [
+      "ZETA"
+    ]
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Write",
+    "tool_input": {
+      "file_path": "/work/proj/notes.txt",
+      "content": "the value is fake-known-value-123\n"
+    },
+    "cwd": "/work/proj",
+    "session_id": "s1"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this would write a value Vahta holds into a file (raw). Use `vahta run`."
+    },
+    "systemMessage": "vahta blocked Write: it would write the value of the secret ZETA (raw) into a file."
+  },
+  "exit": 0
+}

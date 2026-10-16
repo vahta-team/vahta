@@ -20,7 +20,7 @@ use std::time::Duration;
 use vahta_ipc::client::Connector;
 use vahta_ipc::config::{Config, HookOutput, HookTool};
 use vahta_ipc::paths::Paths;
-use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan, Signal};
+use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan, PromptDecision, Signal};
 use vahta_ipc::spool::{self, SpoolLine};
 
 use crate::redact::Cut;
@@ -77,6 +77,11 @@ enum Delivery {
 /// Send `request` to a running daemon of this version and read its reply,
 /// waiting at most [`WAIT`].
 fn deliver(paths: Paths, request: ClientRequest) -> Delivery {
+    deliver_within(paths, request, WAIT)
+}
+
+/// [`deliver`] with another limit.
+fn deliver_within(paths: Paths, request: ClientRequest, wait: Duration) -> Delivery {
     let connector = Connector {
         paths,
         version: vahta_ipc::VERSION.to_string(),
@@ -102,7 +107,7 @@ fn deliver(paths: Paths, request: ClientRequest) -> Delivery {
         };
         let _ = tx.send(delivery);
     });
-    rx.recv_timeout(WAIT).unwrap_or(Delivery::Lost)
+    rx.recv_timeout(wait).unwrap_or(Delivery::Lost)
 }
 
 /// Send `request` to a running daemon of this version and read its reply,
@@ -205,6 +210,114 @@ pub fn tool_check(session: Option<String>, cwd: &str, text: &str) -> Option<Held
         }
     }
     None
+}
+
+/// How long the hook waits for the person to answer the window of a prompt
+/// with a secret in it: a little under the 120 s the harness allows the hook
+/// (the daemon's own wait is shorter still). `VAHTA_HOOK_PROMPT_WAIT_MS` can
+/// only shorten it, for tests; a longer one is ignored.
+const PROMPT_WAIT: Duration = Duration::from_secs(115);
+
+fn prompt_wait() -> Duration {
+    std::env::var("VAHTA_HOOK_PROMPT_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .map_or(PROMPT_WAIT, |d| d.min(PROMPT_WAIT))
+}
+
+/// The longest prompt sent to the daemon whole (a frame is at most 1 MiB, and
+/// JSON escaping can multiply a text by six). A longer one is not put before
+/// the person; the hook holds it.
+pub const MAX_PROMPT: usize = 160 * 1024;
+
+/// The names of the held values a prompt carries, when a daemon of this
+/// version runs and answers within [`WAIT`] (checked in pieces, like a tool
+/// call). Anything else is empty: nothing is known.
+pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if text.len() < MIN_CHECKED {
+        return names;
+    }
+    let Ok(paths) = Paths::from_env(None) else {
+        return names;
+    };
+    let mut start = 0;
+    for _ in 0..CHECK_PIECES {
+        let mut end = (start + CHECK_CHUNK).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let request = ClientRequest::CheckInput {
+            session: session.clone(),
+            cwd: cwd.to_string(),
+            text: text[start..end].to_string(),
+        };
+        match deliver(paths.clone(), request) {
+            Delivery::Answered(ClientReply::InputNames { names: found }) => {
+                for n in found {
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+            }
+            Delivery::Answered(_) => {}
+            Delivery::NoDaemon | Delivery::Lost => return names,
+        }
+        if end >= text.len() {
+            break;
+        }
+        start = end.saturating_sub(CHECK_OVERLAP);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+    names
+}
+
+/// What came of asking the person about a prompt.
+pub enum PromptOutcome {
+    /// A false alarm: the prompt goes on.
+    Send,
+    /// Saved in the project's vault under this name; the prompt must not go.
+    Saved(String),
+    /// The person chose not to send it, or gave no answer.
+    Held { no_answer: bool },
+    /// Another window is open, or this process asked too often.
+    Busy { limited: bool },
+    /// No daemon of this version to ask, or it failed or did not answer in
+    /// time.
+    Unasked,
+}
+
+/// Ask a running daemon to put a prompt with a secret in it before the
+/// person, and wait for the answer (up to [`PROMPT_WAIT`]).
+pub fn prompt_ask(
+    session: Option<String>,
+    harness: &str,
+    cwd: &str,
+    text: &str,
+    detected: Option<String>,
+) -> PromptOutcome {
+    let Ok(paths) = Paths::from_env(None) else {
+        return PromptOutcome::Unasked;
+    };
+    let request = ClientRequest::PromptAsk {
+        session,
+        harness: harness.to_string(),
+        cwd: cwd.to_string(),
+        text: text.to_string(),
+        detected,
+    };
+    match deliver_within(paths, request, prompt_wait()) {
+        Delivery::Answered(ClientReply::PromptAnswer { answer }) => match answer {
+            PromptDecision::Send {} => PromptOutcome::Send,
+            PromptDecision::Saved { name } => PromptOutcome::Saved(name),
+            PromptDecision::Held { no_answer } => PromptOutcome::Held { no_answer },
+            PromptDecision::Busy { limited } => PromptOutcome::Busy { limited },
+        },
+        _ => PromptOutcome::Unasked,
+    }
 }
 
 /// Ask a running daemon whether `argv` passes the rules of every secret in

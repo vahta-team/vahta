@@ -218,6 +218,10 @@ pub struct EventSpec {
     pub kind: Kind,
     /// The harness's own tool matcher for this event. Used by setup only.
     pub matcher: Option<String>,
+    /// How many seconds the harness lets the hook run for this event, written
+    /// next to the command by setup. Absent: the harness's own default. Set
+    /// where the hook may wait for the person (a prompt with a secret in it).
+    pub timeout: Option<u64>,
     pub tool_name: Option<OneOrMany>,
     pub tool_input: Option<OneOrMany>,
     pub prompt: Option<OneOrMany>,

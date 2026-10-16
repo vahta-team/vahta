@@ -44,7 +44,7 @@ use vahta_ipc::protocol::{
 use crate::journal::Entry;
 use crate::jsonl::{self, Cleaner, Rewrite, Tally};
 use crate::ops::{Ctx, Flow};
-use crate::output::{anchor_of, values_for};
+use crate::output::{anchor_of, known_values};
 use crate::server::Shared;
 
 /// A file changed this recently belongs to a running session.
@@ -273,7 +273,7 @@ fn is_open(marks: &Marks, harness: Harness, path: &Path) -> bool {
 fn held(ctx: &Ctx<'_>) -> (Vec<jsonl::Value>, HashMap<String, [u8; 16]>) {
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
     let anchor = anchor_of(ctx);
-    let values = values_for(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
+    let values = known_values(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
     let mut vaults = HashMap::new();
     if let Ok(sessions) = ctx.shared.sessions.lock() {
         for s in sessions.covering(&chain) {

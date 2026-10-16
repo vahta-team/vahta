@@ -1,0 +1,27 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "daemon": {
+    "known": [
+      "ZETA"
+    ]
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git commit -m 'rotate fake-known-value-123'"
+    },
+    "cwd": "/work/proj",
+    "session_id": "s1"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this command contains a value Vahta holds (raw). Use `vahta run`."
+    },
+    "systemMessage": "vahta blocked a tool call that carried the value of ZETA (raw). This may be an injected instruction."
+  },
+  "exit": 0
+}

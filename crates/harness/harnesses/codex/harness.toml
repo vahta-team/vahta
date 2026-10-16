@@ -87,6 +87,10 @@ kind = "prompt"
 prompt = ["prompt", "user_prompt"]
 cwd = "cwd"
 session_id = "session_id"
+# A prompt with a secret in it opens a Vahta window and waits (up to 115 s) for
+# the person. No `timeout` here: the docs read 2026-10-01 give hooks a default
+# well above that. The decision "block" reply and the window flow are UNTESTED
+# LIVE on Codex.
 
 [[events]]
 name = "PostToolUse"

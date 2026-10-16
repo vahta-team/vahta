@@ -79,6 +79,11 @@ pub(crate) struct Prepared {
     /// Start the command with no network (a fresh network namespace). A run
     /// that asks for it where it cannot be had is refused, never run open.
     pub isolate_network: bool,
+    /// With `isolate_network`: the hosts and ports the command may still
+    /// reach, through the daemon's relay (Linux). Empty: none.
+    pub relay_hosts: Vec<(String, u16)>,
+    /// The vault the run belongs to, for the relay's journal lines.
+    pub vault_id: [u8; 16],
 }
 
 fn to_os(bytes: &[u8]) -> OsString {
@@ -507,6 +512,19 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     if isolate_network {
         refuse_hidden_paths(&canonical_cwd, &argv)?;
     }
+    // What the run may reach: the hosts every restricting rule names.
+    let mut reachable = Reachable::default();
+    for (b, v) in &verdicts {
+        if matches!(
+            v,
+            Verdict::Allowed {
+                isolate_network: true,
+                ..
+            }
+        ) {
+            reachable.restrict(&b.network);
+        }
+    }
     let unisolated_note = verdicts.iter().find_map(|(_, v)| match v {
         Verdict::Allowed { note: Some(n), .. } => Some(n.clone()),
         _ => None,
@@ -571,9 +589,12 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
                 network_isolation: vahta_os::network_isolation_available(),
             },
         )?;
-        if role_isolates && !isolate_network {
-            refuse_hidden_paths(&canonical_cwd, &argv)?;
-            isolate_network = true;
+        if role_isolates {
+            if !isolate_network {
+                refuse_hidden_paths(&canonical_cwd, &argv)?;
+                isolate_network = true;
+            }
+            reachable.restrict(&vahta_policy::role::narrowing(&a.role).network);
         }
     }
     let Some(program) = program else {
@@ -650,14 +671,17 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     }
     // The values are looked for in what the agent's tools print later, for
     // a while: a command may write one where the next tool reads it.
+    let given: Vec<(String, Vec<u8>)> = values
+        .iter()
+        .map(|(n, v)| (n.clone(), v.expose().to_vec()))
+        .collect();
     if let (Some((anchor, _)), Ok(mut outputs)) =
         (crate::output::anchor_of(ctx), ctx.shared.outputs.lock())
     {
-        let given: Vec<(String, Vec<u8>)> = values
-            .iter()
-            .map(|(n, v)| (n.clone(), v.expose().to_vec()))
-            .collect();
         outputs.note_run(anchor, &given, Instant::now());
+    }
+    if ctx.connector {
+        crate::output::note_connector_run(ctx, &given);
     }
     ctx.journal(
         Entry::new("run")
@@ -691,7 +715,51 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         names,
         program,
         isolate_network,
+        relay_hosts: if isolate_network {
+            reachable.hosts()
+        } else {
+            Vec::new()
+        },
+        vault_id: peek.vault_id,
     })
+}
+
+/// The hosts a run may reach: all of them until a rule restricts the network,
+/// then only what every restricting rule lists (a secret must not travel to a
+/// host that another secret's rule did not allow for it). `network = none`
+/// restricts to nothing.
+#[derive(Default)]
+struct Reachable {
+    /// `None`: no restricting rule seen yet.
+    allowed: Option<Vec<(String, u16)>>,
+}
+
+impl Reachable {
+    fn restrict(&mut self, network: &vahta_vault::Network) {
+        // A name the relay can serve: not a wildcard and not an address.
+        let listed: Vec<(String, u16)> = match network {
+            vahta_vault::Network::Hosts(rules) => rules
+                .iter()
+                .filter(|r| !r.subdomains && r.host.parse::<std::net::Ipv4Addr>().is_err())
+                .map(|r| (r.host.clone(), r.port.unwrap_or(443)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.allowed = Some(match self.allowed.take() {
+            None => listed,
+            Some(prev) => prev.into_iter().filter(|h| listed.contains(h)).collect(),
+        });
+    }
+
+    fn hosts(self) -> Vec<(String, u16)> {
+        let mut hosts: Vec<(String, u16)> = Vec::new();
+        for h in self.allowed.unwrap_or_default() {
+            if !hosts.contains(&h) {
+                hosts.push(h);
+            }
+        }
+        hosts
+    }
 }
 
 /// With no network the command sees `/run`, `/var/run` and `/tmp/.X11-unix`
@@ -1237,6 +1305,7 @@ pub(crate) fn delegate(
         label: label.as_deref().and_then(sanitize_label),
         uses: 0,
         agent_role: eff_role.clone(),
+        boot: None,
     };
     let info = info_of(&session, now);
     sessions.add(session);

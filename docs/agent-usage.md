@@ -118,6 +118,21 @@ accepted by `run`, `http`, `unlock`, `delegate`, `list` and `check`.
   project): it does not cover the same vault from another project, nor use of
   the vault at home. `vahta sessions` shows both.
 - `vahta list --vault` shows only the secrets you may use from here.
+- A secret whose network is `hosts` (Linux) lets the command open TLS
+  connections to the listed hosts and nothing else, so an MCP server or a script
+  with `hosts = ["api.github.com"]` reaches its own API. Inside, each listed name
+  resolves (through a replaced `/etc/hosts`) to a private loopback address; the
+  daemon relays the connection to the real host after checking that the TLS
+  server name is that host, without decrypting anything. Other names do not
+  resolve, an IP address has no route, a wrong or missing server name is refused
+  and journaled as suspicious, and the journal counts connections and bytes per
+  host. Port 443 is the default; `host:PORT` lists another (a TLS hello there is
+  checked the same way). `*.` wildcards and IP-address entries are not relayed
+  (reach those with `vahta http`). With several secrets, only hosts every one of
+  them lists are reachable. Programs that do their own DNS or ignore
+  `/etc/hosts` (a static binary with a built-in resolver that skips it, DNS over
+  HTTPS to an IP) simply fail. On macOS and Windows nothing filters the network:
+  `hosts` there is a speed bump (`vahta http` is the controlled way).
 - A secret whose network is `none` or `hosts` runs the command with `/run`,
   `/var/run` and `/tmp/.X11-unix` empty (so no local daemon socket gives it a
   way out). `/run/media` and `/run/mnt` (mounted SD cards and sticks) are kept.

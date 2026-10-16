@@ -1,0 +1,16 @@
+{
+  "event": "prompt",
+  "env": {},
+  "daemon": {
+    "known": [],
+    "prompt": "held"
+  },
+  "stdin": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please summarise the readme",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "prompt_ask": []
+}

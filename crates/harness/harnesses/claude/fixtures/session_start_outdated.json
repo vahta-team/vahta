@@ -12,7 +12,7 @@
     "cwd": "{{TMP}}"
   },
   "stdout": {
-    "systemMessage": "vahta: setup for Claude Code is outdated (v0 → v5); run `vahta setup --claude`"
+    "systemMessage": "vahta: setup for Claude Code is outdated (v0 → v6); run `vahta setup --claude`"
   },
   "exit": 0
 }

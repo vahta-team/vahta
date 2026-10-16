@@ -25,7 +25,7 @@
 use std::io::{Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -42,6 +42,11 @@ use crate::server::Shared;
 
 /// How much of a command's output goes in one frame, before base64.
 const CHUNK: usize = 16 * 1024;
+/// How long output that could be the start of a value waits for the rest of
+/// it before it is let go. A value written in one go or in writes that follow
+/// each other is far inside this; a message that merely ends with a character
+/// a value starts with (a newline) is delayed by no more.
+const HOLD: Duration = Duration::from_millis(25);
 /// How long a command that was asked to stop is given before it is killed.
 #[cfg(unix)]
 const KILL_AFTER: Duration = Duration::from_secs(2);
@@ -59,8 +64,13 @@ fn send(writer: &Writer, message: &RunOutput) -> bool {
 }
 
 /// Read one of the command's output streams, scrub it, and send it on.
+///
+/// A tail that could be the start of a value is held back until more arrives
+/// (see `scrub.rs`). If nothing arrives within [`HOLD`] it is let go, so a
+/// complete message is never kept waiting for the next one; the read happens
+/// on its own thread so that the wait can have a limit.
 fn pump(
-    mut source: impl Read,
+    mut source: impl Read + Send + 'static,
     mut scrubber: Scrubber,
     writer: Writer,
     stderr: bool,
@@ -80,17 +90,40 @@ fn pump(
         }
         bytes.chunks(CHUNK).all(|c| send(&writer, &frame(c)))
     };
-    let mut buf = vec![0u8; CHUNK];
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match source.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    });
     loop {
-        match source.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if !emit(scrubber.push(&buf[..n])) {
+        let next = if scrubber.held() {
+            rx.recv_timeout(HOLD)
+        } else {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        };
+        match next {
+            Ok(chunk) => {
+                if !emit(scrubber.push(&chunk)) {
                     return;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if !emit(scrubber.flush_held()) {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     emit(scrubber.finish());
@@ -168,6 +201,8 @@ pub(crate) fn execute(
         names,
         program,
         isolate_network,
+        relay_hosts,
+        vault_id,
     } = prepared;
 
     // The file that was checked is the file that runs: not a second lookup of
@@ -187,10 +222,27 @@ pub(crate) fn execute(
         use std::os::unix::process::CommandExt;
         command.arg0(&argv[0]).process_group(0);
     }
-    if isolate_network
-        && (!vahta_os::network_isolation_available()
-            || vahta_os::isolate_network(&mut command).is_err())
-    {
+    // Named hosts get a relay (Linux); otherwise the namespace has no way out.
+    let mut host_sockets = None;
+    let isolated = isolate_network
+        && vahta_os::network_isolation_available()
+        && if relay_hosts.is_empty() {
+            vahta_os::isolate_network(&mut command).is_ok()
+        } else {
+            match vahta_os::isolate_network_hosts(&mut command, &relay_hosts) {
+                Ok(sockets) => {
+                    host_sockets = Some(sockets);
+                    true
+                }
+                // No host filter here (macOS, Windows cannot isolate at all):
+                // the plain isolation of before.
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    vahta_os::isolate_network(&mut command).is_ok()
+                }
+                Err(_) => false,
+            }
+        };
+    if isolate_network && !isolated {
         let message = format!(
             "refused: {} must run without network access, and this system cannot provide that",
             argv[0]
@@ -210,6 +262,28 @@ pub(crate) fn execute(
     drop(command);
     drop(env);
     let pid = child.id();
+    // The listeners the command's namespace made are accepted here until it ends.
+    let relay = host_sockets.and_then(|sockets| match sockets.take() {
+        Ok(listeners) => Some(crate::host_relay::start(
+            listeners,
+            relay_hosts
+                .iter()
+                .map(|(host, port)| crate::host_relay::Target {
+                    host: host.clone(),
+                    port: *port,
+                })
+                .collect(),
+            shared.journal.clone(),
+            crate::host_relay::Tag {
+                vault: vault_id,
+                names: names.clone(),
+            },
+        )),
+        Err(_) => {
+            end_command(pid);
+            None
+        }
+    });
 
     let launched = vahta_os::identity_of(pid).ok();
     if let (Some(id), Some(sid)) = (launched, &session)
@@ -270,6 +344,9 @@ pub(crate) fn execute(
         let _ = status_tx.send(child.wait());
     });
     let status = status_rx.recv();
+    if let Some(relay) = relay {
+        relay.finish();
+    }
 
     // The command has ended; its output is let drain for a little.
     let deadline = Instant::now() + DRAIN;

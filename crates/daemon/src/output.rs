@@ -104,6 +104,13 @@ struct RunValues {
     expires: Instant,
 }
 
+/// Where the values of connector runs are kept in `runs`: under no process,
+/// since they are looked for in every caller's output.
+const CONNECTOR_RUNS: ProcessId = ProcessId {
+    pid: 0,
+    start_time: 0,
+};
+
 pub(crate) struct Outputs {
     key: Zeroizing<[u8; 32]>,
     held: Vec<(String, Held)>,
@@ -241,7 +248,7 @@ impl Outputs {
         self.released
             .retain(|anchor, list| !list.is_empty() && alive(anchor));
         self.runs
-            .retain(|anchor, r| r.expires > now && alive(anchor));
+            .retain(|anchor, r| r.expires > now && (*anchor == CONNECTOR_RUNS || alive(anchor)));
     }
 }
 
@@ -271,10 +278,13 @@ pub(crate) fn clean_label(raw: &str) -> String {
 }
 
 /// The values the daemon holds for a caller with this chain and anchor, each
-/// in every form it might be written in: the sessions that cover it, and its
-/// anchor's recent runs. Read from the caches built when they were opened, so
-/// a scan opens no vault.
-pub(crate) fn values_for(
+/// in every form it might be written in: the sessions that cover it, its
+/// anchor's recent runs, and, for every caller, the open connectors session
+/// and the recent connector runs (the server of a connector is started by a
+/// harness, not by the agent, so no chain of the agent leads to them). Read
+/// from the caches built when they were opened, so a scan opens no vault. For
+/// comparison only: callers answer with names and positions, never values.
+pub(crate) fn known_values(
     ctx: &Ctx<'_>,
     chain: &[ProcessId],
     anchor: Option<&ProcessId>,
@@ -284,11 +294,26 @@ pub(crate) fn values_for(
         for s in sessions.covering(chain) {
             values.extend(s.forms.targets());
         }
+        for s in sessions.iter() {
+            if s.anchor_exe == crate::session::CONNECTORS_ANCHOR && s.parent.is_none() {
+                values.extend(s.forms.targets());
+            }
+        }
     }
-    if let (Some(anchor), Ok(outputs)) = (anchor, ctx.shared.outputs.lock()) {
-        values.extend(outputs.run_targets(anchor));
+    if let Ok(outputs) = ctx.shared.outputs.lock() {
+        if let Some(anchor) = anchor {
+            values.extend(outputs.run_targets(anchor));
+        }
+        values.extend(outputs.run_targets(&CONNECTOR_RUNS));
     }
     values
+}
+
+/// Remember what a connector's server was started with, for every caller.
+pub(crate) fn note_connector_run(ctx: &Ctx<'_>, given: &[(String, Vec<u8>)]) {
+    if let Ok(mut outputs) = ctx.shared.outputs.lock() {
+        outputs.note_run(CONNECTOR_RUNS, given, Instant::now());
+    }
 }
 
 /// The cuts the hook proposed, checked: in range, on boundaries, labelled.
@@ -347,7 +372,7 @@ pub(crate) fn scan(
     let mut cuts = checked_hook_cuts(&texts, spans);
 
     // The values this daemon holds for the caller, wherever they appear.
-    let values = values_for(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
+    let values = known_values(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
     if !values.is_empty() {
         let scrubber = Scrubber::new(values);
         for (i, text) in texts.iter().enumerate() {
@@ -522,11 +547,11 @@ const SHOW: usize = 0;
 const SAVE: usize = 2;
 
 /// What `allow` needs of a held output, copied out from under the lock.
-struct Asked {
-    texts: Zeroizing<Vec<String>>,
-    cuts: Vec<HeldCut>,
-    cwd: String,
-    tool: String,
+pub(crate) struct Asked {
+    pub texts: Zeroizing<Vec<String>>,
+    pub cuts: Vec<HeldCut>,
+    pub cwd: String,
+    pub tool: String,
 }
 
 pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> Flow<ClientReply> {
@@ -680,6 +705,7 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
                 vault_path,
                 &asked,
                 &finals,
+                None,
             )?;
             record("saved");
             window.close(Some(&format!("Saved {saved}.")));
@@ -702,13 +728,15 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
 
 /// "Save as a secret": which value (if there are several), its name and tier,
 /// then the vault password, which every write needs fresh. Returns the name.
-fn save(
+/// With `suggest`, an empty answer to the name takes it.
+pub(crate) fn save(
     ctx: &Ctx<'_>,
     window: &mut dyn crate::surface::Window,
     panel: &mut Panel,
     vault_path: &std::path::Path,
     asked: &Asked,
     finals: &[HeldCut],
+    suggest: Option<&str>,
 ) -> Flow<String> {
     let which = if finals.len() == 1 {
         0
@@ -736,6 +764,10 @@ fn save(
             .map_err(from_surface)?
             .ok_or_else(cancelled)?;
         let typed = typed.trim().to_string();
+        let typed = match suggest {
+            Some(s) if typed.is_empty() => s.to_string(),
+            _ => typed,
+        };
         if !valid_name(&typed) {
             panel.warning = Some(
                 "A name is letters, digits and underscores, not starting with a digit.".to_string(),

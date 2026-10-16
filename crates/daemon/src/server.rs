@@ -123,10 +123,16 @@ pub(crate) struct Shared {
     /// Running sessions the hooks announced, and transcripts waiting for the
     /// end of theirs (see `transcript.rs`).
     pub(crate) marks: Mutex<crate::transcript::Marks>,
+    /// Prompt values the person called false alarms (see `input_ops.rs`).
+    pub(crate) remembered: Mutex<crate::input_ops::Remembered>,
+    /// One prompt window at a time, and how often (see `input_ops.rs`).
+    pub(crate) prompt_gate: crate::input_ops::Gate,
     /// What agents have tried, weighed (see `alarm.rs`).
     pub(crate) alarm: crate::alarm::Alarm,
     /// The last refused launch of each connector's server (`connector_ops.rs`).
     pub(crate) connector_refusals: Mutex<Vec<vahta_ipc::protocol::ConnectorRefusal>>,
+    /// When each harness was last told the connectors are locked.
+    pub(crate) notified: Mutex<std::collections::HashMap<String, Instant>>,
     /// The ways to unlock a vault.
     pub(crate) unlockers: vahta_auth::Registry,
     /// How devices are reached.
@@ -168,6 +174,7 @@ impl Shared {
     }
 
     pub(crate) fn status(&self) -> StatusInfo {
+        let connectors = self.sessions.lock().ok().and_then(|s| s.connectors_state());
         StatusInfo {
             version: self.options.version.clone(),
             pid: std::process::id(),
@@ -177,6 +184,8 @@ impl Shared {
             runtime_dir: self.options.paths.runtime.display().to_string(),
             alarm_at: self.alarm.raised_at(),
             connector_refusals: self.connector_refusals(),
+            connectors_session: connectors.is_some(),
+            connectors_until_reboot: connectors == Some(true),
         }
     }
 }
@@ -263,6 +272,12 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
             io::Error::other("the system random generator failed"),
         )
     })?;
+    let remembered = crate::input_ops::Remembered::new().ok_or_else(|| {
+        ServerError::Io(
+            "draw a key",
+            io::Error::other("the system random generator failed"),
+        )
+    })?;
     let shared = Arc::new(Shared {
         options,
         journal,
@@ -273,8 +288,11 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
         marks: Mutex::new(crate::transcript::Marks::default()),
+        remembered: Mutex::new(remembered),
+        prompt_gate: Default::default(),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
+        notified: Mutex::new(std::collections::HashMap::new()),
         unlockers: vahta_auth::Registry::standard(),
         links,
         started: Instant::now(),
@@ -350,6 +368,19 @@ fn sweep_sessions(shared: &Arc<Shared>) {
             Ok(mut sessions) => sessions.sweep(Instant::now(), &alive),
             Err(_) => continue,
         };
+        // A session that lasts until a reboot ends when the boot id changes.
+        let rebooted = match (
+            shared.sessions.lock().map(|s| s.any_until_reboot()),
+            crate::testing::boot_id(),
+        ) {
+            (Ok(true), Some(now_boot)) => shared
+                .sessions
+                .lock()
+                .map(|mut s| s.end_other_boot(&now_boot))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        shared.record_ended(rebooted);
         // Taken one after the other, never one inside the other.
         let live: Vec<String> = shared
             .sessions
@@ -887,6 +918,22 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 text,
             } => (
                 crate::report::tool_check(shared, &ctx, session.as_deref(), &text)
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::CheckInput {
+                session: _,
+                cwd: _,
+                text,
+            } => (crate::input_ops::check_input(&ctx, &text), false),
+            ClientRequest::PromptAsk {
+                session: _,
+                harness,
+                cwd,
+                text,
+                detected,
+            } => (
+                crate::input_ops::prompt_ask(&ctx, &harness, &cwd, text, detected)
                     .unwrap_or_else(|r| r),
                 false,
             ),
