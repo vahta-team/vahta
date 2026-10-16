@@ -69,6 +69,7 @@ impl<'a> Ctx<'a> {
             peer: self.peer,
             used_from: std::sync::Mutex::new(None),
             connector: true,
+            gone: self.gone.clone(),
         }
     }
 }

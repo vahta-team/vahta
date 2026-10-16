@@ -2320,6 +2320,202 @@ fn a_command_is_ended_when_its_client_goes_away() {
     wait_until("the command to be ended", 10, || !alive(pid));
 }
 
+// The window is the daemon's, the client is the harness's. When the harness
+// gives up and kills `vahta run`, the window must go with it and the command
+// must never start.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_client_killed_while_the_window_is_open_takes_the_window_with_it() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"hang":true}"#]);
+    let started = s.root.join("started");
+    let mut client = s
+        .command(&s.project())
+        .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
+        .arg(format!("echo x > '{}'", started.display()))
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let asked = s.passwords_asked();
+    wait_until("the password window", 10, || {
+        s.passwords_asked() == asked + 1
+    });
+    client.kill().unwrap();
+    let _ = client.wait();
+    let t = Instant::now();
+    wait_until("the window to be withdrawn", 5, || {
+        s.window_log().iter().any(|e| e["close"] == "withdrawn")
+    });
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    wait_until("the journal to say so", 5, || {
+        s.journal().contains("went away before the command started")
+    });
+    let journal = s.journal();
+    assert!(journal.contains("\"result\":\"cancelled\""), "{journal}");
+    assert!(!journal.contains("\"result\":\"started\""), "{journal}");
+    assert!(!started.exists());
+    // Nothing is left holding the vault's turn: the next run gets its window.
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["run", "--secret", "ZETA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+// The same for a session that is being opened.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_client_killed_while_an_unlock_window_is_open_takes_the_window_with_it() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"hang":true}"#]);
+    let mut client = s
+        .command(&s.project())
+        .args(["unlock"])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let asked = s.passwords_asked();
+    wait_until("the password window", 10, || {
+        s.passwords_asked() == asked + 1
+    });
+    client.kill().unwrap();
+    let _ = client.wait();
+    wait_until("the window to be withdrawn", 5, || {
+        s.window_log().iter().any(|e| e["close"] == "withdrawn")
+    });
+    assert!(s.sessions().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_run(s: &Sandbox, argv_tail: &[&str]) -> std::process::Child {
+    s.command(&s.project())
+        .args(["run", "--secret", "ZETA", "--"])
+        .args(argv_tail)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn windows_opened(s: &Sandbox) -> usize {
+    s.window_log()
+        .iter()
+        .filter(|e| e.get("open").is_some())
+        .count()
+}
+
+// Three of the same command at once are one question to the person.
+#[cfg(target_os = "linux")]
+#[test]
+fn three_identical_runs_at_once_open_one_window() {
+    let s = sandbox_with_secrets();
+    let before = windows_opened(&s);
+    let asked = s.passwords_asked();
+    s.script(&[r#"{"secret":"correct horse","after_ms":700}"#]);
+    let kids: Vec<_> = (0..3).map(|_| spawn_run(&s, &["true"])).collect();
+    for k in kids {
+        let out = k.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+    assert_eq!(windows_opened(&s) - before, 1);
+    assert_eq!(s.passwords_asked() - asked, 1);
+    let journal = s.journal();
+    assert_eq!(journal.matches("\"result\":\"started\"").count(), 3);
+}
+
+// A different command is a different question: it is asked after the first,
+// never beside it.
+#[cfg(target_os = "linux")]
+#[test]
+fn different_runs_at_once_get_their_windows_one_after_the_other() {
+    let s = sandbox_with_secrets();
+    let before = windows_opened(&s);
+    s.script(&[
+        r#"{"secret":"correct horse","after_ms":500}"#,
+        r#"{"secret":"correct horse","after_ms":500}"#,
+    ]);
+    let kids = vec![
+        spawn_run(&s, &["true"]),
+        spawn_run(&s, &["sh", "-c", "exit 0"]),
+    ];
+    for k in kids {
+        let out = k.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+    let log = s.window_log();
+    let mut open = 0i32;
+    let mut peak = 0i32;
+    for e in &log {
+        if e.get("open").is_some() {
+            open += 1;
+            peak = peak.max(open);
+        } else if e.get("close").is_some() {
+            open -= 1;
+        }
+    }
+    assert_eq!(peak, 1, "{log:?}");
+    assert_eq!(windows_opened(&s) - before, 2);
+}
+
+// One "no" is the answer for everyone who asked the same question.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusal_in_the_window_is_the_answer_for_identical_waiters() {
+    let s = sandbox_with_secrets();
+    let before = windows_opened(&s);
+    s.script(&[r#"{"cancel":true,"after_ms":700}"#]);
+    let kids = vec![spawn_run(&s, &["true"]), spawn_run(&s, &["true"])];
+    for k in kids {
+        let out = k.wait_with_output().unwrap();
+        assert_ne!(out.status.code(), Some(0));
+    }
+    assert_eq!(windows_opened(&s) - before, 1);
+    assert!(!s.journal().contains("\"result\":\"started\""));
+}
+
+// A "no" may have been about the command: a different command is asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusal_does_not_answer_a_different_command() {
+    let s = sandbox_with_secrets();
+    let before = windows_opened(&s);
+    s.script(&[
+        r#"{"cancel":true,"after_ms":600}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    let first = spawn_run(&s, &["true"]);
+    wait_until("the first window", 10, || windows_opened(&s) == before + 1);
+    let second = spawn_run(&s, &["sh", "-c", "exit 0"]);
+    let out1 = first.wait_with_output().unwrap();
+    assert_ne!(out1.status.code(), Some(0));
+    let out2 = second.wait_with_output().unwrap();
+    assert_eq!(out2.status.code(), Some(0), "{}", text(&out2.stderr));
+    assert_eq!(windows_opened(&s) - before, 2);
+}
+
+// A session opened by the window that a run waited on serves the run, when
+// the run belongs to it; no second window.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_that_waited_on_an_unlock_window_is_served_by_the_session() {
+    let s = sandbox_with_secrets();
+    let before = windows_opened(&s);
+    s.script(&[r#"{"secret":"correct horse","after_ms":800}"#]);
+    let mut unlock = s
+        .command(&s.project())
+        .args(["unlock"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("the unlock window", 10, || windows_opened(&s) == before + 1);
+    let out = spawn_run(&s, &["true"]).wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(unlock.wait().unwrap().success());
+    assert_eq!(windows_opened(&s) - before, 1);
+    assert_eq!(s.sessions().len(), 1);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn ctrl_c_reaches_the_command_and_its_exit_code_comes_back() {

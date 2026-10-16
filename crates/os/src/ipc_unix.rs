@@ -61,6 +61,19 @@ impl Stream {
         self.inner.shutdown(Shutdown::Both)
     }
 
+    /// Whether the other end has gone away (closed or reset), without
+    /// consuming anything: a pending byte means it is still there. For a
+    /// server that wants to know a client gave up while it works on its
+    /// request.
+    pub fn peer_closed(&self) -> bool {
+        use rustix::net::{RecvFlags, recv};
+        let mut one = [0u8; 1];
+        match recv(&self.inner, &mut one, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
+            Ok((got, _)) => got == 0,
+            Err(e) => e != rustix::io::Errno::AGAIN && e != rustix::io::Errno::INTR,
+        }
+    }
+
     /// Which process is on the other end, from the kernel. Meaningful on the
     /// server side of a connection.
     pub fn peer(&self) -> io::Result<Peer> {
