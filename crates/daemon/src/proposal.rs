@@ -417,6 +417,43 @@ mod tests {
     }
 
     #[test]
+    fn places_inside_the_project_are_stored_relative_and_others_as_they_are() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir(root.join("scripts")).unwrap();
+        std::fs::write(root.join("lib/x.py"), "").unwrap();
+        let args = Args {
+            allow: vec![
+                format!("sh {}/lib/x.py", root.display()),
+                "sh /etc/hostname".to_string(),
+            ],
+            dirs: vec![format!("{}/scripts:ro", root.display())],
+            path: std::env::var_os("PATH"),
+            ..Args::default()
+        };
+        let b = build("K", None, &args, &root).unwrap();
+        let rs = &b.rule_set;
+        assert_eq!(rs.allow[0].text, "sh $PROJECT/lib/x.py");
+        assert_eq!(rs.allow[0].args, ["$PROJECT/lib/x.py"]);
+        assert_eq!(rs.allow[1].args, ["/etc/hostname"]);
+        assert_eq!(rs.dirs[0].path, "$PROJECT/scripts");
+        assert_eq!(rs.dirs[0].text, "$PROJECT/scripts:ro");
+        // The resolved programs (for the window) stay absolute, and a rule
+        // already in the stored form builds again to the same thing.
+        assert!(b.resolved.iter().all(|(_, p)| p.is_absolute()));
+        let again = Args {
+            allow: vec!["sh $PROJECT/lib/x.py".to_string()],
+            dirs: vec!["$PROJECT/scripts:ro".to_string()],
+            path: std::env::var_os("PATH"),
+            ..Args::default()
+        };
+        let b2 = build("K", None, &again, &root).unwrap();
+        assert_eq!(b2.rule_set.allow[0], rs.allow[0]);
+        assert_eq!(b2.rule_set.dirs[0], rs.dirs[0]);
+    }
+
+    #[test]
     fn a_payment_default_needs_hosts_and_a_category_check_runs() {
         let t = tempfile::tempdir().unwrap();
         let pay = vahta_policy::category("payment").unwrap();
