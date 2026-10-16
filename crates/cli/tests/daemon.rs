@@ -7021,3 +7021,251 @@ fn closing_the_pairing_window_pairs_nothing_and_a_dead_phone_link_is_an_error_no
         "the code was shown"
     );
 }
+
+// --- transcripts on disk -------------------------------------------------------------------
+
+impl Sandbox {
+    fn claude_dir(&self) -> PathBuf {
+        self.root.join("home/.claude")
+    }
+
+    /// The folder Claude Code would keep this project's transcripts in.
+    fn claude_project_folder(&self) -> PathBuf {
+        let real = fs::canonicalize(self.project()).unwrap();
+        let name: String = real
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        self.claude_dir().join("projects").join(name)
+    }
+
+    /// Write `lines` as a transcript file last changed `age_secs` ago.
+    fn transcript(&self, path: &Path, lines: &[String], age_secs: u64) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, lines.join("\n") + "\n").unwrap();
+        let when = std::time::SystemTime::now() - Duration::from_secs(age_secs);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    fn hook_session_event(&self, event: &str, hook_name: &str, session: &str) {
+        let payload = serde_json::json!({
+            "hook_event_name": hook_name,
+            "session_id": session,
+            "cwd": self.project(),
+        });
+        let mut child = Command::new(hook_bin())
+            .args(["--harness", "claude", "--event", event])
+            .current_dir(self.project())
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", self.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.root.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run vahta-hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    }
+}
+
+#[test]
+fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_exposure() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let two = ["fake", "-two"].concat();
+    // A made-up token of a shape the detector knows.
+    let token = ["ghp_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"].concat();
+    let b64 = vahta_ipc::protocol::b64_encode(two.as_bytes());
+    let inner = serde_json::to_string(&format!("{{\"k\": \"{one}\"}}")).unwrap();
+
+    let keep = r#"{"type":"user",  "n": 1.50, "message":{"content":"hello"}}"#.to_string();
+    let lines = vec![
+        keep.clone(),
+        serde_json::json!({"type":"user","message":{"content":format!("my key is {one}")}})
+            .to_string(),
+        format!(r#"{{"type":"tool_result","toolUseResult":{inner},"note":"x"}}"#),
+        serde_json::json!({"type":"assistant","text":format!("echo {b64}")}).to_string(),
+        serde_json::json!({"type":"assistant","text":format!("token {token}")}).to_string(),
+    ];
+    let folder = s.claude_project_folder();
+    let closed = folder.join("aaaaaaaa-0000-closed.jsonl");
+    s.transcript(&closed, &lines, 3600);
+    // Another project's transcript is out of the default scope.
+    let other = s
+        .claude_dir()
+        .join("projects/-some-other-project/bbbbbbbb-1111.jsonl");
+    s.transcript(&other, &lines, 3600);
+    // The running session's file: changed just now.
+    let open_id = "open-session-0001";
+    let open = folder.join(format!("{open_id}.jsonl"));
+    s.transcript(&open, &lines, 0);
+    let open_before = fs::read(&open).unwrap();
+    // A Codex rollout of this directory.
+    let rollout = s
+        .root
+        .join("home/.codex/sessions/2026/10/16/rollout-2026-10-16T10-00-00-cccccccc-2222.jsonl");
+    let meta = serde_json::json!({"type":"session_meta","payload":{"id":"cccccccc-2222","cwd":fs::canonicalize(s.project()).unwrap()}}).to_string();
+    s.transcript(&rollout, &[meta.clone(), lines[1].clone()], 3600);
+
+    s.hook_session_event("session_start", "SessionStart", open_id);
+    let out = s.vahta(&["scrub", "--transcript"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout,
+        text(&out.stderr)
+    );
+    for secret in [&one, &two, &token, &b64] {
+        assert!(!stdout.contains(secret.as_str()) && !text(&out.stderr).contains(secret.as_str()));
+    }
+    assert!(
+        stdout.contains("cleaned") && stdout.contains("deferred"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("ZETA") && stdout.contains("BETA"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("/clear"), "{stdout}");
+
+    // Closed file: every line valid JSON, the clean line byte for byte, nothing left.
+    let now = fs::read_to_string(&closed).unwrap();
+    let got: Vec<&str> = now.lines().collect();
+    assert_eq!(got.len(), lines.len());
+    assert_eq!(got[0], keep);
+    for l in &got {
+        serde_json::from_str::<Value>(l).unwrap();
+    }
+    for secret in [&one, &two, &token, &b64] {
+        assert!(!now.contains(secret.as_str()), "{now}");
+    }
+    assert!(!now.contains("fake"), "{now}");
+    assert!(got[1].contains("***REDACTED(ZETA)***"));
+    assert!(got[3].contains("REDACTED(BETA (base64))"), "{}", got[3]);
+    assert!(got[4].contains("***REDACTED("), "{}", got[4]);
+    // The nested JSON text kept its structure.
+    let nested: Value = serde_json::from_str(got[2]).unwrap();
+    assert!(
+        nested["toolUseResult"]
+            .as_str()
+            .unwrap()
+            .contains("REDACTED(ZETA)")
+    );
+    // Other project untouched; the open file untouched; Codex file cleaned.
+    assert!(fs::read_to_string(&other).unwrap().contains(&one));
+    assert_eq!(fs::read(&open).unwrap(), open_before);
+    let rolled = fs::read_to_string(&rollout).unwrap();
+    assert!(rolled.starts_with(&meta) && !rolled.contains(&one));
+    // The closed file keeps its modification time.
+    let age = std::time::SystemTime::now()
+        .duration_since(fs::metadata(&closed).unwrap().modified().unwrap())
+        .unwrap();
+    assert!(age > Duration::from_secs(3000));
+
+    // Exposure: the daemon wrote names, never a value.
+    let exposed = fs::read_to_string(s.root.join("data/exposed.json")).unwrap();
+    assert!(exposed.contains("ZETA") && exposed.contains("BETA") && !exposed.contains("fake"));
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\n[secrets.BETA]\n",
+    )
+    .unwrap();
+    let list = text(&s.vahta(&["list"]).stdout);
+    assert!(
+        list.contains("exposed in a transcript") && list.contains("vahta reset ZETA"),
+        "{list}"
+    );
+    let list_json: Value = serde_json::from_slice(&s.vahta(&["list", "--json"]).stdout).unwrap();
+    let zeta = list_json["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "ZETA")
+        .unwrap();
+    assert_eq!(zeta["exposed"], true);
+    let check = s.vahta(&["check"]);
+    let shown = format!("{}{}", text(&check.stdout), text(&check.stderr));
+    assert!(
+        shown.contains("Exposed:") && shown.contains("rotate it"),
+        "{shown}"
+    );
+
+    // The session ends: the open transcript is cleaned.
+    s.hook_session_event("session_end", "SessionEnd", open_id);
+    wait_until("the open transcript is cleaned", 15, || {
+        !fs::read_to_string(&open).unwrap_or_default().contains(&one)
+    });
+    let after = fs::read_to_string(&open).unwrap();
+    assert!(
+        after
+            .lines()
+            .all(|l| serde_json::from_str::<Value>(l).is_ok())
+    );
+    assert!(after.contains("REDACTED(ZETA)"));
+
+    // Nothing secret in the journal; a second run finds nothing to remove.
+    let journal = s.journal();
+    assert!(
+        journal.contains("transcript_scrub")
+            && !journal.contains("fake-")
+            && !journal.contains(&token)
+    );
+    let again = text(&s.vahta(&["scrub", "--transcript"]).stdout);
+    assert!(again.contains("Nothing to remove"), "{again}");
+
+    // A reset clears the mark.
+    s.script(&[
+        r#"{"secret":"correct horse"}"#,
+        r#"{"secret":"fake-new-value"}"#,
+        r#"{"choose":0}"#,
+    ]);
+    let reset = s.vahta(&["reset", "ZETA"]);
+    assert_eq!(reset.status.code(), Some(0), "{}", text(&reset.stderr));
+    let list = text(&s.vahta(&["list"]).stdout);
+    assert!(
+        !list.contains("vahta reset ZETA") && list.contains("vahta reset BETA"),
+        "{list}"
+    );
+}
+
+#[test]
+fn scrub_needs_the_flag_and_all_covers_other_projects() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let out = s.vahta(&["scrub"]);
+    assert_eq!(out.status.code(), Some(2));
+    let one = ["fake", "-one"].concat();
+    let other = s
+        .claude_dir()
+        .join("projects/-some-other-project/bbbbbbbb-1111.jsonl");
+    s.transcript(
+        &other,
+        &[serde_json::json!({"t": format!("v {one}")}).to_string()],
+        3600,
+    );
+    let out = s.vahta(&["scrub", "--transcript", "--all", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["files"][0]["state"], "cleaned");
+    assert!(!fs::read_to_string(&other).unwrap().contains(&one));
+}
