@@ -5827,8 +5827,12 @@ fn refused_run(s: &Sandbox, program: &str) {
 fn one_refused_network_tool_raises_the_alarm_naming_the_secret_and_the_program() {
     let s = sandbox_for_refusals();
     refused_run(&s, "curl");
+    // The window opens before its question is logged: wait for the question.
     wait_until("the alarm to ask", 10, || {
         s.windows_titled("Suspicious agent behaviour") == 1
+            && s.window_log()
+                .iter()
+                .any(|e| e["ask"] == "choose" && e["options"][0] == "Lock all sessions")
     });
     let log = s.window_log();
     // Another window may follow the alarm's; pick the alarm by its options.
