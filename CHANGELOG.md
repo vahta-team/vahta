@@ -48,6 +48,19 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   the owner), `vahta join FILE` (the member pins the owner after confirming the
   owner's words; an older package is refused) and `vahta share --to owner` for an
   editor to send one secret back. Roles limit what a member may do.
+  Second iteration: the verification code is six groups of four digits (about 79
+  bits, language-neutral, separators forgiven) instead of syllable words; a member
+  can `vahta unlock` (run and http only), and the session ends no later than the
+  membership; a package is compared by the owner's generation, so an editor's own
+  `add` no longer makes the owner's next package look old; `join` follows an owner
+  re-key along the vault's successor chain after the member confirms the new
+  digits; an editor's transfer carries a signed per-editor counter the owner
+  tracks (no clock), and may propose rules for a new secret, which the owner reads
+  in plain words and approves or not. Rules that name a place inside the project
+  are stored relative to it (`$PROJECT/lib/x.py`) and expanded on whichever
+  machine runs them; `share` writes older absolute ones that way too and warns,
+  by secret name, about places outside the project. The v5 body gained a `team`
+  field (not readable by earlier builds of this branch).
 
 - **The connectors vault** (`--connector`): one vault per user, in Vahta's data
   directory, for the keys of the MCP servers Claude Code, Codex and Cursor start.

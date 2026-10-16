@@ -68,13 +68,17 @@ impl StateKey {
         }
     }
 
-    /// The owner's, from a MAC key kept earlier (a session keeps this instead
-    /// of the vault key, which it has dropped).
-    pub(crate) fn owner_from_mac(mac_key: [u8; 32]) -> StateKey {
+    /// The key of the state file `file`, from a MAC key kept earlier (a session
+    /// keeps this instead of the vault key, which it has dropped).
+    pub(crate) fn from_mac(file: StateFile, mac_key: [u8; 32]) -> StateKey {
         StateKey {
-            file: StateFile::Owner,
+            file,
             mac_key: Zeroizing::new(mac_key),
         }
+    }
+
+    pub(crate) fn file(&self) -> StateFile {
+        self.file
     }
 
     pub(crate) fn mac_key(&self) -> &[u8; 32] {
@@ -325,6 +329,38 @@ impl LocalStore {
             hex_encode(&mac)
         );
         write::write_atomic(&self.state_path(vault_id, new.file), text.as_bytes())
+    }
+
+    /// The counter for the next transfer `recipient` sends to the owner of
+    /// `vault_id`, and remember it. It is one above the last this machine gave
+    /// out for that member; as a floor it is also the clock in seconds, so that a
+    /// lost record (a reinstalled machine) cannot leave the member sending
+    /// numbers the owner has long passed. The owner only ever compares counters
+    /// with each other, never with a clock: a clock that is wrong only makes the
+    /// numbers larger.
+    pub fn next_transfer_counter(
+        &self,
+        vault_id: &[u8; 16],
+        recipient: &[u8; 16],
+    ) -> Result<u64, Error> {
+        let path = self
+            .dir(vault_id)
+            .join(format!("transfer-{}", hex_encode(recipient)));
+        let last = match fs::read_to_string(&path) {
+            Ok(t) => t
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| Error::Store("the transfer counter file is malformed"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(_) => return Err(Error::Store("cannot read the transfer counter file")),
+        };
+        let next = last.saturating_add(1).max(crate::now());
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)
+                .map_err(|_| Error::Store("cannot create the store directory"))?;
+        }
+        write::write_atomic(&path, format!("{next}\n").as_bytes())?;
+        Ok(next)
     }
 
     /// Remember `generation` (never lowering the stored one) and pin the owner

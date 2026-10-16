@@ -14,6 +14,9 @@
 //! * `harnesses` in each [`RuleSet`]: which agent harnesses a secret of a
 //!   `Connectors` vault is bound to. Empty after an upgrade, and always empty
 //!   in a `Project` vault.
+//! * `team`: the owner's generation (the file's generation as of the owner's
+//!   last save, which an editor's own saves do not move) and the highest
+//!   transfer counter the owner has accepted from each editor. See [`Team`].
 //!
 //! None of these is open-ended: the body is postcard, which has no room for a
 //! field a build does not know, so an unknown field is refused at decode
@@ -290,6 +293,70 @@ fn check_bindings(kind: VaultKind, index: &[Entry], sets: &[RuleSet]) -> Result<
     check_binding_shapes(sets)
 }
 
+// --- Team state ----------------------------------------------------------------------------
+
+/// How many editors' counters one file keeps (a counter per member).
+pub const MAX_COUNTERS: usize = v1::MAX_RECIPIENTS;
+
+/// The highest transfer counter the owner has accepted from one member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferCounter {
+    pub recipient: [u8; 16],
+    pub counter: u64,
+}
+
+/// What the owner's side of a team adds to the signed body.
+///
+/// * `owner_generation` is the file's generation as the **owner** last saved
+///   it. An editor's local save moves the file's own generation (it has to: it
+///   is how a concurrent write is noticed) but not this one, so a member
+///   compares the packages the owner sends by this number, never by the local
+///   file's.
+/// * `counters`: for each member, the highest counter of the transfers the owner
+///   has imported from them. A transfer carries a counter its sender signed and
+///   must be above this one, so an old transfer cannot be replayed, whatever the
+///   sender's clock says. A package carries none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Team {
+    pub owner_generation: u64,
+    pub counters: Vec<TransferCounter>,
+}
+
+impl Team {
+    /// The highest counter accepted from `recipient`; 0 for none yet.
+    pub fn counter_of(&self, recipient: &[u8; 16]) -> u64 {
+        self.counters
+            .iter()
+            .find(|c| &c.recipient == recipient)
+            .map_or(0, |c| c.counter)
+    }
+
+    /// Record `counter` for `recipient` (never lowering it).
+    pub fn accept_counter(&mut self, recipient: [u8; 16], counter: u64) {
+        match self.counters.iter_mut().find(|c| c.recipient == recipient) {
+            Some(c) => c.counter = c.counter.max(counter),
+            None => self.counters.push(TransferCounter { recipient, counter }),
+        }
+    }
+}
+
+fn check_team(team: &Team, recipients: &[Recipient]) -> Result<(), Error> {
+    let bad = Error::Corrupt("team");
+    if team.counters.len() > MAX_COUNTERS {
+        return Err(bad);
+    }
+    for (i, c) in team.counters.iter().enumerate() {
+        if team.counters[..i]
+            .iter()
+            .any(|o| o.recipient == c.recipient)
+            || !recipients.iter().any(|r| r.id == c.recipient)
+        {
+            return Err(bad);
+        }
+    }
+    Ok(())
+}
+
 // --- Agent roles ---------------------------------------------------------------------------
 
 /// What an agent in a role may ask a secret to do.
@@ -387,6 +454,7 @@ pub struct Body {
     pub remote: bool,
     pub kind: VaultKind,
     pub roles: Vec<AgentRole>,
+    pub team: Team,
 }
 
 /// The body with the recipient list parsed: what the rest of the crate edits.
@@ -405,6 +473,7 @@ pub struct Model {
     pub remote: bool,
     pub kind: VaultKind,
     pub roles: Vec<AgentRole>,
+    pub team: Team,
 }
 
 impl Model {
@@ -425,6 +494,10 @@ impl Model {
             remote: old.remote,
             kind: VaultKind::Project,
             roles: Vec::new(),
+            team: Team {
+                owner_generation: old.header.generation,
+                counters: Vec::new(),
+            },
         }
     }
 
@@ -519,6 +592,10 @@ pub fn decode(frame: &Frame<'_>) -> Result<Decoded, Error> {
     check_devices(&body.devices)?;
     check_bindings(body.kind, &body.index, &body.bindings)?;
     check_roles(&body.roles)?;
+    check_team(&body.team, &body.recipients)?;
+    if body.team.owner_generation > body.header.generation {
+        return Err(Error::Corrupt("team"));
+    }
     check_successors(&body.header.vault_id, &body.owner.sign_pk, &body.successors)?;
 
     let signer_pk = match sig_section.signer {
@@ -556,6 +633,7 @@ pub fn decode(frame: &Frame<'_>) -> Result<Decoded, Error> {
             remote: body.remote,
             kind: body.kind,
             roles: body.roles,
+            team: body.team,
         },
     })
 }
@@ -708,6 +786,7 @@ pub fn encode_as(
         remote: model.remote,
         kind: model.kind,
         roles: model.roles.clone(),
+        team: model.team.clone(),
     };
     let body_bytes = postcard::to_allocvec(&body).map_err(|_| Error::Corrupt("encode"))?;
     let body_len = u32::try_from(body_bytes.len()).map_err(|_| Error::TooLarge)?;

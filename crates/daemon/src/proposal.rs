@@ -99,7 +99,8 @@ fn parse_dir(text: &str, root: &Path) -> Result<DirRule, String> {
     if path_text.is_empty() || path_text.contains('\0') || shown.chars().any(char::is_control) {
         return Err(format!("directory `{shown}` is not a path"));
     }
-    let given = Path::new(path_text);
+    let expanded = rules::expand_project_path(path_text, root);
+    let given = Path::new(expanded.as_ref());
     let full = if given.is_absolute() {
         given.to_path_buf()
     } else {
@@ -182,7 +183,8 @@ fn resolve_allow(
             ProgramSpec::Bare(w) | ProgramSpec::Path(w) => w,
             ProgramSpec::Group(g) => return Err(format!("`{g}` is a group; groups are for deny")),
         };
-        let Some(found) = pathfind::locate(word, path, root) else {
+        let word = rules::expand_project_path(word, root);
+        let Some(found) = pathfind::locate(&word, path, root) else {
             return Err(format!(
                 "cannot find the program of the rule `{}` (bare names are looked up in your PATH, \
                  paths are relative to the project root)",
@@ -279,6 +281,12 @@ pub(crate) fn build(
         c.check(&rule_set)?;
     }
     let warnings = warnings_for(&resolved, &rule_set.dirs, root);
+    // Stored relative to the project, so the vault says the same on every
+    // machine (see `rules::PROJECT_ROOT`).
+    let mut rule_set = rule_set;
+    let canon = pathfind::canonical(root);
+    let roots: Vec<&Path> = canon.iter().map(PathBuf::as_path).chain([root]).collect();
+    rules::relativize(&mut rule_set, &roots);
     Ok(Built {
         rule_set,
         resolved,
@@ -406,6 +414,43 @@ mod tests {
         assert!(!d.write && d.path.ends_with("scripts") && d.text == "./scripts:ro");
         assert!(parse_dir("nope", t.path()).is_err());
         assert!(parse_dir("/", t.path()).is_err());
+    }
+
+    #[test]
+    fn places_inside_the_project_are_stored_relative_and_others_as_they_are() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir(root.join("scripts")).unwrap();
+        std::fs::write(root.join("lib/x.py"), "").unwrap();
+        let args = Args {
+            allow: vec![
+                format!("sh {}/lib/x.py", root.display()),
+                "sh /etc/hostname".to_string(),
+            ],
+            dirs: vec![format!("{}/scripts:ro", root.display())],
+            path: std::env::var_os("PATH"),
+            ..Args::default()
+        };
+        let b = build("K", None, &args, &root).unwrap();
+        let rs = &b.rule_set;
+        assert_eq!(rs.allow[0].text, "sh $PROJECT/lib/x.py");
+        assert_eq!(rs.allow[0].args, ["$PROJECT/lib/x.py"]);
+        assert_eq!(rs.allow[1].args, ["/etc/hostname"]);
+        assert_eq!(rs.dirs[0].path, "$PROJECT/scripts");
+        assert_eq!(rs.dirs[0].text, "$PROJECT/scripts:ro");
+        // The resolved programs (for the window) stay absolute, and a rule
+        // already in the stored form builds again to the same thing.
+        assert!(b.resolved.iter().all(|(_, p)| p.is_absolute()));
+        let again = Args {
+            allow: vec!["sh $PROJECT/lib/x.py".to_string()],
+            dirs: vec!["$PROJECT/scripts:ro".to_string()],
+            path: std::env::var_os("PATH"),
+            ..Args::default()
+        };
+        let b2 = build("K", None, &again, &root).unwrap();
+        assert_eq!(b2.rule_set.allow[0], rs.allow[0]);
+        assert_eq!(b2.rule_set.dirs[0], rs.dirs[0]);
     }
 
     #[test]

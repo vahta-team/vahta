@@ -1288,11 +1288,11 @@ pub enum ClientReply {
         devices: Vec<DeviceInfo>,
         unlock: UnlockInfo,
     },
-    /// The answer to [`crate::members::MemberOp::List`]: the owner's six
-    /// verification words (what a new member compares on joining) and the
+    /// The answer to [`crate::members::MemberOp::List`]: the owner's
+    /// verification digits (what a new member compares on joining) and the
     /// members.
     Members {
-        owner_words: String,
+        owner_digits: String,
         members: Vec<crate::members::MemberInfo>,
     },
 }

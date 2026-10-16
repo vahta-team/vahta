@@ -43,7 +43,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use vahta_vault::rules::{GROUPS, LAUNCHERS, in_group, normalize_program_name};
+use vahta_vault::rules::{
+    GROUPS, LAUNCHERS, expand_project_path, in_group, is_project_path, normalize_program_name,
+};
 use vahta_vault::{ApprovedRule, Network, Program, RuleSet};
 
 /// What is being run.
@@ -96,13 +98,42 @@ fn base_name(path: &str) -> &str {
 
 /// How many words after the program the rule's arguments consume in `argv`:
 /// the rule as an argv prefix, or, for a package runner, the "program +
-/// package" form (see `runner.rs`).
-fn args_len(rule: &ApprovedRule, argv: &[String]) -> Option<usize> {
-    crate::runner::rule_match(rule, argv.get(1..)?)
+/// package" form (see `runner.rs`). `$PROJECT/…` words of the rule are expanded
+/// from `root` first (see `vahta_vault::rules::PROJECT_ROOT`).
+fn args_len(rule: &ApprovedRule, argv: &[String], root: &Path) -> Option<usize> {
+    let rest = argv.get(1..)?;
+    if rule.args.iter().any(|a| is_project_path(a)) {
+        let mut expanded = rule.clone();
+        expanded.args = rule
+            .args
+            .iter()
+            .map(|a| expand_project_path(a, root).into_owned())
+            .collect();
+        // The root is the canonical one, so a path typed through a symlink
+        // (a temp dir that is a link, a linked project folder) is resolved too,
+        // as programs are, before it is compared.
+        let resolved: Vec<String> = rest
+            .iter()
+            .map(|w| match Path::new(w) {
+                p if p.is_absolute() => dunce::canonicalize(p)
+                    .map_or_else(|_| w.clone(), |c| c.to_string_lossy().into_owned()),
+                _ => w.clone(),
+            })
+            .collect();
+        crate::runner::rule_match(&expanded, &resolved)
+    } else {
+        crate::runner::rule_match(rule, rest)
+    }
 }
 
-fn args_match(rule: &ApprovedRule, argv: &[String]) -> bool {
-    args_len(rule, argv).is_some()
+fn args_match(rule: &ApprovedRule, argv: &[String], root: &Path) -> bool {
+    args_len(rule, argv, root).is_some()
+}
+
+/// The project root as the file system resolves it, which is what resolved
+/// program paths are compared with.
+fn canonical_root(root: &Path) -> PathBuf {
+    dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// The names deny matching looks at: what the caller typed and what it
@@ -155,13 +186,18 @@ pub fn extra_args<'a>(
     rules: &RuleSet,
     program: Option<&Path>,
     argv: &'a [String],
+    project_root: &Path,
 ) -> Option<&'a [String]> {
     let resolved = program?;
+    let root = canonical_root(project_root);
     rules
         .allow
         .iter()
-        .filter(|r| matches!(&r.program, Program::Path(p) if Path::new(p) == resolved))
-        .filter_map(|r| args_len(r, argv))
+        .filter(|r| {
+            matches!(&r.program, Program::Path(p)
+                if Path::new(expand_project_path(p, &root).as_ref()) == resolved)
+        })
+        .filter_map(|r| args_len(r, argv, &root))
         .max()
         .map(|n| &argv[1 + n..])
 }
@@ -175,6 +211,7 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
         };
     }
     let names = names_of(ctx.program, argv);
+    let root = canonical_root(ctx.project_root);
     for rule in &rules.deny {
         let hit = match &rule.program {
             Program::Group(g) => names.iter().any(|n| in_group(g, n)),
@@ -182,7 +219,7 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
             Program::Path(_) => false,
         };
         // A group has no arguments; a named rule may have an argv prefix.
-        if hit && (matches!(rule.program, Program::Group(_)) || args_match(rule, argv)) {
+        if hit && (matches!(rule.program, Program::Group(_)) || args_match(rule, argv, &root)) {
             return Verdict::Denied {
                 rule: rule.text.clone(),
             };
@@ -210,10 +247,12 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
     }
 
     if !rules.dirs.is_empty()
-        && !rules
-            .dirs
-            .iter()
-            .any(|d| inside(ctx.cwd, Path::new(&d.path)))
+        && !rules.dirs.iter().any(|d| {
+            inside(
+                ctx.cwd,
+                Path::new(expand_project_path(&d.path, &root).as_ref()),
+            )
+        })
     {
         let list: Vec<&str> = rules.dirs.iter().map(|d| d.text.as_str()).collect();
         return Verdict::Refused {
@@ -232,13 +271,18 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
             };
         };
         let by_rule = rules.allow.iter().any(|rule| match &rule.program {
-            Program::Path(p) => Path::new(p) == resolved && args_match(rule, argv),
+            Program::Path(p) => {
+                Path::new(expand_project_path(p, &root).as_ref()) == resolved
+                    && args_match(rule, argv, &root)
+            }
             _ => false,
         });
-        let by_dir = rules
-            .dirs
-            .iter()
-            .any(|d| inside(resolved, &PathBuf::from(&d.path)));
+        let by_dir = rules.dirs.iter().any(|d| {
+            inside(
+                resolved,
+                Path::new(expand_project_path(&d.path, &root).as_ref()),
+            )
+        });
         if !by_rule && !by_dir {
             return Verdict::NotAllowed {
                 why: if rules.allow.is_empty() {
@@ -359,7 +403,10 @@ mod tests {
         }
         // What follows the package is reported as extra.
         let a = argv(&["npx", "-y", "@pkg/server@1", "--x"]);
-        assert_eq!(extra_args(&b, Some(npx), &a), Some(&a[3..]));
+        assert_eq!(
+            extra_args(&b, Some(npx), &a, Path::new("/proj")),
+            Some(&a[3..])
+        );
         // A deny rule of the same form catches the same commands.
         let d = binding(vec![], vec![deny("npx @pkg/evil")]);
         assert!(matches!(
@@ -373,12 +420,21 @@ mod tests {
         let git = Path::new("/usr/bin/git");
         let b = binding(vec![allow("git push", "/usr/bin/git")], vec![]);
         let a = argv(&["git", "push", "--force", "origin"]);
-        assert_eq!(extra_args(&b, Some(git), &a), Some(&a[2..]));
+        assert_eq!(
+            extra_args(&b, Some(git), &a, Path::new("/proj")),
+            Some(&a[2..])
+        );
         let exact = argv(&["git", "push"]);
-        assert_eq!(extra_args(&b, Some(git), &exact), Some(&exact[2..]));
+        assert_eq!(
+            extra_args(&b, Some(git), &exact, Path::new("/proj")),
+            Some(&exact[2..])
+        );
         // A bare rule allows any arguments: all of them are extra.
         let bare = binding(vec![allow("git", "/usr/bin/git")], vec![]);
-        assert_eq!(extra_args(&bare, Some(git), &a), Some(&a[1..]));
+        assert_eq!(
+            extra_args(&bare, Some(git), &a, Path::new("/proj")),
+            Some(&a[1..])
+        );
         // The rule that names more arguments wins.
         let both = binding(
             vec![
@@ -387,11 +443,20 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(extra_args(&both, Some(git), &a), Some(&a[2..]));
+        assert_eq!(
+            extra_args(&both, Some(git), &a, Path::new("/proj")),
+            Some(&a[2..])
+        );
         // No rule matched (another program, or arguments that differ).
-        assert_eq!(extra_args(&b, Some(Path::new("/bin/git")), &a), None);
-        assert_eq!(extra_args(&b, Some(git), &argv(&["git", "pull"])), None);
-        assert_eq!(extra_args(&b, None, &a), None);
+        assert_eq!(
+            extra_args(&b, Some(Path::new("/bin/git")), &a, Path::new("/proj")),
+            None
+        );
+        assert_eq!(
+            extra_args(&b, Some(git), &argv(&["git", "pull"]), Path::new("/proj")),
+            None
+        );
+        assert_eq!(extra_args(&b, None, &a, Path::new("/proj")), None);
     }
 
     #[test]
@@ -654,5 +719,144 @@ mod tests {
     fn the_empty_command_is_not_allowed() {
         let b = binding(vec![], vec![]);
         assert!(matches!(check(&b, None, &[]), Verdict::NotAllowed { .. }));
+    }
+
+    // Literal Unix paths: the Windows form is covered in `vahta_vault::rules`.
+    #[cfg(unix)]
+    #[test]
+    fn project_relative_rules_are_expanded_from_the_runners_own_root() {
+        let rules = RuleSet {
+            name: "K".into(),
+            allow: vec![ApprovedRule {
+                text: "python3 $PROJECT/lib/x.py".into(),
+                program: Program::Path("/usr/bin/python3".into()),
+                args: vec!["$PROJECT/lib/x.py".into()],
+            }],
+            dirs: vec![DirRule {
+                text: "$PROJECT/scripts".into(),
+                path: "$PROJECT/scripts".into(),
+                write: true,
+            }],
+            network: Network::App,
+            ..RuleSet::default()
+        };
+        let run = |root: &str, cwd: &str, program: &str, words: &[&str]| {
+            let a = argv(words);
+            evaluate(
+                &rules,
+                &Ctx {
+                    program: Some(Path::new(program)),
+                    argv: &a,
+                    cwd: Path::new(cwd),
+                    project_root: Path::new(root),
+                    network_isolation: false,
+                },
+            )
+        };
+        // Two machines, two layouts, one vault.
+        for root in ["/home/owner/x", "/Users/ann/work/x"] {
+            let ok = run(
+                root,
+                &format!("{root}/scripts"),
+                "/usr/bin/python3",
+                &["python3", &format!("{root}/lib/x.py")],
+            );
+            assert!(ok.is_allowed(), "{root}: {ok:?}");
+            // The other machine's path does not match here.
+            let other = run(
+                root,
+                &format!("{root}/scripts"),
+                "/usr/bin/python3",
+                &["python3", "/elsewhere/lib/x.py"],
+            );
+            assert!(!other.is_allowed());
+        }
+        // A program inside the folder is allowed by the folder.
+        let v = run("/p/x", "/p/x/scripts", "/p/x/scripts/tool", &["tool"]);
+        assert!(v.is_allowed(), "{v:?}");
+        // The working directory outside the folder is refused.
+        assert!(matches!(
+            run("/p/x", "/p/x/src", "/p/x/scripts/tool", &["tool"]),
+            Verdict::Refused { .. }
+        ));
+    }
+
+    // Literal Unix paths: the Windows form is covered in `vahta_vault::rules`.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_runner_rule_and_a_project_path_rule_work_in_one_set() {
+        let b = binding(
+            vec![
+                allow("npx @pkg/server", "/usr/bin/npx"),
+                ApprovedRule {
+                    text: "python3 $PROJECT/lib/x.py".into(),
+                    program: Program::Path("/usr/bin/python3".into()),
+                    args: vec!["$PROJECT/lib/x.py".into()],
+                },
+            ],
+            vec![],
+        );
+        let run = |program: &str, words: &[&str]| {
+            let a = argv(words);
+            evaluate(
+                &b,
+                &Ctx {
+                    program: Some(Path::new(program)),
+                    argv: &a,
+                    cwd: Path::new("/m/p"),
+                    project_root: Path::new("/m/p"),
+                    network_isolation: false,
+                },
+            )
+        };
+        assert!(run("/usr/bin/npx", &["npx", "-y", "@pkg/server@1.2.3"]).is_allowed());
+        assert!(run("/usr/bin/python3", &["python3", "/m/p/lib/x.py"]).is_allowed());
+        assert!(!run("/usr/bin/python3", &["python3", "/o/p/lib/x.py"]).is_allowed());
+        assert!(!run("/usr/bin/npx", &["npx", "-y", "@pkg/server-evil"]).is_allowed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_typed_through_a_symlinked_project_folder_still_matches() {
+        let base = std::env::temp_dir().join(format!("vahta-policy-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let real = std::fs::canonicalize(&base).unwrap().join("real");
+        std::fs::create_dir_all(real.join("lib")).unwrap();
+        std::fs::write(real.join("lib/x.py"), "").unwrap();
+        let link = real.parent().unwrap().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let b = binding(
+            vec![ApprovedRule {
+                text: "python3 $PROJECT/lib/x.py".into(),
+                program: Program::Path("/usr/bin/python3".into()),
+                args: vec!["$PROJECT/lib/x.py".into()],
+            }],
+            vec![],
+        );
+        let typed = link.join("lib/x.py").to_string_lossy().into_owned();
+        let other = link.join("lib/y.py").to_string_lossy().into_owned();
+        let run = |root: &Path, word: &str| {
+            let a = argv(&["python3", word]);
+            evaluate(
+                &b,
+                &Ctx {
+                    program: Some(Path::new("/usr/bin/python3")),
+                    argv: &a,
+                    cwd: &real,
+                    project_root: root,
+                    network_isolation: false,
+                },
+            )
+            .is_allowed()
+        };
+        // The project reached by its link or by its real path, the argument
+        // typed either way.
+        for root in [&link, &real] {
+            assert!(run(root, &typed));
+            assert!(run(root, &real.join("lib/x.py").to_string_lossy()));
+            assert!(!run(root, &other));
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -2,7 +2,7 @@
 //! `join`, and opening a vault as a member.
 //!
 //! A vault is shared by sending a file through a chat. The owner adds a member
-//! by the key string the member sent, **after typing the six verification words
+//! by the key string the member sent, **after typing the verification digits
 //! the member read out over another channel**; a package (see
 //! `vahta_vault::member`) then goes to that member alone. Everything that
 //! changes membership asks the owner's password in the window, like the device
@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use vahta_auth::{Action, Factor, UnlockedBy};
 use vahta_ipc::duration::{human, ymd};
-use vahta_ipc::members::{MemberInfo, MemberOp};
+use vahta_ipc::members::{MemberInfo, MemberOp, ProposedRules};
 use vahta_vault::member::{self, FileInfo};
 use vahta_vault::project::Project;
 use vahta_vault::store::StateKey;
@@ -38,13 +38,14 @@ use crate::ops::{
     Ctx, Flow, cancelled, error, find_vault, from_surface, from_vault, lines_for, refused,
     unlock_expecting,
 };
+use crate::proposal;
 use crate::protocol::{ClientReply, Panel, RefusalKind};
 use crate::surface::Window;
 
 /// A membership lasts from a minute to ten years.
 const MIN_SPAN_SECS: u64 = 60;
 const MAX_SPAN_SECS: u64 = 3650 * 86_400;
-/// How many times the words may be typed before the add is refused.
+/// How many times the digits may be typed before the add is refused.
 const WORD_TRIES: usize = 3;
 
 fn now() -> u64 {
@@ -69,8 +70,8 @@ pub(crate) fn handle(ctx: &Ctx<'_>, cwd: &str, op: MemberOp) -> Flow<ClientReply
         MemberOp::Grant { name, member } => grant(ctx, cwd, &name, &member, true),
         MemberOp::Revoke { name, member } => grant(ctx, cwd, &name, &member, false),
         MemberOp::Share { member, out } => share(ctx, cwd, &member, &out),
-        MemberOp::SendToOwner { name, out } => send_to_owner(ctx, cwd, &name, &out),
-        MemberOp::Join { file } => join(ctx, cwd, &file),
+        MemberOp::SendToOwner { name, out, rules } => send_to_owner(ctx, cwd, &name, &out, rules),
+        MemberOp::Join { file, path } => join(ctx, cwd, &file, path),
     }
 }
 
@@ -245,10 +246,10 @@ fn ask_identity(
 /// read out. Public information only.
 pub fn id_text(public: &RecipientPublic) -> String {
     format!(
-        "your key (send this in the chat):\n  {}\nyour six verification words (read these out over \
+        "your key (send this in the chat):\n  {}\nyour verification digits (read these out over \
          a call or in person, never in the chat):\n  {}",
         member::public_key_string(public),
-        member::words_line(public)
+        member::digits_line(public)
     )
 }
 
@@ -257,7 +258,7 @@ fn id_create(ctx: &Ctx<'_>) -> Flow<ClientReply> {
     if identity::exists(&path) {
         return Err(refused(
             RefusalKind::Exists,
-            "this machine already has an identity; `vahta id --show` shows its key and words",
+            "this machine already has an identity; `vahta id --show` shows its key and digits",
         ));
     }
     let title = "Create your Vahta identity";
@@ -347,7 +348,7 @@ fn add(
     lines.push(format!("Access: {}", access_text(expires_at)));
     lines.push(format!("Key fingerprint: {fingerprint}"));
     lines.push(format!(
-        "Ask {name} to read you the six words from `vahta id --show` over a call or in person, \
+        "Ask {name} to read you the digits from `vahta id --show` over a call or in person, \
          not in the chat the key came through, and type them below."
     ));
     let mut panel = ctx.panel(title, lines);
@@ -359,15 +360,15 @@ fn add(
     let mut matched = false;
     for _ in 0..WORD_TRIES {
         let typed = window
-            .ask_text(&panel, &format!("The six words {name} read to you"))
+            .ask_text(&panel, &format!("The digits {name} read to you"))
             .map_err(from_surface)?
             .ok_or_else(cancelled)?;
-        if member::words_match(&public, &typed) {
+        if member::digits_match(&public, &typed) {
             matched = true;
             break;
         }
         panel.warning = Some(
-            "Those are not the words of this key. Ask again; if they still differ, the key was \
+            "Those are not the digits of this key. Ask again; if they still differ, the key was \
              changed on its way to you."
                 .to_string(),
         );
@@ -379,12 +380,12 @@ fn add(
                 .names(&[name.to_string()])
                 .result(
                     "refused",
-                    Some(&format!("verification words differ; key {fingerprint}")),
+                    Some(&format!("verification digits differ; key {fingerprint}")),
                 ),
         );
         window.close(Some("Refused."));
         return Err(error(
-            "refused: the words do not match this key; nothing was written",
+            "refused: the digits do not match this key; nothing was written",
         ));
     }
     let action = Action::Devices {
@@ -444,7 +445,7 @@ fn list(cwd: &str) -> Flow<ClientReply> {
         })
         .collect();
     Ok(ClientReply::Members {
-        owner_words: member::words_line(&info.owner),
+        owner_digits: member::digits_line(&info.owner),
         members,
     })
 }
@@ -691,7 +692,24 @@ fn share(ctx: &Ctx<'_>, cwd: &str, member: &str, out: &str) -> Flow<ClientReply>
         what: format!("package for {}", target.name),
     };
     let vault = unlock_expecting(ctx, window.as_mut(), &vault_path, &panel, action, &peek)?;
-    let bytes = vault.package_for(&target.id).map_err(from_vault)?;
+    let canon = std::fs::canonicalize(&project.root).ok();
+    let roots: Vec<&Path> = canon
+        .iter()
+        .map(PathBuf::as_path)
+        .chain([project.root.as_path()])
+        .collect();
+    let bytes = vault.package_for(&target.id, &roots).map_err(from_vault)?;
+    // Places outside the project stay as the owner approved them; they may not
+    // exist on the member's machine, so say which secrets carry them.
+    let outside: Vec<String> = Vault::peek_bytes(&bytes)
+        .map(|p| p.bindings)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|b| {
+            let places = vahta_vault::rules::absolute_places(b);
+            (!places.is_empty()).then(|| format!("{}: {}", b.name, places.join(", ")))
+        })
+        .collect();
     write_new(&out, &bytes)?;
     ctx.journal(
         Entry::new("package_made")
@@ -707,18 +725,50 @@ fn share(ctx: &Ctx<'_>, cwd: &str, member: &str, out: &str) -> Flow<ClientReply>
             ),
     );
     window.close(Some("Package written."));
+    let warning = if outside.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "warning: these rules name places outside the project, which may not exist on {}'s \
+             machine (rules inside the project are relative and travel fine): {}\n",
+            target.name,
+            outside.join("; ")
+        )
+    };
     Ok(ClientReply::Done {
         message: format!(
-            "wrote {} for {} ({} secret(s)). Send the file to {} in the chat, and read them these \
-             six words over a call or in person, so they can check the file came from you when \
+            "{warning}wrote {} for {} ({} secret(s)). Send the file to {} in the chat, and read them these \
+             digits over a call or in person, so they can check the file came from you when \
              they run `vahta join`:\n  {}",
             out.display(),
             target.name,
             held.len(),
             target.name,
-            member::words_line(&info.owner)
+            member::digits_line(&info.owner)
         ),
     })
+}
+
+/// When this machine's membership in the package at `path` ends, if it does:
+/// what caps a session a member opens. A package not addressed to this
+/// identity, or an ended membership, is an error.
+pub(crate) fn membership_end(ctx: &Ctx<'_>, path: &Path) -> Flow<Option<u64>> {
+    let bytes = vahta_vault::read_file(path).map_err(from_vault)?;
+    let info = member::file_info(&bytes).map_err(from_vault)?;
+    let idp = identity_path(ctx);
+    if !identity::exists(&idp) {
+        return Err(error(
+            "this vault is a member's package and this machine has no identity: run `vahta id`",
+        ));
+    }
+    let public = identity::read_public(&idp).map_err(from_vault)?;
+    let me = info
+        .member_with(&public)
+        .ok_or_else(|| error("this package is not addressed to this machine's identity"))?;
+    if me.expires_at.is_some_and(|t| t <= now()) {
+        return Err(error(Error::MembershipExpired.to_string()));
+    }
+    Ok(me.expires_at)
 }
 
 // --- Opening as a member ---------------------------------------------------------------------------
@@ -734,11 +784,9 @@ fn role_allows(role: Role, action: &Action) -> Result<(), String> {
              change them; nothing was done"
                 .to_string(),
         ),
-        Action::Unlock { .. } => Err(
-            "a member does not hold a session yet: use `vahta run` (your identity password is \
-             asked each time); nothing was done"
-                .to_string(),
-        ),
+        // A session runs commands, which every role may; the daemon ends it
+        // no later than the membership.
+        Action::Unlock { .. } => Ok(()),
         _ => Err(format!(
             "you are {} {name} in this vault: a member can run commands with the secrets it \
              holds{}; the owner manages the rest; nothing was done",
@@ -782,7 +830,7 @@ fn open_member_with(
     }
     let id = me.id;
     let keys = ask_identity(window, panel, &idp)?;
-    // A package this machine never joined has had no owner words confirmed:
+    // A package this machine never joined has had no owner digits confirmed:
     // `vahta join` is the only way in, so the owner's key is never taken on
     // trust from a file that merely appeared in the folder.
     let state_key = StateKey::recipient(id, keys.sign_sk());
@@ -792,12 +840,12 @@ fn open_member_with(
             &info.vault_id,
             &state_key,
             &info.owner.sign_pk,
-            info.generation,
+            info.owner_generation,
         )
         .map_err(from_vault)?;
     if checked.first_open {
         return Err(error(
-            "this package was never joined on this machine: run `vahta join FILE` with the file              the owner sent, which shows the owner's words to confirm",
+            "this package was never joined on this machine: run `vahta join FILE` with the file              the owner sent, which shows the owner's digits to confirm",
         ));
     }
     Vault::open_as_recipient(path, &id, &keys, ctx.store()).map_err(from_vault)
@@ -829,8 +877,27 @@ pub(crate) fn open_member(
 
 // --- Sending one secret to the owner -------------------------------------------------------------
 
-fn send_to_owner(ctx: &Ctx<'_>, cwd: &str, name: &str, out: &str) -> Flow<ClientReply> {
+fn send_to_owner(
+    ctx: &Ctx<'_>,
+    cwd: &str,
+    name: &str,
+    out: &str,
+    rules: ProposedRules,
+) -> Flow<ClientReply> {
     crate::ops::check_name(name)?;
+    let proposed = (rules != ProposedRules::default()).then(|| member::ProposedRules {
+        category: rules.category.clone(),
+        allow: rules.allow.clone(),
+        deny: rules.deny.clone(),
+        dirs: rules.dirs.clone(),
+        net: rules.net.clone(),
+    });
+    if proposed.as_ref().is_some_and(|p| !p.is_well_formed()) {
+        return Err(error(
+            "the proposed rules are too many or too long, or have a control character; nothing \
+             was written",
+        ));
+    }
     let out = check_out(out)?;
     let (project, vault_path) = find_vault(cwd)?;
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
@@ -852,6 +919,13 @@ fn send_to_owner(ctx: &Ctx<'_>, cwd: &str, name: &str, out: &str) -> Flow<Client
          by you."
             .to_string(),
     );
+    if let Some(p) = &proposed {
+        lines.push(format!(
+            "Rules you propose for it (the owner reads and approves them; they change nothing \
+             of a secret the owner already has): {}",
+            proposed_text(p)
+        ));
+    }
     let panel = ctx.panel(title, lines);
     let vault = open_member_with(ctx, window.as_mut(), &vault_path, &panel, &|role| {
         if role == Role::Runner {
@@ -860,7 +934,17 @@ fn send_to_owner(ctx: &Ctx<'_>, cwd: &str, name: &str, out: &str) -> Flow<Client
             Ok(())
         }
     })?;
-    let bytes = vault.make_transfer(name).map_err(from_vault)?;
+    let me = vault
+        .membership()
+        .map(|m| m.id)
+        .ok_or_else(|| error("this vault is not opened as a member"))?;
+    let counter = ctx
+        .store()
+        .next_transfer_counter(&peek.vault_id, &me)
+        .map_err(from_vault)?;
+    let bytes = vault
+        .make_transfer(name, counter, proposed)
+        .map_err(from_vault)?;
     write_new(&out, &bytes)?;
     ctx.journal(
         Entry::new("transfer_made")
@@ -880,19 +964,41 @@ fn send_to_owner(ctx: &Ctx<'_>, cwd: &str, name: &str, out: &str) -> Flow<Client
     })
 }
 
+/// A proposal as one line: `category: c; allow: a, b; ...`.
+fn proposed_text(p: &member::ProposedRules) -> String {
+    let mut parts = Vec::new();
+    if let Some(c) = &p.category {
+        parts.push(format!("category: {c}"));
+    }
+    for (label, list) in [("allow", &p.allow), ("deny", &p.deny), ("dirs", &p.dirs)] {
+        if !list.is_empty() {
+            parts.push(format!("{label}: {}", list.join(", ")));
+        }
+    }
+    if let Some(n) = &p.net {
+        parts.push(format!("network: {n}"));
+    }
+    parts.join("; ")
+}
+
 // --- join ----------------------------------------------------------------------------------------------
 
-fn join(ctx: &Ctx<'_>, cwd: &str, file: &str) -> Flow<ClientReply> {
-    let path = PathBuf::from(file);
-    let bytes = vahta_vault::read_file(&path).map_err(from_vault)?;
+fn join(ctx: &Ctx<'_>, cwd: &str, file: &str, path: Option<String>) -> Flow<ClientReply> {
+    let file = PathBuf::from(file);
+    let bytes = vahta_vault::read_file(&file).map_err(from_vault)?;
     if member::is_transfer(&bytes) {
-        join_transfer(ctx, cwd, &bytes)
+        join_transfer(ctx, cwd, &bytes, path)
     } else {
         join_package(ctx, cwd, &bytes)
     }
 }
 
-fn join_transfer(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
+fn join_transfer(
+    ctx: &Ctx<'_>,
+    cwd: &str,
+    bytes: &[u8],
+    path: Option<String>,
+) -> Flow<ClientReply> {
     let (project, vault_path, peek, info) = owner_vault(ctx, cwd)?;
     let title = "Import a secret a member sent";
     let mut window = ctx.window(title)?;
@@ -914,25 +1020,74 @@ fn join_transfer(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
     let mut lines = lines_for(&project, &vault_path);
     lines.push(format!("Secret: {}", t.name));
     lines.push(format!("From: {} ({role})", t.from.name));
+    // The rules an editor proposes count only for a secret the vault does not
+    // have; they are built here, on the owner's machine, like any `vahta bind`.
+    let mut offered: Option<proposal::Built> = None;
     if t.replaces {
         lines.push(format!(
-            "The vault already has {}: this REPLACES its value. Its kind and tier stay as they are.",
+            "The vault already has {}: this REPLACES its value. Its kind, tier and rules stay as \
+             they are.",
             t.name
         ));
+        if t.proposed.is_some() {
+            lines.push(
+                "The sender also proposed rules; they are ignored, since only you change the \
+                 rules of a secret you have (`vahta bind`)."
+                    .to_string(),
+            );
+        }
     } else {
-        lines.push(
-            "New to the vault. It has no approved rules until you add them with `vahta bind`; \
-             the sender keeps access to it."
-                .to_string(),
-        );
+        match &t.proposed {
+            None => lines.push(
+                "New to the vault. It has no approved rules until you add them with `vahta bind`; \
+                 the sender keeps access to it."
+                    .to_string(),
+            ),
+            Some(p) => {
+                lines.push(format!(
+                    "New to the vault. {} PROPOSES these rules (not approved yet): {}",
+                    t.from.name,
+                    proposed_text(p)
+                ));
+                match build_proposed(&t.name, p, path, &project) {
+                    Ok(built) => {
+                        lines.push(format!(
+                            "In effect, if you approve them: {}",
+                            crate::binding::rules_text(&built.rule_set)
+                        ));
+                        for (text, program) in &built.resolved {
+                            lines.push(format!("`{text}` runs {}", program.display()));
+                        }
+                        for w in &built.warnings {
+                            lines.push(format!("Warning: {w}"));
+                        }
+                        offered = Some(built);
+                    }
+                    Err(e) => lines.push(format!(
+                        "These rules cannot be built here ({e}); the secret can still be \
+                         imported without rules."
+                    )),
+                }
+            }
+        }
     }
     lines.push("The value is not shown.".to_string());
     let panel = ctx.panel(title, lines);
-    let options = vec!["Import".to_string(), "Cancel".to_string()];
+    let options = if offered.is_some() {
+        vec![
+            "Import with these rules".to_string(),
+            "Import without rules".to_string(),
+            "Cancel".to_string(),
+        ]
+    } else {
+        vec!["Import".to_string(), "Cancel".to_string()]
+    };
     let choice = window
         .choose(&panel, "Import this secret?", &options)
         .map_err(from_surface)?;
-    if choice != Some(0) {
+    let cancel = options.len() - 1;
+    let with_rules = offered.is_some() && choice == Some(0);
+    if choice.is_none_or(|c| c >= cancel) {
         ctx.journal(
             Entry::new("transfer_imported")
                 .vault(&peek.vault_id)
@@ -943,12 +1098,30 @@ fn join_transfer(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
         return Err(cancelled());
     }
     vault.apply_transfer(&t).map_err(from_vault)?;
+    if let (true, Some(built)) = (with_rules, &offered) {
+        // The file first, so the repository shows what is enforced.
+        crate::bind_ops::write_rules(&project, &t.name, &built.rule_set)?;
+        vault
+            .set_bindings(&t.name, Some(built.rule_set.clone()))
+            .map_err(from_vault)?;
+    }
     vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
     ctx.journal(
         Entry::new("transfer_imported")
             .vault(&peek.vault_id)
             .names(std::slice::from_ref(&t.name))
-            .result("ok", Some(&format!("from {}", t.from.name))),
+            .result(
+                "ok",
+                Some(&format!(
+                    "from {}{}",
+                    t.from.name,
+                    if with_rules {
+                        "; with the rules it proposed"
+                    } else {
+                        ""
+                    }
+                )),
+            ),
     );
     window.close(Some("Imported."));
     Ok(ClientReply::Done {
@@ -958,11 +1131,36 @@ fn join_transfer(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
             t.from.name,
             if t.replaces {
                 " (replaced the old value)"
+            } else if with_rules {
+                "; the rules it proposed are approved; `vahta share` a new package"
             } else {
                 "; set its rules with `vahta bind`, then `vahta share` a new package"
             }
         ),
     })
+}
+
+/// The proposal as a rule set for `name`, built like `vahta bind` would.
+fn build_proposed(
+    name: &str,
+    p: &member::ProposedRules,
+    path: Option<String>,
+    project: &Project,
+) -> Result<proposal::Built, String> {
+    let category = match &p.category {
+        Some(c) => Some(proposal::find_category(c)?),
+        None => None,
+    };
+    let args = proposal::Args {
+        category: p.category.clone(),
+        allow: p.allow.clone(),
+        deny: p.deny.clone(),
+        dirs: p.dirs.clone(),
+        net: p.net.clone(),
+        path: path.map(std::ffi::OsString::from),
+        from: Vec::new(),
+    };
+    proposal::build(name, category, &args, &project.root)
 }
 
 fn join_package(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
@@ -992,6 +1190,8 @@ fn join_package(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
         root: PathBuf::from(cwd),
     });
     let target = root.vault_path();
+    // Secrets only the installed file has: installing replaces it.
+    let mut local_only: Vec<String> = Vec::new();
     let old = if target.exists() {
         let old = vahta_vault::read_file(&target).map_err(from_vault)?;
         let oi = member::file_info(&old).map_err(|_| {
@@ -1011,13 +1211,21 @@ fn join_package(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
                 "this directory already holds another vault's package; join from another directory",
             ));
         }
-        if info.generation <= oi.generation {
+        // By the owner's generation: the installed file's own generation runs
+        // ahead of it when this member has saved changes locally.
+        if info.owner_generation <= oi.owner_generation {
             return Err(error(format!(
-                "this package (generation {}) is not newer than the one installed (generation \
-                 {}); an older or repeated package is refused",
-                info.generation, oi.generation
+                "this package (owner generation {}) is not newer than the one installed (owner \
+                 generation {}); an older or repeated package is refused",
+                info.owner_generation, oi.owner_generation
             )));
         }
+        local_only = oi
+            .held_by(&me.id)
+            .iter()
+            .filter(|n| !info.held_by(&me.id).contains(n))
+            .cloned()
+            .collect();
         Some(old)
     } else {
         None
@@ -1036,44 +1244,102 @@ fn join_package(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
         ),
         format!("Secrets: {}", held.join(", ")),
     ];
+    if !local_only.is_empty() {
+        lines.push(format!(
+            "Warning: your current file has {}, which this package does not. Installing replaces \
+             your file, so they are lost unless you sent them to the owner first \
+             (`vahta share --to owner`).",
+            local_only.join(", ")
+        ));
+    }
     let mut panel = ctx.panel(title, lines.clone());
     let keys = ask_identity(window.as_mut(), &panel, &idp)?;
     let state_key = StateKey::recipient(me.id, keys.sign_sk());
-    let checked = ctx
-        .store()
-        .check(
-            &info.vault_id,
-            &state_key,
-            &info.owner.sign_pk,
-            info.generation,
-        )
-        .map_err(|e| error(format!("{e}; nothing was installed")))?;
-    if checked.first_open {
-        // The first package of a vault: the owner's key is accepted here for
-        // good, so the person compares it with what the owner reads out.
+    let mut rekeyed = false;
+    let checked = match ctx.store().check(
+        &info.vault_id,
+        &state_key,
+        &info.owner.sign_pk,
+        info.owner_generation,
+    ) {
+        Ok(c) => c,
+        Err(Error::OwnerChanged) => {
+            // The owner re-keyed (a lost device). Accepted only when the
+            // package's own chain of successors, each signed by the key before
+            // it, leads from the key pinned here to the new one.
+            let pinned = ctx
+                .store()
+                .state(&info.vault_id, &state_key)
+                .map_err(from_vault)?
+                .ok_or_else(|| error("the owner's key changed; nothing was installed"))?
+                .pinned_owner_sign_pk;
+            if info.successors_from(&pinned).is_none() {
+                return Err(error(
+                    "this package is signed by a different owner key than the one pinned on this \
+                     machine, and it carries no valid chain from the old key to the new one; \
+                     nothing was installed",
+                ));
+            }
+            rekeyed = true;
+            vahta_vault::store::Checked { first_open: false }
+        }
+        Err(e) => return Err(error(format!("{e}; nothing was installed"))),
+    };
+    if rekeyed {
         lines.push(format!(
-            "The owner's six words: {}",
-            member::words_line(&info.owner)
+            "The owner's key changed (they re-keyed the vault). The chain in the package, signed \
+             by the old key, vouches for the new one. The owner's new digits: {}",
+            member::digits_line(&info.owner)
         ));
         lines.push(
-            "The owner should read you the same six words over a call or in person. They prove \
-             this package comes from the person you mean."
+            "Ask the owner to read you the same digits over a call or in person before you \
+             accept."
                 .to_string(),
         );
         panel = ctx.panel(title, lines);
-        panel.warning = Some("If the words differ, do not join: the file is not from them.".into());
-        let options = vec!["The words match".to_string(), "They differ".to_string()];
+        panel.warning =
+            Some("If the digits differ, do not install: the file is not from them.".into());
+        let options = vec!["The digits match".to_string(), "They differ".to_string()];
         let choice = window
             .choose(
                 &panel,
-                "Do the six words match what the owner read to you?",
+                "Do the digits match what the owner read to you?",
                 &options,
             )
             .map_err(from_surface)?;
         if choice != Some(0) {
             window.close(None);
             return Err(error(
-                "refused: the owner's words were not confirmed; nothing was installed",
+                "refused: the owner's new digits were not confirmed; nothing was installed",
+            ));
+        }
+    } else if checked.first_open {
+        // The first package of a vault: the owner's key is accepted here for
+        // good, so the person compares it with what the owner reads out.
+        lines.push(format!(
+            "The owner's digits: {}",
+            member::digits_line(&info.owner)
+        ));
+        lines.push(
+            "The owner should read you the same digits over a call or in person. They prove \
+             this package comes from the person you mean."
+                .to_string(),
+        );
+        panel = ctx.panel(title, lines);
+        panel.warning =
+            Some("If the digits differ, do not join: the file is not from them.".into());
+        let options = vec!["The digits match".to_string(), "They differ".to_string()];
+        let choice = window
+            .choose(
+                &panel,
+                "Do the digits match what the owner read to you?",
+                &options,
+            )
+            .map_err(from_surface)?;
+        if choice != Some(0) {
+            window.close(None);
+            return Err(error(
+                "refused: the owner's digits were not confirmed; nothing was installed",
             ));
         }
     }
@@ -1082,7 +1348,9 @@ fn join_package(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
     write_atomic(&target, bytes).map_err(from_vault)?;
     // Opening verifies the file again against this machine's record and writes
     // it (the owner's key pinned, the generation raised).
-    if let Err(e) = Vault::open_as_recipient(&target, &me.id, &keys, ctx.store()) {
+    if let Err(e) =
+        Vault::open_as_recipient_accepting(&target, &me.id, &keys, ctx.store(), &mut |_| rekeyed)
+    {
         match &old {
             Some(old) => {
                 let _ = write_atomic(&target, old);
@@ -1101,10 +1369,11 @@ fn join_package(ctx: &Ctx<'_>, cwd: &str, bytes: &[u8]) -> Flow<ClientReply> {
             .result(
                 "ok",
                 Some(&format!(
-                    "{} as {}; generation {}",
+                    "{} as {}; owner generation {}{}",
                     me.name,
                     role_text(me.role),
-                    info.generation
+                    info.owner_generation,
+                    if rekeyed { "; owner key changed" } else { "" }
                 )),
             ),
     );
