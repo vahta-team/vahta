@@ -25,6 +25,7 @@ mod encoded;
 mod guard_ops;
 mod http_ops;
 pub mod journal;
+mod jsonl;
 mod link_devices;
 pub use link_devices::LinkDevices;
 mod lock;
@@ -47,6 +48,7 @@ mod session_ops;
 pub mod surface;
 pub mod terminal;
 pub mod testing;
+mod transcript;
 mod valuecheck;
 
 // The protocol, the client, the paths and the config live in `vahta-ipc`, so

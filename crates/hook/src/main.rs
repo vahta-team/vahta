@@ -1,7 +1,7 @@
 //! `vahta-hook --harness <claude|codex|cursor> --event <kind> [--setup N]`
 //!
 //! Kinds: `before_tool`, `before_read`, `prompt`, `after_tool`, `session_start`,
-//! `permission_request`.
+//! `session_end`, `permission_request`.
 //! Reads one harness event on stdin and answers on stdout. Every failure
 //! (unreadable input, bad JSON, an unknown shape) is an allow: empty stdout,
 //! exit 0. A broken hook must never brick the agent.
@@ -146,7 +146,7 @@ fn tool_secret(ev: &Event) -> (Decision, Option<Signal>) {
 /// A secret in what the person typed, or in a tool's output that cannot be
 /// rewritten. A hidden value is not looked for here, and neither is a rule in
 /// observe mode: this is a plain look.
-fn secret_in(text: &str, what: &str) -> Decision {
+fn secret_in(harness: &str, text: &str, what: &str) -> Decision {
     let Some(f) = vahta_detect::find_secret(text)
         .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block)
     else {
@@ -171,8 +171,9 @@ fn secret_in(text: &str, what: &str) -> Decision {
             ),
             agent_message: format!(
                 "{} reached the transcript through this tool's output. \
-                 Treat it as exposed: tell the user to rotate it, and do not repeat the value.",
-                capitalise(category)
+                 Treat it as exposed: tell the user to rotate it, and do not repeat the value.{}",
+                capitalise(category),
+                scrub_hint(harness)
             ),
         },
     }
@@ -191,6 +192,19 @@ fn deny_known_value(held: &daemon::Held) -> Decision {
             "Blocked: this command contains a value Vahta holds ({}). Use `vahta run`.",
             held.form
         ),
+    }
+}
+
+/// What the agent may do about a value already in the transcript, said
+/// honestly: the files can be cleaned, the conversation cannot.
+fn scrub_hint(harness: &str) -> &'static str {
+    if harness == "cursor" {
+        // Cursor keeps its chats in a database that `vahta scrub` does not touch.
+        " The current conversation still holds it until a new chat."
+    } else {
+        " `vahta scrub --transcript` removes it from the transcript files on disk (the running \
+         session's file is cleaned when the session ends), but the current conversation still \
+         holds it until /clear or a new session."
     }
 }
 
@@ -421,9 +435,11 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
             }
         }
         // The person typed the prompt: a refusal there is not the agent's doing.
-        Kind::Prompt => (secret_in(&ev.text, "prompt"), None),
+        Kind::Prompt => (secret_in(&args.harness, &ev.text, "prompt"), None),
         Kind::AfterTool => (after_tool(m, ev), None),
         Kind::SessionStart => (session_start(m, args), None),
+        // Nothing to say; `run` tells the daemon.
+        Kind::SessionEnd => (Decision::Allow, None),
     }
 }
 
@@ -495,11 +511,11 @@ fn guard_reminder() -> Decision {
 /// the transcript, as before.
 fn after_tool(m: &Manifest, ev: &Event) -> Decision {
     if daemon::hook_output() == vahta_ipc::config::HookOutput::Observe {
-        return observe(ev);
+        return observe(m, ev);
     }
     let mcp = ev.group == Some(vahta_harness::Group::Mcp);
     let Some(output) = ev.output.as_ref().filter(|_| m.can_redact(mcp)) else {
-        return secret_in(&ev.text, "output");
+        return secret_in(&m.name, &ev.text, "output");
     };
     let texts = redact::texts_of(output);
     let (found, possible) = redact::detector_cuts(&texts);
@@ -533,7 +549,7 @@ fn after_tool(m: &Manifest, ev: &Event) -> Decision {
 /// Observe mode (`hook_output = "observe"`): the output is not changed. The
 /// person and the model are told a secret reached the transcript, exactly as
 /// before redaction existed, and a running daemon journals what was seen.
-fn observe(ev: &Event) -> Decision {
+fn observe(m: &Manifest, ev: &Event) -> Decision {
     let texts = match &ev.output {
         Some(output) => redact::texts_of(output),
         None => vec![ev.text.clone()],
@@ -545,7 +561,7 @@ fn observe(ev: &Event) -> Decision {
         kinds.dedup();
         daemon::observed(ev.tool.clone(), kinds, likely.len(), possible.len());
     }
-    secret_in(&ev.text, "output")
+    secret_in(&m.name, &ev.text, "output")
 }
 
 /// What the model and the person are told about a redaction. Names labels and
@@ -640,6 +656,14 @@ fn run() -> Option<vahta_harness::Output> {
             unbuilt_event(&manifest, args.kind, &raw)?
         }
     };
+    if matches!(args.kind, Kind::SessionStart | Kind::SessionEnd) {
+        daemon::session_note(
+            event.session_id.clone(),
+            &args.harness,
+            event.cwd.clone().unwrap_or_default(),
+            args.kind == Kind::SessionEnd,
+        );
+    }
     let (decision, signal) = decide(&manifest, &args, &event);
     if let Some(signal) = signal {
         daemon::report(

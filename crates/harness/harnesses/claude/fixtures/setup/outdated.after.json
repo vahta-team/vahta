@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 4"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 5"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 4"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 5"
           }
         ]
       },
@@ -35,7 +35,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 4"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 5"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_end --setup 5"
           }
         ]
       }
@@ -45,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 4"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 5"
           }
         ]
       }
@@ -56,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 4"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 5"
           }
         ]
       }
@@ -79,7 +89,13 @@
       "Bash(vh list)",
       "Bash(vh list --json)",
       "Bash(vh check)",
-      "Bash(vh check --json)"
+      "Bash(vh check --json)",
+      "Bash(vahta scrub --transcript)",
+      "Bash(vahta scrub --transcript --all)",
+      "Bash(vahta scrub --transcript --json)",
+      "Bash(vh scrub --transcript)",
+      "Bash(vh scrub --transcript --all)",
+      "Bash(vh scrub --transcript --json)"
     ]
   }
 }

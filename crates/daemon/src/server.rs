@@ -120,6 +120,9 @@ pub(crate) struct Shared {
     /// Tool outputs kept for the agent to ask about, and what the person has
     /// let through (see `output.rs`).
     pub(crate) outputs: Mutex<Outputs>,
+    /// Running sessions the hooks announced, and transcripts waiting for the
+    /// end of theirs (see `transcript.rs`).
+    pub(crate) marks: Mutex<crate::transcript::Marks>,
     /// What agents have tried, weighed (see `alarm.rs`).
     pub(crate) alarm: crate::alarm::Alarm,
     /// The last refused launch of each connector's server (`connector_ops.rs`).
@@ -269,6 +272,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         store,
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
+        marks: Mutex::new(crate::transcript::Marks::default()),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
         unlockers: vahta_auth::Registry::standard(),
@@ -842,6 +846,20 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 possible,
             } => (
                 output::scan(&ctx, cwd, tool, texts, spans, possible).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::TranscriptScrub { cwd, all, roots } => (
+                crate::transcript::scrub(&ctx, &cwd, all, roots).unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::TranscriptNote {
+                harness,
+                session,
+                cwd: _,
+                ended,
+                roots,
+            } => (
+                crate::transcript::note(&ctx, &harness, session.as_deref(), ended, roots),
                 false,
             ),
             ClientRequest::OutputObserved {

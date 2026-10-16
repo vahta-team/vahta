@@ -148,6 +148,8 @@ impl Manifest {
             Kind::Prompt => self.replies.prompt.as_ref(),
             Kind::AfterTool => self.replies.after_tool.as_ref(),
             Kind::SessionStart => self.replies.session_start.as_ref(),
+            // Nothing is said at the end of a session.
+            Kind::SessionEnd => None,
             Kind::PermissionRequest => self.replies.permission_request.as_ref(),
         }
     }

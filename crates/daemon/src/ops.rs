@@ -648,6 +648,8 @@ pub(crate) fn store(
         StoreMode::Add => "Saved",
         StoreMode::Reset => "Replaced",
     };
+    // A new value is not the one a transcript holds.
+    crate::transcript::clear_exposed(ctx.shared, &vault.vault_id(), name);
     let note = match mode {
         StoreMode::Add => None,
         StoreMode::Reset => stale_sessions_note(ctx, &vault.vault_id(), name),
@@ -984,6 +986,7 @@ pub(crate) fn remove(ctx: &Ctx<'_>, cwd: &str, name: &str) -> Flow<ClientReply> 
             .names(&[name.to_string()])
             .result("ok", None),
     );
+    crate::transcript::clear_exposed(ctx.shared, &vault.vault_id(), name);
     let note = stale_sessions_note(ctx, &vault.vault_id(), name);
     window.close(Some(&with_note(format!("Removed {name}."), &note)));
     Ok(ClientReply::Done {

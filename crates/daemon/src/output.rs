@@ -264,7 +264,7 @@ fn on_boundaries(text: &str, mut start: usize, mut end: usize) -> (usize, usize)
 }
 
 /// A label from the hook, made fit for a window and the journal.
-fn clean_label(raw: &str) -> String {
+pub(crate) fn clean_label(raw: &str) -> String {
     sanitize_label(raw)
         .map(|l| l.chars().take(64).collect())
         .unwrap_or_else(|| "secret".to_string())
@@ -274,7 +274,7 @@ fn clean_label(raw: &str) -> String {
 /// in every form it might be written in: the sessions that cover it, and its
 /// anchor's recent runs. Read from the caches built when they were opened, so
 /// a scan opens no vault.
-fn values_for(
+pub(crate) fn values_for(
     ctx: &Ctx<'_>,
     chain: &[ProcessId],
     anchor: Option<&ProcessId>,

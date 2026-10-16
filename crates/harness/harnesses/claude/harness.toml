@@ -7,7 +7,9 @@ title = "Claude Code"
 # 2: permissions.deny for the vahta commands that are for the person only.
 # 3: the after-tool matcher also covers WebFetch.
 # 4: permissions.allow for the read-only commands `vahta list` and `vahta check`.
-setup_version = 4
+# 5: the SessionEnd hook (the daemon cleans the transcript it marked), and
+#    permissions.allow for `vahta scrub --transcript`.
+setup_version = 5
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -55,6 +57,14 @@ rules = [
   "Bash(vh list --json)",
   "Bash(vh check)",
   "Bash(vh check --json)",
+  # Removes secrets from the harness's transcript files and reveals nothing,
+  # so it is for the agent to run without being asked (exact strings only).
+  "Bash(vahta scrub --transcript)",
+  "Bash(vahta scrub --transcript --all)",
+  "Bash(vahta scrub --transcript --json)",
+  "Bash(vh scrub --transcript)",
+  "Bash(vh scrub --transcript --all)",
+  "Bash(vh scrub --transcript --json)",
 ]
 
 # User scope only in v1. Hooks live under the "hooks" key of settings.json.
@@ -115,6 +125,17 @@ session_id = "session_id"
 name = "SessionStart"
 kind = "session_start"
 # Registered from v1 so that a later, outdated setup has a channel to say so.
+cwd = "cwd"
+session_id = "session_id"
+
+# The session is over: the daemon cleans the transcript it found a secret in
+# while the session ran and could not rewrite (docs read 2026-10-16,
+# https://code.claude.com/docs/en/hooks; the payload carries session_id, cwd and
+# a `reason`). Nothing is answered. No matcher: every reason (clear, logout,
+# exit) ends a session.
+[[events]]
+name = "SessionEnd"
+kind = "session_end"
 cwd = "cwd"
 session_id = "session_id"
 

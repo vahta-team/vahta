@@ -479,7 +479,7 @@ fn a_claude_v3_install_without_allow_rules_is_outdated_and_upgrades_cleanly() {
     let mut env = t.env();
     env.hook = t.write("bin/vahta-hook", "");
     let mf = m("claude");
-    assert_eq!(mf.setup_version, 4, "v4 added permissions.allow");
+    assert!(mf.setup_version >= 4, "v4 added permissions.allow");
     commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
     let path = config_in(&t, "claude");
     let now = fs::read_to_string(&path).unwrap();

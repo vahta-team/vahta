@@ -295,7 +295,7 @@ impl Manifest {
                 ev.path = text_field(payload, &spec.file_path);
                 ev.content = text_field(payload, &spec.content);
             }
-            Kind::SessionStart => {}
+            Kind::SessionStart | Kind::SessionEnd => {}
             Kind::Prompt => ev.text = text_field(payload, &spec.prompt)?,
             Kind::AfterTool => {
                 ev.tool = tool_name(payload, spec);

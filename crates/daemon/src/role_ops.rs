@@ -785,6 +785,7 @@ pub(crate) fn forbids(ctx: &Ctx<'_>, request: &ClientRequest) -> Option<ClientRe
             | SessionKill { .. }
             | OutputScan { .. }
             | OutputObserved { .. }
+            | TranscriptNote { .. }
             | HookReport { .. }
             | ToolCheck { .. }
             | CheckRun { .. }
