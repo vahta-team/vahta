@@ -7584,6 +7584,11 @@ impl Sandbox {
             .args(["--harness", "claude", "--event", event])
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
+            // Where the hook looks for transcripts: on Windows the profile,
+            // not HOME, is the home directory.
+            .env("USERPROFILE", self.root.join("home"))
+            .env("CLAUDE_CONFIG_DIR", self.claude_dir())
+            .env("CODEX_HOME", self.root.join("home/.codex"))
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("VAHTA_HOOK_DISABLE")
             .env("VAHTA_DATA_DIR", self.root.join("data"))
@@ -7733,9 +7738,15 @@ fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_ex
 
     // The session ends: the open transcript is cleaned.
     s.hook_session_event("session_end", "SessionEnd", open_id);
-    wait_until("the open transcript is cleaned", 15, || {
-        !fs::read_to_string(&open).unwrap_or_default().contains(&one)
-    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while fs::read_to_string(&open).unwrap_or_default().contains(&one) {
+        assert!(
+            Instant::now() < deadline,
+            "the open transcript was not cleaned; journal: {}",
+            s.journal()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let after = fs::read_to_string(&open).unwrap();
     assert!(
         after

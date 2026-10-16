@@ -64,7 +64,8 @@ pub(crate) struct Marks {
     /// `harness:session` of a session a hook said began, when.
     live: HashMap<String, Instant>,
     /// Files found to hold a secret while their session ran.
-    deferred: HashSet<PathBuf>,
+    /// Keys of the files (see [`path_key`]).
+    deferred: HashSet<String>,
 }
 
 fn key(harness: &str, session: &str) -> String {
@@ -144,6 +145,12 @@ fn dir_key(p: &Path) -> String {
     } else {
         text
     }
+}
+
+/// A file as a key that is the same however the path was written: the hook and
+/// the command may spell the same root differently (separators, case on Windows).
+fn path_key(p: &Path) -> String {
+    dir_key(p)
 }
 
 fn same_dir(a: &str, b: &Path) -> bool {
@@ -345,14 +352,14 @@ fn handle(
             .unwrap_or(true);
     let (state, tally) = if open {
         if let Ok(mut m) = shared.marks.lock() {
-            m.deferred.insert(found.path.clone());
+            m.deferred.insert(path_key(&found.path));
         }
         (TranscriptState::Deferred, tally)
     } else {
         match jsonl::rewrite(&found.path, cleaner) {
             Ok(Rewrite::Done(t)) => {
                 if let Ok(mut m) = shared.marks.lock() {
-                    m.deferred.remove(&found.path);
+                    m.deferred.remove(&path_key(&found.path));
                 }
                 (TranscriptState::Cleaned, t)
             }
@@ -441,7 +448,7 @@ pub(crate) fn note(
             ctx.shared
                 .marks
                 .lock()
-                .map(|m| m.deferred.contains(&f.path))
+                .map(|m| m.deferred.contains(&path_key(&f.path)))
                 .unwrap_or(false)
         })
         .collect();
@@ -471,7 +478,7 @@ pub(crate) fn note(
                     // Nothing left in it (cleaned by hand, or the file is gone).
                     None => {
                         if let Ok(mut m) = shared.marks.lock() {
-                            m.deferred.remove(&f.path);
+                            m.deferred.remove(&path_key(&f.path));
                         }
                     }
                 }
