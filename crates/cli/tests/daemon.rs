@@ -7352,7 +7352,7 @@ impl Sandbox {
 
     /// The folder Claude Code would keep this project's transcripts in.
     fn claude_project_folder(&self) -> PathBuf {
-        let real = fs::canonicalize(self.project()).unwrap();
+        let real = dunce::canonicalize(self.project()).unwrap();
         let name: String = real
             .to_string_lossy()
             .chars()
@@ -7443,7 +7443,7 @@ fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_ex
     let rollout = s
         .root
         .join("home/.codex/sessions/2026/10/16/rollout-2026-10-16T10-00-00-cccccccc-2222.jsonl");
-    let meta = serde_json::json!({"type":"session_meta","payload":{"id":"cccccccc-2222","cwd":fs::canonicalize(s.project()).unwrap()}}).to_string();
+    let meta = serde_json::json!({"type":"session_meta","payload":{"id":"cccccccc-2222","cwd":dunce::canonicalize(s.project()).unwrap()}}).to_string();
     s.transcript(&rollout, &[meta.clone(), lines[1].clone()], 3600);
 
     s.hook_session_event("session_start", "SessionStart", open_id);

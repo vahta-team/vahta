@@ -133,13 +133,21 @@ fn codex_cwd(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A directory as text for comparing: resolved when it exists (without
+/// Windows' verbatim prefix), separators alike, and on Windows case folded.
+fn dir_key(p: &Path) -> String {
+    let real = dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let text = real.to_string_lossy().replace('\\', "/");
+    let text = text.trim_end_matches('/').to_string();
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text
+    }
+}
+
 fn same_dir(a: &str, b: &Path) -> bool {
-    let (a, b) = (Path::new(a), b);
-    a == b
-        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(x), Ok(y)) => x == y,
-            _ => false,
-        }
+    dir_key(Path::new(a)) == dir_key(b)
 }
 
 /// Every transcript file in scope.
@@ -152,7 +160,7 @@ fn discover(cwd: &Path, all: bool, roots: &TranscriptRoots) -> Vec<Found> {
             walk(&projects, DEPTH, &|_| true, &mut files);
         } else {
             let mut dirs = vec![claude_project_dir(cwd)];
-            if let Ok(real) = std::fs::canonicalize(cwd) {
+            if let Ok(real) = dunce::canonicalize(cwd) {
                 dirs.push(claude_project_dir(&real));
             }
             dirs.dedup();
