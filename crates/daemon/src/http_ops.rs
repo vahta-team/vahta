@@ -473,6 +473,7 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
                 names: declared.clone(),
                 host: destination.clone(),
             },
+            used_from: found.used_from.as_deref(),
         },
     )?;
 
