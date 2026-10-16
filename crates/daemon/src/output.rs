@@ -547,11 +547,11 @@ const SHOW: usize = 0;
 const SAVE: usize = 2;
 
 /// What `allow` needs of a held output, copied out from under the lock.
-struct Asked {
-    texts: Zeroizing<Vec<String>>,
-    cuts: Vec<HeldCut>,
-    cwd: String,
-    tool: String,
+pub(crate) struct Asked {
+    pub texts: Zeroizing<Vec<String>>,
+    pub cuts: Vec<HeldCut>,
+    pub cwd: String,
+    pub tool: String,
 }
 
 pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> Flow<ClientReply> {
@@ -705,6 +705,7 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
                 vault_path,
                 &asked,
                 &finals,
+                None,
             )?;
             record("saved");
             window.close(Some(&format!("Saved {saved}.")));
@@ -727,13 +728,15 @@ pub(crate) fn allow(ctx: &Ctx<'_>, reference: &str, reason: Option<String>) -> F
 
 /// "Save as a secret": which value (if there are several), its name and tier,
 /// then the vault password, which every write needs fresh. Returns the name.
-fn save(
+/// With `suggest`, an empty answer to the name takes it.
+pub(crate) fn save(
     ctx: &Ctx<'_>,
     window: &mut dyn crate::surface::Window,
     panel: &mut Panel,
     vault_path: &std::path::Path,
     asked: &Asked,
     finals: &[HeldCut],
+    suggest: Option<&str>,
 ) -> Flow<String> {
     let which = if finals.len() == 1 {
         0
@@ -761,6 +764,10 @@ fn save(
             .map_err(from_surface)?
             .ok_or_else(cancelled)?;
         let typed = typed.trim().to_string();
+        let typed = match suggest {
+            Some(s) if typed.is_empty() => s.to_string(),
+            _ => typed,
+        };
         if !valid_name(&typed) {
             panel.warning = Some(
                 "A name is letters, digits and underscores, not starting with a digit.".to_string(),

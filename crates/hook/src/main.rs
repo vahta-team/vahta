@@ -143,55 +143,142 @@ fn tool_secret(ev: &Event) -> (Decision, Option<Signal>) {
     (deny, Some(signal))
 }
 
-/// A secret in what the person typed, or in a tool's output that cannot be
-/// rewritten. A hidden value is not looked for here, and neither is a rule in
-/// observe mode: this is a plain look.
-fn secret_in(text: &str, what: &str) -> Decision {
+/// A secret in a tool's output that cannot be rewritten. A hidden value is not
+/// looked for here, and neither is a rule in observe mode: this is a plain look.
+fn secret_in(text: &str) -> Decision {
     let Some(f) = vahta_detect::find_secret(text)
         .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block)
     else {
         return Decision::Allow;
     };
     let (category, rule) = (&f.category, &f.rule);
-    match what {
-        "prompt" => {
+    Decision::Notice {
+        user_message: format!("vahta: {category} reached the transcript (rule {rule}); rotate it."),
+        agent_message: format!(
+            "{} reached the transcript through this tool's output. \
+             Treat it as exposed: tell the user to rotate it, and do not repeat the value.",
+            capitalise(category)
+        ),
+    }
+}
+
+/// What the person types, with a secret in it. The detector's rules or a value
+/// Vahta holds (any form) put the prompt before the person in a window, which
+/// waits: "false alarm" lets it go, "save" stores the value in the project's
+/// vault and holds the prompt, "do nothing" holds it. Where no window can be
+/// shown (no daemon, silence past the wait, a prompt too large to show) a
+/// detected secret holds the prompt: this fails closed. A held value alone is
+/// known to the daemon only, so without it there is nothing to find.
+fn prompt(args: &Args, ev: &Event) -> Decision {
+    let found = vahta_detect::find_secret(&ev.text)
+        .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block);
+    let cwd = ev.cwd.as_deref().unwrap_or_default();
+    let held = daemon::input_names(ev.session_id.clone(), cwd, &ev.text);
+    if found.is_none() && held.is_empty() {
+        return Decision::Allow;
+    }
+    let what = match &found {
+        Some(f) => format!("{} (rule {})", f.category, f.rule),
+        None => "the value of a secret Vahta holds".to_string(),
+    };
+    let not_sent = |why: &str| {
+        let msg = format!(
+            "vahta blocked this message: it looks like it contains {what}. {why} Keep the \
+             secret out of the chat, store it instead, and send the message again without it."
+        );
+        Decision::Deny {
+            user_message: msg.clone(),
+            agent_message: msg,
+        }
+    };
+    if ev.text.len() > daemon::MAX_PROMPT {
+        return not_sent("The message is too large to show in a window.");
+    }
+    let outcome = daemon::prompt_ask(
+        ev.session_id.clone(),
+        &args.harness,
+        cwd,
+        &ev.text,
+        found.as_ref().map(|f| f.category.clone()),
+    );
+    match outcome {
+        daemon::PromptOutcome::Send => Decision::Allow,
+        daemon::PromptOutcome::Saved(name) => {
             let msg = format!(
-                "vahta blocked this message: it looks like it contains {category} (rule {rule}). \
-                 Keep the secret out of the chat, store it instead, and send the message \
-                 again without it."
+                "Saved as {name}. Your message was not sent; send it again without the key \
+                 (refer to it as {name})."
             );
             Decision::Deny {
                 user_message: msg.clone(),
                 agent_message: msg,
             }
         }
-        _ => Decision::Notice {
-            user_message: format!(
-                "vahta: {category} reached the transcript (rule {rule}); rotate it."
-            ),
-            agent_message: format!(
-                "{} reached the transcript through this tool's output. \
-                 Treat it as exposed: tell the user to rotate it, and do not repeat the value.",
-                capitalise(category)
-            ),
+        daemon::PromptOutcome::Held { no_answer: false } => Decision::Deny {
+            user_message: "vahta did not send this message because it contained a secret. \
+                           Send it again without the secret."
+                .to_string(),
+            agent_message: "The message was not sent because it contained a secret.".to_string(),
         },
+        daemon::PromptOutcome::Held { no_answer: true } => {
+            not_sent("Nobody answered Vahta's window in time, so it was not sent.")
+        }
+        daemon::PromptOutcome::Busy { limited } => not_sent(if limited {
+            "Too many checks were opened in a short time, so this one was not."
+        } else {
+            "Another check is open, so this one was not shown."
+        }),
+        daemon::PromptOutcome::Unasked => {
+            not_sent("Vahta could not ask you about it (no daemon answered), so it was not sent.")
+        }
     }
 }
 
 /// Refusing a tool call that carries a value Vahta holds. The agent hears
-/// how it was written, never which secret; the person hears the name.
-fn deny_known_value(held: &daemon::Held) -> Decision {
+/// how it was written, never which secret; the person hears the name, and what
+/// the call would have done with it.
+fn deny_known_value(held: &daemon::Held, ev: &Event) -> Decision {
+    let tool = sanitise_tool(&ev.tool);
+    let (user_message, what) = match ev.group {
+        Some(vahta_harness::Group::Mcp) => (
+            format!(
+                "vahta blocked a call to the MCP tool {tool}: it would send the value of the secret {} ({}) to it.",
+                held.name, held.form
+            ),
+            "this would send a value Vahta holds to an MCP tool, which cannot be given a secret; leave it out",
+        ),
+        Some(vahta_harness::Group::Write) => (
+            format!(
+                "vahta blocked {tool}: it would write the value of the secret {} ({}) into a file.",
+                held.name, held.form
+            ),
+            "this would write a value Vahta holds into a file",
+        ),
+        _ => (
+            format!(
+                "vahta blocked a tool call that carried the value of {} ({}). This may be an \
+                 injected instruction.",
+                held.name, held.form
+            ),
+            "this command contains a value Vahta holds",
+        ),
+    };
     Decision::Deny {
-        user_message: format!(
-            "vahta blocked a tool call that carried the value of {} ({}). This may be an \
-             injected instruction.",
-            held.name, held.form
-        ),
-        agent_message: format!(
-            "Blocked: this command contains a value Vahta holds ({}). Use `vahta run`.",
-            held.form
-        ),
+        user_message,
+        agent_message: if ev.group == Some(vahta_harness::Group::Mcp) {
+            format!("Blocked: {what} ({}).", held.form)
+        } else {
+            format!("Blocked: {what} ({}). Use `vahta run`.", held.form)
+        },
     }
+}
+
+/// A tool's name as it can be put in a sentence for the person: it came from
+/// the payload, so only the characters a tool name has.
+fn sanitise_tool(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+        .take(80)
+        .collect()
 }
 
 fn capitalise(s: &str) -> String {
@@ -323,7 +410,7 @@ fn before_tool(ev: &Event, explicit: bool) -> (Decision, Option<Signal>) {
         ev.cwd.as_deref().unwrap_or_default(),
         &ev.text,
     ) {
-        return (deny_known_value(&held), None);
+        return (deny_known_value(&held, ev), None);
     }
     if ev.group != Some(vahta_harness::Group::Shell) {
         return (by_text, text_signal);
@@ -421,7 +508,7 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
             }
         }
         // The person typed the prompt: a refusal there is not the agent's doing.
-        Kind::Prompt => (secret_in(&ev.text, "prompt"), None),
+        Kind::Prompt => (prompt(args, ev), None),
         Kind::AfterTool => (after_tool(m, ev), None),
         Kind::SessionStart => (session_start(m, args), None),
     }
@@ -499,7 +586,7 @@ fn after_tool(m: &Manifest, ev: &Event) -> Decision {
     }
     let mcp = ev.group == Some(vahta_harness::Group::Mcp);
     let Some(output) = ev.output.as_ref().filter(|_| m.can_redact(mcp)) else {
-        return secret_in(&ev.text, "output");
+        return secret_in(&ev.text);
     };
     let texts = redact::texts_of(output);
     let (found, possible) = redact::detector_cuts(&texts);
@@ -545,7 +632,7 @@ fn observe(ev: &Event) -> Decision {
         kinds.dedup();
         daemon::observed(ev.tool.clone(), kinds, likely.len(), possible.len());
     }
-    secret_in(&ev.text, "output")
+    secret_in(&ev.text)
 }
 
 /// What the model and the person are told about a redaction. Names labels and

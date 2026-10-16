@@ -414,6 +414,8 @@ pub fn report(
         | ClientReply::OutputSpans { .. }
         | ClientReply::OutputReleased { .. }
         | ClientReply::ToolDeny { .. }
+        | ClientReply::InputNames { .. }
+        | ClientReply::PromptAnswer { .. }
         | ClientReply::Allowed {}
         | ClientReply::NoOpinion {}
         | ClientReply::GuardChoice { .. }

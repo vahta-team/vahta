@@ -202,7 +202,8 @@ pub enum DurationSpec {
 impl ClientRequest {
     /// The directory the daemon must verify against the kernel before serving
     /// the request: the `cwd` of every request that carries one, except the
-    /// hook's (`CheckRun`, `CheckHttp`, `ToolCheck`, `OutputScan`, `HookReport`).
+    /// hook's (`CheckRun`, `CheckHttp`, `ToolCheck`, `CheckInput`, `PromptAsk`,
+    /// `OutputScan`, `HookReport`).
     /// The hook is not the shell whose directory it reports, and what it sends
     /// only answers a question or feeds the journal and the alarm.
     pub fn cwd_to_verify(&self) -> Option<&str> {
@@ -211,6 +212,8 @@ impl ClientRequest {
             CheckRun { .. }
             | CheckHttp { .. }
             | ToolCheck { .. }
+            | CheckInput { .. }
+            | PromptAsk { .. }
             | OutputScan { .. }
             | HookReport { .. } => None,
             Init { cwd }
@@ -523,6 +526,29 @@ pub enum ClientRequest {
         cwd: String,
         text: String,
     },
+    /// The hook asks which held values a text carries (a prompt the person
+    /// typed): every one the daemon holds for this agent, in any form, by
+    /// name. Unlike [`ClientRequest::ToolCheck`] it stops at nothing, tells
+    /// the alarm nothing (the person wrote the text, not the agent) and writes
+    /// nothing to the journal. The reply is `InputNames`, never a value.
+    CheckInput {
+        session: Option<String>,
+        cwd: String,
+        text: String,
+    },
+    /// The hook found a secret, or a held value, in a prompt the person typed
+    /// and waits for the person's decision (a window, minutes). The daemon
+    /// looks at `text` itself; `detected` is what the hook's detector called it
+    /// (a category, for the window), absent when only a held value matched. The
+    /// reply is `PromptAnswer`. The text travels only to the daemon, is never
+    /// journaled, and the window shows its kind and length, never the value.
+    PromptAsk {
+        session: Option<String>,
+        harness: String,
+        cwd: String,
+        text: String,
+        detected: Option<String>,
+    },
     /// The hook asks, before a `vahta run` runs, whether the command inside it
     /// passes every named secret's own rules, so the harness need not ask the
     /// person. No window, no password, no session, nothing journaled: the vault
@@ -754,6 +780,24 @@ pub enum GuardChoice {
     KeepOff { secs: u64 },
     /// Stop the watchdog and its autostart for good.
     TurnOff,
+}
+
+/// What the person decided about a prompt that carried a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PromptDecision {
+    /// A false alarm (or already one): the prompt goes on.
+    Send {},
+    /// The value was saved in the project's vault under `name`; the prompt
+    /// must not go.
+    Saved { name: String },
+    /// The prompt must not go: the person chose to do nothing, or gave no
+    /// answer (`no_answer`: the time ran out or the window was closed).
+    Held { no_answer: bool },
+    /// No window was opened and the prompt must not go: another prompt's
+    /// window is open (`limited` false), or this process tree has asked too
+    /// often (`limited` true).
+    Busy { limited: bool },
 }
 
 /// What the watchdog did, as it tells the daemon.
@@ -1134,6 +1178,15 @@ pub enum ClientReply {
     ToolDeny {
         form: String,
         name: String,
+    },
+    /// The answer to a [`ClientRequest::CheckInput`]: the names of the held
+    /// values the text carries, in order of first appearance, each once.
+    InputNames {
+        names: Vec<String>,
+    },
+    /// The answer to a [`ClientRequest::PromptAsk`].
+    PromptAnswer {
+        answer: PromptDecision,
     },
     /// The answer to a [`ClientRequest::GuardAsk`].
     GuardChoice {

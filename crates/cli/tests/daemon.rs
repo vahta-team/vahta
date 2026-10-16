@@ -4635,6 +4635,232 @@ impl Sandbox {
     }
 }
 
+impl Sandbox {
+    /// Feed the real hook an event of this `kind` (`before_tool`, `prompt`)
+    /// from this test process; the reply, or `None` for silence.
+    fn hook_event(&self, kind: &str, payload: Value) -> Option<Value> {
+        let mut child = Command::new(hook_bin())
+            .args(["--harness", "claude", "--event", kind])
+            .current_dir(self.project())
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", self.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.root.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run vahta-hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let text = text(&out.stdout);
+        (!text.trim().is_empty()).then(|| serde_json::from_str(&text).unwrap())
+    }
+
+    fn hook_tool(&self, tool: &str, input: Value) -> Option<Value> {
+        self.hook_event(
+            "before_tool",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse", "tool_name": tool,
+                "tool_input": input, "cwd": self.project(), "session_id": "sess-1",
+            }),
+        )
+    }
+
+    fn hook_prompt(&self, prompt: &str) -> Option<Value> {
+        self.hook_event(
+            "prompt",
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                "cwd": self.project(), "session_id": "sess-1",
+            }),
+        )
+    }
+}
+
+fn denied_with(reply: &Option<Value>) -> String {
+    let r = reply.as_ref().expect("a reply");
+    assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "deny", "{r}");
+    r["systemMessage"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn a_held_value_in_an_mcp_argument_a_write_or_an_edit_is_denied_by_name() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    // Each hit rings the alarm; the person ignores it.
+    s.script(&[r#"{"choose":1}"#, r#"{"choose":1}"#, r#"{"choose":1}"#]);
+    let mcp = s.hook_tool(
+        "mcp__github__create_issue",
+        serde_json::json!({"title": "t", "extra": {"blob": ["x", "token fake-one"]}}),
+    );
+    let said = denied_with(&mcp);
+    assert!(said.contains("MCP tool") && said.contains("ZETA"), "{said}");
+    assert!(!said.contains("fake-one"));
+    let write = s.hook_tool(
+        "Write",
+        serde_json::json!({"file_path": "/tmp/x.txt", "content": "k=fake-two\n"}),
+    );
+    assert!(denied_with(&write).contains("BETA"));
+    let hexed = vahta_vault::hex_encode(b"fake-one");
+    let edit = s.hook_tool(
+        "Edit",
+        serde_json::json!({"file_path": "/tmp/x.txt", "old_string": "a", "new_string": hexed}),
+    );
+    assert!(denied_with(&edit).contains("ZETA"));
+    // `vahta run` names secrets, never holds their values: not refused.
+    let run = s.hook_tool(
+        "Bash",
+        serde_json::json!({"command": "vahta run --secret ZETA -- true"}),
+    );
+    assert!(
+        run.as_ref()
+            .is_none_or(|r| r["hookSpecificOutput"]["permissionDecision"] != "deny"),
+        "{run:?}"
+    );
+    assert!(!s.journal().contains("fake-"));
+}
+
+fn pasted_key(tail: &str) -> String {
+    ["sk-", "ant-", &tail.repeat(25)].concat()
+}
+
+fn blocked_reason(reply: &Option<Value>) -> String {
+    let r = reply.as_ref().expect("a reply");
+    assert_eq!(r["decision"], "block", "{r}");
+    r["reason"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn a_pasted_secret_asks_and_a_false_alarm_passes_and_is_remembered() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("c");
+    let prompt = format!("my key is {key} use it");
+    let asks = s.asks();
+    s.script(&[r#"{"choose":0}"#]);
+    assert!(s.hook_prompt(&prompt).is_none());
+    let log = s.window_log();
+    let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
+    let options = ask["options"].to_string();
+    assert!(options.contains("False alarm") && options.contains("Do nothing"));
+    assert!(options.contains("Save to the project vault as ANTHROPIC_KEY"));
+    let shown = serde_json::to_string(&log).unwrap();
+    assert!(!shown.contains(&key), "the window was shown the value");
+    assert!(shown.contains("characters"));
+    assert_eq!(s.asks(), asks + 1);
+    // The same value again: no window, and it passes.
+    assert!(s.hook_prompt(&prompt).is_none());
+    assert_eq!(s.asks(), asks + 1);
+    // Another value is asked about.
+    let other = format!("also {}", pasted_key("d"));
+    s.script(&[r#"{"choose":2}"#]);
+    let said = blocked_reason(&s.hook_prompt(&other));
+    assert!(said.contains("contained a secret"), "{said}");
+    assert_eq!(s.asks(), asks + 2);
+    assert!(!s.journal().contains(&key));
+}
+
+#[test]
+fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("e");
+    // The choice, the name (Enter takes the suggestion), the tier, the password.
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    let said = blocked_reason(&s.hook_prompt(&format!("here: {key}")));
+    assert_eq!(
+        said,
+        "Saved as ANTHROPIC_KEY. Your message was not sent; send it again without the key \
+         (refer to it as ANTHROPIC_KEY)."
+    );
+    assert_eq!(
+        s.open_vault().get("ANTHROPIC_KEY").unwrap().expose(),
+        key.as_bytes()
+    );
+    assert!(
+        !serde_json::to_string(&s.window_log())
+            .unwrap()
+            .contains(&key)
+    );
+    assert!(s.journal().contains("prompt_secret") && !s.journal().contains(&key));
+}
+
+#[test]
+fn only_one_prompt_window_is_open_at_a_time() {
+    let s = sandbox_with_secrets();
+    let first = format!("one {}", pasted_key("f"));
+    let second = format!("two {}", pasted_key("g"));
+    let base = s.asks();
+    // The first window stays open for longer than the second waits.
+    s.script(&[r#"{"choose":2,"after_ms":6000}"#]);
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| s.hook_prompt(&first));
+        wait_until("the first window to open", 10, || s.asks() == base + 1);
+        let said = blocked_reason(&s.hook_prompt(&second));
+        assert!(said.contains("Another check is open"), "{said}");
+        // The second never reached a window.
+        assert_eq!(s.asks(), base + 1);
+        assert!(blocked_reason(&a.join().unwrap()).contains("contained a secret"));
+    });
+    assert!(s.journal().contains("\"result\":\"busy\""));
+}
+
+#[test]
+fn a_requester_asking_for_many_prompt_windows_is_held_and_journaled() {
+    let s = sandbox_with_secrets();
+    let base = s.asks();
+    for i in 0..4 {
+        s.script(&[r#"{"choose":2}"#]);
+        let key = pasted_key(&char::from(b'h' + i).to_string());
+        assert!(blocked_reason(&s.hook_prompt(&format!("k {key}"))).contains("contained"));
+    }
+    assert_eq!(s.asks(), base + 4);
+    let fifth = pasted_key("z");
+    let said = blocked_reason(&s.hook_prompt(&format!("k {fifth}")));
+    assert!(said.contains("Too many checks"), "{said}");
+    assert_eq!(s.asks(), base + 4, "no fifth window");
+    let journal = s.journal();
+    assert!(journal.contains("rate_limited") && journal.contains("suspicious"));
+    assert!(!journal.contains(&fifth));
+}
+
+#[test]
+fn a_pasted_held_value_asks_and_no_answer_holds_the_prompt() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    // A held value alone has no detector kind: no save option.
+    s.script(&[r#"{"noanswer":true}"#]);
+    let said = blocked_reason(&s.hook_prompt("the token is fake-one, ok"));
+    assert!(said.contains("Nobody answered"), "{said}");
+    let log = s.window_log();
+    let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
+    assert_eq!(
+        ask["options"],
+        serde_json::json!(["Send it anyway", "Do nothing"])
+    );
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("ZETA") && !lines.contains("fake-one"),
+        "{lines}"
+    );
+    // Clean text asks nothing.
+    let asks = s.asks();
+    assert!(s.hook_prompt("please summarise the readme").is_none());
+    assert_eq!(s.asks(), asks);
+}
+
 /// The rewritten Bash stdout and the message for the model, from a reply.
 fn redacted(reply: &Value) -> (String, String) {
     let hso = &reply["hookSpecificOutput"];

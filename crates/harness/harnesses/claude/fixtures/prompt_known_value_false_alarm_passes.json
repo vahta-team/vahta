@@ -1,0 +1,24 @@
+{
+  "event": "prompt",
+  "env": {},
+  "daemon": {
+    "known": [
+      "ZETA"
+    ],
+    "prompt": "send"
+  },
+  "stdin": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please use fake-known-value-123 for the test",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "prompt_ask": [
+    {
+      "harness": "claude",
+      "cwd": "/work/proj",
+      "detected": null
+    }
+  ]
+}

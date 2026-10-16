@@ -10,6 +10,17 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Input checked against known values.** A tool call (an MCP argument, a Write or
+  Edit, a command or commit) that carries the value of a secret Vahta holds, in any
+  encoding, is denied and the person is told the secret's name. A prompt that holds a
+  detected secret or a held value opens a window: "False alarm" sends it (remembered
+  as keyed hashes until the daemon exits), "Save to the project vault as NAME" stores
+  the value and holds the prompt, "Do nothing" holds it. No answer, no daemon or no
+  window holds it too; one prompt window is open at a time and one requester gets four a
+  minute, then is held, journaled as suspicious and counted for the alarm. The window shows a kind and length, never the value. New
+  daemon requests `CheckInput` and `PromptAsk`; setup writes a 120 s hook timeout on
+  Claude's `UserPromptSubmit` and Cursor's `beforeSubmitPrompt` (Claude setup v5,
+  Cursor v2; Codex and Cursor not tested live).
 - **Only these hosts, on Linux.** A secret (or connector) with `network = hosts`
   now lets any program under `vahta run` open TLS connections to the listed hosts
   and nowhere else, rootless: a network namespace with a replaced `/etc/hosts`
