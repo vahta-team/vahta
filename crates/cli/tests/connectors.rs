@@ -622,6 +622,8 @@ fn a_connector_with_hosts_reaches_only_its_host() {
         "{}",
         text(&out.stderr)
     );
+}
+
 #[test]
 fn with_no_end_time_the_session_lasts_until_the_boot_id_changes() {
     let s = Sandbox::with_connector(true);
