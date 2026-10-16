@@ -15,7 +15,8 @@
 //! * `remote` and `from` do not apply to it;
 //! * its session is the person's: one `vahta unlock --connector`, not anchored
 //!   to a process tree (a harness started from a desktop launcher is not below
-//!   the terminal that unlocked), and only the connectors vault's secrets;
+//!   the terminal that unlocked), lasts until the machine reboots unless
+//!   `--for` limits it, and covers only the connectors vault's secrets;
 //! * `vahta run --connector` never opens a window. A harness gives a server
 //!   about 30 seconds to start and shows the person none of its stderr, so
 //!   with no session the launch is refused at once (exit code 3), journaled,
@@ -123,9 +124,10 @@ pub(crate) fn handle(ctx: &Ctx<'_>, cmd: ConnectorCmd) -> Handled {
             argv,
             env,
             name,
+            renames,
             label,
         } => {
-            return match run(&c, cwd, argv, env, name, label) {
+            return match run(&c, cwd, argv, env, name, renames, label) {
                 Ok(prepared) => Handled::Run(Box::new(prepared)),
                 Err(reply) => Handled::Reply(reply),
             };
@@ -322,7 +324,24 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
     let peek = Vault::peek(&vault_path).map_err(from_vault)?;
     peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
     let names = resolve_names(&peek, None)?;
-    let lasts = duration_of(duration, ctx.shared.options.config.session_minutes)?;
+    // No `--for`: until the machine reboots, so servers start with no window all
+    // day. `forever` is the same (the daemon does not outlive a boot).
+    let until_reboot = matches!(
+        duration,
+        DurationSpec::Default {} | DurationSpec::Forever {}
+    );
+    let boot = if until_reboot {
+        Some(crate::testing::boot_id().ok_or_else(|| {
+            error("cannot read this machine's boot id; use --for to give an end time")
+        })?)
+    } else {
+        None
+    };
+    let lasts = if until_reboot {
+        None
+    } else {
+        duration_of(duration, ctx.shared.options.config.session_minutes)?
+    };
     let me = vahta_os::identity_of(std::process::id())
         .map_err(|_| error("cannot tell this daemon's own identity; nothing was opened"))?;
 
@@ -330,7 +349,10 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
     let mut window = ctx.window(title)?;
     let mut lines = lines_for(&project, &vault_path);
     lines.push(format!("Connectors: {}", names.join(", ")));
-    lines.push(format!("Lasts: {}", describe(lasts)));
+    lines.push(match lasts {
+        None => "Lasts: until this computer restarts, or `vahta lock`".to_string(),
+        some => format!("Lasts: {}", describe(some)),
+    });
     lines.push(
         "Allows: the servers of these connectors to be started by Claude Code, Codex or Cursor \
          with no window, each by its own command. Not revealing, copying or changing anything."
@@ -373,7 +395,7 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
         role: Role::Runner,
         agent_role: None,
         anchor: me,
-        anchor_exe: "connectors".to_string(),
+        anchor_exe: session::CONNECTORS_ANCHOR.to_string(),
         parent: None,
         deadline,
         length: deadline.map(|d| d.saturating_duration_since(now)),
@@ -381,6 +403,7 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
         extension_pending: false,
         label: panel.agent_note.clone(),
         uses: 0,
+        boot,
     };
     let info = info_of(&session, now);
     let replaced = {
@@ -403,7 +426,17 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
             .session(&id, None)
             .vault(&vault_id)
             .names(&names)
-            .result("ok", Some(&format!("connectors; {}", describe(lasts)))),
+            .result(
+                "ok",
+                Some(&format!(
+                    "connectors; {}",
+                    if until_reboot {
+                        "until reboot".to_string()
+                    } else {
+                        describe(lasts)
+                    }
+                )),
+            ),
     );
     window.close(Some("Connectors session open. This window can be closed."));
     Ok(ClientReply::Session(Box::new(info)))
@@ -435,6 +468,7 @@ fn run(
     argv: Vec<String>,
     env: Vec<(String, String)>,
     name: String,
+    renames: Vec<(String, String)>,
     label: Option<String>,
 ) -> Flow<Prepared> {
     check_name(&name)?;
@@ -445,7 +479,7 @@ fn run(
             argv,
             env,
             names: Some(vec![name.clone()]),
-            renames: Vec::new(),
+            renames,
             label,
             ask: false,
             reason: None,
@@ -456,6 +490,14 @@ fn run(
         Err(ClientReply::Refused(mut r)) => {
             let hint = hint_for(r.kind, &name);
             ctx.shared.note_refusal(&name, r.kind, &hint);
+            if r.kind == RefusalKind::NoSession {
+                // The harness hides the server's stderr; this is how the person
+                // learns why it did not start.
+                let harness = parent_facts(ctx)
+                    .and_then(|p| harness_of(&p.exe, p.command.as_deref()))
+                    .unwrap_or("harness");
+                ctx.shared.notify_locked(harness);
+            }
             // The harness that started this reads none of it; the person may
             // run the server by hand to see why.
             r.message = match r.kind {
@@ -667,6 +709,14 @@ fn parent_facts(ctx: &Ctx<'_>) -> Option<Parent> {
     // read; the client's parent is checked again after.
     let command = vahta_os::command_line(ppid);
     (vahta_os::parent_of(ctx.pid).ok()? == ppid).then_some(Parent { exe, command })
+}
+
+/// Which harness a parent process is, by the same rules as
+/// [`parent_is_harness`].
+fn harness_of(exe: &str, command: Option<&str>) -> Option<&'static str> {
+    ["claude", "codex", "cursor"]
+        .into_iter()
+        .find(|h| parent_is_harness(Some(exe), command, &[h.to_string()]))
 }
 
 /// Whether a parent process with executable `exe` (and, where the system
