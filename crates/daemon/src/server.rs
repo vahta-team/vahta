@@ -122,6 +122,8 @@ pub(crate) struct Shared {
     pub(crate) outputs: Mutex<Outputs>,
     /// Prompt values the person called false alarms (see `input_ops.rs`).
     pub(crate) remembered: Mutex<crate::input_ops::Remembered>,
+    /// One prompt window at a time, and how often (see `input_ops.rs`).
+    pub(crate) prompt_gate: crate::input_ops::Gate,
     /// What agents have tried, weighed (see `alarm.rs`).
     pub(crate) alarm: crate::alarm::Alarm,
     /// The last refused launch of each connector's server (`connector_ops.rs`).
@@ -278,6 +280,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
         remembered: Mutex::new(remembered),
+        prompt_gate: Default::default(),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
         unlockers: vahta_auth::Registry::standard(),

@@ -16,7 +16,8 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   detected secret or a held value opens a window: "False alarm" sends it (remembered
   as keyed hashes until the daemon exits), "Save to the project vault as NAME" stores
   the value and holds the prompt, "Do nothing" holds it. No answer, no daemon or no
-  window holds it too. The window shows a kind and length, never the value. New
+  window holds it too; one prompt window is open at a time and one requester gets four a
+  minute, then is held, journaled as suspicious and counted for the alarm. The window shows a kind and length, never the value. New
   daemon requests `CheckInput` and `PromptAsk`; setup writes a 120 s hook timeout on
   Claude's `UserPromptSubmit` and Cursor's `beforeSubmitPrompt` (Claude setup v5,
   Cursor v2; Codex and Cursor not tested live).

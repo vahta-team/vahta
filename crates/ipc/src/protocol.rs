@@ -790,6 +790,10 @@ pub enum PromptDecision {
     /// The prompt must not go: the person chose to do nothing, or gave no
     /// answer (`no_answer`: the time ran out or the window was closed).
     Held { no_answer: bool },
+    /// No window was opened and the prompt must not go: another prompt's
+    /// window is open (`limited` false), or this process tree has asked too
+    /// often (`limited` true).
+    Busy { limited: bool },
 }
 
 /// What the watchdog did, as it tells the daemon.

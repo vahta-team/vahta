@@ -283,6 +283,8 @@ pub enum PromptOutcome {
     Saved(String),
     /// The person chose not to send it, or gave no answer.
     Held { no_answer: bool },
+    /// Another window is open, or this process asked too often.
+    Busy { limited: bool },
     /// No daemon of this version to ask, or it failed or did not answer in
     /// time.
     Unasked,
@@ -312,6 +314,7 @@ pub fn prompt_ask(
             PromptDecision::Send {} => PromptOutcome::Send,
             PromptDecision::Saved { name } => PromptOutcome::Saved(name),
             PromptDecision::Held { no_answer } => PromptOutcome::Held { no_answer },
+            PromptDecision::Busy { limited } => PromptOutcome::Busy { limited },
         },
         _ => PromptOutcome::Unasked,
     }

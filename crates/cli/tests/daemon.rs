@@ -4703,6 +4703,45 @@ fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
 }
 
 #[test]
+fn only_one_prompt_window_is_open_at_a_time() {
+    let s = sandbox_with_secrets();
+    let first = format!("one {}", pasted_key("f"));
+    let second = format!("two {}", pasted_key("g"));
+    let base = s.asks();
+    // The first window stays open for longer than the second waits.
+    s.script(&[r#"{"choose":2,"after_ms":6000}"#]);
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| s.hook_prompt(&first));
+        wait_until("the first window to open", 10, || s.asks() == base + 1);
+        let said = blocked_reason(&s.hook_prompt(&second));
+        assert!(said.contains("Another check is open"), "{said}");
+        // The second never reached a window.
+        assert_eq!(s.asks(), base + 1);
+        assert!(blocked_reason(&a.join().unwrap()).contains("contained a secret"));
+    });
+    assert!(s.journal().contains("\"result\":\"busy\""));
+}
+
+#[test]
+fn a_requester_asking_for_many_prompt_windows_is_held_and_journaled() {
+    let s = sandbox_with_secrets();
+    let base = s.asks();
+    for i in 0..4 {
+        s.script(&[r#"{"choose":2}"#]);
+        let key = pasted_key(&char::from(b'h' + i).to_string());
+        assert!(blocked_reason(&s.hook_prompt(&format!("k {key}"))).contains("contained"));
+    }
+    assert_eq!(s.asks(), base + 4);
+    let fifth = pasted_key("z");
+    let said = blocked_reason(&s.hook_prompt(&format!("k {fifth}")));
+    assert!(said.contains("Too many checks"), "{said}");
+    assert_eq!(s.asks(), base + 4, "no fifth window");
+    let journal = s.journal();
+    assert!(journal.contains("rate_limited") && journal.contains("suspicious"));
+    assert!(!journal.contains(&fifth));
+}
+
+#[test]
 fn a_pasted_held_value_asks_and_no_answer_holds_the_prompt() {
     let s = sandbox_with_secrets();
     s.unlock_session();

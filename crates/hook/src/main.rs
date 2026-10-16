@@ -222,6 +222,11 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
         daemon::PromptOutcome::Held { no_answer: true } => {
             not_sent("Nobody answered Vahta's window in time, so it was not sent.")
         }
+        daemon::PromptOutcome::Busy { limited } => not_sent(if limited {
+            "Too many checks were opened in a short time, so this one was not."
+        } else {
+            "Another check is open, so this one was not shown."
+        }),
         daemon::PromptOutcome::Unasked => {
             not_sent("Vahta could not ask you about it (no daemon answered), so it was not sent.")
         }

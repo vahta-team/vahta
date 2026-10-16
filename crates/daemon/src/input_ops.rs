@@ -21,9 +21,11 @@
 //! [`ClientRequest::CheckInput`]: crate::protocol::ClientRequest::CheckInput
 //! [`ClientRequest::PromptAsk`]: crate::protocol::ClientRequest::PromptAsk
 
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -48,6 +50,83 @@ const MAX_REMEMBERED: usize = 4096;
 const MAX_LISTED: usize = 6;
 /// A value shorter than this shows nothing of itself, not even its ends.
 const SHOW_ENDS_FROM: usize = 16;
+
+/// How long a second `PromptAsk` waits for the open window to close.
+const WAIT_FOR_OPEN: Duration = Duration::from_secs(3);
+/// Windows one requesting process tree may open in [`PER`].
+const MAX_WINDOWS: usize = 4;
+const PER: Duration = Duration::from_secs(60);
+/// How much a refused request weighs for the injection alarm, of its threshold:
+/// two in a minute raise it. A person pasting secrets does not do that.
+const ALARM_SHARE: f64 = 0.5;
+
+/// One prompt window at a time, and a few per minute per requester. A request
+/// can come from any local process, so a flood must not bury the person in
+/// windows.
+#[derive(Default)]
+pub(crate) struct Gate {
+    state: Mutex<GateState>,
+    freed: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    open: bool,
+    recent: HashMap<String, VecDeque<Instant>>,
+}
+
+/// Held while a window is open; dropping it lets the next request in.
+pub(crate) struct Permit<'a>(&'a Gate);
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.0.state.lock() {
+            s.open = false;
+        }
+        self.0.freed.notify_one();
+    }
+}
+
+enum Admit<'a> {
+    Go(Permit<'a>),
+    /// Another window stayed open.
+    Busy,
+    /// `key` opened too many windows lately.
+    TooMany,
+}
+
+impl Gate {
+    fn admit(&self, key: &str) -> Admit<'_> {
+        let Ok(mut s) = self.state.lock() else {
+            return Admit::Busy;
+        };
+        let now = Instant::now();
+        s.recent.retain(|_, q| {
+            q.retain(|t| now.saturating_duration_since(*t) < PER);
+            !q.is_empty()
+        });
+        if s.recent.get(key).is_some_and(|q| q.len() >= MAX_WINDOWS) {
+            return Admit::TooMany;
+        }
+        let deadline = now + WAIT_FOR_OPEN;
+        while s.open {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Admit::Busy;
+            }
+            s = match self.freed.wait_timeout(s, left) {
+                Ok((g, _)) => g,
+                Err(_) => return Admit::Busy,
+            };
+        }
+        s.open = true;
+        s.recent
+            .entry(key.to_string())
+            .or_default()
+            .push_back(Instant::now());
+        Admit::Go(Permit(self))
+    }
+}
 
 /// The values the person said were no secret, as keyed hashes.
 pub(crate) struct Remembered {
@@ -271,6 +350,40 @@ pub(crate) fn prompt_ask(
             answer: PromptDecision::Send {},
         });
     }
+
+    // One window at a time, a few a minute per requester.
+    let subject = crate::report::subject_of(ctx, harness, None);
+    let _permit = match ctx.shared.prompt_gate.admit(&subject.key) {
+        Admit::Go(p) => p,
+        Admit::Busy => {
+            record("busy", &found);
+            return Ok(ClientReply::PromptAnswer {
+                answer: PromptDecision::Busy { limited: false },
+            });
+        }
+        Admit::TooMany => {
+            ctx.journal(Entry::new("prompt_secret").result(
+                "rate_limited",
+                Some(&format!(
+                    "suspicious: {} asked for more than {MAX_WINDOWS} prompt windows in a minute",
+                    subject.shown
+                )),
+            ));
+            if !crate::testing::refusal_alarm_muted()
+                && let Some(verdict) = ctx.shared.alarm.record_scored(
+                    &subject,
+                    crate::alarm::THRESHOLD * ALARM_SHARE,
+                    "too many prompt windows".to_string(),
+                    Instant::now(),
+                )
+            {
+                crate::alarm::raise(ctx.shared, subject, verdict);
+            }
+            return Ok(ClientReply::PromptAnswer {
+                answer: PromptDecision::Busy { limited: true },
+            });
+        }
+    };
 
     // The window.
     let title = "A secret in your message";

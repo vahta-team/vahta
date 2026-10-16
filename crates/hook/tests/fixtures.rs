@@ -12,7 +12,7 @@
 //! other request, and a daemon of another version when `"version"` is given.
 //! `"known": [NAME...]` makes it hold those secrets: it names them for a
 //! `CheckInput` and refuses a `ToolCheck` as the first of them, written raw.
-//! `"prompt": "send" | "saved:NAME" | "held" | "no_answer" | "error" | "silent"`
+//! `"prompt": "send" | "saved:NAME" | "held" | "no_answer" | "busy" | "limited" | "error" | "silent"`
 //! is its answer to a `PromptAsk` (`silent`: none, ever). `prompt_ask`, when
 //! present, is the list of `{harness, cwd, detected}` the hook must have asked
 //! it, in order (never the text).
@@ -225,6 +225,8 @@ impl FakeDaemon {
                                     "send" => D::Send {},
                                     "held" => D::Held { no_answer: false },
                                     "no_answer" => D::Held { no_answer: true },
+                                    "busy" => D::Busy { limited: false },
+                                    "limited" => D::Busy { limited: true },
                                     "silent" => loop {
                                         std::thread::sleep(std::time::Duration::from_secs(60));
                                     },
