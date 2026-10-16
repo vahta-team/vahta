@@ -769,13 +769,16 @@ impl Vault {
     ) -> Result<Vault, Error> {
         let loaded = format::decode(&read_file(path)?)?;
         let (header, owner) = (loaded.header(), loaded.owner());
+        // A member compares files by the generation the owner gave them, not
+        // by its own file's, which its local saves move.
+        let owner_generation = loaded.owner_generation();
         let state_key = StateKey::recipient(*recipient_id, keys.sign_sk());
         let mut moved: Option<OwnerKeyChange> = None;
         let checked = match store.check(
             &header.vault_id,
             &state_key,
             &owner.sign_pk,
-            header.generation,
+            owner_generation,
         ) {
             Ok(c) => c,
             Err(Error::OwnerChanged) if consent.is_some() => {
@@ -786,9 +789,9 @@ impl Vault {
                     .ok_or(Error::OwnerChanged)?;
                 let change =
                     change_from(&loaded, &state.pinned_owner_sign_pk).ok_or(Error::OwnerChanged)?;
-                if header.generation < state.max_generation {
+                if owner_generation < state.max_generation {
                     return Err(Error::RolledBack {
-                        found: header.generation,
+                        found: owner_generation,
                         seen: state.max_generation,
                     });
                 }
@@ -814,14 +817,14 @@ impl Vault {
                 &change.old_owner_sign_pk,
                 &state_key,
                 &owner.sign_pk,
-                header.generation,
+                owner_generation,
             )?;
         }
         store.record(
             &open.model.header.vault_id,
             &state_key,
             &open.model.owner.sign_pk,
-            open.model.header.generation,
+            open.model.team.owner_generation,
         )?;
         let base_generation = open.model.header.generation;
         Ok(Vault {
@@ -928,7 +931,7 @@ impl Vault {
         let (fmt, vk) = match &self.access {
             Access::Owner(u) => (u.fmt, &u.vk),
             Access::Blocked { old, .. } => (old.as_v1().fmt, &old.as_v1().vk),
-            Access::Recipient(_) => return Err(Error::NotOwner),
+            Access::Recipient(r) => return self.recipient_session_keys(r, names),
         };
         let m = self.model();
         let owner = current::owner_keys(vk);
@@ -946,7 +949,46 @@ impl Vault {
             m.header.vault_id,
             m.owner.sign_pk,
             m.header.generation,
+            self.state_key.file(),
             *self.state_key.mac_key(),
+            None,
+            keys,
+        ))
+    }
+
+    /// [`Vault::session_keys`] for a member: the data keys of the secrets it
+    /// holds a wrap for, the member's own state file and MAC key, and the end
+    /// of its membership, after which the keys open nothing.
+    fn recipient_session_keys(
+        &self,
+        r: &RecipientAccess,
+        names: &[String],
+    ) -> Result<SessionKeys, Error> {
+        let m = &r.model;
+        let mut keys = Vec::with_capacity(names.len());
+        for name in names {
+            let i = m
+                .index
+                .iter()
+                .position(|e| &e.name == name)
+                .ok_or_else(|| Error::not_found(name))?;
+            let dek = current::open_dek_as_recipient(
+                r.fmt,
+                &m.header.vault_id,
+                &r.enc_sk,
+                &r.me.id,
+                &m.secrets[i],
+            )?
+            .ok_or(Error::NoAccess)?;
+            keys.push((name.clone(), m.index[i].secret_id, dek));
+        }
+        Ok(SessionKeys::new(
+            m.header.vault_id,
+            m.owner.sign_pk,
+            m.team.owner_generation,
+            self.state_key.file(),
+            *self.state_key.mac_key(),
+            r.me.expires_at,
             keys,
         ))
     }
@@ -1334,6 +1376,7 @@ impl Vault {
             rotate.push(w.model.index[i].name.clone());
         }
         w.model.recipients.retain(|r| &r.id != id);
+        w.model.team.counters.retain(|c| &c.recipient != id);
         if target.role == Role::Admin {
             let vault_id = w.vault_id();
             for r in w.model.recipients.iter_mut() {
@@ -1855,16 +1898,26 @@ impl Vault {
 
         let generation = base + 1;
         let (old_generation, old_updated) = (model.header.generation, model.header.updated);
+        // The owner's generation moves only when the owner saves: a member's
+        // own save must not make the owner's next package look "not newer".
+        let old_owner_generation = model.team.owner_generation;
         model.header.generation = generation;
         model.header.updated = now();
+        if actor == Actor::Owner {
+            model.team.owner_generation = generation;
+        }
         let result = current::encode_as(fmt, model, actor, &signer)
             .and_then(|bytes| write_atomic(path, &bytes));
         if let Err(e) = result {
             model.header.generation = old_generation;
             model.header.updated = old_updated;
+            model.team.owner_generation = old_owner_generation;
             return Err(e);
         }
         let (id, pk) = (model.header.vault_id, model.owner.sign_pk);
+        // What this machine records is the owner's generation, which for the
+        // owner is the file's.
+        let tracked = model.team.owner_generation;
         self.base_generation = generation;
         self.upgraded_from = None;
         match self.repin.take() {
@@ -1874,9 +1927,9 @@ impl Vault {
                 &old.old_owner_sign_pk,
                 &self.state_key,
                 &pk,
-                generation,
+                tracked,
             ),
-            None => store.record(&id, &self.state_key, &pk, generation),
+            None => store.record(&id, &self.state_key, &pk, tracked),
         }
     }
 }

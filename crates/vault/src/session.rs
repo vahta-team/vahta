@@ -19,8 +19,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::KEY_LEN;
 use crate::format::{self, CURRENT, current};
-use crate::store::{LocalStore, StateKey};
-use crate::{Error, SecretValue, hex_encode};
+use crate::store::{LocalStore, StateFile, StateKey};
+use crate::{Error, SecretValue, hex_encode, now};
 
 struct SessionKey {
     name: String,
@@ -31,23 +31,36 @@ struct SessionKey {
 pub struct SessionKeys {
     vault_id: [u8; 16],
     pinned_owner_sign_pk: [u8; 32],
+    /// The owner's generation (a member's file has its own, which its local
+    /// saves move).
     generation: u64,
+    /// Whose state file in the local store the keys were opened for: the
+    /// owner's, or a member's.
+    state_file: StateFile,
     mac_key: Zeroizing<[u8; 32]>,
+    /// When the membership of a member's session ends (Unix seconds): the keys
+    /// open nothing from then on, whatever the session's own deadline says.
+    member_expires_at: Option<u64>,
     keys: Vec<SessionKey>,
 }
 
 impl SessionKeys {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         vault_id: [u8; 16],
         pinned_owner_sign_pk: [u8; 32],
         generation: u64,
+        state_file: StateFile,
         mac_key: [u8; 32],
+        member_expires_at: Option<u64>,
         keys: Vec<(String, [u8; 16], Zeroizing<[u8; KEY_LEN]>)>,
     ) -> SessionKeys {
         SessionKeys {
             vault_id,
             pinned_owner_sign_pk,
             generation,
+            state_file,
+            member_expires_at,
             mac_key: Zeroizing::new(mac_key),
             keys: keys
                 .into_iter()
@@ -94,7 +107,9 @@ impl SessionKeys {
             self.vault_id,
             self.pinned_owner_sign_pk,
             self.generation,
+            self.state_file,
             *self.mac_key,
+            self.member_expires_at,
             keys,
         ))
     }
@@ -122,6 +137,9 @@ impl SessionKeys {
             .iter()
             .find(|k| k.name == name)
             .ok_or(Error::NoAccess)?;
+        if self.member_expires_at.is_some_and(|t| now() >= t) {
+            return Err(Error::MembershipExpired);
+        }
         let loaded = format::decode(bytes)?;
         // A file in an older format has not been upgraded by an unlock of this
         // build; its keys are not these.
@@ -136,27 +154,30 @@ impl SessionKeys {
             // A vault this machine re-keyed (`Vault::rekey`) has pinned its new
             // owner key here; the session's keys are of the old one, so it is
             // stale, not a swap. Any other owner is refused as before.
-            return match store.check_owner_pin(
-                &self.vault_id,
-                crate::store::StateFile::Owner,
-                &m.owner.sign_pk,
-            ) {
+            return match store.check_owner_pin(&self.vault_id, self.state_file, &m.owner.sign_pk) {
                 Ok(()) => Err(Error::SessionStale),
                 Err(e) => Err(e),
             };
         }
-        if m.header.generation < self.generation {
+        // An owner's record follows the file's generation, a member's the
+        // owner's (see `Vault::open_as_recipient`).
+        let generation = if self.state_file == StateFile::Owner {
+            m.header.generation
+        } else {
+            m.team.owner_generation
+        };
+        if generation < self.generation {
             return Err(Error::RolledBack {
-                found: m.header.generation,
+                found: generation,
                 seen: self.generation,
             });
         }
         // The machine's own record, authenticated with the key kept for it.
         store.check(
             &self.vault_id,
-            &StateKey::owner_from_mac(*self.mac_key),
+            &StateKey::from_mac(self.state_file, *self.mac_key),
             &m.owner.sign_pk,
-            m.header.generation,
+            generation,
         )?;
         let i = m
             .index
@@ -339,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_owner_can_make_session_keys() {
+    fn a_member_makes_session_keys_for_what_it_holds_and_reads_through_its_own_record() {
         let t = t();
         saved(&t);
         let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
@@ -355,9 +376,21 @@ mod tests {
         v.grant("A", &id).unwrap();
         v.save(&t.path, &t.store).unwrap();
         let r = Vault::open_as_recipient(&t.path, &id, &keys, &t.store).unwrap();
+        // Not what it does not hold, and not a name the vault lacks.
         assert!(matches!(
-            r.session_keys(&["A".to_string()]),
-            Err(Error::NotOwner)
+            r.session_keys(&["B".to_string()]),
+            Err(Error::NoAccess)
         ));
+        assert!(matches!(
+            r.session_keys(&["Z".to_string()]),
+            Err(Error::NotFound(_))
+        ));
+        let k = r.session_keys(&["A".to_string()]).unwrap();
+        assert_eq!(read(&t, &k, "A").unwrap().expose(), b"fake-one");
+        // The owner's later saves move the file on; the member's keys still read.
+        let mut v = Vault::unlock_password(&t.path, PW, &t.store).unwrap();
+        v.set("C", b"fake-three", Kind::Env, Tier::Session).unwrap();
+        v.save(&t.path, &t.store).unwrap();
+        assert_eq!(read(&t, &k, "A").unwrap().expose(), b"fake-one");
     }
 }

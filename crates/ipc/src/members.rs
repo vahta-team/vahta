@@ -37,11 +37,34 @@ pub enum MemberOp {
     /// `vahta share MEMBER -o FILE`: the package for a member. `out` is an
     /// absolute path.
     Share { member: String, out: String },
-    /// `vahta share --to owner NAME -o FILE`: one secret for the owner.
-    SendToOwner { name: String, out: String },
+    /// `vahta share --to owner NAME -o FILE`: one secret for the owner, with
+    /// the rules the editor proposes for it, if any.
+    SendToOwner {
+        name: String,
+        out: String,
+        #[serde(default)]
+        rules: ProposedRules,
+    },
     /// `vahta join FILE`: install a package, or import a secret an editor
-    /// sent. `file` is an absolute path.
-    Join { file: String },
+    /// sent. `file` is an absolute path. `path` is the caller's `PATH`, to
+    /// find the programs of rules an editor proposed.
+    Join {
+        file: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+}
+
+/// The rules an editor proposes for a secret it sends, as the text it would
+/// give `vahta bind`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposedRules {
+    pub category: Option<String>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub dirs: Vec<String>,
+    pub net: Option<String>,
 }
 
 /// One member as `vahta members list` shows it. No key.

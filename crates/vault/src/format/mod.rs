@@ -306,6 +306,15 @@ impl Loaded {
         }
     }
 
+    /// The generation as the owner saved the file (see `v5::Team`); an older
+    /// format has only the file's own.
+    pub fn owner_generation(&self) -> u64 {
+        match self {
+            Loaded::V5(d) => d.model.team.owner_generation,
+            _ => self.header().generation,
+        }
+    }
+
     pub fn upgrade_pending(&self) -> bool {
         self.format() != CURRENT
     }

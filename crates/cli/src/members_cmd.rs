@@ -3,7 +3,7 @@
 //!
 //! `id --show` and the listing need no password. Everything that changes who
 //! may read what, makes a file for someone or installs one opens a window: the
-//! owner's password, or the member's identity password. The verification words
+//! owner's password, or the member's identity password. The verification digits
 //! are typed in that window, never as an argument.
 
 use std::io::Write;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use vahta_ipc::duration::{human, parse_secs, ymd};
-use vahta_ipc::members::{MemberInfo, MemberOp};
+use vahta_ipc::members::{MemberInfo, MemberOp, ProposedRules};
 use vahta_ipc::protocol::{ClientReply, ClientRequest};
 use vahta_vault::identity;
 use vahta_vault::member;
@@ -29,10 +29,10 @@ Make your own key for joining a team vault. A window asks for a password that
 protects it on this machine. The key is kept in the data directory
 (identity.vht); nobody else ever has your password.
 
-  (none)   create the identity and print your key (vh1...) and six words
+  (none)   create the identity and print your key (vh1...) and six groups of digits
   --show   print them again; no password
 
-Send the key to the vault's owner in the chat. Read the six words to the owner
+Send the key to the vault's owner in the chat. Read the digits to the owner
 over a call or in person, NOT in the chat: they let the owner check the key was
 not swapped on the way.
 ";
@@ -42,21 +42,21 @@ usage: vahta members [list] [--json]
        vahta members add NAME --role runner|editor|admin --key vh1... [--for DURATION|never]
        vahta members extend NAME --for DURATION
        vahta members remove NAME
-       vahta members words
+       vahta members digits
 
 The people who can have secrets from this vault.
 
   list     name, role, when access ends, state, which secrets each holds, and a
            short fingerprint of the key. No password.
   add      add a member by the key they sent. A window shows the name, role and
-           end date, and asks you to TYPE the six words the member reads out to
-           you (`vahta id --show` on their machine); a mismatch refuses the add
+           end date, and asks you to TYPE the six groups of digits the member reads
+           out to you (`vahta id --show` on their machine); a mismatch refuses the add
            and writes nothing. Then your password. Access lasts 30d unless
            --for says otherwise (--for never: no end).
   extend   give a member access for DURATION from now. Password.
   remove   remove a member and re-key the secrets they held; prints the secrets
            to rotate in the real services. Password.
-  words    the six words that identify THIS vault's owner, to read to a member
+  digits   the digits that identify THIS vault's owner, to read to a member
 
 Roles: runner runs commands with the secrets it is given; editor also adds and
 changes its own secrets and can send them to you; admin also manages runners
@@ -79,7 +79,8 @@ secret; the member could already read it, so rotate it in the real service.
 
 pub const SHARE_USAGE: &str = "\
 usage: vahta share MEMBER -o FILE
-       vahta share --to owner SECRET -o FILE
+       vahta share --to owner SECRET -o FILE [--category C] [--allow RULE]...
+                   [--deny RULE]... [--dir DIR]... [--net none|app|hosts:H,...]
 
 The first (the owner) writes a package for MEMBER: a file holding only that
 member's entry and only the secrets they hold, signed by you. Send it to them
@@ -89,6 +90,11 @@ The second (an editor or admin) writes one secret for the vault's owner, sealed
 so that only the owner can read it, and signed by you. Your identity password.
 The owner runs `vahta join FILE` in the project and approves it.
 
+For a secret the owner does not have yet, the rule options PROPOSE rules (the
+same words as `vahta bind`). The owner reads them in plain words and may approve
+them; otherwise the secret arrives with no rules. They never change the rules of
+a secret the owner already has.
+
 FILE must not exist.
 ";
 
@@ -96,8 +102,10 @@ pub const JOIN_USAGE: &str = "\
 usage: vahta join FILE
 
 On a member's machine: install the package the owner sent as this project's
-vault. The first time, a window shows the owner's six words to compare with
-what the owner read to you. A package older than the one installed is refused.
+vault. The first time, a window shows the owner's digits to compare with
+what the owner read to you. A package the owner made earlier than the one
+installed is refused. If the owner re-keyed, a window asks you to confirm the new
+owner's digits.
 
 On the owner's machine: import the secret an editor sent (`vahta share --to
 owner`). A window shows its name and sender and asks first.
@@ -175,10 +183,10 @@ pub fn run_id(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut d
         Ok(public) => {
             let _ = writeln!(
                 stdout,
-                "your key (send this in the chat):\n  {}\nyour six verification words (read these \
+                "your key (send this in the chat):\n  {}\nyour verification digits (read these \
                  out over a call or in person, never in the chat):\n  {}",
                 member::public_key_string(&public),
-                member::words_line(&public)
+                member::digits_line(&public)
             );
             EXIT_CLEAN
         }
@@ -293,7 +301,7 @@ pub fn run_members(
             };
             match conn.request(&request) {
                 Ok(ClientReply::Members {
-                    owner_words,
+                    owner_digits,
                     members,
                 }) => {
                     if json_out {
@@ -301,7 +309,7 @@ pub fn run_members(
                             stdout,
                             "{}",
                             serde_json::to_string_pretty(
-                                &json!({"owner_words": owner_words, "members": members})
+                                &json!({"owner_digits": owner_digits, "members": members})
                             )
                             .unwrap_or_default()
                         );
@@ -314,7 +322,7 @@ pub fn run_members(
                         } else {
                             let _ = writeln!(stdout, "{}", table(&members));
                         }
-                        let _ = writeln!(stdout, "owner's words: {owner_words}");
+                        let _ = writeln!(stdout, "owner's digits: {owner_digits}");
                     }
                     EXIT_CLEAN
                 }
@@ -325,7 +333,7 @@ pub fn run_members(
                 }
             }
         }
-        ["words"] if !loose && span.is_none() => {
+        ["digits" | "words"] if !loose && span.is_none() => {
             let request = ClientRequest::Members {
                 cwd: cwd(env),
                 what: MemberOp::List {},
@@ -335,8 +343,8 @@ pub fn run_members(
                 Err(code) => return code,
             };
             match conn.request(&request) {
-                Ok(ClientReply::Members { owner_words, .. }) => {
-                    let _ = writeln!(stdout, "{owner_words}");
+                Ok(ClientReply::Members { owner_digits, .. }) => {
+                    let _ = writeln!(stdout, "{owner_digits}");
                     EXIT_CLEAN
                 }
                 Ok(other) => daemon_cmd::report("members", &other, false, stdout, stderr),
@@ -396,7 +404,7 @@ pub fn run_members(
         ),
         _ => usage(
             stderr,
-            "expected list, add NAME, extend NAME, remove NAME or words",
+            "expected list, add NAME, extend NAME, remove NAME or digits",
         ),
     }
 }
@@ -452,6 +460,7 @@ pub fn run_share(
     let usage = |stderr: &mut dyn Write, msg: &str| usage_error(stderr, "share", SHARE_USAGE, msg);
     let mut positional: Vec<&str> = Vec::new();
     let (mut out, mut to) = (None::<&str>, None::<&str>);
+    let mut rules = ProposedRules::default();
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -461,15 +470,19 @@ pub fn run_share(
                 let _ = stdout.write_all(SHARE_USAGE.as_bytes());
                 return EXIT_CLEAN;
             }
-            "-o" | "--out" | "--to" => {
+            "-o" | "--out" | "--to" | "--allow" | "--deny" | "--dir" | "--net" | "--category" => {
                 let Some(v) = args.get(i) else {
                     return usage(stderr, &format!("{a} needs a value"));
                 };
                 i += 1;
-                if a == "--to" {
-                    to = Some(v);
-                } else {
-                    out = Some(v);
+                match a {
+                    "--to" => to = Some(v),
+                    "--allow" => rules.allow.push(v.clone()),
+                    "--deny" => rules.deny.push(v.clone()),
+                    "--dir" => rules.dirs.push(v.clone()),
+                    "--net" => rules.net = Some(v.clone()),
+                    "--category" => rules.category = Some(v.clone()),
+                    _ => out = Some(v),
                 }
             }
             other if other.starts_with('-') => {
@@ -482,6 +495,10 @@ pub fn run_share(
         return usage(stderr, "share needs -o FILE");
     };
     let out = absolute(env, out);
+    let proposes = rules != ProposedRules::default();
+    if proposes && to != Some("owner") {
+        return usage(stderr, "rule options go with --to owner");
+    }
     match (to, positional.as_slice()) {
         (None, [member]) => send(
             env,
@@ -499,6 +516,7 @@ pub fn run_share(
             MemberOp::SendToOwner {
                 name: (*name).to_string(),
                 out,
+                rules,
             },
             stdout,
             stderr,
@@ -519,6 +537,7 @@ pub fn run_join(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
             "join",
             MemberOp::Join {
                 file: absolute(env, file),
+                path: std::env::var_os("PATH").map(|p| p.to_string_lossy().into_owned()),
             },
             stdout,
             stderr,

@@ -234,7 +234,7 @@ fn parse_identity(shown: &str) -> (String, String) {
     let key = lines.iter().find(|l| l.starts_with("vh1")).unwrap();
     let at = lines
         .iter()
-        .position(|l| l.contains("six verification words"))
+        .position(|l| l.contains("verification digits"))
         .unwrap();
     ((*key).to_string(), lines[at + 1].to_string())
 }
@@ -278,7 +278,7 @@ fn the_whole_path_from_the_owner_to_a_member_running_a_command() {
     o.add_member("ann", "runner", &key, &words);
     let listed = o.ok(&["members", "list"]);
     assert!(listed.contains("ann") && listed.contains("runner") && listed.contains("active"));
-    assert!(listed.contains("owner's words:"));
+    assert!(listed.contains("owner's digits:"));
     // The window showed the member, role and end date, never the words.
     let log = serde_json::to_string(&o.window_log()).unwrap();
     assert!(log.contains("Member: ann") && log.contains("Role: runner"));
@@ -289,7 +289,7 @@ fn the_whole_path_from_the_owner_to_a_member_running_a_command() {
     let pkg = o.file("ann.vhp");
     o.script(&[&format!("s:{OWNER_PW}")]);
     let said = o.ok(&["share", "ann", "-o", pkg.to_str().unwrap()]);
-    let owner_words = o.ok(&["members", "words"]).trim().to_string();
+    let owner_words = o.ok(&["members", "digits"]).trim().to_string();
     assert!(said.contains(&owner_words));
 
     // The package holds nothing of what ann does not hold, nor anyone else.
@@ -345,16 +345,17 @@ fn the_whole_path_from_the_owner_to_a_member_running_a_command() {
 }
 
 #[test]
-fn wrong_words_refuse_the_member_and_write_nothing() {
+fn wrong_digits_refuse_the_member_and_write_nothing() {
     let o = owner();
     let m = Person::new();
     let (key, _) = m.make_identity();
     let before = fs::read(o.vault_path()).unwrap();
     let asks = o.asks();
+    // Not this key's digits, whatever they are: letters, then a wrong code.
     o.script(&[
         "t:kabe lomi sefo ridu tave zonu",
-        "t:kabe lomi sefo ridu tave zonu",
-        "t:kabe lomi sefo ridu tave zonu",
+        "t:0000 0000 0000 0000 0000 0000",
+        "t:1234",
     ]);
     let out = o.vahta(&["members", "add", "ann", "--role", "runner", "--key", &key]);
     assert_eq!(out.status.code(), Some(1));
@@ -489,7 +490,6 @@ fn a_runner_cannot_add_or_reveal() {
         vec!["remove", "ALPHA"],
         vec!["reveal", "ALPHA"],
         vec!["copy", "ALPHA"],
-        vec!["unlock", "--secret", "ALPHA"],
         vec![
             "share",
             "--to",
@@ -625,4 +625,394 @@ fn removing_a_member_prints_the_secrets_to_rotate_and_revoke_re_keys() {
     let journal = fs::read_to_string(o.root.join("data/journal.jsonl")).unwrap();
     assert!(journal.contains("member_added") && journal.contains("member_removed"));
     assert!(!journal.contains(&key));
+}
+
+// --- Second iteration -----------------------------------------------------------------------
+
+#[cfg(unix)]
+/// The first program called `sh` on PATH, canonical, as the daemon resolves it.
+fn sh_path() -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|d| d.join("sh"))
+        .find_map(|p| fs::canonicalize(p).ok())
+        .expect("sh on PATH")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn the_verification_digits_are_six_groups_and_typing_forgives_separators() {
+    let o = owner();
+    let (m1, m2, m3) = (Person::new(), Person::new(), Person::new());
+    let (k1, d1) = m1.make_identity();
+    let groups: Vec<&str> = d1.split(' ').collect();
+    assert_eq!(groups.len(), 6);
+    assert!(
+        groups
+            .iter()
+            .all(|g| g.len() == 4 && g.bytes().all(|b| b.is_ascii_digit()))
+    );
+    // No separators at all.
+    o.add_member("ann", "runner", &k1, &d1.replace(' ', ""));
+    // Dashes and commas, a stray space.
+    let (k2, d2) = m2.make_identity();
+    o.add_member("bob", "runner", &k2, &format!(" {} ", d2.replace(' ', "-")));
+    assert_eq!(o.open_owner().recipients().len(), 2);
+    // One digit off is refused, as are the right digits for another key.
+    let (k3, d3) = m3.make_identity();
+    let mut off = d3.clone().into_bytes();
+    off[0] = if off[0] == b'0' { b'1' } else { b'0' };
+    let off = String::from_utf8(off).unwrap();
+    o.script(&[&format!("t:{off}"), &format!("t:{d1}"), &format!("t:{d2}")]);
+    let out = o.vahta(&["members", "add", "cy", "--role", "runner", "--key", &k3]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(o.open_owner().recipients().len(), 2);
+    // The owner's side prints digits too, and a joining member sees them.
+    let theirs = o.ok(&["members", "digits"]);
+    assert_eq!(theirs.trim().split(' ').count(), 6);
+    assert!(
+        theirs
+            .trim()
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b' ')
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rule_naming_a_place_in_the_owners_project_matches_in_the_members_project() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("ann", "runner", &key, &digits);
+    o.grant("ALPHA", "ann");
+    // The owner approved `sh <owner project>/lib/x.sh`.
+    let root = fs::canonicalize(o.project()).unwrap();
+    let script = root.join("lib/x.sh").to_string_lossy().into_owned();
+    let rule = vahta_vault::rules::parse_rule(&format!("sh {script}"), true)
+        .unwrap()
+        .to_allow(sh_path());
+    let mut v = o.open_owner();
+    v.set_bindings(
+        "ALPHA",
+        Some(vahta_vault::RuleSet {
+            name: "ALPHA".into(),
+            allow: vec![rule],
+            network: vahta_vault::Network::App,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    v.save(&o.vault_path(), &o.store()).unwrap();
+    let pkg = o.share("ann", "ann.vhp");
+    // The package says nothing of the owner's layout.
+    let bytes = fs::read(&pkg).unwrap();
+    assert!(!contains(&bytes, &root.to_string_lossy()));
+    assert_eq!(m.join(&pkg, true).status.code(), Some(0));
+
+    for name in ["x.sh", "y.sh"] {
+        fs::create_dir_all(m.project().join("lib")).unwrap();
+        fs::write(m.project().join("lib").join(name), "echo ran-it\n").unwrap();
+    }
+    let mine = |name: &str| {
+        m.project()
+            .join("lib")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    };
+    m.script(&[&format!("s:{MEMBER_PW}")]);
+    let out = m.vahta(&["run", "--secret", "ALPHA", "--", "sh", &mine("x.sh")]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("ran-it"));
+    // Another script in the same folder is not what was approved.
+    m.script(&[&format!("s:{MEMBER_PW}")]);
+    let out = m.vahta(&["run", "--secret", "ALPHA", "--", "sh", &mine("y.sh")]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!text(&out.stdout).contains("ran-it"));
+    // Nor the owner's own path, which does not exist here.
+    m.script(&[&format!("s:{MEMBER_PW}")]);
+    let out = m.vahta(&["run", "--secret", "ALPHA", "--", "sh", &script]);
+    assert_ne!(out.status.code(), Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn share_warns_about_places_outside_the_project_by_secret_name() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("ann", "runner", &key, &digits);
+    o.grant("ALPHA", "ann");
+    let mut v = o.open_owner();
+    let rule = vahta_vault::rules::parse_rule("sh", true)
+        .unwrap()
+        .to_allow(sh_path());
+    v.set_bindings(
+        "ALPHA",
+        Some(vahta_vault::RuleSet {
+            name: "ALPHA".into(),
+            allow: vec![rule],
+            network: vahta_vault::Network::App,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    v.save(&o.vault_path(), &o.store()).unwrap();
+    o.script(&[&format!("s:{OWNER_PW}")]);
+    let out = o.ok(&["share", "ann", "-o", o.file("w.vhp").to_str().unwrap()]);
+    assert!(
+        out.contains("warning") && out.contains("ALPHA:") && out.contains(&sh_path()),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_member_opens_a_session_that_never_outlasts_the_membership() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("ann", "runner", &key, &digits);
+    o.grant("ALPHA", "ann");
+    let mut v = o.open_owner();
+    let id = v.recipients()[0].id;
+    v.set_recipient_expiry(&id, Some(now() + 8)).unwrap();
+    v.save(&o.vault_path(), &o.store()).unwrap();
+    let pkg = o.share("ann", "ann.vhp");
+    assert_eq!(m.join(&pkg, true).status.code(), Some(0));
+
+    // An hour was asked for; the membership has seconds left.
+    m.script(&[&format!("s:{MEMBER_PW}")]);
+    let out = m.vahta(&["unlock", "--for", "1h", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let left = doc["session"]["remaining_secs"].as_u64().unwrap();
+    assert!(left <= 8, "{left}");
+    assert_eq!(doc["session"]["names"], serde_json::json!(["ALPHA"]));
+    let log = serde_json::to_string(&m.window_log()).unwrap();
+    assert!(log.contains("membership ends"));
+
+    // Inside the session no window and no password.
+    let asks = m.asks();
+    let out = m.vahta(&["run", "--secret", "ALPHA", "--", "true"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(m.asks(), asks);
+    // A member still cannot reveal, even with a session.
+    let out = m.vahta(&["reveal", "ALPHA"]);
+    assert_eq!(out.status.code(), Some(1));
+
+    std::thread::sleep(Duration::from_secs(9));
+    let out = m.vahta(&["run", "--secret", "ALPHA", "--", "true"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        m.ok(&["sessions", "--json"]).contains("\"sessions\":[]")
+            || serde_json::from_str::<Value>(&m.ok(&["sessions", "--json"])).unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+    );
+}
+
+#[test]
+fn after_the_owner_re_keys_a_member_follows_the_chain_when_the_digits_are_confirmed() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("ann", "runner", &key, &digits);
+    o.grant("ALPHA", "ann");
+    let first = o.share("ann", "first.vhp");
+    assert_eq!(m.join(&first, true).status.code(), Some(0));
+
+    // The owner lost a device and re-keys.
+    let mut v = o.open_owner();
+    let kek = v.password_kek(OWNER_PW.as_bytes()).unwrap();
+    v.rekey(&kek, vahta_vault::RecoveryPlan::Replace, vec![])
+        .unwrap();
+    v.save(&o.vault_path(), &o.store()).unwrap();
+    drop(v);
+    o.grant("BETA", "ann");
+    let second = o.share("ann", "second.vhp");
+    let new_digits = o.ok(&["members", "digits"]).trim().to_string();
+
+    // Declining leaves the installed package alone.
+    let installed = fs::read(m.vault_path()).unwrap();
+    m.script(&[&format!("s:{MEMBER_PW}"), "c:1"]);
+    let out = m.vahta(&["join", second.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(fs::read(m.vault_path()).unwrap(), installed);
+
+    let out = m.join(&second, true);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let log = serde_json::to_string(&m.window_log()).unwrap();
+    assert!(log.contains("owner's key changed") && log.contains(&new_digits));
+    assert!(m.ok(&["list"]).contains("BETA"));
+    assert_eq!(m.run_len("ALPHA").status.code(), Some(0));
+    // The old package is old now.
+    let out = m.join(&first, false);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("not newer"));
+}
+
+#[test]
+fn an_editors_local_changes_do_not_block_the_owners_next_package() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("eve", "editor", &key, &digits);
+    o.grant("ALPHA", "eve");
+    let first = o.share("eve", "first.vhp");
+    assert_eq!(m.join(&first, true).status.code(), Some(0));
+    m.script(&[&format!("s:{MEMBER_PW}"), "s:fake-mine", "c:0"]);
+    m.ok(&["add", "MINE", "--tier", "session"]);
+    // One local save each: the two files' own generations are equal.
+    o.grant("BETA", "eve");
+    let second = o.share("eve", "second.vhp");
+    let out = m.join(&second, false);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(m.ok(&["list"]).contains("BETA"));
+    // The window warned that the local-only secret would be replaced.
+    let log = serde_json::to_string(&m.window_log()).unwrap();
+    assert!(log.contains("your current file has MINE"), "{log}");
+    // An older package is still refused.
+    let out = m.join(&first, false);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn an_editors_transfers_are_ordered_by_a_counter_not_a_clock() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("eve", "editor", &key, &digits);
+    o.grant("ALPHA", "eve");
+    let pkg = o.share("eve", "eve.vhp");
+    assert_eq!(m.join(&pkg, true).status.code(), Some(0));
+    m.script(&[&format!("s:{MEMBER_PW}"), "s:fake-v1", "c:0"]);
+    m.ok(&["add", "MINE", "--tier", "session"]);
+    let send = |file: &str| {
+        let f = m.file(file);
+        m.script(&[&format!("s:{MEMBER_PW}")]);
+        m.ok(&["share", "--to", "owner", "MINE", "-o", f.to_str().unwrap()]);
+        f
+    };
+    let (a, b) = (send("a.vhp"), send("b.vhp"));
+    let import = |f: &Path| {
+        o.script(&[&format!("s:{OWNER_PW}"), "c:0"]);
+        o.vahta(&["join", f.to_str().unwrap()])
+    };
+    // The newer file first; the older one is then a replay.
+    assert_eq!(import(&b).status.code(), Some(0));
+    let out = import(&a);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("not newer"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(import(&b).status.code(), Some(1));
+    // A later one is fine.
+    let c = send("c.vhp");
+    assert_eq!(import(&c).status.code(), Some(0));
+}
+
+#[test]
+fn proposed_rules_are_shown_in_plain_words_and_applied_only_on_approval() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("eve", "editor", &key, &digits);
+    o.grant("ALPHA", "eve");
+    let pkg = o.share("eve", "eve.vhp");
+    assert_eq!(m.join(&pkg, true).status.code(), Some(0));
+    let mut names = Vec::new();
+    for n in ["ONE", "TWO", "THREE"] {
+        m.script(&[&format!("s:{MEMBER_PW}"), "s:fake-x", "c:0"]);
+        m.ok(&["add", n, "--tier", "session"]);
+        names.push(n);
+    }
+    let send = |name: &str| {
+        let f = m.file(&format!("{name}.vhp"));
+        m.script(&[&format!("s:{MEMBER_PW}")]);
+        m.ok(&[
+            "share",
+            "--to",
+            "owner",
+            name,
+            "-o",
+            f.to_str().unwrap(),
+            "--allow",
+            "sh",
+            "--net",
+            "none",
+        ]);
+        f
+    };
+    // Approved: the owner's vault ends up with the rules, signed by the owner.
+    o.script(&[&format!("s:{OWNER_PW}"), "c:0"]);
+    let out = o.ok(&["join", send("ONE").to_str().unwrap()]);
+    assert!(out.contains("rules it proposed are approved"), "{out}");
+    let log = serde_json::to_string(&o.window_log()).unwrap();
+    assert!(
+        log.contains("PROPOSES")
+            && log.contains("allow: sh")
+            && log.contains("Import with these rules")
+    );
+    let v = o.open_owner();
+    let b = v.bindings().iter().find(|b| b.name == "ONE").unwrap();
+    assert_eq!(b.allow[0].text, "sh");
+    assert_eq!(b.network, vahta_vault::Network::None);
+    assert!(
+        fs::read_to_string(o.project().join("vahta.toml"))
+            .unwrap()
+            .contains("ONE")
+    );
+    drop(v);
+
+    // Imported without the rules: the secret has none.
+    o.script(&[&format!("s:{OWNER_PW}"), "c:1"]);
+    o.ok(&["join", send("TWO").to_str().unwrap()]);
+    let v = o.open_owner();
+    assert!(v.entries().iter().any(|e| e.name == "TWO"));
+    assert!(v.bindings().iter().all(|b| b.name != "TWO"));
+    drop(v);
+
+    // Cancelled: nothing at all.
+    o.script(&[&format!("s:{OWNER_PW}"), "c:2"]);
+    let out = o.vahta(&["join", send("THREE").to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4));
+    let v = o.open_owner();
+    assert!(v.entries().iter().all(|e| e.name != "THREE"));
+    // The proposal is in the editor's signed file only as text.
+    assert!(contains(&fs::read(m.file("THREE.vhp")).unwrap(), "sh"));
+}
+
+#[test]
+fn proposed_rules_never_change_a_secret_the_owner_already_has() {
+    let o = owner();
+    let m = Person::new();
+    let (key, digits) = m.make_identity();
+    o.add_member("eve", "editor", &key, &digits);
+    o.grant("ALPHA", "eve");
+    let pkg = o.share("eve", "eve.vhp");
+    assert_eq!(m.join(&pkg, true).status.code(), Some(0));
+    let before = o.open_owner().bindings().to_vec();
+    let f = m.file("alpha.vhp");
+    m.script(&[&format!("s:{MEMBER_PW}")]);
+    m.ok(&[
+        "share",
+        "--to",
+        "owner",
+        "ALPHA",
+        "-o",
+        f.to_str().unwrap(),
+        "--allow",
+        "sh",
+    ]);
+    // The window offers a plain import (no rules option) and says they are ignored.
+    o.script(&[&format!("s:{OWNER_PW}"), "c:0"]);
+    o.ok(&["join", f.to_str().unwrap()]);
+    let log = serde_json::to_string(&o.window_log()).unwrap();
+    assert!(log.contains("they are ignored"), "{log}");
+    assert_eq!(o.open_owner().bindings(), before.as_slice());
 }
