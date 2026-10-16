@@ -25,7 +25,7 @@
 use std::io::{Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -42,6 +42,11 @@ use crate::server::Shared;
 
 /// How much of a command's output goes in one frame, before base64.
 const CHUNK: usize = 16 * 1024;
+/// How long output that could be the start of a value waits for the rest of
+/// it before it is let go. A value written in one go or in writes that follow
+/// each other is far inside this; a message that merely ends with a character
+/// a value starts with (a newline) is delayed by no more.
+const HOLD: Duration = Duration::from_millis(25);
 /// How long a command that was asked to stop is given before it is killed.
 #[cfg(unix)]
 const KILL_AFTER: Duration = Duration::from_secs(2);
@@ -59,8 +64,13 @@ fn send(writer: &Writer, message: &RunOutput) -> bool {
 }
 
 /// Read one of the command's output streams, scrub it, and send it on.
+///
+/// A tail that could be the start of a value is held back until more arrives
+/// (see `scrub.rs`). If nothing arrives within [`HOLD`] it is let go, so a
+/// complete message is never kept waiting for the next one; the read happens
+/// on its own thread so that the wait can have a limit.
 fn pump(
-    mut source: impl Read,
+    mut source: impl Read + Send + 'static,
     mut scrubber: Scrubber,
     writer: Writer,
     stderr: bool,
@@ -80,17 +90,40 @@ fn pump(
         }
         bytes.chunks(CHUNK).all(|c| send(&writer, &frame(c)))
     };
-    let mut buf = vec![0u8; CHUNK];
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match source.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    });
     loop {
-        match source.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if !emit(scrubber.push(&buf[..n])) {
+        let next = if scrubber.held() {
+            rx.recv_timeout(HOLD)
+        } else {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        };
+        match next {
+            Ok(chunk) => {
+                if !emit(scrubber.push(&chunk)) {
                     return;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if !emit(scrubber.flush_held()) {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     emit(scrubber.finish());

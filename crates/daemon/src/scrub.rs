@@ -28,7 +28,8 @@
 //! program's own formatting (line-wrapped base64, say), or transformed in any
 //! other way (compressed, encrypted, rot13), is not recognised, and the few
 //! bytes held back because they look like the start of a value appear late,
-//! at the next read or at the end.
+//! at the next read, at the end, or when the caller gives up waiting
+//! ([`Scrubber::flush_held`]).
 
 use zeroize::Zeroizing;
 
@@ -45,6 +46,10 @@ pub struct Scrubber {
     /// What has been read and not yet written: the held-back tail, and
     /// whatever has arrived since.
     pending: Zeroizing<Vec<u8>>,
+    /// How many bytes at the start of `pending` were written already, by
+    /// [`Scrubber::flush_held`]. They stay as context, so that the rest of a
+    /// value whose start was let go is still taken out.
+    released: usize,
 }
 
 /// A match: where it is and which target.
@@ -73,6 +78,7 @@ impl Scrubber {
             targets,
             max_len,
             pending: Zeroizing::new(Vec::new()),
+            released: 0,
         }
     }
 
@@ -94,6 +100,28 @@ impl Scrubber {
         }
         self.pending.extend_from_slice(chunk);
         self.process(false)
+    }
+
+    /// Whether a tail is being held back, waiting for bytes that may complete
+    /// a value.
+    pub fn held(&self) -> bool {
+        !self.targets.is_empty() && self.pending.len() > self.released
+    }
+
+    /// Nothing has come for a while: decide the held-back tail as text and
+    /// return it, as at the end of the stream. A value that is written in
+    /// pieces further apart than the caller's wait loses the part already
+    /// returned (it is a prefix of the value, never the whole), but whatever
+    /// arrives later and completes it is still taken out.
+    pub fn flush_held(&mut self) -> Vec<u8> {
+        if !self.held() {
+            return Vec::new();
+        }
+        let keep = self.pending.clone();
+        let out = self.process(true);
+        self.released = keep.len();
+        self.pending = keep;
+        out
     }
 
     /// The stream has ended: everything that was held back is decided and
@@ -169,7 +197,10 @@ impl Scrubber {
         } else {
             n - self.partial_suffix(&buf)
         };
-        let hits = self.hits(&buf);
+        // A match that lies wholly in what was written already was handled.
+        let released = std::mem::take(&mut self.released).min(n);
+        let mut hits = self.hits(&buf);
+        hits.retain(|h| h.end > released);
 
         // Merge matches that overlap or touch into spans, in order.
         let mut spans: Vec<(usize, usize, Vec<Hit>)> = Vec::new();
@@ -184,7 +215,7 @@ impl Scrubber {
         }
 
         let mut out = Vec::with_capacity(n);
-        let mut pos = 0;
+        let mut pos = released;
         for (start, end, members) in &spans {
             if *start >= emit_to {
                 break;
@@ -195,7 +226,9 @@ impl Scrubber {
                 emit_to = *start;
                 break;
             }
-            out.extend_from_slice(&buf[pos..*start]);
+            if *start > pos {
+                out.extend_from_slice(&buf[pos..*start]);
+            }
             // One marker for each match not already covered by an earlier one,
             // longest first at each start (the hits are in that order).
             let mut covered = *start;
@@ -217,7 +250,13 @@ impl Scrubber {
             out.extend_from_slice(&buf[pos..emit_to]);
             pos = emit_to;
         }
-        self.pending = Zeroizing::new(buf[pos.min(n)..].to_vec());
+        if pos > released {
+            self.pending = Zeroizing::new(buf[pos.min(n)..].to_vec());
+        } else {
+            // Nothing new was decided: the context stays with the held tail.
+            self.pending = buf;
+            self.released = released;
+        }
         out
     }
 }
@@ -453,5 +492,79 @@ mod tests {
         let mut out = s.push(b"YWJj abc");
         out.extend(s.finish());
         assert_eq!(text(&out), "YWJj ***REDACTED(S)***");
+    }
+
+    #[test]
+    fn a_held_tail_is_let_go_when_nothing_follows_and_the_rest_is_still_taken_out() {
+        // A value that starts with a newline: every line would be held.
+        let mut s = Scrubber::new(values(&[("A", "\nsecret-body")]));
+        assert_eq!(s.push(b"{\"ok\":1}\n"), b"{\"ok\":1}");
+        assert!(s.held());
+        // No more input: the newline is let go, the message is complete.
+        assert_eq!(s.flush_held(), b"\n");
+        assert!(!s.held());
+        assert_eq!(s.flush_held(), b"");
+        // The next message is not held by the one before.
+        assert_eq!(s.push(b"two\n"), b"two");
+        assert_eq!(s.flush_held(), b"\n");
+        // A value that arrives split after a flush: the part let go is gone,
+        // the rest is not written.
+        assert_eq!(s.push(b"x\n"), b"x");
+        assert_eq!(s.flush_held(), b"\n");
+        let out = s.push(b"secret-body and more\n");
+        assert_eq!(text(&out), "***REDACTED(A)*** and more");
+        assert_eq!(s.finish(), b"\n");
+        // Written without a pause, the whole value is taken out.
+        let mut s = Scrubber::new(values(&[("A", "\nsecret-body")]));
+        let mut out = s.push(b"m\n");
+        out.extend(s.push(b"secret-body\n"));
+        out.extend(s.finish());
+        assert_eq!(text(&out), "m***REDACTED(A)***\n");
+    }
+
+    #[test]
+    fn a_value_with_a_trailing_newline_or_after_a_brace_does_not_stall() {
+        for value in ["secret-body\n", "}\nsecret", "\n\n"] {
+            let mut s = Scrubber::new(values(&[("A", value)]));
+            let mut shown = s.push(b"reply 1}\n");
+            shown.extend(s.flush_held());
+            assert_eq!(text(&shown), "reply 1}\n", "{value:?}");
+        }
+        let mut s = Scrubber::new(values(&[("A", "x}\nsecret")]));
+        let mut shown = s.push(b"abc x}\n");
+        shown.extend(s.flush_held());
+        assert_eq!(text(&shown), "abc x}\n");
+        assert_eq!(text(&s.push(b"secret!")), "***REDACTED(A)***!");
+    }
+
+    #[test]
+    fn flushing_changes_nothing_when_nothing_is_held_or_there_are_no_values() {
+        let mut s = Scrubber::new(values(&[("A", "fake-one")]));
+        assert!(!s.held());
+        assert_eq!(s.flush_held(), b"");
+        assert_eq!(s.push(b"plain"), b"plain");
+        assert_eq!(s.flush_held(), b"");
+        let mut s = Scrubber::new(vec![]);
+        assert!(!s.held());
+        assert_eq!(s.push(b"x"), b"x");
+        assert_eq!(s.flush_held(), b"");
+    }
+
+    #[test]
+    fn json_escaped_forms_are_taken_out_in_every_chunking() {
+        let value = "ab\"cd\\ef\ngh/ij";
+        let mut s = Scrubber::with_encodings(values(&[("Q", value)]));
+        let input = r#"{"a":"ab\"cd\\ef\ngh/ij","b":"ab\"cd\\ef\u000agh\/ij","c":"ab\u0022cd\u005Cef\u000Agh/ij"}"#;
+        let mut out = Vec::new();
+        for chunk in input.as_bytes().chunks(3) {
+            out.extend(s.push(chunk));
+        }
+        out.extend(s.finish());
+        let shown = text(&out);
+        assert!(
+            !shown.contains("ab\\\"cd") && !shown.contains("ef"),
+            "{shown}"
+        );
+        assert!(shown.contains("REDACTED(Q (JSON-escaped))"), "{shown}");
     }
 }
