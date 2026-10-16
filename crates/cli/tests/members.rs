@@ -629,6 +629,7 @@ fn removing_a_member_prints_the_secrets_to_rotate_and_revoke_re_keys() {
 
 // --- Second iteration -----------------------------------------------------------------------
 
+#[cfg(unix)]
 /// The first program called `sh` on PATH, canonical, as the daemon resolves it.
 fn sh_path() -> String {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -678,6 +679,7 @@ fn the_verification_digits_are_six_groups_and_typing_forgives_separators() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_rule_naming_a_place_in_the_owners_project_matches_in_the_members_project() {
     let o = owner();
@@ -735,6 +737,7 @@ fn a_rule_naming_a_place_in_the_owners_project_matches_in_the_members_project() 
     assert_ne!(out.status.code(), Some(0));
 }
 
+#[cfg(unix)]
 #[test]
 fn share_warns_about_places_outside_the_project_by_secret_name() {
     let o = owner();

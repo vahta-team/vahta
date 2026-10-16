@@ -109,7 +109,18 @@ fn args_len(rule: &ApprovedRule, argv: &[String], root: &Path) -> Option<usize> 
             .iter()
             .map(|a| expand_project_path(a, root).into_owned())
             .collect();
-        crate::runner::rule_match(&expanded, rest)
+        // The root is the canonical one, so a path typed through a symlink
+        // (a temp dir that is a link, a linked project folder) is resolved too,
+        // as programs are, before it is compared.
+        let resolved: Vec<String> = rest
+            .iter()
+            .map(|w| match Path::new(w) {
+                p if p.is_absolute() => std::fs::canonicalize(p)
+                    .map_or_else(|_| w.clone(), |c| c.to_string_lossy().into_owned()),
+                _ => w.clone(),
+            })
+            .collect();
+        crate::runner::rule_match(&expanded, &resolved)
     } else {
         crate::runner::rule_match(rule, rest)
     }
@@ -798,5 +809,50 @@ mod tests {
         assert!(run("/usr/bin/python3", &["python3", "/m/p/lib/x.py"]).is_allowed());
         assert!(!run("/usr/bin/python3", &["python3", "/o/p/lib/x.py"]).is_allowed());
         assert!(!run("/usr/bin/npx", &["npx", "-y", "@pkg/server-evil"]).is_allowed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_typed_through_a_symlinked_project_folder_still_matches() {
+        let base = std::env::temp_dir().join(format!("vahta-policy-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let real = std::fs::canonicalize(&base).unwrap().join("real");
+        std::fs::create_dir_all(real.join("lib")).unwrap();
+        std::fs::write(real.join("lib/x.py"), "").unwrap();
+        let link = real.parent().unwrap().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let b = binding(
+            vec![ApprovedRule {
+                text: "python3 $PROJECT/lib/x.py".into(),
+                program: Program::Path("/usr/bin/python3".into()),
+                args: vec!["$PROJECT/lib/x.py".into()],
+            }],
+            vec![],
+        );
+        let typed = link.join("lib/x.py").to_string_lossy().into_owned();
+        let other = link.join("lib/y.py").to_string_lossy().into_owned();
+        let run = |root: &Path, word: &str| {
+            let a = argv(&["python3", word]);
+            evaluate(
+                &b,
+                &Ctx {
+                    program: Some(Path::new("/usr/bin/python3")),
+                    argv: &a,
+                    cwd: &real,
+                    project_root: root,
+                    network_isolation: false,
+                },
+            )
+            .is_allowed()
+        };
+        // The project reached by its link or by its real path, the argument
+        // typed either way.
+        for root in [&link, &real] {
+            assert!(run(root, &typed));
+            assert!(run(root, &real.join("lib/x.py").to_string_lossy()));
+            assert!(!run(root, &other));
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
