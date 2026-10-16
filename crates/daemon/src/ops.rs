@@ -46,6 +46,9 @@ pub(crate) struct Ctx<'a> {
     /// The request is for the connectors vault (`--connector`): every lookup
     /// of "the vault" goes to it, and to nothing found from a directory.
     pub connector: bool,
+    /// Whether the client has gone away while the request waits on a person
+    /// (`gone.rs`).
+    pub gone: Arc<crate::gone::Gone>,
 }
 
 /// An early end: the reply to send.
@@ -233,7 +236,10 @@ impl Ctx<'_> {
 
     /// Open a window, or the reply that says none could be.
     pub(crate) fn window(&self, title: &str) -> Flow<Box<dyn Window>> {
-        self.shared.surface.open(title).map_err(from_surface)
+        let window = self.shared.surface.open(title).map_err(from_surface)?;
+        // A client that gives up takes its window with it.
+        self.gone.guard(window.as_ref());
+        Ok(window)
     }
 }
 

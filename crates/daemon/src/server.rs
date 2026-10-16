@@ -124,6 +124,8 @@ pub(crate) struct Shared {
     pub(crate) alarm: crate::alarm::Alarm,
     /// The last refused launch of each connector's server (`connector_ops.rs`).
     pub(crate) connector_refusals: Mutex<Vec<vahta_ipc::protocol::ConnectorRefusal>>,
+    /// Who has the turn to ask the person about each vault (`gate.rs`).
+    pub(crate) gates: crate::gate::Gates,
     /// The ways to unlock a vault.
     pub(crate) unlockers: vahta_auth::Registry,
     /// How devices are reached.
@@ -271,6 +273,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         outputs: Mutex::new(outputs),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
+        gates: crate::gate::Gates::default(),
         unlockers: vahta_auth::Registry::standard(),
         links,
         started: Instant::now(),
@@ -621,6 +624,7 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             peer: peer.id,
             used_from: std::sync::Mutex::new(None),
             connector: false,
+            gone: std::sync::Arc::new(crate::gone::Gone::new(Some(stream))),
         };
         // The client's `cwd` is a claim: believed only if the kernel agrees.
         if let Some(cwd) = request.cwd_to_verify()
@@ -744,6 +748,8 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     },
                 ) {
                     Ok(prepared) => {
+                        // The connection now carries the command's input and output.
+                        ctx.gone.stop();
                         if write_frame(stream, &ClientReply::RunStarted {}).is_ok() {
                             run::execute(shared, stream, prepared, (ctx.exe.clone(), ctx.pid));
                         }

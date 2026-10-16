@@ -22,6 +22,8 @@ mod connector_ops;
 mod devices_ops;
 mod dotenv;
 mod encoded;
+mod gate;
+mod gone;
 mod guard_ops;
 mod http_ops;
 pub mod journal;

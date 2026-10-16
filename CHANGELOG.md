@@ -79,6 +79,21 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   and the journal.
 - **CI** on Linux, macOS and Windows: format, clippy and the workspace tests.
 
+### Fixed
+
+- **A window no longer outlives a client that gave up.** When the harness killed
+  `vahta run` (or `unlock`, `http`, `bind`, ...) while a password or approval window
+  was open, the window stayed up to five minutes and the journal said the command
+  "started" though it never ran. The daemon now watches the connection while a
+  request waits on the person: the window is withdrawn at once, nothing is started and
+  the journal says `cancelled` (client gone).
+- **N requests at once no longer open N windows.** The first request for a vault opens
+  the window; the others wait. A session opened by that window serves the waiters it
+  covers (the usual process-tree and scope lookup; the others get their own window
+  afterwards); the same command asked again meanwhile shares the one-use approval; a
+  "no" is the answer for waiters asking for the same secrets; a different command is
+  asked after the first, never beside it.
+
 ### Changed
 
 - The Python key-amnesia moved to `legacy/` on this branch. It is maintained on

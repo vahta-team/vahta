@@ -31,7 +31,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Threading::CreateEventW;
 
@@ -308,6 +308,26 @@ impl Stream {
         // operation on it.
         unsafe { CancelIoEx(raw(&self.pipe.handle), std::ptr::null()) };
         Ok(())
+    }
+
+    /// Whether the other end has gone away, without consuming anything.
+    pub fn peer_closed(&self) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return true;
+        }
+        // SAFETY: the handle is open; every optional out-parameter is null,
+        // which asks only whether the pipe is still connected.
+        let ok = unsafe {
+            PeekNamedPipe(
+                raw(&self.pipe.handle),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        ok == 0
     }
 
     pub fn peer(&self) -> io::Result<Peer> {
