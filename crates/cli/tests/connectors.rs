@@ -75,6 +75,7 @@ impl Sandbox {
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
+            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1")
             .env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
         match self.idle {
             Some(n) => cmd.env("VAHTA_TEST_IDLE_SECONDS", n.to_string()),
@@ -566,6 +567,61 @@ fn a_connector_is_removed_by_the_person_in_a_window() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let out = s.vahta(&s.root, &["list", "--connector"]);
     assert!(text(&out.stdout).contains("No connectors"));
+}
+
+// A connector bound with `--net hosts:...` reaches its host through the relay
+// (Linux only: needs a network namespace for the server).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_connector_with_hosts_reaches_only_its_host() {
+    use vahta_net::test_server::{Reply, TestServer};
+    if !vahta_os::network_isolation_available() {
+        eprintln!("skipped: no unprivileged network namespaces here");
+        return;
+    }
+    let server = TestServer::start(|_| Reply::ok(b"connector-ok"));
+    let s = Sandbox::new(true);
+    fs::write(s.root.join("ca.pem"), vahta_net::test_server::CA_PEM).unwrap();
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    let out = s.vahta(&s.root, &["init", "--connector"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|p| Command::new(p).arg("-V").output().is_ok());
+    let Some(python) = python else {
+        eprintln!("skipped: no python");
+        return;
+    };
+    let net = format!("hosts:other.localhost:{}", server.port);
+    s.script(&[PW_ANSWER, &typed(&value_of("a")), r#"{"choose":0}"#]);
+    let out = s.vahta(
+        &s.root,
+        &[
+            "add",
+            "--connector",
+            KEY,
+            "--harness",
+            "claude",
+            "--allow",
+            python,
+            "--net",
+            &net,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    s.unlock();
+    let code = format!(
+        "import socket,ssl\nctx=ssl.create_default_context(cafile='{}')\ns=ctx.wrap_socket(socket.create_connection(('other.localhost',{}),timeout=5),server_hostname='other.localhost')\ns.sendall(b'GET / HTTP/1.1\\r\\n\\r\\n')\nprint(b'connector-ok' in s.recv(4096))\ntry:\n    socket.getaddrinfo('example.com',443)\n    print('resolved')\nexcept OSError:\n    print('noresolve')",
+        s.root.join("ca.pem").display(),
+        server.port
+    );
+    let out = s.run_connector(KEY, &[python, "-c", &code]);
+    assert_eq!(
+        text(&out.stdout),
+        "True\nnoresolve\n",
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]

@@ -202,6 +202,24 @@ pub(crate) fn isolate_network_passing(
     Err(crate::Unsupported)
 }
 
+/// Never made: there is no host filter here.
+pub(crate) struct HostSocket;
+
+impl HostSocket {
+    pub(crate) fn take(&self) -> io::Result<Vec<std::net::TcpListener>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+pub(crate) fn isolate_network_hosts(
+    _cmd: &mut Command,
+    _hosts: &[(String, u16)],
+) -> io::Result<HostSocket> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub(crate) fn wake_listener(_listener: &std::net::TcpListener) {}
+
 pub(crate) fn hidden_path(_path: &std::path::Path) -> bool {
     false
 }
