@@ -196,6 +196,27 @@ struct Plan {
     gid_map: Vec<u8>,
     hide: Vec<std::ffi::CString>,
     keep: Vec<Keep>,
+    /// Set for a run that may reach named hosts (see [`isolate_network_hosts`]).
+    hosts: Option<HostPlan>,
+}
+
+/// The extra work of a run with named hosts: a loopback that is up, one
+/// listening socket per host and port, handed out over `ctrl`, and a few files
+/// in `/etc` replaced so that only the listed names resolve.
+struct HostPlan {
+    /// The child's end of the socket the listeners go out over.
+    ctrl: OwnedFd,
+    addrs: Vec<std::net::SocketAddrV4>,
+    binds: Vec<Bind>,
+}
+
+struct Bind {
+    /// A file in the scratch directory of [`HostSocket`].
+    src: std::ffi::CString,
+    target: std::ffi::CString,
+    /// A failed mount of a file the run cannot do without refuses the start;
+    /// the others are best effort.
+    required: bool,
 }
 
 fn is_real_dir(p: &std::path::Path) -> bool {
@@ -252,6 +273,7 @@ impl Plan {
             gid_map: format!("{gid} {gid} 1\n").into_bytes(),
             hide,
             keep,
+            hosts: None,
         }
     }
 }
@@ -346,6 +368,9 @@ fn enter_isolation(plan: &Plan) -> io::Result<()> {
         c"/",
         MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
     )?;
+    if let Some(hosts) = &plan.hosts {
+        enter_hosts(hosts)?;
+    }
     // The passed-through trees are detached copies held by descriptor, since
     // the path to them is covered next. A fixed array: no allocation here.
     let mut held: [Option<OwnedFd>; MAX_KEEP] = [const { None }; MAX_KEEP];
@@ -386,6 +411,88 @@ fn enter_isolation(plan: &Plan) -> io::Result<()> {
     Ok(())
 }
 
+/// The most listening sockets one run gets.
+pub(crate) const MAX_LISTENERS: usize = 64;
+
+/// `struct ifreq` as `SIOCSIFFLAGS` reads it.
+#[repr(C)]
+struct IfReq {
+    name: [u8; 16],
+    flags: i16,
+    pad: [u8; 22],
+}
+
+/// Bring `lo` up in the new network namespace.
+fn loopback_up() -> io::Result<()> {
+    use rustix::ioctl::{Setter, ioctl};
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, socket_with};
+    const IFF_UP: i16 = 1;
+    const IFF_RUNNING: i16 = 0x40;
+    let sock = socket_with(
+        AddressFamily::INET,
+        SocketType::DGRAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    let mut name = [0u8; 16];
+    name[..2].copy_from_slice(b"lo");
+    let req = IfReq {
+        name,
+        flags: IFF_UP | IFF_RUNNING,
+        pad: [0; 22],
+    };
+    // SAFETY: SIOCSIFFLAGS (0x8914) takes a pointer to a `struct ifreq`, which `IfReq`
+    // matches in size and layout (16-byte name, 16-bit flags, padding to 40).
+    unsafe { ioctl(&sock, Setter::<0x8914, IfReq>::new(req)) }?;
+    Ok(())
+}
+
+/// The part of the child's setup for a run with named hosts: loopback up,
+/// listeners bound and sent out over the control socket, name files replaced.
+/// Raw system calls on data built before the fork.
+fn enter_hosts(plan: &HostPlan) -> io::Result<()> {
+    use rustix::mount::mount_bind;
+    use rustix::net::{
+        AddressFamily, SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketFlags,
+        SocketType, bind, listen, sendmsg, socket_with,
+    };
+    use std::io::IoSlice;
+    use std::mem::MaybeUninit;
+    loopback_up()?;
+    for addr in &plan.addrs {
+        let fd = socket_with(
+            AddressFamily::INET,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )?;
+        bind(&fd, addr)?;
+        listen(&fd, 128)?;
+        // One message per listener, in order; the descriptor is a duplicate
+        // in the receiver, so this one closes at the end of the iteration.
+        let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = SendAncillaryBuffer::new(&mut space);
+        let borrowed = [fd.as_fd()];
+        if !control.push(SendAncillaryMessage::ScmRights(&borrowed)) {
+            return Err(io::Error::from_raw_os_error(22));
+        }
+        sendmsg(
+            &plan.ctrl,
+            &[IoSlice::new(&[0])],
+            &mut control,
+            SendFlags::empty(),
+        )?;
+    }
+    for b in &plan.binds {
+        match mount_bind(b.src.as_c_str(), b.target.as_c_str()) {
+            Ok(()) => {}
+            Err(e) if b.required => return Err(e.into()),
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn write_file(path: &std::ffi::CStr, data: &[u8]) -> io::Result<()> {
     use rustix::fs::{Mode, OFlags, open};
     let fd = open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())?;
@@ -395,6 +502,203 @@ fn write_file(path: &std::ffi::CStr, data: &[u8]) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(5));
     }
     Ok(())
+}
+
+/// The parent's end of the socket the listeners of a run with named hosts
+/// arrive on.
+pub(crate) struct HostSocket {
+    parent: OwnedFd,
+    count: usize,
+    /// Where the replacement files were written. They are only needed until
+    /// the child has mounted them (the mounts keep the files), so the
+    /// directory goes when this does.
+    scratch: std::path::PathBuf,
+}
+
+impl Drop for HostSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.scratch);
+    }
+}
+
+impl HostSocket {
+    /// The listening sockets the child made, in the order of the hosts given.
+    /// Call once, after the child has started (it sends them before `exec`).
+    pub(crate) fn take(&self) -> io::Result<Vec<std::net::TcpListener>> {
+        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
+        use std::io::IoSliceMut;
+        let mut out = Vec::with_capacity(self.count);
+        for _ in 0..self.count {
+            let mut byte = [0u8; 1];
+            let mut space =
+                [std::mem::MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+            let mut control = RecvAncillaryBuffer::new(&mut space);
+            recvmsg(
+                &self.parent,
+                &mut [IoSliceMut::new(&mut byte)],
+                &mut control,
+                RecvFlags::CMSG_CLOEXEC,
+            )?;
+            let fd = control.drain().find_map(|m| match m {
+                RecvAncillaryMessage::ScmRights(mut fds) => fds.next(),
+                _ => None,
+            });
+            let fd = fd.ok_or_else(|| io::Error::other("a listener did not arrive"))?;
+            out.push(std::net::TcpListener::from(fd));
+        }
+        Ok(out)
+    }
+}
+
+/// A new private directory for the files that replace the names files.
+fn scratch_dir() -> io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let dir = std::env::temp_dir().join(format!(
+        "vahta-hosts-{}-{}-{nanos}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    Ok(dir)
+}
+
+/// The text of `/etc/hosts` for a run that may reach `names`: each gets the
+/// loopback address `127.0.0.(2 + position)`.
+pub(crate) fn hosts_file(names: &[String]) -> String {
+    let mut text = String::from("127.0.0.1 localhost\n::1 localhost\n");
+    for (i, n) in names.iter().enumerate() {
+        text.push_str(&format!("127.0.0.{} {n}\n", i + 2));
+    }
+    text
+}
+
+/// `/etc/nsswitch.conf` with the `hosts` line reduced to `files`, so no
+/// resolver service is asked. `None` when the real file cannot be read (the C
+/// library's own default then applies, and the sockets give no way out
+/// anyway).
+fn nsswitch_files_only() -> Option<String> {
+    let text = fs::read_to_string("/etc/nsswitch.conf").ok()?;
+    let mut out = String::new();
+    let mut done = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("hosts:") {
+            if !done {
+                out.push_str("hosts: files\n");
+                done = true;
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !done {
+        out.push_str("hosts: files\n");
+    }
+    Some(out)
+}
+
+/// As [`isolate_network`], and the command may open connections to `hosts`
+/// (name and port). Inside the namespace the loopback is up and each distinct
+/// name is `127.0.0.(2 + position)` in a replaced `/etc/hosts` (nothing else
+/// resolves: `nsswitch.conf` consults files only, `resolv.conf` is empty); a
+/// socket listens on that address and each port given for it, and all of them
+/// are handed to the caller, who relays what is accepted. Anything else has no
+/// route. The caller gets the sockets with [`HostSocket::take`] once
+/// `spawn` has returned.
+pub(crate) fn isolate_network_hosts(
+    cmd: &mut Command,
+    hosts: &[(String, u16)],
+) -> io::Result<HostSocket> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
+    use std::os::unix::process::CommandExt;
+    if hosts.is_empty() || hosts.len() > MAX_LISTENERS {
+        return Err(io::Error::from_raw_os_error(22));
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (h, _) in hosts {
+        if !names.contains(h) {
+            names.push(h.clone());
+        }
+    }
+    if names.len() > 200 {
+        return Err(io::Error::from_raw_os_error(22));
+    }
+    let addrs = hosts
+        .iter()
+        .map(|(h, port)| {
+            let i = names.iter().position(|n| n == h).unwrap_or(0);
+            std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, (i + 2) as u8), *port)
+        })
+        .collect();
+    let scratch = scratch_dir()?;
+    let made = (|| -> io::Result<(Vec<Bind>, OwnedFd, OwnedFd)> {
+        let mut binds = Vec::new();
+        let mut add = |file: &str, data: &str, target: &str, required: bool| -> io::Result<()> {
+            let src = scratch.join(file);
+            fs::write(&src, data)?;
+            binds.push(Bind {
+                src: std::ffi::CString::new(src.as_os_str().as_encoded_bytes())
+                    .map_err(io::Error::other)?,
+                target: std::ffi::CString::new(target).map_err(io::Error::other)?,
+                required,
+            });
+            Ok(())
+        };
+        add("hosts", &hosts_file(&names), "/etc/hosts", true)?;
+        add(
+            "resolv.conf",
+            "# no name server is reachable from here\n",
+            "/etc/resolv.conf",
+            false,
+        )?;
+        if let Some(conf) = nsswitch_files_only() {
+            add("nsswitch.conf", &conf, "/etc/nsswitch.conf", false)?;
+        }
+        let (parent, child) = socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            SocketFlags::CLOEXEC,
+            None,
+        )?;
+        Ok((binds, parent, child))
+    })();
+    let (binds, parent, child) = match made {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&scratch);
+            return Err(e);
+        }
+    };
+    let mut plan = Plan::new(&[]);
+    let count = hosts.len();
+    plan.hosts = Some(HostPlan {
+        ctrl: child,
+        addrs,
+        binds,
+    });
+    // SAFETY: as in `isolate_network_passing`: the closure makes only raw
+    // system calls on data built before the fork (unshare, writes to the map
+    // files, mounts, socket, bind, listen, sendmsg, ioctl) and does not
+    // allocate or take a lock.
+    unsafe {
+        cmd.pre_exec(move || enter_isolation(&plan));
+    }
+    Ok(HostSocket {
+        parent,
+        count,
+        scratch,
+    })
+}
+
+/// Make a blocked `accept` on `listener` (in another thread, on this socket or
+/// a duplicate of it) return with an error.
+pub(crate) fn wake_listener(listener: &std::net::TcpListener) {
+    let _ = rustix::net::shutdown(listener, rustix::net::Shutdown::Read);
 }
 
 /// Whether a child can get the namespaces here: does the whole sequence in a

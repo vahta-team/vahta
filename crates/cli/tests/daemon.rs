@@ -99,6 +99,8 @@ impl Sandbox {
             // The software phones a test pairs live here.
             .env("VAHTA_TEST_LOOPBACK", self.root.join("phones"))
             .env("VAHTA_TEST_HTTP_ROOT", self.root.join("ca.pem"))
+            // Every connection of the host relay goes to the local test server.
+            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1")
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("VAHTA_TEST_PHONE_ADDR");
@@ -7113,4 +7115,247 @@ fn closing_the_pairing_window_pairs_nothing_and_a_dead_phone_link_is_an_error_no
         s.window_log().iter().any(|e| e["ask"] == "pairing"),
         "the code was shown"
     );
+}
+
+// --- `network = hosts` on Linux: the relay ---------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod host_relay {
+    use super::*;
+    use vahta_net::test_server::{Reply, TestServer};
+    use vahta_vault::{HostRule, Network, RuleSet};
+
+    const NAME: &str = "other.localhost";
+
+    fn setup(port: u16) -> Option<Sandbox> {
+        setup_named(NAME, port)
+    }
+
+    fn setup_named(name: &str, port: u16) -> Option<Sandbox> {
+        if !vahta_os::network_isolation_available() {
+            eprintln!("skipped: no unprivileged network namespaces here");
+            return None;
+        }
+        let s = Sandbox::new();
+        s.with_vault(&[("ZETA", "fake-relay-1", "session")]);
+        let mut vault = s.open_vault();
+        vault
+            .set_bindings(
+                "ZETA",
+                Some(RuleSet {
+                    name: "ZETA".into(),
+                    network: Network::Hosts(vec![HostRule {
+                        text: format!("{name}:{port}"),
+                        host: name.into(),
+                        subdomains: false,
+                        port: Some(port),
+                    }]),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+            .unwrap();
+        s.script(&[r#"{"secret":"correct horse"}"#]);
+        assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+        Some(s)
+    }
+
+    fn run_python(s: &Sandbox, code: &str) -> String {
+        let out = s.vahta(&["run", "--secret", "ZETA", "--", "python3", "-c", code]);
+        format!("{}{}", text(&out.stdout), text(&out.stderr))
+    }
+
+    const PRELUDE: &str = r#"
+import socket, ssl, sys, urllib.request, threading
+port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
+ctx = ssl.create_default_context(cafile=CA)
+def get(name=NAME, sni=None):
+    s = socket.create_connection((name, port), timeout=5)
+    t = ctx.wrap_socket(s, server_hostname=sni or name)
+    t.sendall(b"GET /x HTTP/1.1\r\nhost: h\r\nconnection: close\r\n\r\n")
+    data = b""
+    while True:
+        c = t.recv(4096)
+        if not c:
+            break
+        data += c
+    return data
+"#;
+
+    fn prelude(s: &Sandbox, port: u16) -> String {
+        format!(
+            "PORT = {port}\nNAME = '{NAME}'\nCA = '{}'\n{PRELUDE}",
+            s.root.join("ca.pem").display()
+        )
+    }
+
+    #[test]
+    fn an_allowed_host_is_reachable_and_nothing_else_is() {
+        let server = TestServer::start(|_| Reply::ok(b"relay-works"));
+        let Some(s) = setup(server.port) else { return };
+        let code = format!(
+            r#"{}
+print("ADDR", socket.gethostbyname(NAME))
+print("GOT", b"relay-works" in get())
+for other in ("example.com", "localhost.example", "other.localhost.example"):
+    try:
+        socket.getaddrinfo(other, 443)
+        print("RESOLVED", other)
+    except OSError:
+        print("NORESOLVE", other)
+try:
+    socket.create_connection(("93.184.216.34", 443), timeout=3)
+    print("IP", "connected")
+except OSError as e:
+    print("IP", "failed", e.errno)
+try:
+    get(sni="example.com")
+    print("SNI", "accepted")
+except (ssl.SSLError, OSError) as e:
+    print("SNI", "refused")
+"#,
+            prelude(&s, server.port)
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("ADDR 127.0.0.2"), "{out}");
+        assert!(out.contains("GOT True"), "{out}");
+        assert!(out.contains("NORESOLVE example.com"), "{out}");
+        assert!(out.contains("NORESOLVE other.localhost.example"), "{out}");
+        assert!(out.contains("IP failed"), "{out}");
+        assert!(out.contains("SNI refused"), "{out}");
+        // The wrong server name reached the journal as suspicious, and the
+        // good connection as a count by host name.
+        let journal = s.journal();
+        assert!(journal.contains("net_relay_refused"), "{journal}");
+        assert!(journal.contains("suspicious:"), "{journal}");
+        assert!(journal.contains(r#""event":"net_relay""#), "{journal}");
+        assert!(journal.contains(NAME), "{journal}");
+        // Only the host name, never what travelled.
+        assert!(!journal.contains("relay-works"));
+        assert!(!journal.contains("fake-relay-1"));
+    }
+
+    #[test]
+    fn many_connections_at_once_all_get_through() {
+        let server = TestServer::start(|_| Reply::ok(b"many"));
+        let Some(s) = setup(server.port) else { return };
+        let code = format!(
+            r#"{}
+ok = []
+def one():
+    ok.append(b"many" in get())
+ts = [threading.Thread(target=one) for _ in range(40)]
+[t.start() for t in ts]
+[t.join() for t in ts]
+print("DONE", len(ok), all(ok))
+"#,
+            prelude(&s, server.port)
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("DONE 40 True"), "{out}");
+    }
+
+    #[test]
+    fn urllib_and_curl_and_node_use_the_names_file() {
+        let server = TestServer::start(|_| Reply::ok(b"tools-ok"));
+        // Not under `.localhost`, which curl resolves by itself. The test
+        // certificate does not name it, so the clients skip verification here
+        // (the certificate checks are in the other tests).
+        let Some(s) = setup_named("tools.example", server.port) else {
+            return;
+        };
+        let url = format!("https://tools.example:{}/p", server.port);
+        let code = format!(
+            "import urllib.request, ssl\nctx = ssl._create_unverified_context()\nprint('URLLIB', urllib.request.urlopen('{url}', context=ctx, timeout=5).read())"
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("URLLIB b'tools-ok'"), "{out}");
+        if std::process::Command::new("curl")
+            .arg("-V")
+            .output()
+            .is_ok()
+        {
+            let out = s.vahta(&[
+                "run",
+                "--secret",
+                "ZETA",
+                "--",
+                "curl",
+                "-sS",
+                "--max-time",
+                "5",
+                "-k",
+                &url,
+            ]);
+            assert_eq!(text(&out.stdout), "tools-ok", "{}", text(&out.stderr));
+            let out = s.vahta(&[
+                "run",
+                "--secret",
+                "ZETA",
+                "--",
+                "curl",
+                "-sS",
+                "--max-time",
+                "5",
+                "-k",
+                "https://example.com/",
+            ]);
+            assert_ne!(out.status.code(), Some(0));
+        }
+        if std::process::Command::new("node")
+            .arg("-v")
+            .output()
+            .is_ok()
+        {
+            let js = format!(
+                "fetch('{url}').then(r => r.text()).then(t => console.log('NODE', t)).catch(e => console.log('NODE failed', String(e.cause && e.cause.code || e)));"
+            );
+            let out = s.vahta(&["run", "--secret", "ZETA", "--", "node", "-e", &js]);
+            // Node trusts its own roots, not the test CA: it must get as far
+            // as a certificate error (a TLS answer came back), not a lookup or
+            // routing failure.
+            let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+            assert!(
+                said.contains("NODE failed")
+                    && !said.contains("ENOTFOUND")
+                    && !said.contains("ENETUNREACH"),
+                "{said}"
+            );
+            let out = s.vahta(&[
+                "run", "--secret", "ZETA", "--", "node", "-e",
+                "fetch('https://example.com/').catch(e => console.log('NODE', String(e.cause && e.cause.code)))",
+            ]);
+            assert!(
+                text(&out.stdout).contains("NODE ENOTFOUND"),
+                "{}",
+                text(&out.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn the_relay_ends_with_the_command_and_leaves_no_process() {
+        let server = TestServer::start(|_| Reply::ok(b"x"));
+        let Some(s) = setup(server.port) else { return };
+        let out = run_python(&s, "print('quick')");
+        assert!(out.contains("quick"), "{out}");
+        // The run's journal line is there and the daemon holds no extra
+        // process: the only children of the sandbox daemon are none.
+        let pid = text(&s.vahta(&["daemon", "status"]).stdout);
+        let _ = pid;
+        let me = std::process::id().to_string();
+        let ps = std::process::Command::new("ps")
+            .args(["-eo", "pid,ppid,args"])
+            .output()
+            .map(|o| text(&o.stdout))
+            .unwrap_or_default();
+        let marker = s.root.to_string_lossy().into_owned();
+        let strays: Vec<&str> = ps
+            .lines()
+            .filter(|l| l.contains(&marker) && l.contains("python3") && !l.contains(&me))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+    }
 }

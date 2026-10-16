@@ -10,6 +10,15 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Only these hosts, on Linux.** A secret (or connector) with `network = hosts`
+  now lets any program under `vahta run` open TLS connections to the listed hosts
+  and nowhere else, rootless: a network namespace with a replaced `/etc/hosts`
+  (each host its own `127.0.0.x`), listeners handed to the daemon, which checks
+  the TLS server name, connects from outside and copies bytes (no decryption).
+  Wrong or missing server names are refused and journaled as suspicious;
+  connections and bytes are journaled per host. macOS and Windows stay a speed
+  bump.
+
 - **Team members** ([docs/team.md](docs/team.md)): share a vault by sending a file
   through a chat. `vahta id` (a key sealed with the member's own password),
   `vahta members add|list|extend|remove` (the owner types the six verification

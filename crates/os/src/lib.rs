@@ -228,6 +228,41 @@ pub fn isolate_network_passing(
     sys::isolate_network_passing(cmd, extra)
 }
 
+/// The listening sockets of a command started by [`isolate_network_hosts`].
+pub struct HostListeners(sys::HostSocket);
+
+impl HostListeners {
+    /// The sockets, one per `(host, port)` given, in that order. They live in
+    /// the command's network namespace; accepting on them works from here.
+    /// Call once, after the command has been started (it makes them before
+    /// `exec`); dropping this afterwards removes the scratch files. They stay usable after it ends, until closed.
+    pub fn take(&self) -> io::Result<Vec<std::net::TcpListener>> {
+        self.0.take()
+    }
+}
+
+/// As [`isolate_network`], and the command may reach the given `(host, port)`
+/// pairs, through the caller. Linux only: inside the namespace the loopback is
+/// up and `/etc/hosts` is replaced so that each host name is its own
+/// `127.0.0.x` (and no other name resolves); a listening socket for each pair
+/// is handed to the caller (see [`HostListeners::take`]), who decides what to
+/// do with a connection. A connection to any other address has no route.
+/// Host names must be lower-case DNS names. Fails where [`isolate_network`]
+/// does, and with `Unsupported` elsewhere.
+pub fn isolate_network_hosts(
+    cmd: &mut Command,
+    hosts: &[(String, u16)],
+) -> io::Result<HostListeners> {
+    sys::isolate_network_hosts(cmd, hosts).map(HostListeners)
+}
+
+/// Make a thread blocked in `accept` on `listener` (this socket or a duplicate)
+/// return with an error. Linux only; elsewhere it does nothing, as there are
+/// no host listeners to stop.
+pub fn wake_listener(listener: &std::net::TcpListener) {
+    sys::wake_listener(listener);
+}
+
 /// Whether a command started by [`isolate_network`] would see `path` replaced
 /// by an empty directory, so that a write there would be lost: under `/run`,
 /// `/var/run` or `/tmp/.X11-unix` and not in the removable-media trees that are
