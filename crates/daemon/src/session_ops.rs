@@ -352,6 +352,7 @@ pub(crate) fn unlock_session(
             label: panel.agent_note.clone(),
             uses: 0,
             agent_role: role.clone(),
+            boot: None,
         };
         let info = info_of(&session, now);
         let replaced = {

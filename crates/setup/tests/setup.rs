@@ -191,7 +191,7 @@ fn foreign_entries_keep_their_order_and_ours_come_last() {
         [
             "/home/u/.local/bin/key-amnesia-hook",
             "./hooks/validate-tool.sh",
-            "/opt/vahta/bin/vahta-hook --harness cursor --event before_tool --setup 1",
+            "/opt/vahta/bin/vahta-hook --harness cursor --event before_tool --setup 2",
         ]
     );
 }
@@ -479,7 +479,10 @@ fn a_claude_v3_install_without_allow_rules_is_outdated_and_upgrades_cleanly() {
     let mut env = t.env();
     env.hook = t.write("bin/vahta-hook", "");
     let mf = m("claude");
-    assert_eq!(mf.setup_version, 4, "v4 added permissions.allow");
+    assert_eq!(
+        mf.setup_version, 5,
+        "v5 added the 120 s timeout on the prompt hook"
+    );
     commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
     let path = config_in(&t, "claude");
     let now = fs::read_to_string(&path).unwrap();

@@ -96,6 +96,13 @@ fn status_text(s: &StatusInfo) -> String {
         text.push('\n');
         text.push_str(&alarm_text(at));
     }
+    if s.connectors_session {
+        text.push_str(if s.connectors_until_reboot {
+            "\nconnectors session: open until this computer restarts (or `vahta lock`)"
+        } else {
+            "\nconnectors session: open"
+        });
+    }
     for line in crate::connector_cmd::refusal_lines(&s.connector_refusals) {
         text.push('\n');
         text.push_str(&line);
@@ -248,6 +255,8 @@ fn status(env: &Env, json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write)
                     "runtime_dir": s.runtime_dir,
                     "alarm_at": s.alarm_at,
                     "connector_refusals": s.connector_refusals,
+                    "connectors_session": s.connectors_session,
+                    "connectors_until_reboot": s.connectors_until_reboot,
                 });
                 let _ = writeln!(
                     stdout,
@@ -405,6 +414,8 @@ pub fn report(
         | ClientReply::OutputSpans { .. }
         | ClientReply::OutputReleased { .. }
         | ClientReply::ToolDeny { .. }
+        | ClientReply::InputNames { .. }
+        | ClientReply::PromptAnswer { .. }
         | ClientReply::Allowed {}
         | ClientReply::NoOpinion {}
         | ClientReply::GuardChoice { .. }

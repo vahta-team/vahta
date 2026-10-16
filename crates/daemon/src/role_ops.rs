@@ -787,6 +787,8 @@ pub(crate) fn forbids(ctx: &Ctx<'_>, request: &ClientRequest) -> Option<ClientRe
             | OutputObserved { .. }
             | HookReport { .. }
             | ToolCheck { .. }
+            | CheckInput { .. }
+            | PromptAsk { .. }
             | CheckRun { .. }
             | CheckHttp { .. }
             | GuardAsk { .. }

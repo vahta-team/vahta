@@ -122,6 +122,30 @@ pub fn command_line(pid: u32) -> Option<String> {
     sys::command_line(pid)
 }
 
+/// An identifier of this boot of the machine: the kernel's boot id on Linux,
+/// the boot time in seconds on macOS (`kern.boottime`) and Windows (now minus
+/// the tick count). `None` when it cannot be read. Compare two only with
+/// [`same_boot`]: the clock-derived ones jitter by a second or two.
+pub fn boot_id() -> Option<String> {
+    sys::boot_id()
+}
+
+/// Whether two [`boot_id`]s are of one boot. Equal ids are; two boot times
+/// (all digits) within [`BOOT_TOLERANCE_SECS`] of each other are, since a
+/// boot time computed from a clock drifts a little (sleep, clock steps).
+pub fn same_boot(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(x), Ok(y)) => x.abs_diff(y) <= BOOT_TOLERANCE_SECS,
+        _ => false,
+    }
+}
+
+/// How far apart two boot times of one boot may be.
+pub const BOOT_TOLERANCE_SECS: u64 = 30;
+
 /// Whether `pid` runs as the user this process runs as. False when it cannot
 /// be told: unknown is not mine.
 pub fn owned_by_me(pid: u32) -> bool {
@@ -202,6 +226,41 @@ pub fn isolate_network_passing(
     extra: &[&std::path::Path],
 ) -> Result<(), Unsupported> {
     sys::isolate_network_passing(cmd, extra)
+}
+
+/// The listening sockets of a command started by [`isolate_network_hosts`].
+pub struct HostListeners(sys::HostSocket);
+
+impl HostListeners {
+    /// The sockets, one per `(host, port)` given, in that order. They live in
+    /// the command's network namespace; accepting on them works from here.
+    /// Call once, after the command has been started (it makes them before
+    /// `exec`); dropping this afterwards removes the scratch files. They stay usable after it ends, until closed.
+    pub fn take(&self) -> io::Result<Vec<std::net::TcpListener>> {
+        self.0.take()
+    }
+}
+
+/// As [`isolate_network`], and the command may reach the given `(host, port)`
+/// pairs, through the caller. Linux only: inside the namespace the loopback is
+/// up and `/etc/hosts` is replaced so that each host name is its own
+/// `127.0.0.x` (and no other name resolves); a listening socket for each pair
+/// is handed to the caller (see [`HostListeners::take`]), who decides what to
+/// do with a connection. A connection to any other address has no route.
+/// Host names must be lower-case DNS names. Fails where [`isolate_network`]
+/// does, and with `Unsupported` elsewhere.
+pub fn isolate_network_hosts(
+    cmd: &mut Command,
+    hosts: &[(String, u16)],
+) -> io::Result<HostListeners> {
+    sys::isolate_network_hosts(cmd, hosts).map(HostListeners)
+}
+
+/// Make a thread blocked in `accept` on `listener` (this socket or a duplicate)
+/// return with an error. Linux only; elsewhere it does nothing, as there are
+/// no host listeners to stop.
+pub fn wake_listener(listener: &std::net::TcpListener) {
+    sys::wake_listener(listener);
 }
 
 /// Whether a command started by [`isolate_network`] would see `path` replaced
@@ -299,6 +358,17 @@ pub fn stable_hash(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::same_boot;
+
+    #[test]
+    fn boots_are_told_apart() {
+        assert!(same_boot("a-b", "a-b"));
+        assert!(!same_boot("a-b", "a-c"));
+        assert!(same_boot("1000", "1002"));
+        assert!(!same_boot("1000", "5000"));
+        assert!(!same_boot("1000", "a-b"));
+    }
+
     use super::*;
 
     #[test]

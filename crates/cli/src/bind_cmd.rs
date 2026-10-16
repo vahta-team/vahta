@@ -54,8 +54,8 @@ options:
   --category C      start from this category (see above)
   --dir PATH        a folder whose programs may use it, and in which it may be
                     used (`PATH:ro` for read-only)
-  --net WHAT        none, app, or hosts:H[,H...] (only these hosts, through
-                    `vahta http`)
+  --net WHAT        none, app, or hosts:H[,H...] (only these hosts: on Linux
+                    any program, through a relay; `vahta http` everywhere)
   --from PROJECT    a project folder (absolute) this secret may also be used
                     from, besides the vault's own project (repeatable; needs
                     `vahta remote on`). The caller's project must be that

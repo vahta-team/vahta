@@ -10,6 +10,26 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Input checked against known values.** A tool call (an MCP argument, a Write or
+  Edit, a command or commit) that carries the value of a secret Vahta holds, in any
+  encoding, is denied and the person is told the secret's name. A prompt that holds a
+  detected secret or a held value opens a window: "False alarm" sends it (remembered
+  as keyed hashes until the daemon exits), "Save to the project vault as NAME" stores
+  the value and holds the prompt, "Do nothing" holds it. No answer, no daemon or no
+  window holds it too; one prompt window is open at a time and one requester gets four a
+  minute, then is held, journaled as suspicious and counted for the alarm. The window shows a kind and length, never the value. New
+  daemon requests `CheckInput` and `PromptAsk`; setup writes a 120 s hook timeout on
+  Claude's `UserPromptSubmit` and Cursor's `beforeSubmitPrompt` (Claude setup v5,
+  Cursor v2; Codex and Cursor not tested live).
+- **Only these hosts, on Linux.** A secret (or connector) with `network = hosts`
+  now lets any program under `vahta run` open TLS connections to the listed hosts
+  and nowhere else, rootless: a network namespace with a replaced `/etc/hosts`
+  (each host its own `127.0.0.x`), listeners handed to the daemon, which checks
+  the TLS server name, connects from outside and copies bytes (no decryption).
+  Wrong or missing server names are refused and journaled as suspicious;
+  connections and bytes are journaled per host. macOS and Windows stay a speed
+  bump.
+
 - **Team members** ([docs/team.md](docs/team.md)): share a vault by sending a file
   through a chat. `vahta id` (a key sealed with the member's own password),
   `vahta members add|list|extend|remove` (the owner types the six verification
@@ -25,6 +45,17 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   starts it with no window while `vahta unlock --connector` is open, checks the
   direct parent is a harness it is bound to, and refuses at once, visibly in
   `vahta daemon status`, when there is no session. See docs/connectors.md.
+
+- **Connectors, second round.** `vahta unlock --connector` with no `--for` lasts
+  until the machine reboots (boot id, read in `vahta-os`) and the daemon stays up
+  with it; `--for 8h` limits it. A launch refused for want of a session raises a
+  desktop notification (at most one per harness per ten minutes). The output hook
+  now cuts a connector's key by value in any agent's tool output, while the
+  connectors session is open and for a while after a connector run. `vahta run
+  --connector --as NAME=VAR` renames the variable. An `allow` rule may be
+  "program + package" (`npx @pkg/server`) for `npx`, `bunx`, `uvx` and `pipx run`:
+  it matches the command with the runner's known flags before the package, a version
+  in the rule pins it, and no version in the rule accepts any plain version.
 
 - **Hardening of rules.** `vahta check` compares the rules a category implies, not
   the literal `vahta.toml`; a `vahta run` or `vahta http` refused by a secret's rules
@@ -93,6 +124,16 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   afterwards); the same command asked again meanwhile shares the one-use approval; a
   "no" is the answer for waiters asking the same question; a different command is
   asked after the first, never beside it.
+- **Output scrubber: JSON-escaped values.** A secret with a quote, a backslash or a
+  control character that a program prints as JSON (`\"`, `\\`, `\n`, `\u000a`,
+  `\/`, `\uXXXX`) was not recognised, and the harness that decodes the JSON showed
+  it to the model. These spellings are now held as another form of the value
+  (`NAME (JSON-escaped)`) in `vahta run` and everywhere forms are used.
+- **Output scrubber: stall.** A value that starts or ends with a newline (or starts
+  with `}\n`) made the scrubber hold back the end of every message until the next
+  one, so an MCP server looked hung. The held tail is now let go after 25 ms with
+  no more output; a value written in pieces within that time is still redacted
+  whole, and one cut by a longer pause has the rest redacted.
 
 ### Changed
 

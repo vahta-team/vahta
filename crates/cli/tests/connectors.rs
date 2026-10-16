@@ -9,6 +9,7 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::ops::Not;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -23,6 +24,8 @@ struct Sandbox {
     root: PathBuf,
     proj: PathBuf,
     as_harness: bool,
+    /// The daemon's idle time in seconds, when a test wants it short.
+    idle: Option<u32>,
 }
 
 fn text(b: &[u8]) -> String {
@@ -51,6 +54,7 @@ impl Sandbox {
             proj: root.join("proj"),
             root,
             as_harness,
+            idle: None,
         }
     }
 
@@ -65,12 +69,18 @@ impl Sandbox {
             .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
             .env("VAHTA_CONFIG_DIR", self.root.join("config"))
             .env_remove("VAHTA_TEST_DAEMON_VERSION")
-            .env_remove("VAHTA_TEST_IDLE_SECONDS")
+            .env("VAHTA_TEST_BOOT_ID_FILE", self.root.join("boot-id"))
+            .env("VAHTA_TEST_NOTIFY_LOG", self.root.join("notify.log"))
             .env("VAHTA_TEST_SURFACE", self.root.join("script.jsonl"))
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
+            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1")
             .env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
+        match self.idle {
+            Some(n) => cmd.env("VAHTA_TEST_IDLE_SECONDS", n.to_string()),
+            None => cmd.env_remove("VAHTA_TEST_IDLE_SECONDS"),
+        };
         if self.as_harness {
             let me = std::env::current_exe().unwrap();
             cmd.env("VAHTA_TEST_CONNECTOR_PARENT", me.file_name().unwrap());
@@ -120,7 +130,13 @@ impl Sandbox {
     /// The connectors vault with one connector, `KEY`, for claude, whose
     /// server is `printenv`.
     fn with_connector(as_harness: bool) -> Sandbox {
-        let s = Sandbox::new(as_harness);
+        Sandbox::with_connector_idle(as_harness, None)
+    }
+
+    fn with_connector_idle(as_harness: bool, idle: Option<u32>) -> Sandbox {
+        let mut s = Sandbox::new(as_harness);
+        s.idle = idle;
+        fs::write(s.root.join("boot-id"), "boot-one\n").unwrap();
         s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
         let out = s.vahta(&s.root, &["init", "--connector"]);
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -149,11 +165,100 @@ impl Sandbox {
         assert!(text(&out.stdout).contains("connectors session"));
     }
 
+    /// Unlock with no `--for`: until the machine reboots.
+    fn unlock_until_reboot(&self) -> String {
+        self.script(&[PW_ANSWER]);
+        let out = self.vahta(&self.root, &["unlock", "--connector"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        text(&out.stdout)
+    }
+
+    fn notifications(&self) -> Vec<String> {
+        fs::read_to_string(self.root.join("notify.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The real hook, given a tool's output as Claude would, from this process.
+    fn hook_after_tool(&self, stdout: &str) -> Option<Value> {
+        use std::io::Write;
+        let payload = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat notes.txt"},
+            "tool_response": {"stdout": stdout, "stderr": ""},
+            "cwd": self.proj,
+        });
+        let mut child = Command::new(hook_bin())
+            .args(["--harness", "claude", "--event", "after_tool"])
+            .current_dir(&self.proj)
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", self.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.root.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run vahta-hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let t = text(&out.stdout);
+        (!t.trim().is_empty()).then(|| serde_json::from_str(&t).unwrap())
+    }
+
     fn run_connector(&self, name: &str, command: &[&str]) -> Output {
         let mut args = vec!["run", "--connector", "--secret", name, "--"];
         args.extend_from_slice(command);
         self.vahta(&self.root, &args)
     }
+}
+
+/// The real `vahta-hook`, built once per test run next to `vahta`.
+fn hook_bin() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let dir = Path::new(env!("CARGO_BIN_EXE_vahta")).parent().unwrap();
+            let mut cmd = Command::new(env!("CARGO"));
+            cmd.args(["build", "--quiet", "-p", "vahta-hook"]);
+            if dir.file_name().is_some_and(|n| n == "release") {
+                cmd.arg("--release");
+            }
+            let status = cmd.status().expect("run cargo build");
+            assert!(status.success(), "cargo build -p vahta-hook failed");
+            dir.join(format!("vahta-hook{}", std::env::consts::EXE_SUFFIX))
+        })
+        .clone()
+}
+
+/// The text the hook put in place of a tool's stdout.
+fn cut_stdout(reply: &Value) -> String {
+    reply["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn wait_until(what: &str, secs: u64, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {what}");
 }
 
 impl Drop for Sandbox {
@@ -462,4 +567,243 @@ fn a_connector_is_removed_by_the_person_in_a_window() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let out = s.vahta(&s.root, &["list", "--connector"]);
     assert!(text(&out.stdout).contains("No connectors"));
+}
+
+// A connector bound with `--net hosts:...` reaches its host through the relay
+// (Linux only: needs a network namespace for the server).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_connector_with_hosts_reaches_only_its_host() {
+    use vahta_net::test_server::{Reply, TestServer};
+    if !vahta_os::network_isolation_available() {
+        eprintln!("skipped: no unprivileged network namespaces here");
+        return;
+    }
+    let server = TestServer::start(|_| Reply::ok(b"connector-ok"));
+    let s = Sandbox::new(true);
+    fs::write(s.root.join("ca.pem"), vahta_net::test_server::CA_PEM).unwrap();
+    s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
+    let out = s.vahta(&s.root, &["init", "--connector"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|p| Command::new(p).arg("-V").output().is_ok());
+    let Some(python) = python else {
+        eprintln!("skipped: no python");
+        return;
+    };
+    let net = format!("hosts:other.localhost:{}", server.port);
+    s.script(&[PW_ANSWER, &typed(&value_of("a")), r#"{"choose":0}"#]);
+    let out = s.vahta(
+        &s.root,
+        &[
+            "add",
+            "--connector",
+            KEY,
+            "--harness",
+            "claude",
+            "--allow",
+            python,
+            "--net",
+            &net,
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    s.unlock();
+    let code = format!(
+        "import socket,ssl\nctx=ssl.create_default_context(cafile='{}')\ns=ctx.wrap_socket(socket.create_connection(('other.localhost',{}),timeout=5),server_hostname='other.localhost')\ns.sendall(b'GET / HTTP/1.1\\r\\n\\r\\n')\nprint(b'connector-ok' in s.recv(4096))\ntry:\n    socket.getaddrinfo('example.com',443)\n    print('resolved')\nexcept OSError:\n    print('noresolve')",
+        s.root.join("ca.pem").display(),
+        server.port
+    );
+    let out = s.run_connector(KEY, &[python, "-c", &code]);
+    assert_eq!(
+        text(&out.stdout),
+        "True\nnoresolve\n",
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn with_no_end_time_the_session_lasts_until_the_boot_id_changes() {
+    let s = Sandbox::with_connector(true);
+    let said = s.unlock_until_reboot();
+    assert!(said.contains("until this computer restarts"), "{said}");
+    // Shown by `sessions` and `daemon status`.
+    let list = text(&s.vahta(&s.root, &["sessions"]).stdout);
+    assert!(list.contains("until reboot"), "{list}");
+    let status = text(&s.vahta(&s.root, &["daemon", "status"]).stdout);
+    assert!(
+        status.contains("connectors session: open until"),
+        "{status}"
+    );
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The machine "reboots".
+    fs::write(s.root.join("boot-id"), "boot-two\n").unwrap();
+    wait_until("the session to end", 10, || {
+        text(&s.vahta(&s.root, &["daemon", "status"]).stdout)
+            .contains("connectors session")
+            .not()
+    });
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("no connectors session"));
+    let status = text(&s.vahta(&s.root, &["daemon", "status"]).stdout);
+    assert!(!status.contains("connectors session: open"), "{status}");
+    assert!(s.journal().contains("reboot"));
+}
+
+#[test]
+fn a_session_with_an_end_time_is_not_a_reboot_session() {
+    let s = Sandbox::with_connector(true);
+    s.unlock();
+    let list = text(&s.vahta(&s.root, &["sessions"]).stdout);
+    assert!(!list.contains("until reboot"), "{list}");
+    // A changed boot id does not end it.
+    fs::write(s.root.join("boot-id"), "boot-two\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+#[test]
+fn the_daemon_stays_while_a_connectors_session_is_open_and_lock_ends_it() {
+    let s = Sandbox::with_connector_idle(true, Some(1));
+    s.unlock_until_reboot();
+    let pid_of = |s: &Sandbox| -> Value {
+        let out = s.vahta(&s.root, &["daemon", "status", "--json"]);
+        serde_json::from_str(&text(&out.stdout)).unwrap_or(Value::Null)
+    };
+    let before = pid_of(&s)["pid"].clone();
+    assert!(before.is_u64());
+    // Well past the idle time, with no connection in between.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let after = pid_of(&s);
+    assert_eq!(after["pid"], before, "the daemon exited and came back");
+    assert_eq!(after["connectors_session"], true);
+    assert!(!s.journal().contains("daemon_idle_exit"));
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // `lock` ends it, and then the daemon may go idle.
+    assert_eq!(s.vahta(&s.root, &["lock", "--all"]).status.code(), Some(0));
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    wait_until("the idle exit", 15, || {
+        s.journal().contains("daemon_idle_exit")
+    });
+}
+
+#[test]
+fn a_refusal_for_no_session_notifies_once_per_harness_per_while() {
+    let s = Sandbox::with_connector(true);
+    assert!(s.notifications().is_empty());
+    for _ in 0..3 {
+        let out = s.run_connector(KEY, &["printenv", KEY]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    }
+    let notes = s.notifications();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("Connectors are locked"), "{notes:?}");
+    assert!(notes[0].contains("vahta unlock --connector"), "{notes:?}");
+    assert!(!notes[0].contains(&value_of("a")));
+    // A refusal for another reason says nothing.
+    s.unlock();
+    let out = s.run_connector(KEY, &["true"]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert_eq!(s.notifications().len(), 1);
+}
+
+#[test]
+fn no_notification_for_a_launch_that_is_not_from_a_harness() {
+    let s = Sandbox::with_connector(false);
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(s.notifications().is_empty());
+}
+
+#[test]
+fn the_hook_redacts_a_connectors_value_in_any_agents_output() {
+    let s = Sandbox::with_connector(true);
+    let value = value_of("a");
+    // Nothing is known of it while locked and never run, bar the detector.
+    s.unlock_until_reboot();
+    let reply = s
+        .hook_after_tool(&format!("the key is {value} ok"))
+        .expect("the value is cut");
+    assert_eq!(
+        cut_stdout(&reply),
+        format!("the key is ***REDACTED({KEY})*** ok")
+    );
+    // Run once, then lock: the recent run's value is still looked for.
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.vahta(&s.root, &["lock", "--all"]).status.code(), Some(0));
+    let reply = s
+        .hook_after_tool(&format!("again {value}"))
+        .expect("the value is still cut");
+    assert_eq!(cut_stdout(&reply), format!("again ***REDACTED({KEY})***"));
+    assert!(!s.journal().contains(&value));
+}
+
+#[test]
+fn as_puts_a_connectors_value_in_another_variable() {
+    let s = Sandbox::with_connector(true);
+    s.unlock();
+    let out = s.vahta(
+        &s.root,
+        &[
+            "run",
+            "--connector",
+            "--secret",
+            KEY,
+            "--as",
+            &format!("{KEY}=OTHER_VAR"),
+            "--",
+            "printenv",
+            "OTHER_VAR",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), format!("***REDACTED({KEY})***\n"));
+    // The original name is not set.
+    let out = s.vahta(
+        &s.root,
+        &[
+            "run",
+            "--connector",
+            "--secret",
+            KEY,
+            "--as",
+            &format!("{KEY}=OTHER_VAR"),
+            "--",
+            "printenv",
+            KEY,
+        ],
+    );
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!text(&out.stdout).contains("REDACTED"));
+    // A bad form, another secret's name and a reserved variable are refused.
+    for bad in ["OTHER_VAR", "NOT_THE_SECRET=X", &format!("{KEY}=PATH")] {
+        let out = s.vahta(
+            &s.root,
+            &[
+                "run",
+                "--connector",
+                "--secret",
+                KEY,
+                "--as",
+                bad,
+                "--",
+                "printenv",
+                "X",
+            ],
+        );
+        assert!(
+            matches!(out.status.code(), Some(1..=3)),
+            "{bad}: {:?} {}",
+            out.status.code(),
+            text(&out.stderr)
+        );
+    }
 }

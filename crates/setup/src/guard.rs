@@ -690,6 +690,9 @@ fn codex_block(es: &[Entry]) -> String {
         s.push_str(&format!("\n[[hooks.{}.hooks]]\n", e.event));
         s.push_str("type = \"command\"\n");
         s.push_str(&format!("command = {}\n", toml_str(&e.command)));
+        if let Some(t) = e.timeout {
+            s.push_str(&format!("timeout = {t}\n"));
+        }
     }
     s
 }

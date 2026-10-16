@@ -1,0 +1,27 @@
+{
+  "event": "prompt",
+  "env": {},
+  "daemon": {
+    "known": [
+      "ZETA"
+    ],
+    "prompt": "held"
+  },
+  "stdin": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please use fake-known-value-123 for the test",
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "decision": "block",
+    "reason": "vahta did not send this message because it contained a secret. Send it again without the secret."
+  },
+  "exit": 0,
+  "prompt_ask": [
+    {
+      "harness": "claude",
+      "cwd": "/work/proj",
+      "detected": null
+    }
+  ]
+}

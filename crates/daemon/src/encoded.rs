@@ -18,7 +18,14 @@
 //!   covers a value encoded by itself to its last character;
 //! * **hex**, lower and upper case;
 //! * **URL-encoded** (percent-encoding, upper and lower case);
-//! * **reversed** bytes.
+//! * **reversed** bytes;
+//! * **JSON-escaped**, for a value with a quote, a backslash, a control
+//!   character (a newline, a tab) or the like in it: a program that prints
+//!   JSON writes `\"`, `\\`, `\n`, and the harness that reads it decodes it
+//!   back to the value. The common spellings are kept: `\n` or `\u000a`,
+//!   `\u00xx` in lower or upper case, `/` plain or as `\/`, non-ASCII as
+//!   `\uXXXX`, `<`, `>`, `&` as `<`, and the plain spelling escaped a
+//!   second time (JSON inside a JSON string).
 //!
 //! Forms that come out identical (a value with no `+` or `/` encodes the same
 //! in both base64 alphabets) are kept once.
@@ -56,6 +63,8 @@ pub enum Form {
     Hex,
     UrlEncoded,
     Reversed,
+    /// As the inside of a JSON string (`\"`, `\\`, `\n`, `\u00XX`).
+    JsonEscaped,
     /// Pieces of the value in adjacent or added string literals.
     Concat,
 }
@@ -69,6 +78,7 @@ impl Form {
             Form::Hex => "hex",
             Form::UrlEncoded => "URL-encoded",
             Form::Reversed => "reversed",
+            Form::JsonEscaped => "JSON-escaped",
             Form::Concat => "concatenation",
         }
     }
@@ -185,6 +195,116 @@ fn percent_all(bytes: &[u8], upper: bool) -> Vec<u8> {
     out
 }
 
+/// How a JSON encoder spells its output; each field is a choice real
+/// encoders make differently.
+#[derive(Clone, Copy, Default)]
+struct JsonStyle {
+    /// `/` as `\/`.
+    slash: bool,
+    /// `\n`, `\r`, `\t`, `\b`, `\f` as `\u000a` and the like.
+    long_ctl: bool,
+    /// `\"` and `\\` as `\u0022` and `\u005c`.
+    long_quote: bool,
+    /// Hex digits of `\u` escapes in upper case.
+    upper: bool,
+    /// Everything outside ASCII as `\uXXXX` (a surrogate pair above U+FFFF).
+    ascii: bool,
+    /// `<`, `>`, `&` and U+2028/2029 as `\u` escapes.
+    html: bool,
+}
+
+/// `value` as the inside of a JSON string, or `None` when that is `value`
+/// itself.
+fn json_escaped(value: &[u8], style: JsonStyle) -> Option<Vec<u8>> {
+    let digits: &[u8; 16] = if style.upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let unit = |out: &mut Vec<u8>, u: u16| {
+        out.extend_from_slice(b"\\u");
+        for shift in [12, 8, 4, 0] {
+            out.push(digits[usize::from((u >> shift) & 15)]);
+        }
+    };
+    let mut out = Vec::with_capacity(value.len() + 8);
+    // Bytes that are not UTF-8 pass as they are; they have no escape.
+    let chars: Vec<Result<char, u8>> = match std::str::from_utf8(value) {
+        Ok(t) => t.chars().map(Ok).collect(),
+        Err(_) => value
+            .iter()
+            .map(|&b| if b < 0x80 { Ok(char::from(b)) } else { Err(b) })
+            .collect(),
+    };
+    for c in chars {
+        let c = match c {
+            Ok(c) => c,
+            Err(b) => {
+                out.push(b);
+                continue;
+            }
+        };
+        let (short, long) = match c {
+            '"' => (Some(b'"'), style.long_quote),
+            '\\' => (Some(b'\\'), style.long_quote),
+            '\n' => (Some(b'n'), style.long_ctl),
+            '\r' => (Some(b'r'), style.long_ctl),
+            '\t' => (Some(b't'), style.long_ctl),
+            '\u{8}' => (Some(b'b'), style.long_ctl),
+            '\u{c}' => (Some(b'f'), style.long_ctl),
+            _ => (None, false),
+        };
+        match (c, short) {
+            (_, Some(s)) if !long => out.extend_from_slice(&[b'\\', s]),
+            (_, Some(_)) => unit(&mut out, c as u16),
+            ('/', _) if style.slash => out.extend_from_slice(b"\\/"),
+            ('<' | '>' | '&' | '\u{2028}' | '\u{2029}', _) if style.html => {
+                unit(&mut out, c as u16)
+            }
+            (c, _) if c < ' ' => unit(&mut out, c as u16),
+            (c, _) if style.ascii && !c.is_ascii() => {
+                let mut pair = [0u16; 2];
+                for &u in c.encode_utf16(&mut pair).iter() {
+                    unit(&mut out, u);
+                }
+            }
+            (c, _) => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    (out != value).then_some(out)
+}
+
+/// The JSON spellings of `value` that differ from it, each once.
+fn json_forms(value: &[u8]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for bits in 0..64u8 {
+        let style = JsonStyle {
+            slash: bits & 1 != 0,
+            long_ctl: bits & 2 != 0,
+            long_quote: bits & 4 != 0,
+            upper: bits & 8 != 0,
+            ascii: bits & 16 != 0,
+            html: bits & 32 != 0,
+        };
+        if let Some(e) = json_escaped(value, style)
+            && !out.contains(&e)
+        {
+            out.push(e);
+        }
+    }
+    // JSON inside a JSON string: the usual spelling, escaped again.
+    if let Some(once) = json_escaped(value, JsonStyle::default())
+        && let Some(twice) = json_escaped(&once, JsonStyle::default())
+        && !out.contains(&twice)
+    {
+        out.push(twice);
+    }
+    out
+}
+
 /// `text` with each `%XX` run decoded, or `None` when it has none. Never
 /// longer than `text`.
 fn percent_decoded(text: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
@@ -236,6 +356,9 @@ fn forms_of(value: &[u8]) -> Vec<(Form, Zeroizing<Vec<u8>>)> {
     add(Form::UrlEncoded, percent_all(value, true));
     add(Form::UrlEncoded, percent_all(value, false));
     add(Form::Reversed, value.iter().rev().copied().collect());
+    for pattern in json_forms(value) {
+        add(Form::JsonEscaped, pattern);
+    }
     out
 }
 
@@ -512,5 +635,56 @@ mod tests {
         let sub = set.subset(&["B".to_string()]);
         assert_eq!(sub.find(b"fake-bbbb-bbbb").map(|h| h.0), Some("B"));
         assert!(sub.find(b"fake-aaaa-aaaa").is_none());
+    }
+
+    fn json_hit(set: &EncodedSet, text: &str) -> bool {
+        set.find(text.as_bytes()) == Some(("NAME", Form::JsonEscaped))
+    }
+
+    #[test]
+    fn a_json_escaped_value_is_found_in_every_common_spelling() {
+        let set = one(b"ab\"cd\\ef\r\n\tgh/ij");
+        for text in [
+            r#"{"t":"ab\"cd\\ef\r\n\tgh/ij"}"#,
+            r#"{"t":"ab\"cd\\ef\r\n\tgh\/ij"}"#,
+            r#"{"t":"ab\"cd\\ef\u000d\u000a\u0009gh/ij"}"#,
+            r#"{"t":"ab\"cd\\ef\u000D\u000A\u0009gh\/ij"}"#,
+            r#"{"t":"ab\u0022cd\u005cef\u000d\u000a\u0009gh/ij"}"#,
+            // Inside a JSON string that is itself in JSON.
+            r#"{"t":"{\"x\":\"ab\\\"cd\\\\ef\\r\\n\\tgh/ij\"}"}"#,
+        ] {
+            assert!(json_hit(&set, text), "{text}");
+        }
+        // Not the decoded value, and not a different escape.
+        assert_eq!(set.find(b"ab\"cd\\ef\r\n\tgh/ij").unwrap().1, Form::Raw);
+        assert!(set.find(br#"ab\"cd\\ef\r\n\tgh/ik"#).is_none());
+    }
+
+    #[test]
+    fn json_escapes_of_non_ascii_and_markup_characters() {
+        let set = one("a<b>&caf\u{e9}\u{1f600}x\"".as_bytes());
+        for text in [
+            r#"a<b>&caf\u00e9\ud83d\ude00x\""#,
+            r#"a\u003cb\u003e\u0026caf\u00e9\ud83d\ude00x\""#,
+            r#"a\u003Cb\u003E\u0026caf\u00E9\uD83D\uDE00x\""#,
+            "a<b>&caf\u{e9}\u{1f600}x\\\"",
+        ] {
+            assert!(json_hit(&set, text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_value_with_no_json_escapes_has_no_json_form() {
+        let set = one(VALUE);
+        assert!(
+            set.targets().iter().all(|(l, _)| !l.contains("JSON")),
+            "{:?}",
+            set.targets()
+        );
+        // A value that is not UTF-8 still gets the escapes it has.
+        let set = one(b"ab\"\xff\xfecdefgh");
+        let mut text = b"x ab\\\"".to_vec();
+        text.extend_from_slice(b"\xff\xfecdefgh y");
+        assert_eq!(set.find(&text), Some(("NAME", Form::JsonEscaped)));
     }
 }

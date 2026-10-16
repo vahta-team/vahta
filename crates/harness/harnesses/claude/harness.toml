@@ -7,7 +7,8 @@ title = "Claude Code"
 # 2: permissions.deny for the vahta commands that are for the person only.
 # 3: the after-tool matcher also covers WebFetch.
 # 4: permissions.allow for the read-only commands `vahta list` and `vahta check`.
-setup_version = 4
+# 5: the prompt hook may wait for the person: timeout 120 s on UserPromptSubmit.
+setup_version = 5
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -126,6 +127,10 @@ kind = "prompt"
 prompt = ["prompt", "user_prompt"]
 cwd = "cwd"
 session_id = "session_id"
+# A prompt with a secret in it opens a Vahta window and waits for the person
+# (false alarm / save to the vault / do nothing). The hook gives up a little
+# before this (115 s) and then holds the prompt: it fails closed. Seconds.
+timeout = 120
 
 [[events]]
 name = "PostToolUse"
