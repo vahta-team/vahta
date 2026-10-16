@@ -1,0 +1,28 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "daemon": {
+    "known": [
+      "ZETA"
+    ]
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "mcp__github__create_issue",
+    "tool_input": {
+      "title": "notes",
+      "body": "token is fake-known-value-123"
+    },
+    "cwd": "/work/proj",
+    "session_id": "s1"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "Blocked: this would send a value Vahta holds to an MCP tool, which cannot be given a secret; leave it out (raw)."
+    },
+    "systemMessage": "vahta blocked a call to the MCP tool mcp__github__create_issue: it would send the value of the secret ZETA (raw) to it."
+  },
+  "exit": 0
+}

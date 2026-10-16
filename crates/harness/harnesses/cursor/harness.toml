@@ -4,7 +4,8 @@
 name = "cursor"
 title = "Cursor"
 # Bump when what `vahta setup` writes for this harness changes.
-setup_version = 1
+# 2: beforeSubmitPrompt may wait for the person: timeout 120 s (untested live).
+setup_version = 2
 unnamed_tool_group = "write"
 
 [config]
@@ -85,6 +86,11 @@ kind = "prompt"
 prompt = "prompt"
 cwd = "cwd"
 session_id = "conversation_id"
+# Same wait as Claude's: a prompt with a secret in it opens a Vahta window.
+# `timeout` (seconds) per hook is in the docs read 2026-10-01; whether Cursor
+# also fails closed on it is UNTESTED LIVE. The hook itself holds the prompt
+# when the window is not answered in time.
+timeout = 120
 
 [[events]]
 name = "postToolUse"

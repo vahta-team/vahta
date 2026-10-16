@@ -30,6 +30,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -150,6 +151,18 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
 
 /// ka's rule: a process this user can open for query is this user's; one it
 /// cannot is not (fail closed).
+/// The boot time in seconds since the epoch: now minus the milliseconds the
+/// system has been up.
+pub(crate) fn boot_id() -> Option<String> {
+    // SAFETY: a call with no arguments.
+    let up_ms = unsafe { GetTickCount64() };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    now.checked_sub(up_ms / 1000).map(|t| t.to_string())
+}
+
 /// Not read here (see `vahta_os::command_line`).
 pub(crate) fn command_line(_pid: u32) -> Option<String> {
     None
@@ -209,6 +222,24 @@ pub(crate) fn isolate_network_passing(
 ) -> Result<(), crate::Unsupported> {
     Err(crate::Unsupported)
 }
+
+/// Never made: there is no host filter here.
+pub(crate) struct HostSocket;
+
+impl HostSocket {
+    pub(crate) fn take(&self) -> io::Result<Vec<std::net::TcpListener>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+pub(crate) fn isolate_network_hosts(
+    _cmd: &mut Command,
+    _hosts: &[(String, u16)],
+) -> io::Result<HostSocket> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub(crate) fn wake_listener(_listener: &std::net::TcpListener) {}
 
 pub(crate) fn hidden_path(_path: &std::path::Path) -> bool {
     false

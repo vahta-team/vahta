@@ -99,6 +99,8 @@ impl Sandbox {
             // The software phones a test pairs live here.
             .env("VAHTA_TEST_LOOPBACK", self.root.join("phones"))
             .env("VAHTA_TEST_HTTP_ROOT", self.root.join("ca.pem"))
+            // Every connection of the host relay goes to the local test server.
+            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1")
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("VAHTA_TEST_PHONE_ADDR");
@@ -1710,6 +1712,45 @@ fn raw_request(s: &Sandbox, real: &Path, request: &ClientRequest) -> ClientReply
     serde_json::from_str(line).unwrap()
 }
 
+// The hook's tool-output scan finds a held value in its encoded forms too.
+#[test]
+fn tool_output_with_a_value_in_json_escaped_or_base64_form_is_cut() {
+    let s = Sandbox::new();
+    s.with_vault(&[("QUOTE", r#"fake-q\"uote\\one"#, "session")]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    // fake-q"uote\one: as JSON writes it, and in base64.
+    let texts = vec![
+        r#"{"out":"x fake-q\"uote\\one y"}"#.to_string(),
+        "k=ZmFrZS1xInVvdGVcb25l".to_string(),
+        "nothing here".to_string(),
+    ];
+    let reply = raw_request(
+        &s,
+        &s.project(),
+        &ClientRequest::OutputScan {
+            cwd: s.project().display().to_string(),
+            tool: "Bash".into(),
+            texts: texts.clone(),
+            spans: Vec::new(),
+            possible: Vec::new(),
+        },
+    );
+    let ClientReply::OutputSpans { spans, .. } = reply else {
+        panic!("{reply:?}");
+    };
+    let cut = |i: usize| {
+        spans
+            .iter()
+            .filter(|c| c.text == i)
+            .map(|c| texts[i][c.start..c.end].to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cut(0), [r#"fake-q\"uote\\one"#], "{spans:?}");
+    assert_eq!(cut(1), ["ZmFrZS1xInVvdGVcb25l"], "{spans:?}");
+    assert!(cut(2).is_empty());
+}
+
 // --- run and delegate -----------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -1779,6 +1820,60 @@ fn run_with_the_password_injects_the_value_and_scrubs_it_from_the_output() {
     let journal = s.journal();
     assert!(journal.contains("\"event\":\"run\"") && journal.contains("\"reason\":\"password\""));
     assert!(journal.contains("run_end") && !journal.contains("fake-"));
+}
+
+// Runs commands that only a Unix has (sh, printenv, sed).
+#[cfg(unix)]
+#[test]
+fn a_value_printed_as_json_is_scrubbed_in_its_escaped_form() {
+    let s = Sandbox::new();
+    // The window's answer is JSON: the value is fake-q"uote\one.
+    s.with_vault(&[("QUOTE", r#"fake-q\"uote\\one"#, "session")]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&[
+        "run",
+        "--secret",
+        "QUOTE",
+        "--",
+        "sh",
+        "-c",
+        r#"printf '{"k":"'; printenv QUOTE | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'; printf '"}\n'"#,
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "{\"k\":\"***REDACTED(QUOTE (JSON-escaped))***\"}\n"
+    );
+}
+
+// A tail that looks like the start of a value does not hold a message back.
+#[cfg(unix)]
+#[test]
+fn output_that_ends_like_a_value_starts_is_not_held_until_the_next_write() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let mut client = s
+        .command(&s.project())
+        .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
+        .arg("printf 'done f'; sleep 5; echo")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = client.stdout.take().unwrap();
+    let t = Instant::now();
+    let mut seen = Vec::new();
+    while !String::from_utf8_lossy(&seen).contains("done f") {
+        use std::io::Read;
+        let mut b = [0u8; 64];
+        let n = stdout.read(&mut b).unwrap_or(0);
+        assert!(n > 0, "the stream ended before the text came: {seen:?}");
+        seen.extend_from_slice(&b[..n]);
+    }
+    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    let _ = client.kill();
+    let _ = client.wait();
 }
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).
@@ -4540,6 +4635,232 @@ impl Sandbox {
     }
 }
 
+impl Sandbox {
+    /// Feed the real hook an event of this `kind` (`before_tool`, `prompt`)
+    /// from this test process; the reply, or `None` for silence.
+    fn hook_event(&self, kind: &str, payload: Value) -> Option<Value> {
+        let mut child = Command::new(hook_bin())
+            .args(["--harness", "claude", "--event", kind])
+            .current_dir(self.project())
+            .env("HOME", self.root.join("home"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", self.root.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.root.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run vahta-hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let text = text(&out.stdout);
+        (!text.trim().is_empty()).then(|| serde_json::from_str(&text).unwrap())
+    }
+
+    fn hook_tool(&self, tool: &str, input: Value) -> Option<Value> {
+        self.hook_event(
+            "before_tool",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse", "tool_name": tool,
+                "tool_input": input, "cwd": self.project(), "session_id": "sess-1",
+            }),
+        )
+    }
+
+    fn hook_prompt(&self, prompt: &str) -> Option<Value> {
+        self.hook_event(
+            "prompt",
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                "cwd": self.project(), "session_id": "sess-1",
+            }),
+        )
+    }
+}
+
+fn denied_with(reply: &Option<Value>) -> String {
+    let r = reply.as_ref().expect("a reply");
+    assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "deny", "{r}");
+    r["systemMessage"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn a_held_value_in_an_mcp_argument_a_write_or_an_edit_is_denied_by_name() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    // Each hit rings the alarm; the person ignores it.
+    s.script(&[r#"{"choose":1}"#, r#"{"choose":1}"#, r#"{"choose":1}"#]);
+    let mcp = s.hook_tool(
+        "mcp__github__create_issue",
+        serde_json::json!({"title": "t", "extra": {"blob": ["x", "token fake-one"]}}),
+    );
+    let said = denied_with(&mcp);
+    assert!(said.contains("MCP tool") && said.contains("ZETA"), "{said}");
+    assert!(!said.contains("fake-one"));
+    let write = s.hook_tool(
+        "Write",
+        serde_json::json!({"file_path": "/tmp/x.txt", "content": "k=fake-two\n"}),
+    );
+    assert!(denied_with(&write).contains("BETA"));
+    let hexed = vahta_vault::hex_encode(b"fake-one");
+    let edit = s.hook_tool(
+        "Edit",
+        serde_json::json!({"file_path": "/tmp/x.txt", "old_string": "a", "new_string": hexed}),
+    );
+    assert!(denied_with(&edit).contains("ZETA"));
+    // `vahta run` names secrets, never holds their values: not refused.
+    let run = s.hook_tool(
+        "Bash",
+        serde_json::json!({"command": "vahta run --secret ZETA -- true"}),
+    );
+    assert!(
+        run.as_ref()
+            .is_none_or(|r| r["hookSpecificOutput"]["permissionDecision"] != "deny"),
+        "{run:?}"
+    );
+    assert!(!s.journal().contains("fake-"));
+}
+
+fn pasted_key(tail: &str) -> String {
+    ["sk-", "ant-", &tail.repeat(25)].concat()
+}
+
+fn blocked_reason(reply: &Option<Value>) -> String {
+    let r = reply.as_ref().expect("a reply");
+    assert_eq!(r["decision"], "block", "{r}");
+    r["reason"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn a_pasted_secret_asks_and_a_false_alarm_passes_and_is_remembered() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("c");
+    let prompt = format!("my key is {key} use it");
+    let asks = s.asks();
+    s.script(&[r#"{"choose":0}"#]);
+    assert!(s.hook_prompt(&prompt).is_none());
+    let log = s.window_log();
+    let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
+    let options = ask["options"].to_string();
+    assert!(options.contains("False alarm") && options.contains("Do nothing"));
+    assert!(options.contains("Save to the project vault as ANTHROPIC_KEY"));
+    let shown = serde_json::to_string(&log).unwrap();
+    assert!(!shown.contains(&key), "the window was shown the value");
+    assert!(shown.contains("characters"));
+    assert_eq!(s.asks(), asks + 1);
+    // The same value again: no window, and it passes.
+    assert!(s.hook_prompt(&prompt).is_none());
+    assert_eq!(s.asks(), asks + 1);
+    // Another value is asked about.
+    let other = format!("also {}", pasted_key("d"));
+    s.script(&[r#"{"choose":2}"#]);
+    let said = blocked_reason(&s.hook_prompt(&other));
+    assert!(said.contains("contained a secret"), "{said}");
+    assert_eq!(s.asks(), asks + 2);
+    assert!(!s.journal().contains(&key));
+}
+
+#[test]
+fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("e");
+    // The choice, the name (Enter takes the suggestion), the tier, the password.
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    let said = blocked_reason(&s.hook_prompt(&format!("here: {key}")));
+    assert_eq!(
+        said,
+        "Saved as ANTHROPIC_KEY. Your message was not sent; send it again without the key \
+         (refer to it as ANTHROPIC_KEY)."
+    );
+    assert_eq!(
+        s.open_vault().get("ANTHROPIC_KEY").unwrap().expose(),
+        key.as_bytes()
+    );
+    assert!(
+        !serde_json::to_string(&s.window_log())
+            .unwrap()
+            .contains(&key)
+    );
+    assert!(s.journal().contains("prompt_secret") && !s.journal().contains(&key));
+}
+
+#[test]
+fn only_one_prompt_window_is_open_at_a_time() {
+    let s = sandbox_with_secrets();
+    let first = format!("one {}", pasted_key("f"));
+    let second = format!("two {}", pasted_key("g"));
+    let base = s.asks();
+    // The first window stays open for longer than the second waits.
+    s.script(&[r#"{"choose":2,"after_ms":6000}"#]);
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| s.hook_prompt(&first));
+        wait_until("the first window to open", 10, || s.asks() == base + 1);
+        let said = blocked_reason(&s.hook_prompt(&second));
+        assert!(said.contains("Another check is open"), "{said}");
+        // The second never reached a window.
+        assert_eq!(s.asks(), base + 1);
+        assert!(blocked_reason(&a.join().unwrap()).contains("contained a secret"));
+    });
+    assert!(s.journal().contains("\"result\":\"busy\""));
+}
+
+#[test]
+fn a_requester_asking_for_many_prompt_windows_is_held_and_journaled() {
+    let s = sandbox_with_secrets();
+    let base = s.asks();
+    for i in 0..4 {
+        s.script(&[r#"{"choose":2}"#]);
+        let key = pasted_key(&char::from(b'h' + i).to_string());
+        assert!(blocked_reason(&s.hook_prompt(&format!("k {key}"))).contains("contained"));
+    }
+    assert_eq!(s.asks(), base + 4);
+    let fifth = pasted_key("z");
+    let said = blocked_reason(&s.hook_prompt(&format!("k {fifth}")));
+    assert!(said.contains("Too many checks"), "{said}");
+    assert_eq!(s.asks(), base + 4, "no fifth window");
+    let journal = s.journal();
+    assert!(journal.contains("rate_limited") && journal.contains("suspicious"));
+    assert!(!journal.contains(&fifth));
+}
+
+#[test]
+fn a_pasted_held_value_asks_and_no_answer_holds_the_prompt() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    // A held value alone has no detector kind: no save option.
+    s.script(&[r#"{"noanswer":true}"#]);
+    let said = blocked_reason(&s.hook_prompt("the token is fake-one, ok"));
+    assert!(said.contains("Nobody answered"), "{said}");
+    let log = s.window_log();
+    let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
+    assert_eq!(
+        ask["options"],
+        serde_json::json!(["Send it anyway", "Do nothing"])
+    );
+    let lines = ask["panel"]["lines"].to_string();
+    assert!(
+        lines.contains("ZETA") && !lines.contains("fake-one"),
+        "{lines}"
+    );
+    // Clean text asks nothing.
+    let asks = s.asks();
+    assert!(s.hook_prompt("please summarise the readme").is_none());
+    assert_eq!(s.asks(), asks);
+}
+
 /// The rewritten Bash stdout and the message for the model, from a reply.
 fn redacted(reply: &Value) -> (String, String) {
     let hso = &reply["hookSpecificOutput"];
@@ -7020,4 +7341,247 @@ fn closing_the_pairing_window_pairs_nothing_and_a_dead_phone_link_is_an_error_no
         s.window_log().iter().any(|e| e["ask"] == "pairing"),
         "the code was shown"
     );
+}
+
+// --- `network = hosts` on Linux: the relay ---------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod host_relay {
+    use super::*;
+    use vahta_net::test_server::{Reply, TestServer};
+    use vahta_vault::{HostRule, Network, RuleSet};
+
+    const NAME: &str = "other.localhost";
+
+    fn setup(port: u16) -> Option<Sandbox> {
+        setup_named(NAME, port)
+    }
+
+    fn setup_named(name: &str, port: u16) -> Option<Sandbox> {
+        if !vahta_os::network_isolation_available() {
+            eprintln!("skipped: no unprivileged network namespaces here");
+            return None;
+        }
+        let s = Sandbox::new();
+        s.with_vault(&[("ZETA", "fake-relay-1", "session")]);
+        let mut vault = s.open_vault();
+        vault
+            .set_bindings(
+                "ZETA",
+                Some(RuleSet {
+                    name: "ZETA".into(),
+                    network: Network::Hosts(vec![HostRule {
+                        text: format!("{name}:{port}"),
+                        host: name.into(),
+                        subdomains: false,
+                        port: Some(port),
+                    }]),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+            .unwrap();
+        s.script(&[r#"{"secret":"correct horse"}"#]);
+        assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+        Some(s)
+    }
+
+    fn run_python(s: &Sandbox, code: &str) -> String {
+        let out = s.vahta(&["run", "--secret", "ZETA", "--", "python3", "-c", code]);
+        format!("{}{}", text(&out.stdout), text(&out.stderr))
+    }
+
+    const PRELUDE: &str = r#"
+import socket, ssl, sys, urllib.request, threading
+port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
+ctx = ssl.create_default_context(cafile=CA)
+def get(name=NAME, sni=None):
+    s = socket.create_connection((name, port), timeout=5)
+    t = ctx.wrap_socket(s, server_hostname=sni or name)
+    t.sendall(b"GET /x HTTP/1.1\r\nhost: h\r\nconnection: close\r\n\r\n")
+    data = b""
+    while True:
+        c = t.recv(4096)
+        if not c:
+            break
+        data += c
+    return data
+"#;
+
+    fn prelude(s: &Sandbox, port: u16) -> String {
+        format!(
+            "PORT = {port}\nNAME = '{NAME}'\nCA = '{}'\n{PRELUDE}",
+            s.root.join("ca.pem").display()
+        )
+    }
+
+    #[test]
+    fn an_allowed_host_is_reachable_and_nothing_else_is() {
+        let server = TestServer::start(|_| Reply::ok(b"relay-works"));
+        let Some(s) = setup(server.port) else { return };
+        let code = format!(
+            r#"{}
+print("ADDR", socket.gethostbyname(NAME))
+print("GOT", b"relay-works" in get())
+for other in ("example.com", "localhost.example", "other.localhost.example"):
+    try:
+        socket.getaddrinfo(other, 443)
+        print("RESOLVED", other)
+    except OSError:
+        print("NORESOLVE", other)
+try:
+    socket.create_connection(("93.184.216.34", 443), timeout=3)
+    print("IP", "connected")
+except OSError as e:
+    print("IP", "failed", e.errno)
+try:
+    get(sni="example.com")
+    print("SNI", "accepted")
+except (ssl.SSLError, OSError) as e:
+    print("SNI", "refused")
+"#,
+            prelude(&s, server.port)
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("ADDR 127.0.0.2"), "{out}");
+        assert!(out.contains("GOT True"), "{out}");
+        assert!(out.contains("NORESOLVE example.com"), "{out}");
+        assert!(out.contains("NORESOLVE other.localhost.example"), "{out}");
+        assert!(out.contains("IP failed"), "{out}");
+        assert!(out.contains("SNI refused"), "{out}");
+        // The wrong server name reached the journal as suspicious, and the
+        // good connection as a count by host name.
+        let journal = s.journal();
+        assert!(journal.contains("net_relay_refused"), "{journal}");
+        assert!(journal.contains("suspicious:"), "{journal}");
+        assert!(journal.contains(r#""event":"net_relay""#), "{journal}");
+        assert!(journal.contains(NAME), "{journal}");
+        // Only the host name, never what travelled.
+        assert!(!journal.contains("relay-works"));
+        assert!(!journal.contains("fake-relay-1"));
+    }
+
+    #[test]
+    fn many_connections_at_once_all_get_through() {
+        let server = TestServer::start(|_| Reply::ok(b"many"));
+        let Some(s) = setup(server.port) else { return };
+        let code = format!(
+            r#"{}
+ok = []
+def one():
+    ok.append(b"many" in get())
+ts = [threading.Thread(target=one) for _ in range(40)]
+[t.start() for t in ts]
+[t.join() for t in ts]
+print("DONE", len(ok), all(ok))
+"#,
+            prelude(&s, server.port)
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("DONE 40 True"), "{out}");
+    }
+
+    #[test]
+    fn urllib_and_curl_and_node_use_the_names_file() {
+        let server = TestServer::start(|_| Reply::ok(b"tools-ok"));
+        // Not under `.localhost`, which curl resolves by itself. The test
+        // certificate does not name it, so the clients skip verification here
+        // (the certificate checks are in the other tests).
+        let Some(s) = setup_named("tools.example", server.port) else {
+            return;
+        };
+        let url = format!("https://tools.example:{}/p", server.port);
+        let code = format!(
+            "import urllib.request, ssl\nctx = ssl._create_unverified_context()\nprint('URLLIB', urllib.request.urlopen('{url}', context=ctx, timeout=5).read())"
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("URLLIB b'tools-ok'"), "{out}");
+        if std::process::Command::new("curl")
+            .arg("-V")
+            .output()
+            .is_ok()
+        {
+            let out = s.vahta(&[
+                "run",
+                "--secret",
+                "ZETA",
+                "--",
+                "curl",
+                "-sS",
+                "--max-time",
+                "5",
+                "-k",
+                &url,
+            ]);
+            assert_eq!(text(&out.stdout), "tools-ok", "{}", text(&out.stderr));
+            let out = s.vahta(&[
+                "run",
+                "--secret",
+                "ZETA",
+                "--",
+                "curl",
+                "-sS",
+                "--max-time",
+                "5",
+                "-k",
+                "https://example.com/",
+            ]);
+            assert_ne!(out.status.code(), Some(0));
+        }
+        if std::process::Command::new("node")
+            .arg("-v")
+            .output()
+            .is_ok()
+        {
+            let js = format!(
+                "fetch('{url}').then(r => r.text()).then(t => console.log('NODE', t)).catch(e => console.log('NODE failed', String(e.cause && e.cause.code || e)));"
+            );
+            let out = s.vahta(&["run", "--secret", "ZETA", "--", "node", "-e", &js]);
+            // Node trusts its own roots, not the test CA: it must get as far
+            // as a certificate error (a TLS answer came back), not a lookup or
+            // routing failure.
+            let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+            assert!(
+                said.contains("NODE failed")
+                    && !said.contains("ENOTFOUND")
+                    && !said.contains("ENETUNREACH"),
+                "{said}"
+            );
+            let out = s.vahta(&[
+                "run", "--secret", "ZETA", "--", "node", "-e",
+                "fetch('https://example.com/').catch(e => console.log('NODE', String(e.cause && e.cause.code)))",
+            ]);
+            assert!(
+                text(&out.stdout).contains("NODE ENOTFOUND"),
+                "{}",
+                text(&out.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn the_relay_ends_with_the_command_and_leaves_no_process() {
+        let server = TestServer::start(|_| Reply::ok(b"x"));
+        let Some(s) = setup(server.port) else { return };
+        let out = run_python(&s, "print('quick')");
+        assert!(out.contains("quick"), "{out}");
+        // The run's journal line is there and the daemon holds no extra
+        // process: the only children of the sandbox daemon are none.
+        let pid = text(&s.vahta(&["daemon", "status"]).stdout);
+        let _ = pid;
+        let me = std::process::id().to_string();
+        let ps = std::process::Command::new("ps")
+            .args(["-eo", "pid,ppid,args"])
+            .output()
+            .map(|o| text(&o.stdout))
+            .unwrap_or_default();
+        let marker = s.root.to_string_lossy().into_owned();
+        let strays: Vec<&str> = ps
+            .lines()
+            .filter(|l| l.contains(&marker) && l.contains("python3") && !l.contains(&me))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+    }
 }

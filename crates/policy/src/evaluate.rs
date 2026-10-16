@@ -24,8 +24,9 @@
 //!    * `allow` empty, `dirs` not empty: the program must be inside a
 //!      directory.
 //! 5. **network**: `Network::None` and `Network::Hosts` ask for a run with no
-//!    network ([`Verdict::Allowed::isolate_network`]); hosts are then reachable
-//!    only through `vahta http`. `Network::App` does not.
+//!    network ([`Verdict::Allowed::isolate_network`]); the daemon then gives a
+//!    `Network::Hosts` run a relay to the listed hosts on Linux (and `vahta http`
+//!    reaches them everywhere). `Network::App` does not.
 //!
 //! `write` on a directory is informational for now: nothing enforces read-only.
 //!
@@ -43,7 +44,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use vahta_vault::rules::{
-    GROUPS, LAUNCHERS, expand_project_path, in_group, normalize_program_name,
+    GROUPS, LAUNCHERS, expand_project_path, in_group, is_project_path, normalize_program_name,
 };
 use vahta_vault::{ApprovedRule, Network, Program, RuleSet};
 
@@ -68,8 +69,9 @@ pub struct Ctx<'a> {
 pub enum Verdict {
     /// The command may use the secret.
     Allowed {
-        /// Start it with no network at all. Set by `Network::None` and
-        /// `Network::Hosts`, and only where that can be done.
+        /// Start it in a network namespace with no way out except, for
+        /// `Network::Hosts`, a relay to the listed hosts. Set by `Network::None`
+        /// and `Network::Hosts`, and only where that can be done.
         isolate_network: bool,
         /// Something the person or the journal should know: the rules ask for
         /// no network and this system cannot give it.
@@ -94,18 +96,27 @@ fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-/// The rule's arguments on this machine: `$PROJECT/…` words expanded from
-/// `root` (see `vahta_vault::rules::PROJECT_ROOT`).
-fn rule_args(rule: &ApprovedRule, root: &Path) -> Vec<String> {
-    rule.args
-        .iter()
-        .map(|a| expand_project_path(a, root).into_owned())
-        .collect()
+/// How many words after the program the rule's arguments consume in `argv`:
+/// the rule as an argv prefix, or, for a package runner, the "program +
+/// package" form (see `runner.rs`). `$PROJECT/…` words of the rule are expanded
+/// from `root` first (see `vahta_vault::rules::PROJECT_ROOT`).
+fn args_len(rule: &ApprovedRule, argv: &[String], root: &Path) -> Option<usize> {
+    let rest = argv.get(1..)?;
+    if rule.args.iter().any(|a| is_project_path(a)) {
+        let mut expanded = rule.clone();
+        expanded.args = rule
+            .args
+            .iter()
+            .map(|a| expand_project_path(a, root).into_owned())
+            .collect();
+        crate::runner::rule_match(&expanded, rest)
+    } else {
+        crate::runner::rule_match(rule, rest)
+    }
 }
 
 fn args_match(rule: &ApprovedRule, argv: &[String], root: &Path) -> bool {
-    let args = rule_args(rule, root);
-    argv.get(1..).is_some_and(|a| a.starts_with(&args))
+    args_len(rule, argv, root).is_some()
 }
 
 /// The project root as the file system resolves it, which is what resolved
@@ -175,8 +186,7 @@ pub fn extra_args<'a>(
             matches!(&r.program, Program::Path(p)
                 if Path::new(expand_project_path(p, &root).as_ref()) == resolved)
         })
-        .filter(|r| args_match(r, argv, &root))
-        .map(|r| r.args.len())
+        .filter_map(|r| args_len(r, argv, &root))
         .max()
         .map(|n| &argv[1 + n..])
 }
@@ -359,6 +369,38 @@ mod tests {
         assert!(matches!(
             check(&b, None, &["stripe"]),
             Verdict::NotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_package_rule_allows_the_runner_with_its_flags_and_nothing_else() {
+        let npx = Path::new("/usr/bin/npx");
+        let b = binding(vec![allow("npx @pkg/server", "/usr/bin/npx")], vec![]);
+        assert_eq!(
+            check(&b, Some(npx), &["npx", "-y", "@pkg/server@1.2.3"]),
+            allowed()
+        );
+        for bad in [
+            &["npx", "-y", "@pkg/server-evil"][..],
+            &["npx", "-p", "evil", "@pkg/server"][..],
+            &["npx", "-y", "evil", "@pkg/server"][..],
+        ] {
+            assert!(
+                matches!(check(&b, Some(npx), bad), Verdict::NotAllowed { .. }),
+                "{bad:?}"
+            );
+        }
+        // What follows the package is reported as extra.
+        let a = argv(&["npx", "-y", "@pkg/server@1", "--x"]);
+        assert_eq!(
+            extra_args(&b, Some(npx), &a, Path::new("/proj")),
+            Some(&a[3..])
+        );
+        // A deny rule of the same form catches the same commands.
+        let d = binding(vec![], vec![deny("npx @pkg/evil")]);
+        assert!(matches!(
+            check(&d, Some(npx), &["npx", "-y", "@pkg/evil@1"]),
+            Verdict::Denied { .. }
         ));
     }
 
@@ -724,5 +766,37 @@ mod tests {
             run("/p/x", "/p/x/src", "/p/x/scripts/tool", &["tool"]),
             Verdict::Refused { .. }
         ));
+    }
+
+    #[test]
+    fn a_package_runner_rule_and_a_project_path_rule_work_in_one_set() {
+        let b = binding(
+            vec![
+                allow("npx @pkg/server", "/usr/bin/npx"),
+                ApprovedRule {
+                    text: "python3 $PROJECT/lib/x.py".into(),
+                    program: Program::Path("/usr/bin/python3".into()),
+                    args: vec!["$PROJECT/lib/x.py".into()],
+                },
+            ],
+            vec![],
+        );
+        let run = |program: &str, words: &[&str]| {
+            let a = argv(words);
+            evaluate(
+                &b,
+                &Ctx {
+                    program: Some(Path::new(program)),
+                    argv: &a,
+                    cwd: Path::new("/m/p"),
+                    project_root: Path::new("/m/p"),
+                    network_isolation: false,
+                },
+            )
+        };
+        assert!(run("/usr/bin/npx", &["npx", "-y", "@pkg/server@1.2.3"]).is_allowed());
+        assert!(run("/usr/bin/python3", &["python3", "/m/p/lib/x.py"]).is_allowed());
+        assert!(!run("/usr/bin/python3", &["python3", "/o/p/lib/x.py"]).is_allowed());
+        assert!(!run("/usr/bin/npx", &["npx", "-y", "@pkg/server-evil"]).is_allowed());
     }
 }
