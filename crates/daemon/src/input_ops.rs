@@ -3,7 +3,7 @@
 //!
 //! **Check.** Which values the daemon holds for the caller's agent does the
 //! text carry, in any form? The matcher is the scrubber's, over the same
-//! values a tool's output is scrubbed of (`output::values_for`). The reply is
+//! values a tool's output is scrubbed of (`output::known_values`). The reply is
 //! names only.
 //!
 //! **Ask.** The hook found a secret in a prompt (its detector, a held value,
@@ -36,7 +36,7 @@ use vahta_vault::{Vault, valid_name};
 
 use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, find_vault, from_surface};
-use crate::output::{Asked, HeldCut, anchor_of, save, values_for};
+use crate::output::{Asked, HeldCut, anchor_of, known_values, save};
 use crate::protocol::{ClientReply, PromptDecision};
 use crate::scrub::Scrubber;
 use crate::surface::sanitize_label;
@@ -177,7 +177,7 @@ impl Remembered {
 fn known_in(ctx: &Ctx<'_>, text: &str) -> Vec<(usize, usize, String)> {
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
     let anchor = anchor_of(ctx);
-    let values = values_for(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
+    let values = known_values(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
     if values.is_empty() {
         return Vec::new();
     }

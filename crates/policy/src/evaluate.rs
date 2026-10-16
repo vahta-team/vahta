@@ -92,8 +92,15 @@ fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// How many words after the program the rule's arguments consume in `argv`:
+/// the rule as an argv prefix, or, for a package runner, the "program +
+/// package" form (see `runner.rs`).
+fn args_len(rule: &ApprovedRule, argv: &[String]) -> Option<usize> {
+    crate::runner::rule_match(rule, argv.get(1..)?)
+}
+
 fn args_match(rule: &ApprovedRule, argv: &[String]) -> bool {
-    argv.get(1..).is_some_and(|a| a.starts_with(&rule.args))
+    args_len(rule, argv).is_some()
 }
 
 /// The names deny matching looks at: what the caller typed and what it
@@ -152,8 +159,7 @@ pub fn extra_args<'a>(
         .allow
         .iter()
         .filter(|r| matches!(&r.program, Program::Path(p) if Path::new(p) == resolved))
-        .filter(|r| args_match(r, argv))
-        .map(|r| r.args.len())
+        .filter_map(|r| args_len(r, argv))
         .max()
         .map(|n| &argv[1 + n..])
 }
@@ -328,6 +334,35 @@ mod tests {
         assert!(matches!(
             check(&b, None, &["stripe"]),
             Verdict::NotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_package_rule_allows_the_runner_with_its_flags_and_nothing_else() {
+        let npx = Path::new("/usr/bin/npx");
+        let b = binding(vec![allow("npx @pkg/server", "/usr/bin/npx")], vec![]);
+        assert_eq!(
+            check(&b, Some(npx), &["npx", "-y", "@pkg/server@1.2.3"]),
+            allowed()
+        );
+        for bad in [
+            &["npx", "-y", "@pkg/server-evil"][..],
+            &["npx", "-p", "evil", "@pkg/server"][..],
+            &["npx", "-y", "evil", "@pkg/server"][..],
+        ] {
+            assert!(
+                matches!(check(&b, Some(npx), bad), Verdict::NotAllowed { .. }),
+                "{bad:?}"
+            );
+        }
+        // What follows the package is reported as extra.
+        let a = argv(&["npx", "-y", "@pkg/server@1", "--x"]);
+        assert_eq!(extra_args(&b, Some(npx), &a), Some(&a[3..]));
+        // A deny rule of the same form catches the same commands.
+        let d = binding(vec![], vec![deny("npx @pkg/evil")]);
+        assert!(matches!(
+            check(&d, Some(npx), &["npx", "-y", "@pkg/evil@1"]),
+            Verdict::Denied { .. }
         ));
     }
 

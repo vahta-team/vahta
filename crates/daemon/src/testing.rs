@@ -40,6 +40,37 @@ pub fn connector_parent_alias() -> Option<String> {
     }
 }
 
+/// This machine's boot id. In a test build the file `VAHTA_TEST_BOOT_ID_FILE`
+/// names, when it exists, stands in for the system's: a test changes its
+/// contents to "reboot". Otherwise the system's.
+pub fn boot_id() -> Option<String> {
+    #[cfg(feature = "test-surface")]
+    if let Some(text) =
+        std::env::var_os("VAHTA_TEST_BOOT_ID_FILE").and_then(|p| std::fs::read_to_string(p).ok())
+    {
+        let id = text.trim();
+        if !id.is_empty() {
+            return Some(id.to_string());
+        }
+    }
+    vahta_os::boot_id()
+}
+
+/// Where desktop notifications go instead of the screen. `None` in the shipped
+/// build: they are shown. In a test build they are never shown: they are
+/// appended, one line each, to the file `VAHTA_TEST_NOTIFY_LOG` names, or
+/// dropped when it is not set.
+pub fn notify_log() -> Option<Option<std::path::PathBuf>> {
+    #[cfg(feature = "test-surface")]
+    {
+        Some(std::env::var_os("VAHTA_TEST_NOTIFY_LOG").map(std::path::PathBuf::from))
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
 /// In a test build, whether refusals by a secret's rules are kept out of the
 /// alarm (`VAHTA_TEST_MUTE_REFUSAL_ALARM` set). Always `false` in the shipped
 /// build.
