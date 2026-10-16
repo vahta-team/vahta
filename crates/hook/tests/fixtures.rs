@@ -10,6 +10,12 @@
 //! "no_opinion", "check_http": ...}` is its answer to a `CheckRun` and a
 //! `CheckHttp`; it answers `Ok` to every
 //! other request, and a daemon of another version when `"version"` is given.
+//! `"known": [NAME...]` makes it hold those secrets: it names them for a
+//! `CheckInput` and refuses a `ToolCheck` as the first of them, written raw.
+//! `"prompt": "send" | "saved:NAME" | "held" | "no_answer" | "error" | "silent"`
+//! is its answer to a `PromptAsk` (`silent`: none, ever). `prompt_ask`, when
+//! present, is the list of `{harness, cwd, detected}` the hook must have asked
+//! it, in order (never the text).
 //! `check_run`, when present, is the list of `{cwd, argv, names[, vault]}` (`{cwd, url, names[, vault]}` for http) the hook
 //! must have asked it, in order.
 //! Secret-shaped values are never written in the files: `{{SECRET_ANTHROPIC}}`
@@ -99,6 +105,7 @@ fn pem(edge: &str) -> String {
 /// each `CheckRun` it is asked.
 struct FakeDaemon {
     asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    prompts: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
 }
 
 impl FakeDaemon {
@@ -116,11 +123,24 @@ impl FakeDaemon {
             .as_str()
             .unwrap_or(vahta_ipc::VERSION)
             .to_string();
+        let known: Vec<String> = script["known"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let prompt = script["prompt"].as_str().unwrap_or("").to_string();
         let asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let prompts: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let log = asked.clone();
+        let prompt_log = prompts.clone();
         std::thread::spawn(move || {
             while let Ok(mut stream) = listener.accept() {
                 let (log, version) = (log.clone(), version.clone());
+                let (known, prompt, prompt_log) =
+                    (known.clone(), prompt.clone(), prompt_log.clone());
                 std::thread::spawn(move || {
                     let Ok(Some(_hello)) = read_frame::<Hello>(&mut stream) else {
                         return;
@@ -179,6 +199,50 @@ impl FakeDaemon {
                                     ClientReply::NoOpinion {}
                                 }
                             }
+                            ClientRequest::CheckInput { .. } => ClientReply::InputNames {
+                                names: known.clone(),
+                            },
+                            ClientRequest::ToolCheck { .. } => match known.first() {
+                                Some(name) => ClientReply::ToolDeny {
+                                    form: "raw".into(),
+                                    name: name.clone(),
+                                },
+                                None => ClientReply::Ok {},
+                            },
+                            ClientRequest::PromptAsk {
+                                harness,
+                                cwd,
+                                detected,
+                                ..
+                            } => {
+                                if let Ok(mut l) = prompt_log.lock() {
+                                    l.push(serde_json::json!({
+                                        "harness": harness, "cwd": cwd, "detected": detected
+                                    }));
+                                }
+                                use vahta_ipc::protocol::PromptDecision as D;
+                                let answer = match prompt.as_str() {
+                                    "send" => D::Send {},
+                                    "held" => D::Held { no_answer: false },
+                                    "no_answer" => D::Held { no_answer: true },
+                                    "silent" => loop {
+                                        std::thread::sleep(std::time::Duration::from_secs(60));
+                                    },
+                                    other => match other.strip_prefix("saved:") {
+                                        Some(name) => D::Saved { name: name.into() },
+                                        None => {
+                                            let error = ClientReply::Error {
+                                                message: "scripted failure".into(),
+                                            };
+                                            if write_frame(&mut stream, &error).is_err() {
+                                                return;
+                                            }
+                                            continue;
+                                        }
+                                    },
+                                };
+                                ClientReply::PromptAnswer { answer }
+                            }
                             _ => ClientReply::Ok {},
                         };
                         if write_frame(&mut stream, &answer).is_err() {
@@ -188,7 +252,7 @@ impl FakeDaemon {
                 });
             }
         });
-        Ok(FakeDaemon { asked })
+        Ok(FakeDaemon { asked, prompts })
     }
 }
 
@@ -338,6 +402,12 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         let got = Value::Array(daemon.asked.lock().map_err(|e| e.to_string())?.clone());
         if &got != want {
             return Err(format!("check_run\n  want {want}\n  got  {got}"));
+        }
+    }
+    if let (Some(want), Some(daemon)) = (fx.get("prompt_ask"), &daemon) {
+        let got = Value::Array(daemon.prompts.lock().map_err(|e| e.to_string())?.clone());
+        if &got != want {
+            return Err(format!("prompt_ask\n  want {want}\n  got  {got}"));
         }
     }
     if let Some(want) = fx.get("spool") {

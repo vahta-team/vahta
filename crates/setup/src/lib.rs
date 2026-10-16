@@ -278,6 +278,8 @@ pub struct Entry {
     pub event: String,
     pub matcher: Option<String>,
     pub command: String,
+    /// Seconds the harness lets the hook run; `None` leaves its default.
+    pub timeout: Option<u64>,
 }
 
 /// The entries for a harness, one per `[[events]]` item. `program` is the hook
@@ -288,6 +290,7 @@ fn entries(m: &Manifest, program: &str) -> Vec<Entry> {
         .map(|e| Entry {
             event: e.name.clone(),
             matcher: e.matcher.clone(),
+            timeout: e.timeout,
             command: format!(
                 "{program} --harness {} --event {} --setup {}",
                 m.name,
@@ -308,10 +311,16 @@ fn entry_json(e: &Entry, shape: Shape) -> Value {
             let mut h = Map::new();
             h.insert("type".into(), "command".into());
             h.insert("command".into(), e.command.clone().into());
+            if let Some(t) = e.timeout {
+                h.insert("timeout".into(), t.into());
+            }
             o.insert("hooks".into(), Value::Array(vec![Value::Object(h)]));
         }
         Shape::Flat => {
             o.insert("command".into(), e.command.clone().into());
+            if let Some(t) = e.timeout {
+                o.insert("timeout".into(), t.into());
+            }
             if let Some(m) = &e.matcher {
                 o.insert("matcher".into(), m.clone().into());
             }
@@ -936,6 +945,7 @@ fn installed(doc: &Map<String, Value>, shape: Shape, os: Os) -> Vec<(Entry, Stri
                             event: event.clone(),
                             matcher: matcher.clone(),
                             command: c.into(),
+                            timeout: item.get("timeout").and_then(Value::as_u64),
                         },
                         word,
                     ));

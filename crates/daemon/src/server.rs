@@ -120,6 +120,8 @@ pub(crate) struct Shared {
     /// Tool outputs kept for the agent to ask about, and what the person has
     /// let through (see `output.rs`).
     pub(crate) outputs: Mutex<Outputs>,
+    /// Prompt values the person called false alarms (see `input_ops.rs`).
+    pub(crate) remembered: Mutex<crate::input_ops::Remembered>,
     /// What agents have tried, weighed (see `alarm.rs`).
     pub(crate) alarm: crate::alarm::Alarm,
     /// The last refused launch of each connector's server (`connector_ops.rs`).
@@ -260,6 +262,12 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
             io::Error::other("the system random generator failed"),
         )
     })?;
+    let remembered = crate::input_ops::Remembered::new().ok_or_else(|| {
+        ServerError::Io(
+            "draw a key",
+            io::Error::other("the system random generator failed"),
+        )
+    })?;
     let shared = Arc::new(Shared {
         options,
         journal,
@@ -269,6 +277,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         store,
         sessions: Mutex::new(Sessions::default()),
         outputs: Mutex::new(outputs),
+        remembered: Mutex::new(remembered),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
         unlockers: vahta_auth::Registry::standard(),
@@ -869,6 +878,22 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 text,
             } => (
                 crate::report::tool_check(shared, &ctx, session.as_deref(), &text)
+                    .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::CheckInput {
+                session: _,
+                cwd: _,
+                text,
+            } => (crate::input_ops::check_input(&ctx, &text), false),
+            ClientRequest::PromptAsk {
+                session: _,
+                harness,
+                cwd,
+                text,
+                detected,
+            } => (
+                crate::input_ops::prompt_ask(&ctx, &harness, &cwd, text, detected)
                     .unwrap_or_else(|r| r),
                 false,
             ),
