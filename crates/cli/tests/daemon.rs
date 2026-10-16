@@ -1712,6 +1712,45 @@ fn raw_request(s: &Sandbox, real: &Path, request: &ClientRequest) -> ClientReply
     serde_json::from_str(line).unwrap()
 }
 
+// The hook's tool-output scan finds a held value in its encoded forms too.
+#[test]
+fn tool_output_with_a_value_in_json_escaped_or_base64_form_is_cut() {
+    let s = Sandbox::new();
+    s.with_vault(&[("QUOTE", r#"fake-q\"uote\\one"#, "session")]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    // fake-q"uote\one: as JSON writes it, and in base64.
+    let texts = vec![
+        r#"{"out":"x fake-q\"uote\\one y"}"#.to_string(),
+        "k=ZmFrZS1xInVvdGVcb25l".to_string(),
+        "nothing here".to_string(),
+    ];
+    let reply = raw_request(
+        &s,
+        &s.project(),
+        &ClientRequest::OutputScan {
+            cwd: s.project().display().to_string(),
+            tool: "Bash".into(),
+            texts: texts.clone(),
+            spans: Vec::new(),
+            possible: Vec::new(),
+        },
+    );
+    let ClientReply::OutputSpans { spans, .. } = reply else {
+        panic!("{reply:?}");
+    };
+    let cut = |i: usize| {
+        spans
+            .iter()
+            .filter(|c| c.text == i)
+            .map(|c| texts[i][c.start..c.end].to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cut(0), [r#"fake-q\"uote\\one"#], "{spans:?}");
+    assert_eq!(cut(1), ["ZmFrZS1xInVvdGVcb25l"], "{spans:?}");
+    assert!(cut(2).is_empty());
+}
+
 // --- run and delegate -----------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -1781,6 +1820,60 @@ fn run_with_the_password_injects_the_value_and_scrubs_it_from_the_output() {
     let journal = s.journal();
     assert!(journal.contains("\"event\":\"run\"") && journal.contains("\"reason\":\"password\""));
     assert!(journal.contains("run_end") && !journal.contains("fake-"));
+}
+
+// Runs commands that only a Unix has (sh, printenv, sed).
+#[cfg(unix)]
+#[test]
+fn a_value_printed_as_json_is_scrubbed_in_its_escaped_form() {
+    let s = Sandbox::new();
+    // The window's answer is JSON: the value is fake-q"uote\one.
+    s.with_vault(&[("QUOTE", r#"fake-q\"uote\\one"#, "session")]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&[
+        "run",
+        "--secret",
+        "QUOTE",
+        "--",
+        "sh",
+        "-c",
+        r#"printf '{"k":"'; printenv QUOTE | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'; printf '"}\n'"#,
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "{\"k\":\"***REDACTED(QUOTE (JSON-escaped))***\"}\n"
+    );
+}
+
+// A tail that looks like the start of a value does not hold a message back.
+#[cfg(unix)]
+#[test]
+fn output_that_ends_like_a_value_starts_is_not_held_until_the_next_write() {
+    let s = sandbox_with_secrets();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    let mut client = s
+        .command(&s.project())
+        .args(["run", "--secret", "ZETA", "--", "sh", "-c"])
+        .arg("printf 'done f'; sleep 5; echo")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = client.stdout.take().unwrap();
+    let t = Instant::now();
+    let mut seen = Vec::new();
+    while !String::from_utf8_lossy(&seen).contains("done f") {
+        use std::io::Read;
+        let mut b = [0u8; 64];
+        let n = stdout.read(&mut b).unwrap_or(0);
+        assert!(n > 0, "the stream ended before the text came: {seen:?}");
+        seen.extend_from_slice(&b[..n]);
+    }
+    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    let _ = client.kill();
+    let _ = client.wait();
 }
 
 // Runs commands that only a Unix has (sh, printenv, cat, true).
