@@ -72,6 +72,25 @@ pub(crate) fn exe_name(pid: u32) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The boot time in seconds since the epoch, from `kern.boottime`.
+pub(crate) fn boot_id() -> Option<String> {
+    // SAFETY: `timeval` is plain data; all-zero bytes are a valid value.
+    let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: the name is a NUL-terminated string; the buffer is `size` bytes of
+    // writable memory that outlives the call.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            std::ptr::addr_of_mut!(tv).cast::<c_void>(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && tv.tv_sec > 0).then(|| tv.tv_sec.to_string())
+}
+
 /// Not read here (see `vahta_os::command_line`).
 pub(crate) fn command_line(_pid: u32) -> Option<String> {
     None

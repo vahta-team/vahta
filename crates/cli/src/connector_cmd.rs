@@ -78,15 +78,21 @@ window until the session ends. The harnesses give a server about 30 seconds to
 start and show you nothing of its error output, so without a session a launch
 is refused at once (see `vahta daemon status`). The session is yours, not a
 process tree's: it covers a harness started from a launcher too.
+
+  --for DURATION  end it after this long (for example 8h). Without it the session
+                  lasts until the computer restarts (or `vahta lock --all`).
 ";
 
 pub const RUN_USAGE: &str = "\
-usage: vahta run --connector --secret NAME [--] COMMAND [ARGS...]
+usage: vahta run --connector --secret NAME [--as NAME=VAR] [--] COMMAND [ARGS...]
 
 How a harness starts the MCP server of a connector. Put it in the harness's
 config in place of the server's own command (see docs/connectors.md). The
 command must be one of NAME's allow rules, and the harness must be one NAME is
 bound to. With no connectors session it is refused at once (exit 3).
+
+  --as NAME=VAR   put the secret in the variable VAR, when the server reads its
+                  key from a name other than NAME (as `vahta run --as` does)
 ";
 
 pub const LIST_USAGE: &str = "\
@@ -205,6 +211,7 @@ struct Args {
     duration: Option<DurationSpec>,
     label: Option<String>,
     named: Option<String>,
+    renames: Vec<(String, String)>,
     command: Vec<String>,
 }
 
@@ -279,6 +286,13 @@ fn parse(command: &str, args: &[String]) -> Parsed {
             "--label" if matches!(command, "unlock" | "run") => {
                 value("--label").map(|v| p.label = Some(v))
             }
+            "--as" if command == "run" => value("--as").and_then(|v| match v.split_once('=') {
+                Some((n, var)) if !n.is_empty() && !var.is_empty() => {
+                    p.renames.push((n.to_string(), var.to_string()));
+                    Ok(())
+                }
+                _ => Err("--as expects NAME=VAR".to_string()),
+            }),
             "--secret" if command == "run" => value("--secret").and_then(|v| {
                 if p.named.is_some() {
                     Err("a connector's server takes one --secret".to_string())
@@ -386,6 +400,7 @@ fn unlock(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -
                     info.id,
                     info.names.join(", "),
                     match info.remaining_secs {
+                        _ if info.until_reboot => "lasts until this computer restarts".to_string(),
                         Some(s) => format!("lasts {}", human_secs(s)),
                         None => "lasts until revoked".to_string(),
                     }
@@ -420,6 +435,7 @@ fn run(p: Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i3
             argv: p.command,
             env: crate::run_cmd::environment(),
             name,
+            renames: p.renames,
             label: p.label,
         },
     };
