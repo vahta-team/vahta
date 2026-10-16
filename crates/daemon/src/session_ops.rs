@@ -16,9 +16,11 @@ use vahta_vault::{Peek, Tier, Vault, valid_name};
 
 use crate::anchor::{self, Node};
 use crate::encoded::EncodedSet;
+use crate::gate::Admission;
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, find_vault, from_vault, lines_for, refused, refused_names, unlock_as,
+    Ctx, Flow, cancelled, check_name, find_vault, from_vault, lines_for, refused, refused_names,
+    unlock_as,
 };
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
 use crate::server::Shared;
@@ -278,132 +280,159 @@ pub(crate) fn unlock_session(
     let anchor_node = &nodes[anchor_index];
     let (anchor, anchor_exe) = (anchor_node.id, anchor_node.exe.clone());
 
-    let mut window = ctx.window("Open a session")?;
-    let mut lines = lines_for(&project, &vault_path);
-    lines.push(format!("Secrets: {}", names.join(", ")));
-    lines.push(format!("Lasts: {}", describe(lasts)));
-    if let Some(t) = member_end {
-        lines.push(format!(
-            "Your membership ends {}; the session ends no later.",
-            vahta_ipc::duration::ymd(t)
-        ));
-    }
-    lines.push(format!(
-        "Belongs to: {anchor_exe} (pid {}), and everything it starts",
-        anchor.pid
-    ));
-    match &role {
-        Some(r) => {
-            lines.extend(crate::role_ops::describe(r));
-            lines.push(
-                "Allows: only what the role says, inside each secret's own rules, with no \
-                 window. Not revealing, copying, exporting or changing anything."
-                    .to_string(),
-            );
-        }
-        None => lines.push(
-            "Allows: running commands with these secrets, with no window. Not revealing, \
-             copying, exporting or changing anything."
-                .to_string(),
-        ),
-    }
-    let mut panel = ctx.panel("Open a session", lines);
-    panel.agent_note = label.as_deref().and_then(sanitize_label);
-    let action = Action::Unlock {
-        names: names.clone(),
-        duration_secs: lasts.map(|d| d.as_secs()),
-    };
-    let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
-    if vault.upgrade_pending() {
-        // A session reads the current format only; the first save writes it.
-        vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
-    }
-    let keys = vault.session_keys(&names).map_err(from_vault)?;
-    // The values in their encoded forms, for the pre-tool check and the output
-    // scan; held as long as the keys are, and not a moment longer.
-    let held: Vec<(String, vahta_vault::SecretValue)> = names
-        .iter()
-        .filter_map(|n| vault.get(n).ok().map(|v| (n.clone(), v)))
-        .collect();
-    let forms = EncodedSet::build(held.iter().map(|(n, v)| (n.as_str(), v.expose())));
-    drop(held);
-    // Build the search tables now, not in the middle of a tool call.
-    let _ = forms.find(b"");
-    let vault_id = vault.vault_id();
-    // From here on the vault key is gone: the session holds data keys only.
-    drop(vault);
-
-    let now = Instant::now();
-    let deadline = lasts.map(|d| now + d);
-    let id =
-        session::new_id().ok_or_else(|| crate::ops::error("the system random generator failed"))?;
-    let session = Session {
-        id: id.clone(),
-        tenant: "local",
-        vault_id,
-        vault_path: vault_path.clone(),
-        project: project.root.clone(),
-        used_from: target.used_from.clone(),
-        scope: names.clone(),
-        keys,
-        forms,
-        role: Role::Runner,
-        anchor,
-        anchor_exe: anchor_exe.clone(),
-        parent: None,
-        deadline,
-        length: deadline.map(|d| d.saturating_duration_since(now)),
-        // A role caps how long one grant lasts, so it is not extended by a question.
-        ask_at: deadline
-            .filter(|_| role.as_ref().is_none_or(|r| r.max_for_secs.is_none()))
-            .filter(|_| member_end.is_none())
-            .map(|d| ask_time(now, d)),
-        extension_pending: false,
-        label: panel.agent_note.clone(),
-        uses: 0,
-        agent_role: role.clone(),
-        boot: None,
-    };
-    let info = info_of(&session, now);
-    let replaced = {
-        let mut sessions = ctx
+    // One window at a time per vault (`gate.rs`). Whoever waited on another
+    // request's window asks for its own afterwards, whatever came of it: a
+    // session belongs to the process that asked, so it is never shared.
+    ctx.gone.watch();
+    let turn = loop {
+        match ctx
             .shared
-            .sessions
-            .lock()
-            .map_err(|_| crate::ops::error("the session table is unusable"))?;
-        // A second unlock for the same process replaces the first.
-        let replaced = sessions.end_where(
-            |s| {
-                s.parent.is_none()
-                    && s.anchor == anchor
-                    && s.vault_id == vault_id
-                    && s.used_from == target.used_from
-            },
-            "replaced",
-        );
-        sessions.add(session);
-        replaced
+            .gates
+            .enter(&peek.vault_id, None, ctx.gone.cancel())
+        {
+            Admission::Turn(turn) => break turn,
+            Admission::Gone => return Err(cancelled()),
+            Admission::Refused(reply) => return Err(reply),
+            Admission::Granted(_) | Admission::Look => {}
+        }
     };
-    ctx.shared.record_ended(replaced);
-    // Sessions are open again by the person's hand: the alarm is over.
-    ctx.shared.alarm.clear_raised();
-    ctx.journal(
-        Entry::new("session_start")
-            .session(&id, None)
-            .vault(&vault_id)
-            .names(&names)
-            .role(role.as_ref().map(|r| r.name.as_str()))
-            .result(
-                "ok",
-                Some(&format!(
-                    "anchor {anchor_exe} pid {}; {}",
-                    anchor.pid,
-                    describe(lasts)
-                )),
+    let result = (|| -> Flow<ClientReply> {
+        let mut window = ctx.window("Open a session")?;
+        let mut lines = lines_for(&project, &vault_path);
+        lines.push(format!("Secrets: {}", names.join(", ")));
+        lines.push(format!("Lasts: {}", describe(lasts)));
+        if let Some(t) = member_end {
+            lines.push(format!(
+                "Your membership ends {}; the session ends no later.",
+                vahta_ipc::duration::ymd(t)
+            ));
+        }
+        lines.push(format!(
+            "Belongs to: {anchor_exe} (pid {}), and everything it starts",
+            anchor.pid
+        ));
+        match &role {
+            Some(r) => {
+                lines.extend(crate::role_ops::describe(r));
+                lines.push(
+                    "Allows: only what the role says, inside each secret's own rules, with no \
+                 window. Not revealing, copying, exporting or changing anything."
+                        .to_string(),
+                );
+            }
+            None => lines.push(
+                "Allows: running commands with these secrets, with no window. Not revealing, \
+             copying, exporting or changing anything."
+                    .to_string(),
             ),
-    );
-    window.close(Some("Session open. This window can be closed."));
-    Ok(ClientReply::Session(Box::new(info)))
+        }
+        let mut panel = ctx.panel("Open a session", lines);
+        panel.agent_note = label.as_deref().and_then(sanitize_label);
+        let action = Action::Unlock {
+            names: names.clone(),
+            duration_secs: lasts.map(|d| d.as_secs()),
+        };
+        let mut vault = unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
+        if vault.upgrade_pending() {
+            // A session reads the current format only; the first save writes it.
+            vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+        }
+        let keys = vault.session_keys(&names).map_err(from_vault)?;
+        // The values in their encoded forms, for the pre-tool check and the output
+        // scan; held as long as the keys are, and not a moment longer.
+        let held: Vec<(String, vahta_vault::SecretValue)> = names
+            .iter()
+            .filter_map(|n| vault.get(n).ok().map(|v| (n.clone(), v)))
+            .collect();
+        let forms = EncodedSet::build(held.iter().map(|(n, v)| (n.as_str(), v.expose())));
+        drop(held);
+        // Build the search tables now, not in the middle of a tool call.
+        let _ = forms.find(b"");
+        let vault_id = vault.vault_id();
+        // From here on the vault key is gone: the session holds data keys only.
+        drop(vault);
+
+        let now = Instant::now();
+        let deadline = lasts.map(|d| now + d);
+        let id = session::new_id()
+            .ok_or_else(|| crate::ops::error("the system random generator failed"))?;
+        let session = Session {
+            id: id.clone(),
+            tenant: "local",
+            vault_id,
+            vault_path: vault_path.clone(),
+            project: project.root.clone(),
+            used_from: target.used_from.clone(),
+            scope: names.clone(),
+            keys,
+            forms,
+            role: Role::Runner,
+            anchor,
+            anchor_exe: anchor_exe.clone(),
+            parent: None,
+            deadline,
+            length: deadline.map(|d| d.saturating_duration_since(now)),
+            // A role caps how long one grant lasts, so it is not extended by a question.
+            ask_at: deadline
+                .filter(|_| role.as_ref().is_none_or(|r| r.max_for_secs.is_none()))
+                .filter(|_| member_end.is_none())
+                .map(|d| ask_time(now, d)),
+            extension_pending: false,
+            label: panel.agent_note.clone(),
+            uses: 0,
+            agent_role: role.clone(),
+            boot: None,
+        };
+        let info = info_of(&session, now);
+        let replaced = {
+            let mut sessions = ctx
+                .shared
+                .sessions
+                .lock()
+                .map_err(|_| crate::ops::error("the session table is unusable"))?;
+            // A second unlock for the same process replaces the first.
+            let replaced = sessions.end_where(
+                |s| {
+                    s.parent.is_none()
+                        && s.anchor == anchor
+                        && s.vault_id == vault_id
+                        && s.used_from == target.used_from
+                },
+                "replaced",
+            );
+            sessions.add(session);
+            replaced
+        };
+        ctx.shared.record_ended(replaced);
+        // Sessions are open again by the person's hand: the alarm is over.
+        ctx.shared.alarm.clear_raised();
+        ctx.journal(
+            Entry::new("session_start")
+                .session(&id, None)
+                .vault(&vault_id)
+                .names(&names)
+                .role(role.as_ref().map(|r| r.name.as_str()))
+                .result(
+                    "ok",
+                    Some(&format!(
+                        "anchor {anchor_exe} pid {}; {}",
+                        anchor.pid,
+                        describe(lasts)
+                    )),
+                ),
+        );
+        window.close(Some("Session open. This window can be closed."));
+        Ok(ClientReply::Session(Box::new(info)))
+    })();
+    match &result {
+        Ok(_) => turn.session_opened(),
+        // Only the person's own no is passed on to those who waited.
+        Err(reply @ ClientReply::Cancelled { .. }) if !ctx.gone.is_gone() => {
+            turn.refused(None, reply)
+        }
+        Err(_) => turn.fell(),
+    }
+    result
 }
 
 fn all_or_project(

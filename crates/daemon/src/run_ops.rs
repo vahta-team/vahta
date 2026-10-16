@@ -31,10 +31,11 @@ use vahta_vault::{Error, Peek, SecretValue, Tier, Vault, valid_name};
 use vahta_policy::Verdict;
 
 use crate::binding;
+use crate::gate::{Admission, UseKey};
 use crate::journal::Entry;
 use crate::ops::{
-    Ctx, Flow, check_name, error, from_vault, lines_for, refused, refused_names, unknown_name,
-    unlock_as,
+    Ctx, Flow, cancelled, check_name, error, from_vault, lines_for, refused, refused_names,
+    unknown_name, unlock_as,
 };
 use crate::pathfind;
 use crate::protocol::{ClientReply, DurationSpec, NameIssue, RefusalKind};
@@ -636,7 +637,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             vec![format!("Command: {}", command_text(&argv))],
         )?;
     }
-    let (values, via) = unlock_values(
+    let unlocked = unlock_values(
         ctx,
         Unlock {
             project: &project,
@@ -661,8 +662,16 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
                 names: names.clone(),
                 command: command_text(&argv),
             },
+            used_from: target.used_from.as_deref(),
         },
-    )?;
+    );
+    // A client that went away while the window was open is not a run that
+    // was refused, and the window's answer, if one came, is not used.
+    if ctx.gone.is_gone() {
+        drop(unlocked);
+        return Err(client_gone(ctx, &peek.vault_id, &names, role.as_ref()));
+    }
+    let (values, via) = unlocked?;
 
     if let Some(a) = &role {
         crate::role_ops::note_use(ctx, a);
@@ -847,6 +856,9 @@ pub(crate) struct Unlock<'a> {
     pub nothing: &'static str,
     /// What the unlock is for, which decides what may open the vault.
     pub action: Action,
+    /// Where the caller is using the vault from, for looking for a session
+    /// again after waiting on another request's window.
+    pub used_from: Option<&'a std::path::Path>,
 }
 
 /// The values of `names` for one use, the way every use of a secret gets them:
@@ -872,6 +884,7 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
         refused_event,
         nothing,
         action,
+        used_from,
     } = u;
     let each_use: Vec<String> = names
         .iter()
@@ -885,87 +898,181 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
         })
         .cloned()
         .collect();
-    let mut via: Option<String> = None;
-    let mut keys = None;
-    if let Some((id, scope, delegated)) = found {
-        let uncovered = names.iter().any(|n| !scope.contains(n));
-        if !uncovered && each_use.is_empty() {
-            let mut sessions = ctx
-                .shared
-                .sessions
-                .lock()
-                .map_err(|_| error("the session table is unusable"))?;
-            if let Some(s) = sessions.get_mut(&id) {
-                keys = s.keys.narrowed(names).ok();
-                if keys.is_some() {
-                    s.uses += 1;
-                    via = Some(id);
+    let mut found = found;
+    loop {
+        let mut via: Option<String> = None;
+        let mut keys = None;
+        if let Some((id, scope, delegated)) = found.take() {
+            let uncovered = names.iter().any(|n| !scope.contains(n));
+            if !uncovered && each_use.is_empty() {
+                let mut sessions = ctx
+                    .shared
+                    .sessions
+                    .lock()
+                    .map_err(|_| error("the session table is unusable"))?;
+                if let Some(s) = sessions.get_mut(&id) {
+                    keys = s.keys.narrowed(names).ok();
+                    if keys.is_some() {
+                        s.uses += 1;
+                        via = Some(id);
+                    }
                 }
+            } else if delegated {
+                // A sub-agent asks for nothing beyond what it was given, and the
+                // person is not asked on its behalf.
+                let kind = if each_use.is_empty() {
+                    RefusalKind::OutOfScope
+                } else {
+                    RefusalKind::EachUse
+                };
+                let offending: Vec<String> = names
+                    .iter()
+                    .filter(|n| !scope.contains(n) || each_use.contains(n))
+                    .cloned()
+                    .collect();
+                ctx.journal(
+                    Entry::new(refused_event)
+                        .session(&id, None)
+                        .vault(&peek.vault_id)
+                        .names(&offending)
+                        .result("refused", Some(&format!("{kind:?}"))),
+                );
+                return Err(refused_names(
+                    kind,
+                    format!(
+                        "this delegated session does not cover these secrets, and a delegated \
+                         session cannot ask for more; {nothing}"
+                    ),
+                    issue_list(&offending, kind),
+                ));
             }
-        } else if delegated {
-            // A sub-agent asks for nothing beyond what it was given, and the
-            // person is not asked on its behalf.
-            let kind = if each_use.is_empty() {
-                RefusalKind::OutOfScope
-            } else {
-                RefusalKind::EachUse
-            };
-            let offending: Vec<String> = names
-                .iter()
-                .filter(|n| !scope.contains(n) || each_use.contains(n))
-                .cloned()
-                .collect();
-            ctx.journal(
-                Entry::new(refused_event)
-                    .session(&id, None)
-                    .vault(&peek.vault_id)
-                    .names(&offending)
-                    .result("refused", Some(&format!("{kind:?}"))),
-            );
-            return Err(refused_names(
-                kind,
-                format!(
-                    "this delegated session does not cover these secrets, and a delegated session \
-                     cannot ask for more; {nothing}"
-                ),
-                issue_list(&offending, kind),
-            ));
         }
-    }
 
-    let mut values: Vec<(String, SecretValue)> = Vec::with_capacity(names.len());
-    if let Some(keys) = &keys {
-        let bytes = vahta_vault::read_file(vault_path).map_err(from_vault)?;
-        for n in names {
-            match keys.open(&bytes, n, ctx.store()) {
-                Ok(v) => values.push((n.clone(), v)),
-                Err(Error::SessionStale) => {
-                    return Err(refused_names(
-                        RefusalKind::Stale,
-                        Error::SessionStale.to_string(),
-                        issue_list(std::slice::from_ref(n), RefusalKind::Stale),
-                    ));
+        if let Some(keys) = &keys {
+            let bytes = vahta_vault::read_file(vault_path).map_err(from_vault)?;
+            let mut values: Vec<(String, SecretValue)> = Vec::with_capacity(names.len());
+            for n in names {
+                match keys.open(&bytes, n, ctx.store()) {
+                    Ok(v) => values.push((n.clone(), v)),
+                    Err(Error::SessionStale) => {
+                        return Err(refused_names(
+                            RefusalKind::Stale,
+                            Error::SessionStale.to_string(),
+                            issue_list(std::slice::from_ref(n), RefusalKind::Stale),
+                        ));
+                    }
+                    Err(e) => return Err(from_vault(e)),
                 }
-                Err(e) => return Err(from_vault(e)),
             }
+            return Ok((values, via));
         }
-    } else {
-        let mut window = ctx.window(title)?;
-        let mut lines = lines_for(project, vault_path);
-        lines.extend(extra);
-        let mut panel = ctx.panel(title, lines);
-        panel.agent_note = label.and_then(sanitize_label);
-        let vault = unlock_as(ctx, window.as_mut(), vault_path, &panel, action)?;
-        for n in names {
-            let v = vault.get(n).map_err(|e| match e {
-                Error::NotFound(_) => unknown_name(n),
-                other => from_vault(other),
-            })?;
-            values.push((n.clone(), v));
-        }
-        window.close(None);
+
+        // The person is needed. One window at a time per vault (`gate.rs`):
+        // while another request has it open, wait, and take what its outcome
+        // gives this request, or the next turn.
+        ctx.gone.watch();
+        let key = share_key(ctx, title, &extra, label, names);
+        let turn = match ctx
+            .shared
+            .gates
+            .enter(&peek.vault_id, key.as_ref(), ctx.gone.cancel())
+        {
+            Admission::Turn(turn) => turn,
+            Admission::Granted(values) => return Ok((values, None)),
+            Admission::Refused(reply) => return Err(reply),
+            Admission::Gone => return Err(cancelled()),
+            Admission::Look => {
+                // A session may have been opened meanwhile; the usual lookup
+                // decides whether it covers this caller.
+                found = find_session(ctx, peek, used_from)?;
+                continue;
+            }
+        };
+        return match prompt_for(ctx, project, vault_path, title, extra, label, action, names) {
+            Ok(values) => {
+                turn.granted(key, &values);
+                Ok((values, None))
+            }
+            Err(reply) => {
+                // Only the person's own no is passed on to the others.
+                if matches!(reply, ClientReply::Cancelled { .. }) && !ctx.gone.is_gone() {
+                    turn.refused(key, &reply);
+                } else {
+                    turn.fell();
+                }
+                Err(reply)
+            }
+        };
     }
-    Ok((values, via))
+}
+
+/// The end of a run whose client went away before it could start: the journal
+/// says so (never "started"), and the reply, which nobody reads, says nothing
+/// was run.
+fn client_gone(
+    ctx: &Ctx<'_>,
+    vault_id: &[u8; 16],
+    names: &[String],
+    role: Option<&crate::role_ops::Active>,
+) -> ClientReply {
+    ctx.journal(
+        Entry::new("run")
+            .vault(vault_id)
+            .names(names)
+            .role(role.map(|a| a.role.name.as_str()))
+            .result(
+                "cancelled",
+                Some("the client went away before the command started; nothing was run"),
+            ),
+    );
+    cancelled()
+}
+
+/// What makes two one-use approvals the same question: the same vault (the
+/// gate), the same agent (its anchor), the same window text and note. `None`
+/// when the agent cannot be pinned down; such a request shares nothing.
+fn share_key(
+    ctx: &Ctx<'_>,
+    title: &str,
+    lines: &[String],
+    label: Option<&str>,
+    names: &[String],
+) -> Option<UseKey> {
+    let (anchor, _) = crate::output::anchor_of(ctx)?;
+    Some(UseKey(format!(
+        "{:?}|{title}|{lines:?}|{label:?}|{names:?}|{}",
+        anchor, ctx.connector
+    )))
+}
+
+/// The window for one use: the password, then the values of `names`.
+#[allow(clippy::too_many_arguments)]
+fn prompt_for(
+    ctx: &Ctx<'_>,
+    project: &vahta_vault::project::Project,
+    vault_path: &std::path::Path,
+    title: &str,
+    extra: Vec<String>,
+    label: Option<&str>,
+    action: Action,
+    names: &[String],
+) -> Flow<Vec<(String, SecretValue)>> {
+    let mut window = ctx.window(title)?;
+    let mut lines = lines_for(project, vault_path);
+    lines.extend(extra);
+    let mut panel = ctx.panel(title, lines);
+    panel.agent_note = label.and_then(sanitize_label);
+    let vault = unlock_as(ctx, window.as_mut(), vault_path, &panel, action)?;
+    let mut values: Vec<(String, SecretValue)> = Vec::with_capacity(names.len());
+    for n in names {
+        let v = vault.get(n).map_err(|e| match e {
+            Error::NotFound(_) => unknown_name(n),
+            other => from_vault(other),
+        })?;
+        values.push((n.clone(), v));
+    }
+    window.close(None);
+    Ok(values)
 }
 
 /// A program name as a message may carry it: one plain line.

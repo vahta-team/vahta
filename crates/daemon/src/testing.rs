@@ -266,6 +266,9 @@ pub mod scripted {
     //! Any answer may carry `"after_ms": N`: the window then holds the answer
     //! back for N milliseconds after the question is logged (with the script
     //! unlocked, so other windows go on), as a person who takes their time.
+    //! `{"hang": true}` never answers. A window the daemon withdraws (the
+    //! client that asked for it went away) ends a held or hanging question as
+    //! closed and logs `{"close": "withdrawn"}`.
     //!
     //! Every question is appended to the log (`VAHTA_TEST_SURFACE_LOG`) with
     //! what the window would have shown: its lines, warning and agent note, and
@@ -283,6 +286,9 @@ pub mod scripted {
 
     use crate::protocol::{Panel, Secret};
     use crate::surface::{DeviceWait, PromptSurface, SurfaceError, Window};
+
+    /// Set when the daemon withdraws the window.
+    type Cancelled = Arc<(Mutex<bool>, Condvar)>;
 
     struct Inner {
         script: PathBuf,
@@ -336,7 +342,7 @@ pub mod scripted {
         }
 
         /// The next answer, removed from the script.
-        fn pop(&self) -> Result<Value, SurfaceError> {
+        fn pop(&self, cancelled: &Cancelled) -> Result<Value, SurfaceError> {
             let guard = self.io.lock().map_err(|_| unavailable("poisoned"))?;
             let text = std::fs::read_to_string(&self.script)
                 .map_err(|_| unavailable("the scripted surface has no script"))?;
@@ -355,8 +361,27 @@ pub mod scripted {
             drop(guard);
             let answer: Value = serde_json::from_str(&first)
                 .map_err(|_| unavailable("a bad line in the script"))?;
-            if let Some(ms) = answer.get("after_ms").and_then(Value::as_u64) {
-                std::thread::sleep(Duration::from_millis(ms));
+            // `hang` never answers; `after_ms` answers late. Either ends at
+            // once, as a closed window, when the daemon withdraws the window
+            // (the client that asked for it went away).
+            let wait = if answer.get("hang").is_some() {
+                Some(Duration::from_secs(600))
+            } else {
+                answer
+                    .get("after_ms")
+                    .and_then(Value::as_u64)
+                    .map(Duration::from_millis)
+            };
+            if let Some(wait) = wait {
+                let (lock, cv) = &**cancelled;
+                let guard = lock.lock().map_err(|_| unavailable("poisoned"))?;
+                let (withdrawn, _) = cv
+                    .wait_timeout_while(guard, wait, |c| !*c)
+                    .map_err(|_| unavailable("poisoned"))?;
+                if *withdrawn {
+                    self.log(json!({"close": "withdrawn"}));
+                    return Err(SurfaceError::Closed);
+                }
             }
             Ok(answer)
         }
@@ -380,6 +405,7 @@ pub mod scripted {
             self.inner.log(json!({"open": title}));
             Ok(Box::new(ScriptedWindow {
                 inner: self.inner.clone(),
+                cancelled: Arc::default(),
                 pair_stopped: Arc::default(),
                 wait_stopped: Arc::default(),
             }))
@@ -388,6 +414,7 @@ pub mod scripted {
 
     struct ScriptedWindow {
         inner: Arc<Inner>,
+        cancelled: Cancelled,
         /// Set when the daemon says the phone has connected.
         pair_stopped: Arc<(Mutex<bool>, Condvar)>,
         /// Set when the daemon says the phone has answered an unlock.
@@ -403,7 +430,7 @@ pub mod scripted {
         ) -> Result<Option<Secret>, SurfaceError> {
             self.inner
                 .log(json!({"ask": kind, "prompt": prompt, "panel": panel_json(panel)}));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             if answer.get("cancel").is_some() {
                 return Ok(None);
             }
@@ -443,7 +470,7 @@ pub mod scripted {
         ) -> Result<Option<bool>, SurfaceError> {
             self.inner
                 .log(json!({"ask": "confirm", "prompt": question, "panel": panel_json(panel)}));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             if answer.get("yes").is_some() {
                 Ok(Some(true))
             } else if answer.get("no").is_some() {
@@ -466,7 +493,7 @@ pub mod scripted {
             self.inner.log(json!({
                 "ask": "choose", "prompt": question, "options": options, "panel": panel_json(panel)
             }));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             if answer.get("cancel").is_some() || answer.get("noanswer").is_some() {
                 return Ok(None);
             }
@@ -485,7 +512,7 @@ pub mod scripted {
         ) -> Result<Option<String>, SurfaceError> {
             self.inner
                 .log(json!({"ask": "text", "prompt": prompt, "panel": panel_json(panel)}));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             if answer.get("cancel").is_some() || answer.get("noanswer").is_some() {
                 return Ok(None);
             }
@@ -507,14 +534,14 @@ pub mod scripted {
             self.inner.log(json!({
                 "ask": "show", "prompt": what, "shown": value.expose(), "panel": panel_json(panel)
             }));
-            self.inner.pop().map(|_| ())
+            self.inner.pop(&self.cancelled).map(|_| ())
         }
 
         fn show_recovery_key(&mut self, panel: &Panel, key: &Secret) -> Result<bool, SurfaceError> {
             self.inner.log(json!({
                 "ask": "recovery", "shown": key.expose(), "panel": panel_json(panel)
             }));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             Ok(answer.get("ack").is_some())
         }
 
@@ -528,7 +555,7 @@ pub mod scripted {
             self.inner.log(json!({
                 "ask": "pairing", "qr": qr, "code": text, "panel": panel_json(panel)
             }));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             if answer.get("cancel").is_some() {
                 return Ok(false);
             }
@@ -569,7 +596,7 @@ pub mod scripted {
             self.inner.log(json!({
                 "ask": "device_wait", "device": device, "panel": panel_json(panel)
             }));
-            let answer = self.inner.pop()?;
+            let answer = self.inner.pop(&self.cancelled)?;
             match answer.get("devicewait").and_then(Value::as_str) {
                 Some("password") => return Ok(DeviceWait::Password),
                 Some("close") => return Ok(DeviceWait::Closed),
@@ -597,6 +624,17 @@ pub mod scripted {
                 let (lock, cv) = &*state;
                 if let Ok(mut s) = lock.lock() {
                     *s = true;
+                    cv.notify_all();
+                }
+            }))
+        }
+
+        fn canceller(&self) -> Option<Box<dyn FnOnce() + Send>> {
+            let state = self.cancelled.clone();
+            Some(Box::new(move || {
+                let (lock, cv) = &*state;
+                if let Ok(mut c) = lock.lock() {
+                    *c = true;
                     cv.notify_all();
                 }
             }))
