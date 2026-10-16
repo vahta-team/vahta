@@ -47,6 +47,7 @@ mod output_cmd;
 mod remote_cmd;
 mod role_cmd;
 mod run_cmd;
+mod scrub_cmd;
 mod session_cmds;
 mod setup;
 mod surface_cmd;
@@ -131,6 +132,7 @@ commands:
   join    install a package from the owner, or import a secret an editor sent
   hooks   `hooks pause` turns Vahta's hooks off for a while (the person approves)
   output  `output allow REF`: ask to see what was cut from a tool's output
+  scrub   `scrub --transcript`: take secrets out of your agent's transcript files
   init    create this project's vault
   add     store a new secret (typed in a window, never on the command line)
   reset   replace the value of a secret the vault has
@@ -468,6 +470,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("share") => members_cmd::run_share(&args[1..], env, stdout, stderr),
         Some("join") => members_cmd::run_join(&args[1..], env, stdout, stderr),
         Some("output") => output_cmd::run(&args[1..], env, stdout, stderr),
+        Some("scrub") => scrub_cmd::run(&args[1..], env, stdout, stderr),
         // The prompt window, started by the daemon; not listed in the help.
         Some("_surface") => surface_cmd::run(&args[1..]),
         // The hook watchdog, started by the daemon or at login; not listed either.

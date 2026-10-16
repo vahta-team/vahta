@@ -412,6 +412,7 @@ pub fn report(
         | ClientReply::Session(_)
         | ClientReply::Sessions { .. }
         | ClientReply::OutputSpans { .. }
+        | ClientReply::Transcripts(_)
         | ClientReply::OutputReleased { .. }
         | ClientReply::ToolDeny { .. }
         | ClientReply::InputNames { .. }

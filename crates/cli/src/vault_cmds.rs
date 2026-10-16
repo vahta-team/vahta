@@ -171,6 +171,36 @@ fn peek_verified(vault: &Path, store: &LocalStore) -> Result<(Peek, Verification
     Ok((peek, verified))
 }
 
+/// The secrets of `peek` whose value the daemon found in a transcript and that
+/// have not been reset since, with when. Read from the daemon's
+/// `exposed.json`; nothing there, or no data directory, is none.
+fn exposures(env: &Env, peek: &Peek) -> Vec<(String, u64)> {
+    let Some(dir) = &env.data_dir else {
+        return Vec::new();
+    };
+    let list = vahta_ipc::exposed::Exposed::load(&vahta_ipc::exposed::exposed_file(dir));
+    let vault = vahta_vault::hex_encode(&peek.vault_id);
+    let mut out: Vec<(String, u64)> = peek
+        .entries
+        .iter()
+        .filter_map(|e| list.when(&vault, &e.name).map(|at| (e.name.clone(), at)))
+        .collect();
+    out.sort();
+    out
+}
+
+/// "NAME: exposed in a transcript on DATE - rotate it: ...", one line.
+fn exposed_line(name: &str, at: u64) -> String {
+    format!(
+        "{name}: exposed in a transcript on {} - rotate it (change it at its source, then \
+         `vahta reset {name}`)",
+        crate::daemon_cmd::utc_text(at)
+            .split(' ')
+            .next()
+            .unwrap_or_default()
+    )
+}
+
 /// Which names have `vahta.toml` rules that the vault has not approved. Empty
 /// when the file is absent or unreadable (`check` reports an unreadable one):
 /// with nothing proposed there is nothing to call different.
@@ -326,6 +356,7 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
     let pending = rules_pending(&project, &peek);
     let role_pending = roles_pending(&project, &peek);
     let bound = |name: &str| peek.bindings.iter().any(|b| b.name == name);
+    let exposed = exposures(env, &peek);
 
     if json {
         let secrets: Vec<_> = entries
@@ -342,6 +373,12 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
                         .unwrap_or_default()
                 );
                 o["rules_pending"] = json!(pending.contains(&e.name));
+                let at = exposed
+                    .iter()
+                    .find(|(n, _)| n == &e.name)
+                    .map(|(_, at)| *at);
+                o["exposed"] = json!(at.is_some());
+                o["exposed_at"] = json!(at);
                 if let Kind::File { file_name } = &e.kind {
                     o["kind"] = json!("file");
                     o["file_name"] = json!(file_name);
@@ -407,6 +444,9 @@ pub fn run_list(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
                 let _ = writeln!(stdout, "{}", line.trim_end());
             }
         }
+        for (name, at) in &exposed {
+            let _ = writeln!(stdout, "EXPOSED  {}", exposed_line(name, *at));
+        }
         let lines = role_lines(&peek, &role_pending);
         if !lines.is_empty() {
             let _ = writeln!(stdout, "Roles:");
@@ -437,6 +477,7 @@ fn check_json(
     r: &CheckResult,
     pending: &[String],
     roles_pending: &[String],
+    exposed: &[(String, u64)],
     error: Option<&str>,
 ) -> String {
     let doc = json!({
@@ -449,6 +490,10 @@ fn check_json(
         "optional_absent": r.optional_absent,
         "rules_pending": pending,
         "roles_pending": roles_pending,
+        "exposed": exposed
+            .iter()
+            .map(|(name, at)| json!({"name": name, "at": at}))
+            .collect::<Vec<_>>(),
         "error": error,
     });
     serde_json::to_string_pretty(&doc).unwrap_or_default()
@@ -493,7 +538,15 @@ pub fn run_check(
             let _ = writeln!(
                 stdout,
                 "{}",
-                check_json(manifest_path, vault, &empty_result(), &[], &[], Some(msg))
+                check_json(
+                    manifest_path,
+                    vault,
+                    &empty_result(),
+                    &[],
+                    &[],
+                    &[],
+                    Some(msg)
+                )
             );
         } else {
             let _ = writeln!(stderr, "vahta check: error: {msg}");
@@ -530,7 +583,7 @@ pub fn run_check(
             let _ = writeln!(
                 stdout,
                 "{}",
-                check_json(None, None, &empty_result(), &[], &[], None)
+                check_json(None, None, &empty_result(), &[], &[], &[], None)
             );
         } else {
             let _ = writeln!(stdout, "No vahta.toml found - nothing to check.");
@@ -547,6 +600,7 @@ pub fn run_check(
     let mut rules_lines: Vec<String> = Vec::new();
     let mut role_pending: Vec<String> = Vec::new();
     let mut role_text: Vec<String> = Vec::new();
+    let mut exposed: Vec<(String, u64)> = Vec::new();
     let (names, vault_shown, pending): (Option<Vec<String>>, Option<&Path>, Vec<String>) =
         if has_vault {
             let Some(store) = store(env) else {
@@ -592,6 +646,7 @@ pub fn run_check(
                     }
                     role_pending = roles_pending(&project, &peek);
                     role_text = role_lines(&peek, &role_pending);
+                    exposed = exposures(env, &peek);
                     (
                         Some(peek.entries.iter().map(|e| e.name.clone()).collect()),
                         Some(vault_path.as_path()),
@@ -636,6 +691,7 @@ pub fn run_check(
                 &result,
                 &pending,
                 &role_pending,
+                &exposed,
                 None
             )
         );
@@ -674,6 +730,10 @@ pub fn run_check(
                  not approved; `vahta bind` shows and approves them)",
                 pending.join(", ")
             ));
+        }
+        // A warning, not a failure: the verdict below is about the contract.
+        for (name, at) in &exposed {
+            lines.push(format!("Exposed: {}", exposed_line(name, *at)));
         }
         if !role_text.is_empty() {
             lines.push("Roles:".to_string());

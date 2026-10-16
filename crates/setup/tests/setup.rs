@@ -479,8 +479,8 @@ fn a_claude_v3_install_without_allow_rules_is_outdated_and_upgrades_cleanly() {
     let mut env = t.env();
     env.hook = t.write("bin/vahta-hook", "");
     let mf = m("claude");
-    assert_eq!(
-        mf.setup_version, 5,
+    assert!(
+        mf.setup_version >= 5,
         "v5 added the 120 s timeout on the prompt hook"
     );
     commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();

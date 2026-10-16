@@ -21,6 +21,9 @@ pub enum Kind {
     AfterTool,
     /// A session has begun. Used to say that the installed setup is outdated.
     SessionStart,
+    /// A session has ended (Claude Code's `SessionEnd`). The daemon cleans the
+    /// transcript it marked while the session ran. No reply is ever sent.
+    SessionEnd,
     /// The harness is about to ask the person to approve a tool call (Codex's
     /// `PermissionRequest`). Read like `BeforeTool`; the only reply that means
     /// anything is an explicit allow.
@@ -36,6 +39,7 @@ impl Kind {
             Kind::Prompt => "prompt",
             Kind::AfterTool => "after_tool",
             Kind::SessionStart => "session_start",
+            Kind::SessionEnd => "session_end",
             Kind::PermissionRequest => "permission_request",
         }
     }
@@ -47,6 +51,7 @@ impl Kind {
             "prompt" => Some(Kind::Prompt),
             "after_tool" => Some(Kind::AfterTool),
             "session_start" => Some(Kind::SessionStart),
+            "session_end" => Some(Kind::SessionEnd),
             "permission_request" => Some(Kind::PermissionRequest),
             _ => None,
         }

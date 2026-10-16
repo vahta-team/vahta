@@ -271,7 +271,7 @@ fn on_boundaries(text: &str, mut start: usize, mut end: usize) -> (usize, usize)
 }
 
 /// A label from the hook, made fit for a window and the journal.
-fn clean_label(raw: &str) -> String {
+pub(crate) fn clean_label(raw: &str) -> String {
     sanitize_label(raw)
         .map(|l| l.chars().take(64).collect())
         .unwrap_or_else(|| "secret".to_string())

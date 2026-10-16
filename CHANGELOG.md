@@ -10,6 +10,16 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **Transcript scrub** ([docs/transcripts.md](docs/transcripts.md)): `vahta scrub
+  --transcript [--all]` takes the values the daemon holds (every encoded form, and
+  inside JSON text) and likely secrets out of Claude Code and Codex transcript files,
+  with `***REDACTED(NAME)***`, keeping every line valid JSON and unchanged lines
+  byte for byte. A running session's file is marked and cleaned at `SessionEnd`
+  (new Claude hook; setup version 6, and `permissions.allow` for the command).
+  Secrets found are marked exposed: `vahta list` and `vahta check` say to rotate
+  them until `vahta reset`. The hook's "reached the transcript" message now names
+  the command and says the current conversation stays contaminated.
+
 - **Input checked against known values.** A tool call (an MCP argument, a Write or
   Edit, a command or commit) that carries the value of a secret Vahta holds, in any
   encoding, is denied and the person is told the secret's name. A prompt that holds a

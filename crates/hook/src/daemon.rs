@@ -396,3 +396,17 @@ pub fn observed(tool: String, kinds: Vec<String>, likely: usize, possible: usize
         possible,
     });
 }
+
+/// Tell the daemon a session began or ended, so it can tell a running
+/// session's transcript from a closed one and clean the marked one at the end.
+/// Its answer does not matter.
+pub fn session_note(session: Option<String>, harness: &str, cwd: String, ended: bool) {
+    let home = dirs::home_dir();
+    let _ = ask(ClientRequest::TranscriptNote {
+        harness: harness.to_string(),
+        session,
+        cwd,
+        ended,
+        roots: vahta_ipc::protocol::TranscriptRoots::from_env(home.as_deref()),
+    });
+}

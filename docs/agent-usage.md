@@ -77,6 +77,13 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
    `vahta output allow REF --reason "..."` asks the person to show it
    ([hooks.md](hooks.md)).
 
+## A secret reached the transcript
+
+If the hook says a secret reached the transcript, tell the person to rotate it.
+`vahta scrub --transcript` removes it from the transcript files on disk (no
+window; see [transcripts.md](transcripts.md)). The conversation you are in
+still holds it until /clear or a new session.
+
 ## Using a vault from another project
 
 A tool vault (say `~/Projects/ai-tools`, holding a registry token) can serve

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 17;
+pub const PROTOCOL: u32 = 18;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -215,6 +215,7 @@ impl ClientRequest {
             | CheckInput { .. }
             | PromptAsk { .. }
             | OutputScan { .. }
+            | TranscriptNote { .. }
             | HookReport { .. } => None,
             Init { cwd }
             | Add { cwd, .. }
@@ -241,7 +242,8 @@ impl ClientRequest {
             | Members { cwd, .. }
             | UnlockRole { cwd, .. }
             | DelegateRole { cwd, .. }
-            | Role { cwd, .. } => Some(cwd),
+            | Role { cwd, .. }
+            | TranscriptScrub { cwd, .. } => Some(cwd),
             Connector {
                 cmd: ConnectorCmd::Run { cwd, .. },
             } => Some(cwd),
@@ -272,6 +274,72 @@ pub struct RuleArgs {
     /// The harnesses (`claude`, `codex`, `cursor`) that may launch the server
     /// that uses the secret; only for a connectors vault.
     pub harnesses: Vec<String>,
+}
+
+/// Where the harnesses keep their transcripts, as the client's environment
+/// says (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, else the home directory's `.claude`
+/// and `.codex`). `None`: that harness is not looked at.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TranscriptRoots {
+    pub claude: Option<String>,
+    pub codex: Option<String>,
+}
+
+impl TranscriptRoots {
+    /// From the environment of this process: `CLAUDE_CONFIG_DIR` and
+    /// `CODEX_HOME` if set, else `.claude` and `.codex` under `home`.
+    pub fn from_env(home: Option<&std::path::Path>) -> TranscriptRoots {
+        let var = |name: &str| {
+            std::env::var_os(name)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+        };
+        let text = |p: Option<std::path::PathBuf>| p.map(|p| p.display().to_string());
+        TranscriptRoots {
+            claude: text(var("CLAUDE_CONFIG_DIR").or_else(|| home.map(|h| h.join(".claude")))),
+            codex: text(var("CODEX_HOME").or_else(|| home.map(|h| h.join(".codex")))),
+        }
+    }
+}
+
+/// What became of one transcript file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptState {
+    /// Rewritten with the values taken out.
+    Cleaned,
+    /// Its session is running: found and marked, not rewritten. It is cleaned
+    /// when the session ends.
+    Deferred,
+    /// Not rewritten: it changed while being cleaned, or could not be written.
+    /// Run the command again.
+    Failed,
+}
+
+/// A transcript file that held something: counts and a path, never what.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptFile {
+    pub path: String,
+    pub harness: String,
+    /// Places a value Vahta holds was found (any form).
+    pub values: usize,
+    /// Places the detector found a secret-shaped value.
+    pub patterns: usize,
+    pub state: TranscriptState,
+}
+
+/// The answer to a [`ClientRequest::TranscriptScrub`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptReport {
+    /// How many transcript files were read.
+    pub scanned: usize,
+    /// Only the files that held something.
+    pub files: Vec<TranscriptFile>,
+    /// Names of the secrets found (now marked exposed), each once.
+    pub exposed: Vec<String>,
 }
 
 /// What a client may ask. No variant has a field for a value or a password:
@@ -491,6 +559,27 @@ pub enum ClientRequest {
         harness: String,
         cwd: String,
         signal: Signal,
+    },
+    /// `vahta scrub --transcript`: take the values the daemon holds for the
+    /// caller, and what the detector knows as a secret, out of the harnesses'
+    /// transcripts on disk. `all` is every project's, else the project of
+    /// `cwd`. The transcript of a running session is not rewritten; it is
+    /// marked, and cleaned when its session ends. Answers with
+    /// [`ClientReply::Transcripts`].
+    TranscriptScrub {
+        cwd: String,
+        all: bool,
+        roots: TranscriptRoots,
+    },
+    /// The hook: a session of `harness` began, or (`ended`) ended. At its end
+    /// the daemon cleans the transcript it marked. Fire and forget; `session`
+    /// is the harness's own id, which the transcript's file name carries.
+    TranscriptNote {
+        harness: String,
+        session: Option<String>,
+        cwd: String,
+        ended: bool,
+        roots: TranscriptRoots,
     },
     /// Ask the person to let the agent see what was cut out of a tool's
     /// output kept under `reference`. Only the agent whose hook made the
@@ -1166,6 +1255,8 @@ pub enum ClientReply {
     OutputReleased {
         text: String,
     },
+    /// The answer to a [`ClientRequest::TranscriptScrub`].
+    Transcripts(TranscriptReport),
     /// The answer to a `CheckRun` or `CheckHttp`: every named secret exists, is session-tier,
     /// and its approved rules allow this command.
     Allowed {},
