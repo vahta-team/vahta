@@ -1,5 +1,6 @@
-//! Command rules for a secret: the text syntax, the deny groups and the
-//! program-name normalisation. Pure; nothing here touches the file system.
+//! Command rules for a secret: the text syntax, the deny groups, the
+//! program-name normalisation and project-relative paths. Pure; nothing here
+//! touches the file system.
 //!
 //! A rule is one string. The first word is the program, any further words are
 //! an argv prefix the command must start with:
@@ -18,7 +19,127 @@
 //! They make a deny list a speed bump, not a wall: a program that is in no
 //! group, or a copy under another name, is not caught. `allow` is the guard.
 
-use crate::format::current::{ApprovedRule, HostRule, Program};
+use std::borrow::Cow;
+use std::path::{Component, Path};
+
+use crate::format::current::{ApprovedRule, HostRule, Program, RuleSet};
+
+// --- Paths inside the project ----------------------------------------------------------------
+
+/// What stands for the project root in a stored path: `$PROJECT` alone, or
+/// `$PROJECT/lib/x.py`. A rule that names a place inside the project is stored
+/// this way, so the vault says the same thing on every machine and does not
+/// carry the folder layout of the person who approved it; whoever evaluates the
+/// rules expands it from their own project root. An absolute path in a rule
+/// (every vault made before this) still works as it is.
+pub const PROJECT_ROOT: &str = "$PROJECT";
+
+/// Whether `p` is `$PROJECT` or `$PROJECT/…`.
+pub fn is_project_path(p: &str) -> bool {
+    p == PROJECT_ROOT
+        || p.strip_prefix(PROJECT_ROOT)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The stored form of the absolute `path` if it is at or below `root`, with
+/// normal components only; `None` otherwise.
+pub fn to_project_path(path: &str, root: &Path) -> Option<String> {
+    let rel = Path::new(path).strip_prefix(root).ok()?;
+    let mut out = PROJECT_ROOT.to_string();
+    for c in rel.components() {
+        match c {
+            Component::Normal(part) => {
+                out.push('/');
+                out.push_str(part.to_str()?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// `stored` as a path on this machine: `$PROJECT` forms are expanded from
+/// `root`, anything else is returned as it is.
+pub fn expand_project_path<'a>(stored: &'a str, root: &Path) -> Cow<'a, str> {
+    if !is_project_path(stored) {
+        return Cow::Borrowed(stored);
+    }
+    let rest = stored[PROJECT_ROOT.len()..].trim_start_matches('/');
+    if rest.is_empty() {
+        Cow::Owned(root.to_string_lossy().into_owned())
+    } else {
+        Cow::Owned(root.join(rest).to_string_lossy().into_owned())
+    }
+}
+
+/// `word` in its stored form if it is an absolute path inside one of `roots`.
+fn relative_word(word: &str, roots: &[&Path]) -> String {
+    if !Path::new(word).is_absolute() {
+        return word.to_string();
+    }
+    roots
+        .iter()
+        .find_map(|r| to_project_path(word, r))
+        .unwrap_or_else(|| word.to_string())
+}
+
+fn relative_words(text: &str, roots: &[&Path]) -> String {
+    text.split(' ')
+        .map(|w| relative_word(w, roots))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn relative_rule(rule: &mut ApprovedRule, roots: &[&Path]) {
+    if let Program::Path(p) = &mut rule.program {
+        *p = relative_word(p, roots);
+    }
+    for a in &mut rule.args {
+        *a = relative_word(a, roots);
+    }
+    rule.text = relative_words(&rule.text, roots);
+}
+
+/// Store the places of `rules` that are inside the project (one of `roots`:
+/// the project root as given and as the file system resolves it) in the
+/// project-relative form. Places elsewhere are left as they are.
+pub fn relativize(rules: &mut RuleSet, roots: &[&Path]) {
+    for r in rules.allow.iter_mut().chain(rules.deny.iter_mut()) {
+        relative_rule(r, roots);
+    }
+    for d in &mut rules.dirs {
+        d.path = relative_word(&d.path, roots);
+        // `PATH`, `PATH:ro` or `PATH:rw` as the person wrote it.
+        let (path, mode) = match d.text.rfind(':') {
+            Some(i) if matches!(&d.text[i..], ":ro" | ":rw") => d.text.split_at(i),
+            _ => (d.text.as_str(), ""),
+        };
+        d.text = format!("{}{mode}", relative_word(path, roots));
+    }
+}
+
+/// The absolute places in `rules` that are not in the project-relative form:
+/// the programs and folders a package carries from one machine to another,
+/// where they may not exist. Each once, in order.
+pub fn absolute_places(rules: &RuleSet) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut note = |p: &str| {
+        if Path::new(p).is_absolute() && !out.iter().any(|o| o == p) {
+            out.push(p.to_string());
+        }
+    };
+    for r in &rules.allow {
+        if let Program::Path(p) = &r.program {
+            note(p);
+        }
+        r.args.iter().for_each(|a| note(a));
+    }
+    for r in &rules.deny {
+        r.args.iter().for_each(|a| note(a));
+    }
+    rules.dirs.iter().for_each(|d| note(&d.path));
+    out
+}
 
 /// `@network`: programs whose job is to move bytes to another machine.
 pub const NETWORK: &[&str] = &[

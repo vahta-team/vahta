@@ -1,4 +1,4 @@
-//! Team members: the public key a person gives to the owner, the words that
+//! Team members: the public key a person gives to the owner, the digits that
 //! prove it arrived unchanged, the package the owner sends back and the single
 //! secret an editor sends to the owner.
 //!
@@ -6,16 +6,17 @@
 //! `enc_pk ‖ sign_pk ‖ checksum`, where the checksum is the first four bytes of
 //! SHA-256 over `"vahta/v1/member-key-check" ‖ enc_pk ‖ sign_pk`. It catches a
 //! mistyped or cut-off string; it is not a defence against an attacker, who
-//! can compute it. The words are.
+//! can compute it. The digits are.
 //!
-//! **The verification words.** Six words derived from SHA-256 over
-//! `"vahta/v1/member-words" ‖ enc_pk ‖ sign_pk`: 72 bits, twelve per word. The
-//! person who owns the key reads them to the owner over another channel, and
-//! the owner types them in. Someone who swaps the key string in the chat has to
-//! find another key pair with the same 72 bits, which is out of reach. The
-//! repository has no word list (the paper key is hex), so a word is two
-//! syllables, each a consonant and a vowel from 16 and 4 (64 syllables, 4096
-//! words), chosen to be easy to say and to spell.
+//! **The verification digits.** Six groups of four decimal digits derived from
+//! SHA-256 over `"vahta/v1/member-digits" ‖ enc_pk ‖ sign_pk`: the first 128 bits
+//! of the hash, modulo 10^24, which is about 79 bits. The person who owns the
+//! key reads them to the owner over another channel, and the owner types them
+//! in. Someone who swaps the key string in the chat has to find another key
+//! pair with the same 79 bits, which is out of reach. Digits, not words, because
+//! they are language-neutral: everyone reads `4821 3905` aloud in their own
+//! language, and there is no word list to translate or to mishear. Typing
+//! accepts any separators (or none).
 //!
 //! **The package** ([`build_package`]) is a format-5 vault file the owner signs
 //! and that holds one member's recipient entry and nothing about anyone else:
@@ -30,28 +31,39 @@
 //! **The transfer** ([`Transfer`]) is how an editor sends one secret to the
 //! owner: the secret as the editor's copy of the vault already holds it (sealed
 //! under its own key, which is wrapped for the owner's public key), plus its
-//! name, kind and tier, signed by the editor.
+//! name, kind and tier, signed by the editor. It also carries a **counter**, one
+//! more than the editor's last, which the owner records in the signed vault: an
+//! old transfer cannot be replayed, and no clock is involved. For a secret the
+//! owner does not have yet, the editor may **propose rules** as text
+//! ([`ProposedRules`]); they mean nothing until the owner reads them in the
+//! import window and approves, and are then built and signed by the owner like
+//! any other approval.
 
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::{self, KEY_LEN};
+use std::path::Path;
+
 use crate::format::current::{
-    self, Actor, Entry, Kind, Model, PasswordParams, Recipient, SLOT_PASSWORD, Sealed, Slot, Tier,
+    self, Actor, Entry, Kind, Model, PasswordParams, Recipient, SLOT_PASSWORD, Sealed, Slot, Team,
+    Tier,
 };
 use crate::vault::RecipientPublic;
 use crate::{Error, hex_encode, valid_name};
 
 const DOMAIN_KEY_CHECK: &[u8] = b"vahta/v1/member-key-check";
-const DOMAIN_WORDS: &[u8] = b"vahta/v1/member-words";
+const DOMAIN_DIGITS: &[u8] = b"vahta/v1/member-digits";
 const DOMAIN_FINGERPRINT: &[u8] = b"vahta/v1/member-fingerprint";
 const DOMAIN_TRANSFER: &[u8] = b"vahta/v1/transfer";
 
 /// What a key string starts with.
 pub const KEY_PREFIX: &str = "vh1";
-/// How many words are read out.
-pub const WORD_COUNT: usize = 6;
+/// How many groups of digits are read out.
+pub const GROUP_COUNT: usize = 6;
+/// How many digits one group has.
+const GROUP_DIGITS: usize = 4;
 
 /// The label of the placeholder slot of a package.
 pub const PACKAGE_SLOT_LABEL: &str = "vahta/package";
@@ -140,49 +152,49 @@ pub fn fingerprint(public: &RecipientPublic) -> String {
     hex_encode(&digest(DOMAIN_FINGERPRINT, public)[..6])
 }
 
-const CONSONANTS: &[u8; 16] = b"bdfghklmnprstvwz";
-const VOWELS: &[u8; 4] = b"aeio";
-
-fn syllable(i: u16) -> [char; 2] {
-    [
-        CONSONANTS[usize::from(i >> 2) & 15] as char,
-        VOWELS[usize::from(i & 3)] as char,
-    ]
+/// The six groups of `public`, in order, each four digits.
+pub fn verification_digits(public: &RecipientPublic) -> [String; GROUP_COUNT] {
+    let hash = digest(DOMAIN_DIGITS, public);
+    let mut head = [0u8; 16];
+    head.copy_from_slice(&hash[..16]);
+    // 128 bits reduced to 24 digits; the bias of the reduction is below 2^-40.
+    let mut n = u128::from_be_bytes(head) % 10u128.pow((GROUP_COUNT * GROUP_DIGITS) as u32);
+    let mut groups = [0u32; GROUP_COUNT];
+    for g in groups.iter_mut().rev() {
+        *g = (n % 10u128.pow(GROUP_DIGITS as u32)) as u32;
+        n /= 10u128.pow(GROUP_DIGITS as u32);
+    }
+    groups.map(|g| format!("{g:0width$}", width = GROUP_DIGITS))
 }
 
-/// The six words of `public`, in order.
-pub fn verification_words(public: &RecipientPublic) -> [String; WORD_COUNT] {
-    let hash = digest(DOMAIN_WORDS, public);
-    let mut bits = 0u32;
-    let mut acc = 0u32;
-    let mut bytes = hash.iter();
-    std::array::from_fn(|_| {
-        while bits < 12 {
-            acc = (acc << 8) | u32::from(*bytes.next().unwrap_or(&0));
-            bits += 8;
+/// The digits as one line, `4821 3905 ...`.
+pub fn digits_line(public: &RecipientPublic) -> String {
+    verification_digits(public).join(" ")
+}
+
+/// The value of a decimal digit in the scripts people are likely to type: ASCII,
+/// Arabic-Indic, Devanagari, Bengali, Thai and full-width digits.
+fn digit_value(c: char) -> Option<u32> {
+    const ZEROS: [u32; 7] = [0x30, 0x660, 0x6F0, 0x966, 0x9E6, 0xE50, 0xFF10];
+    let code = c as u32;
+    ZEROS
+        .iter()
+        .find_map(|z| code.checked_sub(*z).filter(|d| *d < 10))
+}
+
+/// Whether `typed` is the digits of `public`. Spaces and any other punctuation
+/// between (or inside) the groups are ignored, so `4821 3905`, `4821-3905` and
+/// `48213905` are the same; a letter, a missing digit or a wrong one is not.
+pub fn digits_match(public: &RecipientPublic, typed: &str) -> bool {
+    let mut got = String::new();
+    for c in typed.chars() {
+        match digit_value(c) {
+            Some(d) => got.push(char::from_digit(d, 10).unwrap_or('?')),
+            None if c.is_alphanumeric() => return false,
+            None => {}
         }
-        bits -= 12;
-        let w = ((acc >> bits) & 0xfff) as u16;
-        acc &= (1 << bits) - 1;
-        let (a, b) = (syllable(w >> 6), syllable(w & 63));
-        [a[0], a[1], b[0], b[1]].iter().collect()
-    })
-}
-
-/// The words as one line, `kabe lomi ...`.
-pub fn words_line(public: &RecipientPublic) -> String {
-    verification_words(public).join(" ")
-}
-
-/// Whether `typed` is the six words of `public`: case and the separators
-/// (spaces, commas, hyphens) are forgiven, a different word is not.
-pub fn words_match(public: &RecipientPublic, typed: &str) -> bool {
-    let got: Vec<String> = typed
-        .split(|c: char| c.is_whitespace() || c == ',' || c == '-')
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    got == verification_words(public)
+    }
+    got == verification_digits(public).concat()
 }
 
 // --- Packages -------------------------------------------------------------------------------
@@ -222,10 +234,17 @@ pub fn is_package(model: &Model) -> bool {
 /// The file `owner_key` signs for `recipient_id`: see the module
 /// documentation. The member's entry is certified again by the owner, so a
 /// member an Admin added still verifies without the Admin's entry.
+///
+/// The rules in it are the owner's approved ones with every place inside the
+/// project (one of `roots`) in the project-relative form, so a vault from
+/// before that form still works on the member's machine; the folders the secret
+/// may be used from (the owner's own layout, and no use to a member) are left
+/// out.
 pub(crate) fn build_package(
     model: &Model,
     recipient_id: &[u8; 16],
     owner_key: &SigningKey,
+    roots: &[&Path],
 ) -> Result<Vec<u8>, Error> {
     if is_package(model) {
         return Err(Error::Package);
@@ -266,6 +285,11 @@ pub(crate) fn build_package(
         .iter()
         .filter(|b| index.iter().any(|e| e.name == b.name))
         .cloned()
+        .filter_map(|mut b| {
+            crate::rules::relativize(&mut b, roots);
+            b.from.clear();
+            (!b.is_empty()).then_some(b)
+        })
         .collect();
     let package = Model {
         header: model.header.clone(),
@@ -280,6 +304,10 @@ pub(crate) fn build_package(
         remote: false,
         kind: model.kind,
         roles: Vec::new(),
+        team: Team {
+            owner_generation: model.team.owner_generation,
+            counters: Vec::new(),
+        },
     };
     let bytes = current::encode(&package, owner_key)?;
     // What leaves here must be what a reader accepts as a package.
@@ -293,7 +321,11 @@ pub(crate) fn build_package(
 #[derive(Debug, Clone)]
 pub struct FileInfo {
     pub vault_id: [u8; 16],
+    /// The file's own generation (an editor's local saves move it).
     pub generation: u64,
+    /// The generation as the owner saved the file: what packages are compared
+    /// by.
+    pub owner_generation: u64,
     pub owner: RecipientPublic,
     /// Whether this is a member package (see [`is_package`]).
     pub package: bool,
@@ -304,6 +336,8 @@ pub struct FileInfo {
     pub recipients: Vec<Recipient>,
     /// For each member (by id), the names of the secrets it holds a wrap for.
     pub holdings: Vec<([u8; 16], Vec<String>)>,
+    /// The owner successor chain the file carries, oldest first.
+    pub successors: Vec<current::Successor>,
 }
 
 /// Read, verify and describe `bytes`.
@@ -335,6 +369,7 @@ pub fn file_info(bytes: &[u8]) -> Result<FileInfo, Error> {
     Ok(FileInfo {
         vault_id: loaded.header().vault_id,
         generation: loaded.header().generation,
+        owner_generation: loaded.owner_generation(),
         owner: RecipientPublic {
             enc_pk: owner.enc_pk,
             sign_pk: owner.sign_pk,
@@ -343,6 +378,7 @@ pub fn file_info(bytes: &[u8]) -> Result<FileInfo, Error> {
         signed_by_owner: loaded.signer() == Actor::Owner,
         recipients,
         holdings,
+        successors: loaded.successors(),
     })
 }
 
@@ -353,6 +389,17 @@ impl FileInfo {
             .iter()
             .find(|(id, _)| id == recipient_id)
             .map_or(&[], |(_, names)| names.as_slice())
+    }
+
+    /// The records of the file's successor chain that lead from the owner key
+    /// `pinned` to this file's owner, if it is an earlier owner of this vault
+    /// (the chain's signatures were checked when the file was read). Empty
+    /// `None` when `pinned` is not in the chain.
+    pub fn successors_from(&self, pinned: &[u8; 32]) -> Option<&[current::Successor]> {
+        current::path_from(&self.successors, pinned).filter(|p| {
+            p.last()
+                .is_some_and(|l| l.new_owner_sign_pub == self.owner.sign_pk)
+        })
     }
 
     /// The entry whose public keys are `public`, if the file lists one.
@@ -366,12 +413,53 @@ impl FileInfo {
 // --- Transfer ---------------------------------------------------------------------------------
 
 const TRANSFER_MAGIC: &[u8; 8] = b"VAHTAXFR";
-const TRANSFER_VERSION: u16 = 1;
+const TRANSFER_VERSION: u16 = 2;
 const MAX_TRANSFER: usize = 3 << 20;
 
 /// Whether `bytes` start like a transfer file.
 pub fn is_transfer(bytes: &[u8]) -> bool {
     bytes.starts_with(TRANSFER_MAGIC)
+}
+
+/// How many rules, folders and hosts a proposal may name, and how long each is.
+const MAX_PROPOSED: usize = 64;
+const MAX_PROPOSED_TEXT: usize = 512;
+
+/// The rules an editor proposes for a secret it sends, as the text it would
+/// give `vahta bind`. Text, not resolved rules: the programs are found on the
+/// owner's machine when the owner approves, and the owner reads the result
+/// before anything is stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedRules {
+    pub category: Option<String>,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub dirs: Vec<String>,
+    /// `none`, `app` or `hosts:H[,H...]`.
+    pub net: Option<String>,
+}
+
+impl ProposedRules {
+    /// Whether it proposes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.category.is_none()
+            && self.allow.is_empty()
+            && self.deny.is_empty()
+            && self.dirs.is_empty()
+            && self.net.is_none()
+    }
+
+    /// Few items, each of a sensible length and free of control characters.
+    pub fn is_well_formed(&self) -> bool {
+        let text_ok = |t: &String| {
+            !t.is_empty() && t.len() <= MAX_PROPOSED_TEXT && !t.chars().any(char::is_control)
+        };
+        [&self.allow, &self.deny, &self.dirs]
+            .iter()
+            .all(|l| l.len() <= MAX_PROPOSED && l.iter().all(text_ok))
+            && self.category.iter().all(text_ok)
+            && self.net.iter().all(text_ok)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -381,11 +469,12 @@ pub(crate) struct TransferBody {
     pub name: String,
     pub kind: Kind,
     pub tier: Tier,
-    /// When the editor last changed the secret; an older transfer than the
-    /// owner's copy is refused.
-    pub updated: u64,
+    /// The sender's counter for this transfer: above every earlier one it
+    /// made, and above the highest the owner has accepted from it.
+    pub counter: u64,
     pub fmt: u16,
     pub sealed: Sealed,
+    pub proposed: Option<ProposedRules>,
 }
 
 pub(crate) fn encode_transfer(body: &TransferBody, signer: &SigningKey) -> Result<Vec<u8>, Error> {
@@ -441,6 +530,13 @@ pub(crate) fn decode_transfer(
     if !valid_name(&body.name) {
         return Err(Error::InvalidName);
     }
+    if body
+        .proposed
+        .as_ref()
+        .is_some_and(|p| p.is_empty() || !p.is_well_formed())
+    {
+        return Err(corrupt());
+    }
     Ok(body)
 }
 
@@ -487,23 +583,83 @@ mod tests {
     }
 
     #[test]
-    fn the_words_depend_on_both_keys_and_are_stable() {
-        let a = verification_words(&public(1, 2));
-        assert_eq!(a, verification_words(&public(1, 2)));
-        assert_ne!(a, verification_words(&public(1, 3)));
-        assert_ne!(a, verification_words(&public(2, 2)));
-        for w in &a {
-            assert_eq!(w.len(), 4);
+    fn the_digits_depend_on_both_keys_and_are_stable() {
+        let a = verification_digits(&public(1, 2));
+        assert_eq!(a, verification_digits(&public(1, 2)));
+        assert_ne!(a, verification_digits(&public(1, 3)));
+        assert_ne!(a, verification_digits(&public(2, 2)));
+        assert_eq!(a.len(), 6);
+        for g in &a {
+            assert!(g.len() == 4 && g.bytes().all(|b| b.is_ascii_digit()), "{g}");
         }
-        let line = words_line(&public(1, 2));
-        assert!(words_match(&public(1, 2), &line));
-        assert!(words_match(
-            &public(1, 2),
-            &line.to_uppercase().replace(' ', ",  ")
+        let line = digits_line(&public(1, 2));
+        assert_eq!(line.len(), 6 * 4 + 5);
+        let p = public(1, 2);
+        // Spaces, none at all, other separators and other scripts' digits.
+        assert!(digits_match(&p, &line));
+        assert!(digits_match(&p, &line.replace(' ', "")));
+        assert!(digits_match(
+            &p,
+            &format!("  {}\n", line.replace(' ', " - "))
         ));
-        assert!(!words_match(&public(1, 2), &words_line(&public(1, 3))));
-        let fewer: Vec<&str> = line.split(' ').take(5).collect();
-        assert!(!words_match(&public(1, 2), &fewer.join(" ")));
-        assert!(!words_match(&public(1, 2), ""));
+        assert!(digits_match(&p, &line.replace(' ', ",")));
+        let arabic: String = line
+            .chars()
+            .map(|c| {
+                c.to_digit(10)
+                    .map_or(c, |d| char::from_u32(0x660 + d).unwrap())
+            })
+            .collect();
+        assert!(digits_match(&p, &arabic));
+        // A different key, a changed or missing digit, a letter, nothing.
+        assert!(!digits_match(&p, &digits_line(&public(1, 3))));
+        assert!(!digits_match(&p, &line[..line.len() - 1]));
+        let mut off = line.clone().into_bytes();
+        let last = off.len() - 1;
+        off[last] = if off[last] == b'0' { b'1' } else { b'0' };
+        assert!(!digits_match(&p, &String::from_utf8(off).unwrap()));
+        assert!(!digits_match(&p, &format!("{line}0")));
+        assert!(!digits_match(
+            &p,
+            &line.replacen(|c: char| c.is_ascii_digit(), "o", 1)
+        ));
+        assert!(!digits_match(&p, ""));
+    }
+
+    #[test]
+    fn the_digits_use_the_whole_range_and_the_bits_are_spread() {
+        // 24 digits, leading zeros kept, and many keys give many different codes.
+        let mut seen = std::collections::HashSet::new();
+        for a in 0..=255u8 {
+            let d = verification_digits(&public(a, 7)).concat();
+            assert_eq!(d.len(), 24);
+            seen.insert(d);
+        }
+        assert_eq!(seen.len(), 256);
+    }
+
+    #[test]
+    fn proposed_rules_are_bounded() {
+        let ok = ProposedRules {
+            allow: vec!["git push".into()],
+            ..ProposedRules::default()
+        };
+        assert!(ok.is_well_formed() && !ok.is_empty());
+        assert!(ProposedRules::default().is_empty());
+        let long = ProposedRules {
+            allow: vec!["a".repeat(MAX_PROPOSED_TEXT + 1)],
+            ..ok.clone()
+        };
+        let many = ProposedRules {
+            allow: vec!["a".into(); MAX_PROPOSED + 1],
+            ..ok.clone()
+        };
+        let control = ProposedRules {
+            net: Some("none\u{7}".into()),
+            ..ok
+        };
+        for bad in [long, many, control] {
+            assert!(!bad.is_well_formed());
+        }
     }
 }

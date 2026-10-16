@@ -538,7 +538,7 @@ fn valid_dir(d: &DirRule) -> bool {
     valid_text(&d.text)
         && d.path.len() <= MAX_PATH_LEN
         && !d.path.contains('\0')
-        && portable_absolute(&d.path)
+        && (portable_absolute(&d.path) || crate::rules::is_project_path(&d.path))
         && !d.path.split(['/', '\\']).any(|c| c == "." || c == "..")
 }
 

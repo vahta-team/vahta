@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::format::current::Sealed;
-use crate::member::{self, TransferBody};
+use crate::member::{self, ProposedRules, TransferBody};
 
 /// Who sent a transfer: a member of the vault, by id and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,10 +19,15 @@ pub struct Transfer {
     pub kind: Kind,
     pub tier: Tier,
     pub from: TransferSender,
-    /// When the editor last changed it (the editor's clock).
-    pub updated: u64,
+    /// The sender's counter for this transfer (see `member::ProposedRules`'s
+    /// module); the owner records it when the transfer is applied.
+    pub counter: u64,
     /// The vault already has a secret of this name, which this would replace.
     pub replaces: bool,
+    /// The rules the editor proposes, as text. Only a secret the vault does
+    /// not have yet can take them (`replaces` is false); they are the owner's
+    /// to read and approve, and nothing here has applied them.
+    pub proposed: Option<ProposedRules>,
     value: SecretValue,
 }
 
@@ -45,11 +50,22 @@ impl Vault {
     /// The file to send `recipient_id`: owner-signed, holding that member's
     /// entry and only the secrets they hold. Owner only. It reflects the vault
     /// as it is in memory, so save first. See `member::build_package`.
-    pub fn package_for(&self, recipient_id: &[u8; 16]) -> Result<Vec<u8>, Error> {
+    ///
+    /// `roots` are the project root as given and as the file system resolves
+    /// it: rules naming places inside it are written project-relative (see
+    /// `rules::PROJECT_ROOT`) in the package.
+    pub fn package_for(
+        &self,
+        recipient_id: &[u8; 16],
+        roots: &[&std::path::Path],
+    ) -> Result<Vec<u8>, Error> {
         match &self.access {
-            Access::Owner(u) => {
-                member::build_package(&u.model, recipient_id, &current::owner_keys(&u.vk).sign)
-            }
+            Access::Owner(u) => member::build_package(
+                &u.model,
+                recipient_id,
+                &current::owner_keys(&u.vk).sign,
+                roots,
+            ),
             Access::Blocked { .. } => Err(Error::UpgradeNeedsRecoveryKey),
             Access::Recipient(_) => Err(Error::NotOwner),
         }
@@ -77,8 +93,21 @@ impl Vault {
     /// One secret for the owner: the sealed secret as this vault holds it
     /// (its key is wrapped for the owner's public key), with its name, kind
     /// and tier, signed by this member. An Admin or Editor only, and only a
-    /// secret it can read.
-    pub fn make_transfer(&self, name: &str) -> Result<Vec<u8>, Error> {
+    /// secret it can read. `counter` is this member's next transfer counter
+    /// (see `LocalStore::next_transfer_counter`); `proposed` are rules to
+    /// suggest to the owner for a secret it does not have yet.
+    pub fn make_transfer(
+        &self,
+        name: &str,
+        counter: u64,
+        proposed: Option<ProposedRules>,
+    ) -> Result<Vec<u8>, Error> {
+        if proposed
+            .as_ref()
+            .is_some_and(|p| p.is_empty() || !p.is_well_formed())
+        {
+            return Err(Error::Invalid("the proposed rules are not well formed"));
+        }
         let Access::Recipient(r) = &self.access else {
             return Err(Error::Invalid("only a member sends a secret to the owner"));
         };
@@ -109,12 +138,13 @@ impl Vault {
                 name: entry.name.clone(),
                 kind: entry.kind.clone(),
                 tier: entry.tier,
-                updated: entry.updated,
+                counter,
                 fmt: r.fmt,
                 sealed: Sealed {
                     wraps: Vec::new(),
                     ..sealed.clone()
                 },
+                proposed,
             },
             &crypto::signing_key(&r.sign_sk),
         )
@@ -122,8 +152,8 @@ impl Vault {
 
     /// Open and check a transfer: it is for this vault, an Admin or Editor of
     /// it signed it and has not expired, the secret opens with the owner key,
-    /// and it is newer than the owner's copy. Owner only. Nothing changes
-    /// until [`Vault::apply_transfer`].
+    /// and its counter is above the highest the owner has accepted from that
+    /// sender. Owner only. Nothing changes until [`Vault::apply_transfer`].
     pub fn read_transfer(&self, bytes: &[u8]) -> Result<Transfer, Error> {
         let Access::Owner(u) = &self.access else {
             return Err(Error::NotOwner);
@@ -150,12 +180,13 @@ impl Vault {
         if sender.expires_at.is_some_and(|t| now() >= t) {
             return Err(Error::MembershipExpired);
         }
-        let existing = u.model.index.iter().find(|e| e.name == body.name);
-        if existing.is_some_and(|e| e.updated >= body.updated) {
+        if body.counter <= u.model.team.counter_of(&sender.id) {
             return Err(Error::Invalid(
-                "this transfer is not newer than the secret already in the vault",
+                "this file is not newer than the last one imported from that sender (an older \
+                 or repeated file is refused)",
             ));
         }
+        let existing = u.model.index.iter().find(|e| e.name == body.name);
         let keys = current::owner_keys(&u.vk);
         let value = current::open_value(u.fmt, &body.vault_id, &keys.enc_sk, &body.sealed)?;
         Ok(Transfer {
@@ -166,22 +197,31 @@ impl Vault {
                 id: sender.id,
                 name: sender.name.clone(),
             },
-            updated: body.updated,
+            counter: body.counter,
             replaces: existing.is_some(),
+            proposed: body.proposed,
             value,
         })
     }
 
-    /// Store a checked transfer. A secret the vault already has keeps its kind
-    /// and tier (the sender changes the value, not the policy); a new one has
-    /// no approved rules, which are the owner's to give, and the sender keeps
-    /// access to it.
+    /// Store a checked transfer and record its counter. A secret the vault
+    /// already has keeps its kind, tier and rules (the sender changes the value,
+    /// not the policy); a new one has no approved rules until the owner gives
+    /// them (`set_bindings`, with the proposal if the owner approved it), and
+    /// the sender keeps access to it.
     pub fn apply_transfer(&mut self, t: &Transfer) -> Result<(), Error> {
         let (kind, tier) = match self.entries().iter().find(|e| e.name == t.name) {
             Some(e) => (e.kind.clone(), e.tier),
             None => (t.kind.clone(), t.tier),
         };
+        // The owner only: checked before anything changes.
+        self.owner_mut()?;
         self.set(&t.name, t.value.expose(), kind, tier)?;
-        self.grant(&t.name, &t.from.id)
+        self.grant(&t.name, &t.from.id)?;
+        self.owner_mut()?
+            .model
+            .team
+            .accept_counter(t.from.id, t.counter);
+        Ok(())
     }
 }
