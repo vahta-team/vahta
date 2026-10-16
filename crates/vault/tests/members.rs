@@ -431,3 +431,40 @@ fn a_package_carries_project_relative_rules_and_no_folders_of_the_owner() {
         "/home/owner/Projects/x/scripts"
     );
 }
+
+#[test]
+fn a_package_after_a_rekey_leads_from_the_old_owner_key_and_from_no_other() {
+    let (o, mut v, id, keys) = team(Role::Runner);
+    let first = v.package_for(&id, &[]).unwrap();
+    let old = file_info(&first).unwrap().owner;
+    assert!(
+        file_info(&first)
+            .unwrap()
+            .successors_from(&old.sign_pk)
+            .is_none()
+    );
+    let kek = v.password_kek(PW).unwrap();
+    v.rekey(&kek, vahta_vault::RecoveryPlan::Replace, vec![])
+        .unwrap();
+    v.save(&o.path, &o.store).unwrap();
+    let next = file_info(&v.package_for(&id, &[]).unwrap()).unwrap();
+    assert_ne!(next.owner, old);
+    let path = next
+        .successors_from(&old.sign_pk)
+        .expect("leads from the old key");
+    assert_eq!(path.last().unwrap().new_owner_sign_pub, next.owner.sign_pk);
+    assert!(next.successors_from(&[7; 32]).is_none());
+    assert!(next.successors_from(&next.owner.sign_pk).is_none());
+
+    // The member who pinned the old key refuses the new package until it
+    // consents, and then follows it; the owner generation keeps rising.
+    let (_dir, mpath, store) = installed(&first);
+    Vault::open_as_recipient(&mpath, &id, &keys, &store).unwrap();
+    std::fs::write(&mpath, v.package_for(&id, &[]).unwrap()).unwrap();
+    assert!(matches!(
+        Vault::open_as_recipient(&mpath, &id, &keys, &store),
+        Err(Error::OwnerChanged)
+    ));
+    Vault::open_as_recipient_accepting(&mpath, &id, &keys, &store, &mut |_| true).unwrap();
+    Vault::open_as_recipient(&mpath, &id, &keys, &store).unwrap();
+}

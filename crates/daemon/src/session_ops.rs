@@ -29,6 +29,13 @@ use vahta_auth::Action;
 /// The most a session may be asked to last, short of `forever`: a year.
 pub(crate) const MAX_SECS: u64 = 366 * 24 * 3600;
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 impl Shared {
     /// Journal sessions that have ended. Their keys are already overwritten.
     pub(crate) fn record_ended(&self, ended: Vec<Ended>) {
@@ -245,6 +252,21 @@ pub(crate) fn unlock_session(
         None => lasts,
     };
 
+    // A member's session never outlasts the membership: its end is the sooner
+    // of what was asked and the day access ends, and it is not extended.
+    let member_end = if peek.package {
+        crate::members_ops::membership_end(ctx, &vault_path)?
+    } else {
+        None
+    };
+    let lasts = match member_end {
+        Some(t) => {
+            let left = Duration::from_secs(t.saturating_sub(unix_now()));
+            Some(lasts.map_or(left, |l| l.min(left)))
+        }
+        None => lasts,
+    };
+
     let nodes = nodes_of(ctx);
     let anchor_index = anchor::select(&nodes, vahta_os::MIN_PID).map_err(|_| {
         refused(
@@ -260,6 +282,12 @@ pub(crate) fn unlock_session(
     let mut lines = lines_for(&project, &vault_path);
     lines.push(format!("Secrets: {}", names.join(", ")));
     lines.push(format!("Lasts: {}", describe(lasts)));
+    if let Some(t) = member_end {
+        lines.push(format!(
+            "Your membership ends {}; the session ends no later.",
+            vahta_ipc::duration::ymd(t)
+        ));
+    }
     lines.push(format!(
         "Belongs to: {anchor_exe} (pid {}), and everything it starts",
         anchor.pid
@@ -328,6 +356,7 @@ pub(crate) fn unlock_session(
         // A role caps how long one grant lasts, so it is not extended by a question.
         ask_at: deadline
             .filter(|_| role.as_ref().is_none_or(|r| r.max_for_secs.is_none()))
+            .filter(|_| member_end.is_none())
             .map(|d| ask_time(now, d)),
         extension_pending: false,
         label: panel.agent_note.clone(),

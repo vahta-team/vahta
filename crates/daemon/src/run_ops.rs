@@ -213,13 +213,14 @@ impl Steering {
         verdicts: &[(&vahta_vault::RuleSet, Verdict)],
         argv: &[String],
         program: Option<&std::path::Path>,
+        project_root: &std::path::Path,
         env: &[(String, String)],
         injected: &[&str],
     ) -> Steering {
         let baseline = vahta_policy::EnvBaseline::of(verdicts.iter().map(|(b, _)| *b));
         let extra = verdicts
             .iter()
-            .filter_map(|(b, _)| vahta_policy::extra_args(b, program, argv))
+            .filter_map(|(b, _)| vahta_policy::extra_args(b, program, argv, project_root))
             .max_by_key(|e| e.len())
             .map(command_text)
             .unwrap_or_default();
@@ -512,7 +513,14 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         _ => None,
     });
     let injected: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
-    let steering = Steering::of(&verdicts, &argv, program.as_deref(), &client_env, &injected);
+    let steering = Steering::of(
+        &verdicts,
+        &argv,
+        program.as_deref(),
+        &project.root,
+        &client_env,
+        &injected,
+    );
     if !failures.is_empty() {
         if !ask {
             let refused: Vec<String> = failures.iter().map(|(b, _)| b.name.clone()).collect();

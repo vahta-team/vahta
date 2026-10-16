@@ -99,7 +99,8 @@ fn parse_dir(text: &str, root: &Path) -> Result<DirRule, String> {
     if path_text.is_empty() || path_text.contains('\0') || shown.chars().any(char::is_control) {
         return Err(format!("directory `{shown}` is not a path"));
     }
-    let given = Path::new(path_text);
+    let expanded = rules::expand_project_path(path_text, root);
+    let given = Path::new(expanded.as_ref());
     let full = if given.is_absolute() {
         given.to_path_buf()
     } else {
@@ -182,7 +183,8 @@ fn resolve_allow(
             ProgramSpec::Bare(w) | ProgramSpec::Path(w) => w,
             ProgramSpec::Group(g) => return Err(format!("`{g}` is a group; groups are for deny")),
         };
-        let Some(found) = pathfind::locate(word, path, root) else {
+        let word = rules::expand_project_path(word, root);
+        let Some(found) = pathfind::locate(&word, path, root) else {
             return Err(format!(
                 "cannot find the program of the rule `{}` (bare names are looked up in your PATH, \
                  paths are relative to the project root)",
@@ -279,6 +281,12 @@ pub(crate) fn build(
         c.check(&rule_set)?;
     }
     let warnings = warnings_for(&resolved, &rule_set.dirs, root);
+    // Stored relative to the project, so the vault says the same on every
+    // machine (see `rules::PROJECT_ROOT`).
+    let mut rule_set = rule_set;
+    let canon = pathfind::canonical(root);
+    let roots: Vec<&Path> = canon.iter().map(PathBuf::as_path).chain([root]).collect();
+    rules::relativize(&mut rule_set, &roots);
     Ok(Built {
         rule_set,
         resolved,

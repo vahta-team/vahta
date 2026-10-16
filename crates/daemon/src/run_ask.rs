@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use vahta_vault::project::Project;
-use vahta_vault::rules::{normalize_program_name, parse_rule, runs_anything};
-use vahta_vault::{ApprovedRule, Peek, RuleSet, manifest};
+use vahta_vault::rules::{self, normalize_program_name, parse_rule, runs_anything};
+use vahta_vault::{ApprovedRule, Peek, Program, RuleSet, manifest};
 
 use vahta_policy::Verdict;
 
@@ -76,7 +76,19 @@ fn proposed_rule(
     if clash {
         return None;
     }
-    let approved = parsed.to_allow(program.to_string_lossy().into_owned());
+    let mut approved = parsed.to_allow(program.to_string_lossy().into_owned());
+    // Inside the project it is stored relative to it, like every approved rule.
+    let canon = crate::pathfind::canonical(project_root);
+    let roots: Vec<&Path> = canon
+        .iter()
+        .map(PathBuf::as_path)
+        .chain([project_root])
+        .collect();
+    if let Program::Path(p) = &mut approved.program
+        && let Some(rel) = roots.iter().find_map(|r| rules::to_project_path(p, r))
+    {
+        *p = rel;
+    }
     Some((text, approved))
 }
 

@@ -42,7 +42,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use vahta_vault::rules::{GROUPS, LAUNCHERS, in_group, normalize_program_name};
+use vahta_vault::rules::{
+    GROUPS, LAUNCHERS, expand_project_path, in_group, normalize_program_name,
+};
 use vahta_vault::{ApprovedRule, Network, Program, RuleSet};
 
 /// What is being run.
@@ -92,8 +94,24 @@ fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-fn args_match(rule: &ApprovedRule, argv: &[String]) -> bool {
-    argv.get(1..).is_some_and(|a| a.starts_with(&rule.args))
+/// The rule's arguments on this machine: `$PROJECT/…` words expanded from
+/// `root` (see `vahta_vault::rules::PROJECT_ROOT`).
+fn rule_args(rule: &ApprovedRule, root: &Path) -> Vec<String> {
+    rule.args
+        .iter()
+        .map(|a| expand_project_path(a, root).into_owned())
+        .collect()
+}
+
+fn args_match(rule: &ApprovedRule, argv: &[String], root: &Path) -> bool {
+    let args = rule_args(rule, root);
+    argv.get(1..).is_some_and(|a| a.starts_with(&args))
+}
+
+/// The project root as the file system resolves it, which is what resolved
+/// program paths are compared with.
+fn canonical_root(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// The names deny matching looks at: what the caller typed and what it
@@ -146,13 +164,18 @@ pub fn extra_args<'a>(
     rules: &RuleSet,
     program: Option<&Path>,
     argv: &'a [String],
+    project_root: &Path,
 ) -> Option<&'a [String]> {
     let resolved = program?;
+    let root = canonical_root(project_root);
     rules
         .allow
         .iter()
-        .filter(|r| matches!(&r.program, Program::Path(p) if Path::new(p) == resolved))
-        .filter(|r| args_match(r, argv))
+        .filter(|r| {
+            matches!(&r.program, Program::Path(p)
+                if Path::new(expand_project_path(p, &root).as_ref()) == resolved)
+        })
+        .filter(|r| args_match(r, argv, &root))
         .map(|r| r.args.len())
         .max()
         .map(|n| &argv[1 + n..])
@@ -167,6 +190,7 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
         };
     }
     let names = names_of(ctx.program, argv);
+    let root = canonical_root(ctx.project_root);
     for rule in &rules.deny {
         let hit = match &rule.program {
             Program::Group(g) => names.iter().any(|n| in_group(g, n)),
@@ -174,7 +198,7 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
             Program::Path(_) => false,
         };
         // A group has no arguments; a named rule may have an argv prefix.
-        if hit && (matches!(rule.program, Program::Group(_)) || args_match(rule, argv)) {
+        if hit && (matches!(rule.program, Program::Group(_)) || args_match(rule, argv, &root)) {
             return Verdict::Denied {
                 rule: rule.text.clone(),
             };
@@ -202,10 +226,12 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
     }
 
     if !rules.dirs.is_empty()
-        && !rules
-            .dirs
-            .iter()
-            .any(|d| inside(ctx.cwd, Path::new(&d.path)))
+        && !rules.dirs.iter().any(|d| {
+            inside(
+                ctx.cwd,
+                Path::new(expand_project_path(&d.path, &root).as_ref()),
+            )
+        })
     {
         let list: Vec<&str> = rules.dirs.iter().map(|d| d.text.as_str()).collect();
         return Verdict::Refused {
@@ -224,13 +250,18 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
             };
         };
         let by_rule = rules.allow.iter().any(|rule| match &rule.program {
-            Program::Path(p) => Path::new(p) == resolved && args_match(rule, argv),
+            Program::Path(p) => {
+                Path::new(expand_project_path(p, &root).as_ref()) == resolved
+                    && args_match(rule, argv, &root)
+            }
             _ => false,
         });
-        let by_dir = rules
-            .dirs
-            .iter()
-            .any(|d| inside(resolved, &PathBuf::from(&d.path)));
+        let by_dir = rules.dirs.iter().any(|d| {
+            inside(
+                resolved,
+                Path::new(expand_project_path(&d.path, &root).as_ref()),
+            )
+        });
         if !by_rule && !by_dir {
             return Verdict::NotAllowed {
                 why: if rules.allow.is_empty() {
@@ -336,12 +367,21 @@ mod tests {
         let git = Path::new("/usr/bin/git");
         let b = binding(vec![allow("git push", "/usr/bin/git")], vec![]);
         let a = argv(&["git", "push", "--force", "origin"]);
-        assert_eq!(extra_args(&b, Some(git), &a), Some(&a[2..]));
+        assert_eq!(
+            extra_args(&b, Some(git), &a, Path::new("/proj")),
+            Some(&a[2..])
+        );
         let exact = argv(&["git", "push"]);
-        assert_eq!(extra_args(&b, Some(git), &exact), Some(&exact[2..]));
+        assert_eq!(
+            extra_args(&b, Some(git), &exact, Path::new("/proj")),
+            Some(&exact[2..])
+        );
         // A bare rule allows any arguments: all of them are extra.
         let bare = binding(vec![allow("git", "/usr/bin/git")], vec![]);
-        assert_eq!(extra_args(&bare, Some(git), &a), Some(&a[1..]));
+        assert_eq!(
+            extra_args(&bare, Some(git), &a, Path::new("/proj")),
+            Some(&a[1..])
+        );
         // The rule that names more arguments wins.
         let both = binding(
             vec![
@@ -350,11 +390,20 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(extra_args(&both, Some(git), &a), Some(&a[2..]));
+        assert_eq!(
+            extra_args(&both, Some(git), &a, Path::new("/proj")),
+            Some(&a[2..])
+        );
         // No rule matched (another program, or arguments that differ).
-        assert_eq!(extra_args(&b, Some(Path::new("/bin/git")), &a), None);
-        assert_eq!(extra_args(&b, Some(git), &argv(&["git", "pull"])), None);
-        assert_eq!(extra_args(&b, None, &a), None);
+        assert_eq!(
+            extra_args(&b, Some(Path::new("/bin/git")), &a, Path::new("/proj")),
+            None
+        );
+        assert_eq!(
+            extra_args(&b, Some(git), &argv(&["git", "pull"]), Path::new("/proj")),
+            None
+        );
+        assert_eq!(extra_args(&b, None, &a, Path::new("/proj")), None);
     }
 
     #[test]
@@ -617,5 +666,63 @@ mod tests {
     fn the_empty_command_is_not_allowed() {
         let b = binding(vec![], vec![]);
         assert!(matches!(check(&b, None, &[]), Verdict::NotAllowed { .. }));
+    }
+
+    #[test]
+    fn project_relative_rules_are_expanded_from_the_runners_own_root() {
+        let rules = RuleSet {
+            name: "K".into(),
+            allow: vec![ApprovedRule {
+                text: "python3 $PROJECT/lib/x.py".into(),
+                program: Program::Path("/usr/bin/python3".into()),
+                args: vec!["$PROJECT/lib/x.py".into()],
+            }],
+            dirs: vec![DirRule {
+                text: "$PROJECT/scripts".into(),
+                path: "$PROJECT/scripts".into(),
+                write: true,
+            }],
+            network: Network::App,
+            ..RuleSet::default()
+        };
+        let run = |root: &str, cwd: &str, program: &str, words: &[&str]| {
+            let a = argv(words);
+            evaluate(
+                &rules,
+                &Ctx {
+                    program: Some(Path::new(program)),
+                    argv: &a,
+                    cwd: Path::new(cwd),
+                    project_root: Path::new(root),
+                    network_isolation: false,
+                },
+            )
+        };
+        // Two machines, two layouts, one vault.
+        for root in ["/home/owner/x", "/Users/ann/work/x"] {
+            let ok = run(
+                root,
+                &format!("{root}/scripts"),
+                "/usr/bin/python3",
+                &["python3", &format!("{root}/lib/x.py")],
+            );
+            assert!(ok.is_allowed(), "{root}: {ok:?}");
+            // The other machine's path does not match here.
+            let other = run(
+                root,
+                &format!("{root}/scripts"),
+                "/usr/bin/python3",
+                &["python3", "/elsewhere/lib/x.py"],
+            );
+            assert!(!other.is_allowed());
+        }
+        // A program inside the folder is allowed by the folder.
+        let v = run("/p/x", "/p/x/scripts", "/p/x/scripts/tool", &["tool"]);
+        assert!(v.is_allowed(), "{v:?}");
+        // The working directory outside the folder is refused.
+        assert!(matches!(
+            run("/p/x", "/p/x/src", "/p/x/scripts/tool", &["tool"]),
+            Verdict::Refused { .. }
+        ));
     }
 }
