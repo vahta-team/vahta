@@ -2380,6 +2380,7 @@ fn a_client_killed_while_an_unlock_window_is_open_takes_the_window_with_it() {
     assert!(s.sessions().is_empty());
 }
 
+#[cfg(target_os = "linux")]
 fn spawn_run(s: &Sandbox, argv_tail: &[&str]) -> std::process::Child {
     s.command(&s.project())
         .args(["run", "--secret", "ZETA", "--"])
@@ -2391,6 +2392,7 @@ fn spawn_run(s: &Sandbox, argv_tail: &[&str]) -> std::process::Child {
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn windows_opened(s: &Sandbox) -> usize {
     s.window_log()
         .iter()
