@@ -78,6 +78,23 @@ pub(crate) fn http_root() -> Option<Vec<u8>> {
     std::env::var_os("VAHTA_TEST_HTTP_ROOT").and_then(|p| std::fs::read(p).ok())
 }
 
+/// In a test build, the address every connection of the host relay goes to
+/// instead of the host's own (`VAHTA_TEST_RELAY_CONNECT`, an IP address), so a
+/// test can stand a local server in for an allowed host. Always `None` in the
+/// shipped build.
+pub(crate) fn relay_connect_override() -> Option<std::net::IpAddr> {
+    #[cfg(feature = "test-surface")]
+    {
+        std::env::var("VAHTA_TEST_RELAY_CONNECT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
 /// Where the commands of a login autostart (`systemctl`, `launchctl`, `reg`)
 /// go instead of being run. `None` in the shipped build: they are run. In a
 /// test build they are never run: they are appended, one line each, to the

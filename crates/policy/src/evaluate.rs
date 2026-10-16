@@ -24,8 +24,9 @@
 //!    * `allow` empty, `dirs` not empty: the program must be inside a
 //!      directory.
 //! 5. **network**: `Network::None` and `Network::Hosts` ask for a run with no
-//!    network ([`Verdict::Allowed::isolate_network`]); hosts are then reachable
-//!    only through `vahta http`. `Network::App` does not.
+//!    network ([`Verdict::Allowed::isolate_network`]); the daemon then gives a
+//!    `Network::Hosts` run a relay to the listed hosts on Linux (and `vahta http`
+//!    reaches them everywhere). `Network::App` does not.
 //!
 //! `write` on a directory is informational for now: nothing enforces read-only.
 //!
@@ -66,8 +67,9 @@ pub struct Ctx<'a> {
 pub enum Verdict {
     /// The command may use the secret.
     Allowed {
-        /// Start it with no network at all. Set by `Network::None` and
-        /// `Network::Hosts`, and only where that can be done.
+        /// Start it in a network namespace with no way out except, for
+        /// `Network::Hosts`, a relay to the listed hosts. Set by `Network::None`
+        /// and `Network::Hosts`, and only where that can be done.
         isolate_network: bool,
         /// Something the person or the journal should know: the rules ask for
         /// no network and this system cannot give it.
