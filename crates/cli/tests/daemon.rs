@@ -1710,6 +1710,45 @@ fn raw_request(s: &Sandbox, real: &Path, request: &ClientRequest) -> ClientReply
     serde_json::from_str(line).unwrap()
 }
 
+// The hook's tool-output scan finds a held value in its encoded forms too.
+#[test]
+fn tool_output_with_a_value_in_json_escaped_or_base64_form_is_cut() {
+    let s = Sandbox::new();
+    s.with_vault(&[("QUOTE", r#"fake-q\"uote\\one"#, "session")]);
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    // fake-q"uote\one: as JSON writes it, and in base64.
+    let texts = vec![
+        r#"{"out":"x fake-q\"uote\\one y"}"#.to_string(),
+        "k=ZmFrZS1xInVvdGVcb25l".to_string(),
+        "nothing here".to_string(),
+    ];
+    let reply = raw_request(
+        &s,
+        &s.project(),
+        &ClientRequest::OutputScan {
+            cwd: s.project().display().to_string(),
+            tool: "Bash".into(),
+            texts: texts.clone(),
+            spans: Vec::new(),
+            possible: Vec::new(),
+        },
+    );
+    let ClientReply::OutputSpans { spans, .. } = reply else {
+        panic!("{reply:?}");
+    };
+    let cut = |i: usize| {
+        spans
+            .iter()
+            .filter(|c| c.text == i)
+            .map(|c| texts[i][c.start..c.end].to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cut(0), [r#"fake-q\"uote\\one"#], "{spans:?}");
+    assert_eq!(cut(1), ["ZmFrZS1xInVvdGVcb25l"], "{spans:?}");
+    assert!(cut(2).is_empty());
+}
+
 // --- run and delegate -----------------------------------------------------------------------
 
 #[cfg(unix)]
