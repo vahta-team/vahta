@@ -266,7 +266,7 @@ pub(crate) fn unlock_session(
         match ctx
             .shared
             .gates
-            .enter(&peek.vault_id, &names, None, ctx.gone.cancel())
+            .enter(&peek.vault_id, None, ctx.gone.cancel())
         {
             Admission::Turn(turn) => break turn,
             Admission::Gone => return Err(cancelled()),
@@ -398,7 +398,7 @@ pub(crate) fn unlock_session(
         Ok(_) => turn.session_opened(),
         // Only the person's own no is passed on to those who waited.
         Err(reply @ ClientReply::Cancelled { .. }) if !ctx.gone.is_gone() => {
-            turn.refused(&names, reply)
+            turn.refused(None, reply)
         }
         Err(_) => turn.fell(),
     }

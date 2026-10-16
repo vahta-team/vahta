@@ -17,10 +17,11 @@
 //!   anchor) is served by that approval, because for the person it is the
 //!   same question asked twice. Any other waiter takes its own turn: another
 //!   command is another question.
-//! * **The person refused or closed the window**: the waiters whose secrets
-//!   are all among the ones just refused get the same refusal, so one "no"
-//!   does not bring up the window N times more. Waiters asking for other
-//!   secrets take their own turn.
+//! * **The person refused or closed the window**: the waiters whose question
+//!   is the same one (the same key as above) get the same refusal, so one "no"
+//!   does not bring up the same window N times more. A "no" may have been
+//!   about the command, not the secret, so any other waiter takes its own
+//!   turn.
 //! * **The request fell through** (its client went away, or an error): nobody
 //!   was answered; the next waiter takes the turn.
 //!
@@ -49,9 +50,9 @@ enum Outcome {
         key: UseKey,
         values: Vec<(String, SecretValue)>,
     },
-    /// The person said no to a window about `names`.
+    /// The person said no to the window for `key`.
     Refused {
-        names: Vec<String>,
+        key: Option<UseKey>,
         reply: ClientReply,
     },
     /// Nothing was decided.
@@ -114,12 +115,11 @@ impl Gates {
         Some(map.entry(*vault_id).or_default().clone())
     }
 
-    /// Ask for the turn on `vault_id` for a request about `names`. `key` says
+    /// Ask for the turn on `vault_id` for a request. `key` says
     /// what a one-use approval for this request would be an approval of.
     pub(crate) fn enter(
         &self,
         vault_id: &[u8; 16],
-        names: &[String],
         key: Option<&UseKey>,
         gone: &Cancel,
     ) -> Admission {
@@ -169,9 +169,10 @@ impl Gates {
                     Outcome::Granted { key: k, values } if key == Some(k) => {
                         Admission::Granted(values.clone())
                     }
-                    Outcome::Refused { names: n, reply } if names.iter().all(|x| n.contains(x)) => {
-                        Admission::Refused(reply.clone())
-                    }
+                    Outcome::Refused {
+                        key: Some(k),
+                        reply,
+                    } if key == Some(k) => Admission::Refused(reply.clone()),
                     _ => Admission::Look,
                 },
                 _ => Admission::Look,
@@ -211,9 +212,9 @@ impl Turn {
     }
 
     /// The person said no.
-    pub(crate) fn refused(self, names: &[String], reply: &ClientReply) {
+    pub(crate) fn refused(self, key: Option<UseKey>, reply: &ClientReply) {
         self.end(Outcome::Refused {
-            names: names.to_vec(),
+            key,
             reply: reply.clone(),
         });
     }

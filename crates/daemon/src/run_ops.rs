@@ -896,23 +896,22 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
         // gives this request, or the next turn.
         ctx.gone.watch();
         let key = share_key(ctx, title, &extra, label, names);
-        let turn =
-            match ctx
-                .shared
-                .gates
-                .enter(&peek.vault_id, names, key.as_ref(), ctx.gone.cancel())
-            {
-                Admission::Turn(turn) => turn,
-                Admission::Granted(values) => return Ok((values, None)),
-                Admission::Refused(reply) => return Err(reply),
-                Admission::Gone => return Err(cancelled()),
-                Admission::Look => {
-                    // A session may have been opened meanwhile; the usual lookup
-                    // decides whether it covers this caller.
-                    found = find_session(ctx, peek, used_from)?;
-                    continue;
-                }
-            };
+        let turn = match ctx
+            .shared
+            .gates
+            .enter(&peek.vault_id, key.as_ref(), ctx.gone.cancel())
+        {
+            Admission::Turn(turn) => turn,
+            Admission::Granted(values) => return Ok((values, None)),
+            Admission::Refused(reply) => return Err(reply),
+            Admission::Gone => return Err(cancelled()),
+            Admission::Look => {
+                // A session may have been opened meanwhile; the usual lookup
+                // decides whether it covers this caller.
+                found = find_session(ctx, peek, used_from)?;
+                continue;
+            }
+        };
         return match prompt_for(ctx, project, vault_path, title, extra, label, action, names) {
             Ok(values) => {
                 turn.granted(key, &values);
@@ -921,7 +920,7 @@ pub(crate) fn unlock_values(ctx: &Ctx<'_>, u: Unlock<'_>) -> Flow<Unlocked> {
             Err(reply) => {
                 // Only the person's own no is passed on to the others.
                 if matches!(reply, ClientReply::Cancelled { .. }) && !ctx.gone.is_gone() {
-                    turn.refused(names, &reply);
+                    turn.refused(key, &reply);
                 } else {
                     turn.fell();
                 }

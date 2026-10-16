@@ -91,7 +91,7 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   the window; the others wait. A session opened by that window serves the waiters it
   covers (the usual process-tree and scope lookup; the others get their own window
   afterwards); the same command asked again meanwhile shares the one-use approval; a
-  "no" is the answer for waiters asking for the same secrets; a different command is
+  "no" is the answer for waiters asking the same question; a different command is
   asked after the first, never beside it.
 
 ### Changed

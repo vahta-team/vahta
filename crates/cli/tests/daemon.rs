@@ -2356,23 +2356,40 @@ fn different_runs_at_once_get_their_windows_one_after_the_other() {
     assert_eq!(windows_opened(&s) - before, 2);
 }
 
-// One "no" is the answer for everyone who asked for the same secrets.
+// One "no" is the answer for everyone who asked the same question.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_refusal_in_the_window_is_the_answer_for_those_who_waited() {
+fn a_refusal_in_the_window_is_the_answer_for_identical_waiters() {
     let s = sandbox_with_secrets();
     let before = windows_opened(&s);
     s.script(&[r#"{"cancel":true,"after_ms":700}"#]);
-    let kids = vec![
-        spawn_run(&s, &["true"]),
-        spawn_run(&s, &["sh", "-c", "exit 0"]),
-    ];
+    let kids = vec![spawn_run(&s, &["true"]), spawn_run(&s, &["true"])];
     for k in kids {
         let out = k.wait_with_output().unwrap();
         assert_ne!(out.status.code(), Some(0));
     }
     assert_eq!(windows_opened(&s) - before, 1);
     assert!(!s.journal().contains("\"result\":\"started\""));
+}
+
+// A "no" may have been about the command: a different command is asked.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refusal_does_not_answer_a_different_command() {
+    let s = sandbox_with_secrets();
+    let before = windows_opened(&s);
+    s.script(&[
+        r#"{"cancel":true,"after_ms":600}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    let first = spawn_run(&s, &["true"]);
+    wait_until("the first window", 10, || windows_opened(&s) == before + 1);
+    let second = spawn_run(&s, &["sh", "-c", "exit 0"]);
+    let out1 = first.wait_with_output().unwrap();
+    assert_ne!(out1.status.code(), Some(0));
+    let out2 = second.wait_with_output().unwrap();
+    assert_eq!(out2.status.code(), Some(0), "{}", text(&out2.stderr));
+    assert_eq!(windows_opened(&s) - before, 2);
 }
 
 // A session opened by the window that a run waited on serves the run, when
