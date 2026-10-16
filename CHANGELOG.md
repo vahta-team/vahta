@@ -35,6 +35,17 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   direct parent is a harness it is bound to, and refuses at once, visibly in
   `vahta daemon status`, when there is no session. See docs/connectors.md.
 
+- **Connectors, second round.** `vahta unlock --connector` with no `--for` lasts
+  until the machine reboots (boot id, read in `vahta-os`) and the daemon stays up
+  with it; `--for 8h` limits it. A launch refused for want of a session raises a
+  desktop notification (at most one per harness per ten minutes). The output hook
+  now cuts a connector's key by value in any agent's tool output, while the
+  connectors session is open and for a while after a connector run. `vahta run
+  --connector --as NAME=VAR` renames the variable. An `allow` rule may be
+  "program + package" (`npx @pkg/server`) for `npx`, `bunx`, `uvx` and `pipx run`:
+  it matches the command with the runner's known flags before the package, a version
+  in the rule pins it, and no version in the rule accepts any plain version.
+
 - **Hardening of rules.** `vahta check` compares the rules a category implies, not
   the literal `vahta.toml`; a `vahta run` or `vahta http` refused by a secret's rules
   counts for the injection alarm (a refused network tool, shell or interpreter at

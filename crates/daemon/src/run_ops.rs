@@ -671,14 +671,17 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     }
     // The values are looked for in what the agent's tools print later, for
     // a while: a command may write one where the next tool reads it.
+    let given: Vec<(String, Vec<u8>)> = values
+        .iter()
+        .map(|(n, v)| (n.clone(), v.expose().to_vec()))
+        .collect();
     if let (Some((anchor, _)), Ok(mut outputs)) =
         (crate::output::anchor_of(ctx), ctx.shared.outputs.lock())
     {
-        let given: Vec<(String, Vec<u8>)> = values
-            .iter()
-            .map(|(n, v)| (n.clone(), v.expose().to_vec()))
-            .collect();
         outputs.note_run(anchor, &given, Instant::now());
+    }
+    if ctx.connector {
+        crate::output::note_connector_run(ctx, &given);
     }
     ctx.journal(
         Entry::new("run")
@@ -1302,6 +1305,7 @@ pub(crate) fn delegate(
         label: label.as_deref().and_then(sanitize_label),
         uses: 0,
         agent_role: eff_role.clone(),
+        boot: None,
     };
     let info = info_of(&session, now);
     sessions.add(session);

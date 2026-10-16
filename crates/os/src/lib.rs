@@ -122,6 +122,30 @@ pub fn command_line(pid: u32) -> Option<String> {
     sys::command_line(pid)
 }
 
+/// An identifier of this boot of the machine: the kernel's boot id on Linux,
+/// the boot time in seconds on macOS (`kern.boottime`) and Windows (now minus
+/// the tick count). `None` when it cannot be read. Compare two only with
+/// [`same_boot`]: the clock-derived ones jitter by a second or two.
+pub fn boot_id() -> Option<String> {
+    sys::boot_id()
+}
+
+/// Whether two [`boot_id`]s are of one boot. Equal ids are; two boot times
+/// (all digits) within [`BOOT_TOLERANCE_SECS`] of each other are, since a
+/// boot time computed from a clock drifts a little (sleep, clock steps).
+pub fn same_boot(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(x), Ok(y)) => x.abs_diff(y) <= BOOT_TOLERANCE_SECS,
+        _ => false,
+    }
+}
+
+/// How far apart two boot times of one boot may be.
+pub const BOOT_TOLERANCE_SECS: u64 = 30;
+
 /// Whether `pid` runs as the user this process runs as. False when it cannot
 /// be told: unknown is not mine.
 pub fn owned_by_me(pid: u32) -> bool {
@@ -334,6 +358,17 @@ pub fn stable_hash(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::same_boot;
+
+    #[test]
+    fn boots_are_told_apart() {
+        assert!(same_boot("a-b", "a-b"));
+        assert!(!same_boot("a-b", "a-c"));
+        assert!(same_boot("1000", "1002"));
+        assert!(!same_boot("1000", "5000"));
+        assert!(!same_boot("1000", "a-b"));
+    }
+
     use super::*;
 
     #[test]
