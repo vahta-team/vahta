@@ -79,6 +79,19 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   and the journal.
 - **CI** on Linux, macOS and Windows: format, clippy and the workspace tests.
 
+### Fixed
+
+- **Output scrubber: JSON-escaped values.** A secret with a quote, a backslash or a
+  control character that a program prints as JSON (`\"`, `\\`, `\n`, `\u000a`,
+  `\/`, `\uXXXX`) was not recognised, and the harness that decodes the JSON showed
+  it to the model. These spellings are now held as another form of the value
+  (`NAME (JSON-escaped)`) in `vahta run` and everywhere forms are used.
+- **Output scrubber: stall.** A value that starts or ends with a newline (or starts
+  with `}\n`) made the scrubber hold back the end of every message until the next
+  one, so an MCP server looked hung. The held tail is now let go after 25 ms with
+  no more output; a value written in pieces within that time is still redacted
+  whole, and one cut by a longer pause has the rest redacted.
+
 ### Changed
 
 - The Python key-amnesia moved to `legacy/` on this branch. It is maintained on
