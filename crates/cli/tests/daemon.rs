@@ -7584,10 +7584,9 @@ impl Sandbox {
             .args(["--harness", "claude", "--event", event])
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
-            // Where the hook looks for transcripts: on Windows the profile,
-            // not HOME, is the home directory.
+            // Windows takes the home directory from the profile, not `$HOME`.
             .env("USERPROFILE", self.root.join("home"))
-            .env("CLAUDE_CONFIG_DIR", self.claude_dir())
+            .env("CLAUDE_CONFIG_DIR", self.root.join("home/.claude"))
             .env("CODEX_HOME", self.root.join("home/.codex"))
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("VAHTA_HOOK_DISABLE")
