@@ -77,7 +77,7 @@ fn strip_root<'a>(path: &'a Path, root: &Path) -> Option<&'a Path> {
                 return None;
             }
         }
-        return Some(rest.as_path());
+        Some(rest.as_path())
     }
     #[cfg(not(windows))]
     None
