@@ -84,6 +84,10 @@ impl Sandbox {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_vahta"));
         cmd.current_dir(cwd)
             .env("HOME", self.root.join("home"))
+            // Windows takes the home directory from the profile, not `$HOME`.
+            .env("USERPROFILE", self.root.join("home"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("home/.claude"))
+            .env("CODEX_HOME", self.root.join("home/.codex"))
             .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env_remove("XDG_RUNTIME_DIR")
