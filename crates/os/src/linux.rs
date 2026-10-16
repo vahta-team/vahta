@@ -18,6 +18,13 @@ use crate::{Peer, ProcessId, walk_chain};
 /// reuse a pid while a pidfd to it is open. `None` on a kernel without pidfd.
 pub(crate) type Hold = Option<OwnedFd>;
 
+/// The kernel's id of this boot.
+pub(crate) fn boot_id() -> Option<String> {
+    let id = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// `(ppid, start time in clock ticks since boot)` from the text of
 /// `/proc/<pid>/stat`. The command name (field 2) is in parentheses and may
 /// itself hold spaces and parentheses, so the fields are counted from the last

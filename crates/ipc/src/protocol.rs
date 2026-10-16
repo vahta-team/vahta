@@ -723,6 +723,10 @@ pub enum ConnectorCmd {
         argv: Vec<String>,
         env: Vec<(String, String)>,
         name: String,
+        /// `(secret, variable)`: the server reads its key from a variable that
+        /// is not the secret's name.
+        #[serde(default)]
+        renames: Vec<(String, String)>,
         label: Option<String>,
     },
 }
@@ -978,6 +982,9 @@ pub struct SessionInfo {
     /// The agent role the session is limited to, if any.
     #[serde(default)]
     pub agent_role: Option<String>,
+    /// The connectors session that lasts until the machine reboots.
+    #[serde(default)]
+    pub until_reboot: bool,
 }
 
 /// Why a request was refused outright, before any window.
@@ -1195,6 +1202,12 @@ pub struct StatusInfo {
     /// The last refused launches of connector servers, newest last.
     #[serde(default)]
     pub connector_refusals: Vec<ConnectorRefusal>,
+    /// A connectors session is open.
+    #[serde(default)]
+    pub connectors_session: bool,
+    /// That session lasts until the machine reboots.
+    #[serde(default)]
+    pub connectors_until_reboot: bool,
 }
 
 // --- Surface messages --------------------------------------------------------------------

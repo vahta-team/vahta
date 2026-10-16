@@ -39,6 +39,9 @@ pub const EXTEND_BY: Duration = Duration::from_secs(30 * 60);
 /// How long before the end the person is asked.
 pub const EXTEND_LEAD: Duration = Duration::from_secs(2 * 60);
 
+/// The `anchor_exe` of the connectors session, which belongs to the daemon.
+pub const CONNECTORS_ANCHOR: &str = "connectors";
+
 /// What a session may do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -80,6 +83,9 @@ pub struct Session {
     /// session was opened. A child of a role session keeps it. Such a session
     /// runs and sends requests as the role says and does nothing else.
     pub agent_role: Option<AgentRole>,
+    /// The boot of the machine this session lasts until (the connectors
+    /// session opened with no end time); it ends when the boot id changes.
+    pub boot: Option<String>,
 }
 
 /// A session that has ended, its keys already overwritten.
@@ -365,6 +371,32 @@ impl Sessions {
         self.end_where(|_| true, reason)
     }
 
+    /// End the sessions that last until a reboot, when the machine is no
+    /// longer at the boot they were opened in (`current` is its boot id now).
+    pub fn end_other_boot(&mut self, current: &str) -> Vec<Ended> {
+        self.end_where(
+            |s| {
+                s.boot
+                    .as_deref()
+                    .is_some_and(|b| !vahta_os::same_boot(b, current))
+            },
+            "reboot",
+        )
+    }
+
+    /// The connectors session, if one is open: whether it lasts until a reboot.
+    pub fn connectors_state(&self) -> Option<bool> {
+        self.items
+            .iter()
+            .find(|s| s.parent.is_none() && s.anchor_exe == CONNECTORS_ANCHOR)
+            .map(|s| s.boot.is_some())
+    }
+
+    /// Whether any session lasts until a reboot.
+    pub fn any_until_reboot(&self) -> bool {
+        self.items.iter().any(|s| s.boot.is_some())
+    }
+
     /// End what has run out (a deadline, an anchor that is gone) and say which
     /// root sessions are due to be asked about extending.
     pub fn sweep(&mut self, now: Instant, alive: &dyn Fn(&ProcessId) -> bool) -> Sweep {
@@ -476,6 +508,7 @@ pub fn info_of(s: &Session, now: Instant) -> SessionInfo {
         uses: s.uses,
         label: s.label.clone(),
         agent_role: s.agent_role.as_ref().map(|r| r.name.clone()),
+        until_reboot: s.boot.is_some(),
     }
 }
 
@@ -568,6 +601,7 @@ mod tests {
             label: None,
             uses: 0,
             agent_role: None,
+            boot: None,
         }
     }
 
