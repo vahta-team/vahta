@@ -168,6 +168,8 @@ pub(crate) fn execute(
         names,
         program,
         isolate_network,
+        relay_hosts,
+        vault_id,
     } = prepared;
 
     // The file that was checked is the file that runs: not a second lookup of
@@ -187,10 +189,27 @@ pub(crate) fn execute(
         use std::os::unix::process::CommandExt;
         command.arg0(&argv[0]).process_group(0);
     }
-    if isolate_network
-        && (!vahta_os::network_isolation_available()
-            || vahta_os::isolate_network(&mut command).is_err())
-    {
+    // Named hosts get a relay (Linux); otherwise the namespace has no way out.
+    let mut host_sockets = None;
+    let isolated = isolate_network
+        && vahta_os::network_isolation_available()
+        && if relay_hosts.is_empty() {
+            vahta_os::isolate_network(&mut command).is_ok()
+        } else {
+            match vahta_os::isolate_network_hosts(&mut command, &relay_hosts) {
+                Ok(sockets) => {
+                    host_sockets = Some(sockets);
+                    true
+                }
+                // No host filter here (macOS, Windows cannot isolate at all):
+                // the plain isolation of before.
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    vahta_os::isolate_network(&mut command).is_ok()
+                }
+                Err(_) => false,
+            }
+        };
+    if isolate_network && !isolated {
         let message = format!(
             "refused: {} must run without network access, and this system cannot provide that",
             argv[0]
@@ -210,6 +229,28 @@ pub(crate) fn execute(
     drop(command);
     drop(env);
     let pid = child.id();
+    // The listeners the command's namespace made are accepted here until it ends.
+    let relay = host_sockets.and_then(|sockets| match sockets.take() {
+        Ok(listeners) => Some(crate::host_relay::start(
+            listeners,
+            relay_hosts
+                .iter()
+                .map(|(host, port)| crate::host_relay::Target {
+                    host: host.clone(),
+                    port: *port,
+                })
+                .collect(),
+            shared.journal.clone(),
+            crate::host_relay::Tag {
+                vault: vault_id,
+                names: names.clone(),
+            },
+        )),
+        Err(_) => {
+            end_command(pid);
+            None
+        }
+    });
 
     let launched = vahta_os::identity_of(pid).ok();
     if let (Some(id), Some(sid)) = (launched, &session)
@@ -270,6 +311,9 @@ pub(crate) fn execute(
         let _ = status_tx.send(child.wait());
     });
     let status = status_rx.recv();
+    if let Some(relay) = relay {
+        relay.finish();
+    }
 
     // The command has ended; its output is let drain for a little.
     let deadline = Instant::now() + DRAIN;

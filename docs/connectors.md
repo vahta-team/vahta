@@ -43,6 +43,11 @@ not apply to this vault. Change them later with
 window); remove a connector with `vahta remove --connector NAME`. To replace a
 key, remove it and add it again.
 
+A server that must call its own API gets its hosts with the other rules, for
+example `--net hosts:api.github.com` on `vahta add|bind --connector`. On Linux
+the server then runs with no network except TLS to those hosts (see
+[agent-usage.md](agent-usage.md)); on macOS and Windows that is not enforced.
+
 `vahta list --connector` shows each connector, its harnesses and command, and the
 launches that were refused; `vahta check --connector` fails if one has no rules.
 
