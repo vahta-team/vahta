@@ -7388,6 +7388,10 @@ impl Sandbox {
             .args(["--harness", "claude", "--event", event])
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
+            // Windows takes the home directory from the profile, not `$HOME`.
+            .env("USERPROFILE", self.root.join("home"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("home/.claude"))
+            .env("CODEX_HOME", self.root.join("home/.codex"))
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("VAHTA_HOOK_DISABLE")
             .env("VAHTA_DATA_DIR", self.root.join("data"))
