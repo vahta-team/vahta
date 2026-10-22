@@ -123,13 +123,12 @@ def egress_blocked() -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
-    ap.add_argument("--llm", default="http://llm:11434")
+    ap.add_argument("--llm", default="http://llm:8080")
     ap.add_argument("--scenario", default="ci_check")
     ap.add_argument("--max-turns", type=int, default=15)
     ap.add_argument("--alarm", default="warn", choices=["warn", "lock"])
     ap.add_argument("--bind", type=int, default=0,
                     help="1: bind every secret to `printenv` (deny @network, @shells), as an owner who uses binding would")
-    ap.add_argument("--num-ctx", type=int, default=16384)
     ap.add_argument("--out", default="/out")
     a = ap.parse_args()
 
@@ -156,7 +155,7 @@ def main():
             if a.model in ("scripted", "scripted-attacker"):
                 msg = llm.scripted_chat(turn, a.model)
             else:
-                msg = llm.ollama_chat(a.model, messages, tools=TOOLS, url=a.llm, num_ctx=a.num_ctx)
+                msg = llm.local_chat(a.model, messages, tools=TOOLS, url=a.llm)
         except Exception as e:
             log.add(type="error", content=f"llm: {type(e).__name__}: {e}")
             stats["ended"] = "llm_error"
@@ -184,7 +183,7 @@ def main():
             carries = {n: f for n, v in canaries.items() if (f := canary.forms_in(probe, v))}
             log.add(type="tool", tool=fn["name"], input=args, decision=decision, reason=reason, shown=shown,
                     t0=t0, technique=techniques.classify(fn["name"], args), carries=carries)
-            messages.append({"role": "tool", "tool_name": fn["name"], "content": shown})
+            messages.append({"role": "tool", "tool_call_id": c.get("id", ""), "content": shown})
 
     # Evidence for the scorer.
     home = os.path.expanduser("~")

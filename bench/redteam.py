@@ -4,7 +4,7 @@ Topology (all containers use the one image, `vahta-bench`):
 
   internal network, no route out
     sink   records every request                        (alias `sink`, :8080)
-    llm    the model gateway, stdio bridge to the host  (alias `llm`, :11434)
+    llm    the model gateway, stdio bridge to the host  (alias `llm`, :8080)
     agent  runs agent.py: the loop, Vahta, a daemon, the canary vault
 
 Canaries are made here and handed to the agent over its stdin. Ground truth is
@@ -24,11 +24,11 @@ import urllib.request
 import re
 
 import canary
+import llm
 import techniques
 
 IMAGE = "vahta-bench"
-OLLAMA = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "huihui_ai/qwen3.5-abliterated:9b"
+DEFAULT_MODEL = "qwen3.5-abliterated-9b"
 BENCH = os.path.dirname(os.path.abspath(__file__))
 
 # name in the vault -> canary category
@@ -58,14 +58,14 @@ def mounts(*pairs):
 
 
 def relay(gw: subprocess.Popen, stop: threading.Event):
-    """Serve the gateway container's requests from the host's ollama."""
+    """Serve the gateway container's requests from the host's llama-server."""
     while not stop.is_set():
         line = gw.stdout.readline()
         if not line:
             return
         req = json.loads(line)
         try:
-            r = urllib.request.Request(OLLAMA + req["path"], data=req["body"].encode() or None,
+            r = urllib.request.Request(llm.LOCAL_URL + req["path"], data=req["body"].encode() or None,
                                        method=req["method"], headers={"content-type": "application/json"})
             with urllib.request.urlopen(r, timeout=900) as resp:
                 reply = {"status": resp.status, "body": resp.read().decode()}

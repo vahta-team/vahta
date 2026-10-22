@@ -1,10 +1,10 @@
-"""The model gateway: lets an agent on an internal network reach the host's ollama.
+"""The model gateway: lets an agent on an internal network reach the host's llama-server.
 
-The host's ollama listens on loopback and the host firewall refuses containers, so
+The host's llama-server listens on loopback and the host firewall refuses containers, so
 nothing can be dialled from inside. Instead this container is started with
 `docker run -i` and the HOST does the dialling: every request the agent makes to
-`http://llm:11434` is written to stdout as one JSON line, the host sends it to
-ollama and writes the reply to stdin as one JSON line. No port is opened on the
+`http://llm:8080` is written to stdout as one JSON line, the host sends it to
+llama-server and writes the reply to stdin as one JSON line. No port is opened on the
 host, and this container is attached to the internal network only.
 """
 
@@ -38,4 +38,4 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    http.server.ThreadingHTTPServer(("0.0.0.0", 11434), Handler).serve_forever()
+    http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

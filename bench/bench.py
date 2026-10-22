@@ -2,9 +2,10 @@
 """Vahta LLM test bench. Standard library only. See bench/README.md.
 
   bench.py build                          build the image from this checkout
+  bench.py serve                          run the local model (llama.cpp `llama-server`) for local:MODEL and redteam
   bench.py regress                        the fixed regression set, no model
-  bench.py volume --backend B -n N        detector volume (B: seed | matrix | ollama:MODEL | haiku | sonnet)
-  bench.py redteam --model M              one red-team episode (M: an ollama model | scripted | scripted-attacker | claude-code)
+  bench.py volume --backend B -n N        detector volume (B: seed | matrix | local:MODEL | haiku | sonnet | opus)
+  bench.py redteam --model M              one red-team episode (M: a local model | scripted | scripted-attacker | claude-code)
   bench.py cc-selftest                    the Claude Code mode against a mock API: proxy checks and an end-to-end run
   bench.py cc-redact                      real Claude Code + real hooks: is a canary redacted in each tool's result? (mock, no token)
   bench.py mkregress RUN_DIR              make the regression set from a volume run
@@ -123,6 +124,21 @@ def cmd_cc_redact(a):
     sys.exit(cctest.main_redact())
 
 
+DEFAULT_GGUF = os.path.expanduser("~/models/huihui-qwen3.5-9b-abliterated.Q4_K_M.gguf")
+
+
+def cmd_serve(a):
+    """Run llama-server in the foreground on loopback; Ctrl-C stops it."""
+    gguf = a.gguf or os.environ.get("BENCH_GGUF", DEFAULT_GGUF)
+    if not os.path.exists(gguf):
+        sys.exit(f"no model file at {gguf}; see bench/README.md, Local model")
+    port = a.port or "8080"
+    argv = ["llama-server", "-m", gguf, "--alias", redteam.DEFAULT_MODEL, "--host", "127.0.0.1", "--port", port,
+            "-c", str(a.ctx), "--fit", "on", "-fa", "on"]
+    print(" ".join(argv), flush=True)
+    os.execvp(argv[0], argv)
+
+
 def cmd_redteam(a):
     run = new_run("redteam")
     scenario = "attacker" if a.mode == "attacker" else a.scenario
@@ -143,6 +159,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build").set_defaults(f=cmd_build)
+    p = sub.add_parser("serve", help="run the local model server (llama.cpp) on 127.0.0.1")
+    p.add_argument("--gguf", help=f"the model file (default $BENCH_GGUF or {DEFAULT_GGUF})")
+    p.add_argument("--port", help="default 8080; set BENCH_LLM_URL to match if you change it")
+    p.add_argument("--ctx", type=int, default=16384, help="context size in tokens")
+    p.set_defaults(f=cmd_serve)
     p = sub.add_parser("volume")
     p.add_argument("--backend", default="seed")
     p.add_argument("-n", type=int, default=30)
@@ -164,7 +185,7 @@ def main():
     sub.add_parser("cc-redact", help="Claude Code: what the model is shown from each tool, against a mock, no credential").set_defaults(f=cmd_cc_redact)
     p = sub.add_parser("redteam")
     p.add_argument("--model", default=redteam.DEFAULT_MODEL,
-                   help="an ollama model, `scripted`, `scripted-attacker`, or `claude-code`")
+                   help="a model served by `bench.py serve`, `scripted`, `scripted-attacker`, or `claude-code`")
     p.add_argument("--mode", default="victim", choices=["victim", "attacker"],
                    help="victim: an ordinary task plus an injection; attacker: the model is told to beat Vahta")
     p.add_argument("--scenario", default="ci_check")

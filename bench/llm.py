@@ -2,9 +2,12 @@
 
 Backends are named on the command line:
 
-  ollama:MODEL        the host's ollama (native /api/chat, thinking off), e.g. ollama:huihui_ai/qwen3.5-abliterated:9b
-  haiku               claude-haiku-4-5-20251001 through the Anthropic API
+  local:MODEL         the host's llama.cpp `llama-server` (OpenAI-style
+                      /v1/chat/completions, thinking off), e.g. local:qwen3.5-abliterated-9b;
+                      `ollama:MODEL` is accepted as the old spelling of the same backend
+  haiku               claude-haiku-5-5 through the Anthropic API
   sonnet              claude-sonnet-5-5 through the Anthropic API
+  opus                claude-opus-5-5 through the Anthropic API
 
 The Anthropic key is read from the environment variable ANTHROPIC_API_KEY and
 from nowhere else. Run the bench with `vahta run --secret ANTHROPIC_API_KEY --
@@ -15,11 +18,14 @@ import json
 import os
 import urllib.request
 
-OLLAMA_URL = "http://127.0.0.1:11434"
+# The local model server: `python3 bench/bench.py serve` starts llama-server here.
+LOCAL_URL = os.environ.get("BENCH_LLM_URL", "http://127.0.0.1:8080")
+LOCAL_PREFIXES = ("local:", "ollama:")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODELS = {
-    "haiku": "claude-haiku-4-5-20251001",
+    "haiku": "claude-haiku-5-5",
     "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
 }
 
 
@@ -33,18 +39,32 @@ def _post(url: str, body: dict, headers: dict, timeout: float) -> dict:
         return json.load(resp)
 
 
-def ollama_chat(model, messages, tools=None, url=OLLAMA_URL, temperature=0.8, timeout=600, num_predict=1024, num_ctx=8192):
-    """One non-streaming chat turn. Returns the assistant message dict."""
+def local_chat(model, messages, tools=None, url=LOCAL_URL, temperature=0.8, timeout=600, max_tokens=1024):
+    """One non-streaming chat turn against llama-server. Returns the assistant
+    message dict in the OpenAI shape: `content` is a string, and each tool call
+    has an `id` and `function.arguments` as a JSON string."""
     body = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "think": False,
-        "options": {"temperature": temperature, "num_ctx": num_ctx, "num_predict": num_predict},
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     if tools:
         body["tools"] = tools
-    return _post(url + "/api/chat", body, {}, timeout)["message"]
+    msg = _post(url + "/v1/chat/completions", body, {}, timeout)["choices"][0]["message"]
+    msg["content"] = msg.get("content") or ""
+    msg.pop("reasoning_content", None)
+    return msg
+
+
+def local_model(backend: str):
+    """The model name of a `local:` (or old `ollama:`) backend, or None."""
+    for p in LOCAL_PREFIXES:
+        if backend.startswith(p):
+            return backend[len(p):]
+    return None
 
 
 def anthropic_chat(alias, system, user, temperature=1.0, max_tokens=1024, timeout=120):
@@ -67,9 +87,9 @@ def anthropic_chat(alias, system, user, temperature=1.0, max_tokens=1024, timeou
 
 def complete(backend: str, system: str, user: str, temperature=0.9) -> str:
     """One prompt in, text out, for the case generator."""
-    if backend.startswith("ollama:"):
-        msg = ollama_chat(
-            backend[len("ollama:"):],
+    if (model := local_model(backend)) is not None:
+        msg = local_chat(
+            model,
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             temperature=temperature,
         )
