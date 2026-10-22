@@ -70,6 +70,11 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   process's session covers its other servers and ends with it. See
   docs/connectors.md.
 
+- **The hook starts the daemon** when none answers: the `vahta` beside the hook
+  binary only (never through `PATH` or the working directory), waiting at most
+  1.2 s, giving up after 3 failed starts in a row (count in the runtime directory,
+  cleared when a daemon answers). Without it in time the call is strict, as before.
+
 - **`vahta journal`** shows the journal in plain words (`--last`, `--since`, `--secret`,
   `--kind`, `--json`), suspicious lines marked `!`. It reads the file, needs no
   daemon, and is refused to agents by the hook.

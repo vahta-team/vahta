@@ -12,6 +12,7 @@
 //! from the trusted TOML templates, because that is a writer, not a reader.
 
 mod agentguard;
+mod autostart;
 mod daemon;
 mod hookguard;
 mod readguard;

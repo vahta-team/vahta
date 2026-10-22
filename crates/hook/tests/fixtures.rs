@@ -380,6 +380,7 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         _ => fx["stdin"].to_string(),
     };
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vahta-hook"));
+    cmd.env("VAHTA_HOOK_NO_START", "1");
     cmd.args([
         "--harness",
         harness,
@@ -528,6 +529,7 @@ fn manifests_parse() {
 fn run_raw(harness: &str, event: &str, stdin: &str) -> String {
     use std::io::Write;
     let mut child = Command::new(env!("CARGO_BIN_EXE_vahta-hook"))
+        .env("VAHTA_HOOK_NO_START", "1")
         .args(["--harness", harness, "--event", event])
         .env_remove("VAHTA_HOOK_DISABLE")
         .stdin(std::process::Stdio::piped())
@@ -607,6 +609,7 @@ fn the_journal_is_refused_to_an_agent_as_a_command_and_as_a_file() {
         })
         .to_string();
         let mut child = Command::new(env!("CARGO_BIN_EXE_vahta-hook"))
+            .env("VAHTA_HOOK_NO_START", "1")
             .args(["--harness", "claude", "--event", "before_tool"])
             .env_remove("VAHTA_HOOK_DISABLE")
             .env("VAHTA_DATA_DIR", &data)

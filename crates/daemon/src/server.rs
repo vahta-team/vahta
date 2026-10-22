@@ -248,7 +248,14 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
     let address = options.paths.address()?;
     let listener =
         Listener::bind(&address).map_err(|e| ServerError::Io("listen on the socket", e))?;
-    journal.record(Entry::new("daemon_start").result("ok", Some(&options.version)));
+    // A hook that found no daemon starts one and says so; nothing else is
+    // taken from this variable.
+    let started = if std::env::var("VAHTA_STARTED_BY").is_ok_and(|v| v == "hook") {
+        format!("{}; started by hook", options.version)
+    } else {
+        options.version.clone()
+    };
+    journal.record(Entry::new("daemon_start").result("ok", Some(&started)));
     let spooled = crate::report::ingest_spool(&options.paths, &journal);
 
     let registry = Arc::new(SurfaceRegistry::default());

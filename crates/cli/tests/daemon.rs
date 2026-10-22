@@ -4877,6 +4877,16 @@ impl Sandbox {
         });
         let mut child = Command::new(hook_bin())
             .args(["--harness", "claude", "--event", "after_tool"])
+            // A test of the hook with no daemon says so with a marker file: the
+            // hook would otherwise start one (`autostart.rs`).
+            .env(
+                "VAHTA_HOOK_NO_START",
+                if self.root.join("no-hook-start").exists() {
+                    "1"
+                } else {
+                    ""
+                },
+            )
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
             .env_remove("XDG_RUNTIME_DIR")
@@ -5370,6 +5380,7 @@ fn the_hook_cuts_the_values_of_a_run_that_had_no_session() {
 #[test]
 fn without_a_daemon_the_hook_cuts_what_the_detector_finds_and_says_so() {
     let s = Sandbox::new();
+    fs::write(s.root.join("no-hook-start"), "").unwrap();
     let key = ["sk-", "ant-", &"a".repeat(25)].concat();
     let reply = s.hook_after_bash(&format!("found {key}")).unwrap();
     let (stdout, message) = redacted(&reply);
