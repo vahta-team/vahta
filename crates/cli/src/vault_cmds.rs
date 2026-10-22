@@ -172,18 +172,22 @@ fn peek_verified(vault: &Path, store: &LocalStore) -> Result<(Peek, Verification
 }
 
 /// The secrets of `peek` whose value the daemon found in a transcript and that
-/// have not been reset since, with when. Read from the daemon's
-/// `exposed.json`; nothing there, or no data directory, is none.
+/// have not been reset since, with when. Read from the machine's record of the
+/// vault (`vahta_vault::store`); nothing there, or no data directory, is none.
 fn exposures(env: &Env, peek: &Peek) -> Vec<(String, u64)> {
     let Some(dir) = &env.data_dir else {
         return Vec::new();
     };
-    let list = vahta_ipc::exposed::Exposed::load(&vahta_ipc::exposed::exposed_file(dir));
-    let vault = vahta_vault::hex_encode(&peek.vault_id);
+    let marks = LocalStore::new(dir).exposed_unchecked(&peek.vault_id);
     let mut out: Vec<(String, u64)> = peek
         .entries
         .iter()
-        .filter_map(|e| list.when(&vault, &e.name).map(|at| (e.name.clone(), at)))
+        .filter_map(|e| {
+            marks
+                .iter()
+                .find(|m| m.name == e.name)
+                .map(|m| (e.name.clone(), m.at))
+        })
         .collect();
     out.sort();
     out

@@ -135,6 +135,10 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **"Exposed in a transcript" can no longer be erased by deleting a file.** The marks
+  moved from `exposed.json` into the machine's authenticated record of each vault (the
+  one that pins the owner key); a deleted or edited mark fails the next unlock as
+  tampering. An existing `exposed.json` is migrated once per vault and removed.
 - **`vahta lock --connector`** ends the connectors session and nothing else (before,
   only `lock --all` and `sessions kill` did); a plain `vahta lock` still leaves it.
 - **DNS rebinding in the host filter.** A name allowed by `network = hosts` that

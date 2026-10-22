@@ -153,6 +153,13 @@ impl Sandbox {
         self.project().join(".vahta/vault.vht")
     }
 
+    /// This machine's record of the project's vault (pin, generation, exposed
+    /// marks) in the data directory.
+    fn state_file(&self) -> PathBuf {
+        let id = vahta_vault::hex_encode(&self.open_vault().vault_id());
+        self.root.join("data/vaults").join(id).join("state")
+    }
+
     /// Open the project's vault directly, as a check that the daemon wrote what
     /// it said.
     fn open_vault(&self) -> Vault {
@@ -7737,9 +7744,12 @@ fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_ex
         .unwrap();
     assert!(age > Duration::from_secs(3000));
 
-    // Exposure: the daemon wrote names, never a value.
-    let exposed = fs::read_to_string(s.root.join("data/exposed.json")).unwrap();
-    assert!(exposed.contains("ZETA") && exposed.contains("BETA") && !exposed.contains("fake"));
+    // Exposure: the daemon wrote names into the machine's record of the vault
+    // (not a file of its own), never a value.
+    assert!(!s.root.join("data/exposed.json").exists());
+    let exposed = fs::read_to_string(s.state_file()).unwrap();
+    assert!(exposed.contains("exposed = ZETA") && exposed.contains("exposed = BETA"));
+    assert!(!exposed.contains("fake"));
     fs::write(
         s.project().join("vahta.toml"),
         "[secrets.ZETA]\n[secrets.BETA]\n",
@@ -7807,6 +7817,88 @@ fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_ex
         !list.contains("vahta reset ZETA") && list.contains("vahta reset BETA"),
         "{list}"
     );
+}
+
+#[test]
+fn an_exposed_mark_cannot_be_erased_without_the_next_unlock_saying_so() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let folder = s.claude_project_folder();
+    s.transcript(
+        &folder.join("aaaaaaaa-0000-closed.jsonl"),
+        &[serde_json::json!({"t": format!("v {one}")}).to_string()],
+        3600,
+    );
+    let out = s.vahta(&["scrub", "--transcript"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let state = s.state_file();
+    let good = fs::read_to_string(&state).unwrap();
+    assert!(good.contains("exposed = ZETA"), "{good}");
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\n[secrets.BETA]\n",
+    )
+    .unwrap();
+    let shown = text(&s.vahta(&["list"]).stdout);
+    assert!(shown.contains("vahta reset ZETA"), "{shown}");
+
+    // An agent deleting the line: `list` reads without the key and so cannot
+    // tell, but the next open of the vault refuses.
+    let erased: String =
+        good.lines()
+            .filter(|l| !l.starts_with("exposed = "))
+            .fold(String::new(), |mut acc, l| {
+                acc.push_str(l);
+                acc.push('\n');
+                acc
+            });
+    fs::write(&state, &erased).unwrap();
+    assert!(!text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+    assert_eq!(s.vahta(&["lock", "--all"]).status.code(), Some(0));
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = text(&out.stderr);
+    assert!(err.contains("integrity check"), "{err}");
+
+    // Put back, it opens again and the mark is still there.
+    fs::write(&state, &good).unwrap();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    assert!(text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+}
+
+#[test]
+fn an_old_exposed_json_is_moved_into_the_record_when_its_vault_is_opened() {
+    let s = sandbox_with_secrets();
+    let vault_hex = vahta_vault::hex_encode(&s.open_vault().vault_id());
+    let legacy = s.root.join("data/exposed.json");
+    let other = "0".repeat(32);
+    fs::write(
+        &legacy,
+        format!(
+            r#"{{"exposed":[{{"vault":"{vault_hex}","name":"ZETA","at":1700000000}},{{"vault":"{other}","name":"OTHER","at":5}}]}}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\n[secrets.BETA]\n",
+    )
+    .unwrap();
+    // Shown at once, from the old file.
+    assert!(text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+    // The first unlock of the vault moves its entry; the other vault's stays.
+    s.unlock_session();
+    assert!(
+        fs::read_to_string(s.state_file())
+            .unwrap()
+            .contains("exposed = ZETA 1700000000")
+    );
+    let rest = fs::read_to_string(&legacy).unwrap();
+    assert!(rest.contains("OTHER") && !rest.contains("ZETA"), "{rest}");
+    assert!(text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
 }
 
 #[test]

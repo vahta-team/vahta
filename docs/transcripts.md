@@ -72,9 +72,16 @@ modification time alone.
 
 ### Exposed secrets
 
-Every secret whose value is found in a transcript is written to
-`exposed.json` in the data directory: its name, its vault and the time, never
-the value or the file. `vahta list` and `vahta check` print
+Every secret whose value is found in a transcript is recorded in the machine's
+record of its vault (the file in the data directory that also pins the owner key
+and the highest generation seen): its name and the time, never the value or the
+file. The record is authenticated, and the marks are part of what is
+authenticated, so a mark an agent deletes or alters makes the vault's next unlock
+fail ("this machine's record of the vault failed its integrity check") instead of
+quietly forgetting the exposure. `vahta list` and `vahta check` read the marks
+without the vault key, so they cannot tell an edit; the unlock does. An
+`exposed.json` from an earlier build is moved into the record of each vault the
+first time that vault is unlocked, and deleted when it is empty. `vahta list` and `vahta check` print
 `exposed in a transcript - rotate it` with `vahta reset NAME` until the secret
 is reset or removed. In `vahta check` it is a warning and does not change the
 verdict.

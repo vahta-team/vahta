@@ -24,9 +24,10 @@
 //!   its session began and not ended and it changed in the last six hours. An
 //!   open file is read, its secrets are recorded as exposed, and it is marked;
 //!   the session's `SessionEnd` hook then has the daemon clean it.
-//! * **Exposed.** A secret found in a transcript is written to `exposed.json`
-//!   (name, vault, time), and `vahta list` and `vahta check` say to rotate it
-//!   until it is reset or removed.
+//! * **Exposed.** A secret found in a transcript is recorded in the machine's
+//!   authenticated record of its vault (`vahta_vault::store`: name and time, in
+//!   the MAC, so deleting the mark is detected), and `vahta list` and `vahta
+//!   check` say to rotate it until it is reset or removed.
 //!
 //! The values are the sessions' own (the caller must have unlocked); with none,
 //! only the detector's finds are taken out.
@@ -36,10 +37,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use vahta_ipc::exposed::{Exposed, exposed_file};
 use vahta_ipc::protocol::{
     ClientReply, TranscriptFile, TranscriptReport, TranscriptRoots, TranscriptState,
 };
+use vahta_vault::store::StateKey;
 
 use crate::journal::Entry;
 use crate::jsonl::{self, Cleaner, Rewrite, Tally};
@@ -284,46 +285,44 @@ fn is_open(marks: &Marks, harness: Harness, path: &Path) -> bool {
         })
 }
 
+/// Where a name found in a transcript is recorded as exposed: its vault and the
+/// key of this machine's record of that vault.
+type Vaults = HashMap<String, ([u8; 16], Arc<StateKey>)>;
+
 /// The held values of the caller, and which vault each name is from.
-fn held(ctx: &Ctx<'_>) -> (Vec<jsonl::Value>, HashMap<String, [u8; 16]>) {
+fn held(ctx: &Ctx<'_>) -> (Vec<jsonl::Value>, Vaults) {
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
     let anchor = anchor_of(ctx);
     let values = known_values(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
     let mut vaults = HashMap::new();
     if let Ok(sessions) = ctx.shared.sessions.lock() {
         for s in sessions.covering(&chain) {
+            let key = Arc::new(s.keys.state_key());
             for name in &s.scope {
-                vaults.insert(name.clone(), s.vault_id);
+                vaults.insert(name.clone(), (s.vault_id, key.clone()));
             }
         }
     }
     (values, vaults)
 }
 
-/// Record `names` as exposed. Names the caller has no session for have no
-/// vault to be recorded under and are left out.
-fn mark_exposed(shared: &Shared, names: &[String], vaults: &HashMap<String, [u8; 16]>) {
-    let file = exposed_file(shared.store.root());
-    let mut exposed = Exposed::load(&file);
+/// Record `names` as exposed, in the machine's authenticated record of each
+/// name's vault. Names the caller has no session for have no vault to be
+/// recorded under and are left out.
+fn mark_exposed(shared: &Shared, names: &[String], vaults: &Vaults) {
     let at = vahta_ipc::state::now();
-    let mut changed = false;
+    let mut groups: Vec<([u8; 16], Arc<StateKey>, Vec<String>)> = Vec::new();
     for name in names {
-        if let Some(vault) = vaults.get(name) {
-            changed |= exposed.mark(&vahta_vault::hex_encode(vault), name, at);
+        let Some((vault, key)) = vaults.get(name) else {
+            continue;
+        };
+        match groups.iter_mut().find(|g| g.0 == *vault) {
+            Some(g) => g.2.push(name.clone()),
+            None => groups.push((*vault, key.clone(), vec![name.clone()])),
         }
     }
-    if changed {
-        let _ = exposed.save(&file);
-    }
-}
-
-/// Forget that `name` of `vault` was exposed: its value was replaced, or the
-/// secret is gone.
-pub(crate) fn clear_exposed(shared: &Shared, vault: &[u8; 16], name: &str) {
-    let file = exposed_file(shared.store.root());
-    let mut exposed = Exposed::load(&file);
-    if exposed.clear(&vahta_vault::hex_encode(vault), name) {
-        let _ = exposed.save(&file);
+    for (vault, key, mine) in groups {
+        let _ = shared.store.mark_exposed(&vault, &key, &mine, at);
     }
 }
 

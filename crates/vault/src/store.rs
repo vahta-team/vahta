@@ -17,6 +17,16 @@
 //! Peek has no key, so it reads the state to compare the pin and generation but
 //! cannot check the MAC, and says so.
 //!
+//! The same file carries the **exposed marks**: the names of this vault's secrets
+//! whose value was found in an agent's transcript (`vahta scrub --transcript`)
+//! and that have not been replaced since. They are in the MAC, so an agent that
+//! deletes a mark (or adds one) makes the next open [`Error::StoreTampered`]
+//! instead of silently erasing "this key was exposed". A state with no marks has
+//! exactly the MAC it had before marks existed. `vahta list` and `check` read the
+//! marks like a peek reads the pin, without the MAC. An older `exposed.json` in
+//! the root is moved into the state file of the vault it names the first time
+//! that vault is opened with its key, and deleted when it is empty.
+//!
 //! The root is a parameter so tests use a temp dir; the default is the
 //! platform data directory plus `vahta`.
 
@@ -93,14 +103,64 @@ impl StateKey {
         }
     }
 
-    fn mac(&self, vault_id: &[u8; 16], pinned: &[u8; 32], generation: u64) -> Hmac<Sha256> {
+    fn mac(
+        &self,
+        vault_id: &[u8; 16],
+        pinned: &[u8; 32],
+        generation: u64,
+        exposed: &[ExposedMark],
+    ) -> Hmac<Sha256> {
         // HMAC accepts a key of any length, so this cannot fail.
         let mut m = Hmac::<Sha256>::new_from_slice(&*self.mac_key).expect("hmac key length");
         m.update(vault_id);
         m.update(pinned);
         m.update(&generation.to_le_bytes());
+        // Nothing is added for no marks: a state from before marks verifies.
+        let mut marks: Vec<&ExposedMark> = exposed.iter().collect();
+        marks.sort_by(|a, b| a.name.cmp(&b.name));
+        for mark in marks {
+            m.update(b"exposed\0");
+            m.update(mark.name.as_bytes());
+            m.update(&[0]);
+            m.update(&mark.at.to_le_bytes());
+        }
         m
     }
+
+    /// The text of a state file under this key.
+    fn state_text(
+        &self,
+        vault_id: &[u8; 16],
+        pinned: &[u8; 32],
+        generation: u64,
+        exposed: &[ExposedMark],
+    ) -> String {
+        let mut marks = exposed.to_vec();
+        marks.sort_by(|a, b| a.name.cmp(&b.name));
+        let mac = self
+            .mac(vault_id, pinned, generation, &marks)
+            .finalize()
+            .into_bytes();
+        let mut text = format!(
+            "pinned_owner_sign_pk = {}\nmax_generation = {}\n",
+            hex_encode(pinned),
+            generation
+        );
+        for mark in &marks {
+            text.push_str(&format!("exposed = {} {}\n", mark.name, mark.at));
+        }
+        text.push_str(&format!("mac = {}\n", hex_encode(&mac)));
+        text
+    }
+}
+
+/// A secret of the vault whose value was found in a transcript: its name and
+/// when it was first found (seconds since the Unix epoch). Never the value, and
+/// never where it was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExposedMark {
+    pub name: String,
+    pub at: u64,
 }
 
 /// What the store holds for one vault in one state file.
@@ -108,6 +168,8 @@ impl StateKey {
 pub struct State {
     pub pinned_owner_sign_pk: [u8; 32],
     pub max_generation: u64,
+    /// Sorted by name, one per name.
+    pub exposed: Vec<ExposedMark>,
     mac: [u8; 32],
 }
 
@@ -169,9 +231,14 @@ impl LocalStore {
         let Some(state) = self.load_unchecked(vault_id, key.file)? else {
             return Ok(None);
         };
-        key.mac(vault_id, &state.pinned_owner_sign_pk, state.max_generation)
-            .verify_slice(&state.mac)
-            .map_err(|_| Error::StoreTampered)?;
+        key.mac(
+            vault_id,
+            &state.pinned_owner_sign_pk,
+            state.max_generation,
+            &state.exposed,
+        )
+        .verify_slice(&state.mac)
+        .map_err(|_| Error::StoreTampered)?;
         Ok(Some(state))
     }
 
@@ -268,26 +335,17 @@ impl LocalStore {
         new_owner_sign_pk: &[u8; 32],
         generation: u64,
     ) -> Result<(), Error> {
-        let seen = match self.load_authenticated(vault_id, old)? {
+        let (seen, exposed) = match self.load_authenticated(vault_id, old)? {
             Some(s) => {
                 if &s.pinned_owner_sign_pk != old_owner_sign_pk {
                     return Err(Error::OwnerChanged);
                 }
-                s.max_generation
+                (s.max_generation, s.exposed)
             }
-            None => 0,
+            None => (0, Vec::new()),
         };
         let max_generation = seen.max(generation);
-        let mac = new
-            .mac(vault_id, new_owner_sign_pk, max_generation)
-            .finalize()
-            .into_bytes();
-        let text = format!(
-            "pinned_owner_sign_pk = {}\nmax_generation = {}\nmac = {}\n",
-            hex_encode(new_owner_sign_pk),
-            max_generation,
-            hex_encode(&mac)
-        );
+        let text = new.state_text(vault_id, new_owner_sign_pk, max_generation, &exposed);
         write::write_atomic(&self.state_path(vault_id, new.file), text.as_bytes())
     }
 
@@ -318,16 +376,9 @@ impl LocalStore {
                 seen: state.max_generation,
             });
         }
-        let mac = new
-            .mac(vault_id, new_owner_sign_pk, generation)
-            .finalize()
-            .into_bytes();
-        let text = format!(
-            "pinned_owner_sign_pk = {}\nmax_generation = {}\nmac = {}\n",
-            hex_encode(new_owner_sign_pk),
-            generation,
-            hex_encode(&mac)
-        );
+        // The marks are carried over: the person confirmed the owner, not that
+        // the exposure is gone.
+        let text = new.state_text(vault_id, new_owner_sign_pk, generation, &state.exposed);
         write::write_atomic(&self.state_path(vault_id, new.file), text.as_bytes())
     }
 
@@ -383,23 +434,219 @@ impl LocalStore {
             }
             None => generation,
         };
-        let mac = key
-            .mac(vault_id, owner_sign_pk, max_generation)
-            .finalize()
-            .into_bytes();
-        let text = format!(
-            "pinned_owner_sign_pk = {}\nmax_generation = {}\nmac = {}\n",
-            hex_encode(owner_sign_pk),
-            max_generation,
-            hex_encode(&mac)
-        );
+        let mut exposed = existing.map(|s| s.exposed).unwrap_or_default();
+        let migrated = self.legacy_exposed(vault_id);
+        merge_marks(&mut exposed, &migrated);
+        let text = key.state_text(vault_id, owner_sign_pk, max_generation, &exposed);
         let path = self.state_path(vault_id, key.file);
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)
                 .map_err(|_| Error::Store("cannot create the store directory"))?;
         }
-        write::write_atomic(&path, text.as_bytes())
+        write::write_atomic(&path, text.as_bytes())?;
+        // Only once the marks are safe in the state file is the old file cut.
+        if !migrated.is_empty() {
+            self.drop_legacy_exposed(vault_id);
+        }
+        Ok(())
     }
+
+    /// This opener's exposed marks for the vault, after the state's MAC is
+    /// checked. No state is no marks.
+    pub fn exposed(&self, vault_id: &[u8; 16], key: &StateKey) -> Result<Vec<ExposedMark>, Error> {
+        Ok(self
+            .load_authenticated(vault_id, key)?
+            .map(|s| s.exposed)
+            .unwrap_or_default())
+    }
+
+    /// Record `names` as exposed at `at` (the first time of a name is kept).
+    /// Whether the marks changed. A vault this opener has no state for cannot
+    /// have anything recorded: it was never opened with its key.
+    pub fn mark_exposed(
+        &self,
+        vault_id: &[u8; 16],
+        key: &StateKey,
+        names: &[String],
+        at: u64,
+    ) -> Result<bool, Error> {
+        let Some(mut state) = self.load_authenticated(vault_id, key)? else {
+            return Ok(false);
+        };
+        let before = state.exposed.len();
+        let new: Vec<ExposedMark> = names
+            .iter()
+            .map(|name| ExposedMark {
+                name: name.clone(),
+                at,
+            })
+            .collect();
+        merge_marks(&mut state.exposed, &new);
+        if state.exposed.len() == before {
+            return Ok(false);
+        }
+        self.write_marks(vault_id, key, &state)?;
+        Ok(true)
+    }
+
+    /// Forget that `name` was exposed: its value was replaced, or it is gone.
+    /// Whether the marks changed.
+    pub fn clear_exposed(
+        &self,
+        vault_id: &[u8; 16],
+        key: &StateKey,
+        name: &str,
+    ) -> Result<bool, Error> {
+        let Some(mut state) = self.load_authenticated(vault_id, key)? else {
+            return Ok(false);
+        };
+        let before = state.exposed.len();
+        state.exposed.retain(|m| m.name != name);
+        if state.exposed.len() == before {
+            return Ok(false);
+        }
+        self.write_marks(vault_id, key, &state)?;
+        Ok(true)
+    }
+
+    fn write_marks(&self, vault_id: &[u8; 16], key: &StateKey, state: &State) -> Result<(), Error> {
+        let text = key.state_text(
+            vault_id,
+            &state.pinned_owner_sign_pk,
+            state.max_generation,
+            &state.exposed,
+        );
+        write::write_atomic(&self.state_path(vault_id, key.file), text.as_bytes())
+    }
+
+    /// The exposed marks of the vault as `vahta list` and `check` show them: every
+    /// state file of the vault read without its MAC (a peek has no key), and an
+    /// old `exposed.json` not yet moved. A tampered file is caught at the next
+    /// open, not here; one that cannot be read has no marks to show.
+    pub fn exposed_unchecked(&self, vault_id: &[u8; 16]) -> Vec<ExposedMark> {
+        let mut out: Vec<ExposedMark> = Vec::new();
+        if let Ok(entries) = fs::read_dir(self.dir(vault_id)) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let file = if name == "state" {
+                    StateFile::Owner
+                } else if let Some(id) = name
+                    .strip_prefix("state-")
+                    .and_then(hex_decode)
+                    .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                {
+                    StateFile::Recipient(id)
+                } else {
+                    continue;
+                };
+                if let Ok(Some(state)) = self.load_unchecked(vault_id, file) {
+                    merge_marks(&mut out, &state.exposed);
+                }
+            }
+        }
+        merge_marks(&mut out, &self.legacy_exposed(vault_id));
+        out
+    }
+
+    fn legacy_path(&self) -> PathBuf {
+        self.root.join("exposed.json")
+    }
+
+    /// The marks of `vault_id` in an old `exposed.json`. An absent or unreadable
+    /// file has none.
+    fn legacy_exposed(&self, vault_id: &[u8; 16]) -> Vec<ExposedMark> {
+        legacy_entries(&self.legacy_path())
+            .into_iter()
+            .filter(|(vault, _)| *vault == hex_encode(vault_id))
+            .map(|(_, mark)| mark)
+            .collect()
+    }
+
+    /// Take the marks of `vault_id` out of the old file, and the file itself when
+    /// nothing is left. Best effort: what stays is migrated again, harmlessly.
+    fn drop_legacy_exposed(&self, vault_id: &[u8; 16]) {
+        let path = self.legacy_path();
+        let id = hex_encode(vault_id);
+        let rest: Vec<(String, ExposedMark)> = legacy_entries(&path)
+            .into_iter()
+            .filter(|(vault, _)| *vault != id)
+            .collect();
+        if rest.is_empty() {
+            let _ = fs::remove_file(&path);
+            return;
+        }
+        let items: Vec<String> = rest
+            .iter()
+            .map(|(vault, m)| {
+                format!(
+                    "    {{\"vault\": \"{vault}\", \"name\": \"{}\", \"at\": {}}}",
+                    m.name, m.at
+                )
+            })
+            .collect();
+        let text = format!("{{\n  \"exposed\": [\n{}\n  ]\n}}\n", items.join(",\n"));
+        let _ = write::write_atomic(&path, text.as_bytes());
+    }
+}
+
+/// Add the marks of `new` that `marks` has no name for; the first time of a
+/// name is kept. Sorted by name.
+fn merge_marks(marks: &mut Vec<ExposedMark>, new: &[ExposedMark]) {
+    for m in new {
+        if !marks.iter().any(|x| x.name == m.name) {
+            marks.push(m.clone());
+        }
+    }
+    marks.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+/// `(vault id in hex, mark)` of every entry of an old `exposed.json`; a file
+/// that is absent or not what it was written as has none. A name that is not a
+/// valid secret name is skipped, so nothing odd is ever written to a state file.
+fn legacy_entries(path: &Path) -> Vec<(String, ExposedMark)> {
+    use vahta_json::Value;
+    fn field<'a>(fields: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
+        fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = vahta_json::parse_bounded(&text, 8) else {
+        return Vec::new();
+    };
+    let Value::Object(top) = &parsed else {
+        return Vec::new();
+    };
+    let Some(Value::Array(items)) = field(top, "exposed") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let Value::Object(f) = item else {
+                return None;
+            };
+            let (Some(Value::Str(vault)), Some(Value::Str(name))) =
+                (field(f, "vault"), field(f, "name"))
+            else {
+                return None;
+            };
+            let Some(Value::Int(at)) = field(f, "at") else {
+                return None;
+            };
+            let at = at.parse::<u64>().ok()?;
+            let hex_ok = vault.len() == 32 && vault.bytes().all(|b| b.is_ascii_hexdigit());
+            (hex_ok && crate::valid_name(name)).then(|| {
+                (
+                    vault.to_ascii_lowercase(),
+                    ExposedMark {
+                        name: name.clone(),
+                        at,
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 fn compare(state: &State, owner_sign_pk: &[u8; 32], generation: u64) -> Result<(), Error> {
@@ -417,9 +664,20 @@ fn compare(state: &State, owner_sign_pk: &[u8; 32], generation: u64) -> Result<(
 
 fn parse_state(text: &str) -> Option<State> {
     let (mut pinned, mut generation, mut mac) = (None, None, None);
+    let mut exposed: Vec<ExposedMark> = Vec::new();
     for line in text.lines() {
         let (key, value) = line.split_once(" = ")?;
         match key {
+            "exposed" => {
+                let (name, at) = value.split_once(' ')?;
+                if !crate::valid_name(name) || exposed.iter().any(|m| m.name == name) {
+                    return None;
+                }
+                exposed.push(ExposedMark {
+                    name: name.to_string(),
+                    at: at.parse().ok()?,
+                });
+            }
             "pinned_owner_sign_pk" if pinned.is_none() => {
                 pinned = Some(<[u8; 32]>::try_from(hex_decode(value)?).ok()?);
             }
@@ -433,6 +691,7 @@ fn parse_state(text: &str) -> Option<State> {
     Some(State {
         pinned_owner_sign_pk: pinned?,
         max_generation: generation?,
+        exposed,
         mac: mac?,
     })
 }
@@ -506,6 +765,161 @@ mod tests {
             store.check(&id, &key, &[2; 32], 1),
             Err(Error::Store(_))
         ));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn exposed_marks_are_kept_in_the_authenticated_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(dir.path());
+        let (id, key) = ([4u8; 16], owner_key());
+        // No state, nothing to attach marks to.
+        assert!(!store.mark_exposed(&id, &key, &names(&["A"]), 10).unwrap());
+        store.record(&id, &key, &[2; 32], 1).unwrap();
+        assert!(
+            store
+                .mark_exposed(&id, &key, &names(&["B", "A"]), 10)
+                .unwrap()
+        );
+        // The first time is kept, and a repeat changes nothing.
+        assert!(!store.mark_exposed(&id, &key, &names(&["A"]), 99).unwrap());
+        let marks = store.exposed(&id, &key).unwrap();
+        assert_eq!(
+            marks,
+            [
+                ExposedMark {
+                    name: "A".into(),
+                    at: 10
+                },
+                ExposedMark {
+                    name: "B".into(),
+                    at: 10
+                }
+            ]
+        );
+        // They survive a later record (an unlock, a save) and a re-pin.
+        store.record(&id, &key, &[2; 32], 5).unwrap();
+        assert_eq!(store.exposed(&id, &key).unwrap(), marks);
+        let new = StateKey::owner(&[6; 32]);
+        store
+            .repin_owner(&id, &key, &[2; 32], &new, &[3; 32], 6)
+            .unwrap();
+        assert_eq!(store.exposed(&id, &new).unwrap(), marks);
+        // A reader with no key sees them too.
+        assert_eq!(store.exposed_unchecked(&id), marks);
+        // Clearing one leaves the other.
+        assert!(store.clear_exposed(&id, &new, "A").unwrap());
+        assert!(!store.clear_exposed(&id, &new, "A").unwrap());
+        assert_eq!(store.exposed(&id, &new).unwrap().len(), 1);
+        assert_eq!(store.exposed_unchecked(&id)[0].name, "B");
+    }
+
+    #[test]
+    fn deleting_adding_or_changing_a_mark_is_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(dir.path());
+        let (id, key) = ([8u8; 16], owner_key());
+        store.record(&id, &key, &[2; 32], 1).unwrap();
+        store.mark_exposed(&id, &key, &names(&["A"]), 10).unwrap();
+        let path = store.state_path(&id, StateFile::Owner);
+        let good = fs::read_to_string(&path).unwrap();
+        assert!(good.contains("exposed = A 10\n"));
+        for bad in [
+            good.replace("exposed = A 10\n", ""),
+            good.replace("exposed = A 10\n", "exposed = A 11\n"),
+            good.replace("exposed = A 10\n", "exposed = Z 10\n"),
+            good.replace("exposed = A 10\n", "exposed = A 10\nexposed = B 10\n"),
+        ] {
+            fs::write(&path, bad).unwrap();
+            assert!(matches!(
+                store.check(&id, &key, &[2; 32], 1),
+                Err(Error::StoreTampered)
+            ));
+            assert!(matches!(
+                store.mark_exposed(&id, &key, &names(&["C"]), 1),
+                Err(Error::StoreTampered)
+            ));
+            assert!(matches!(
+                store.clear_exposed(&id, &key, "A"),
+                Err(Error::StoreTampered)
+            ));
+        }
+        // Not a valid mark line: malformed, not a reset.
+        for bad in [
+            "exposed = a b 1\n",
+            "exposed = A\n",
+            "exposed = A x\n",
+            "exposed = A 1\nexposed = A 2\n",
+        ] {
+            fs::write(&path, good.replace("exposed = A 10\n", bad)).unwrap();
+            assert!(matches!(
+                store.check(&id, &key, &[2; 32], 1),
+                Err(Error::Store(_))
+            ));
+        }
+        fs::write(&path, &good).unwrap();
+        store.check(&id, &key, &[2; 32], 1).unwrap();
+    }
+
+    #[test]
+    fn a_state_written_before_marks_existed_still_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(dir.path());
+        let (id, key) = ([2u8; 16], owner_key());
+        // The old format: a MAC over id, pin and generation only.
+        let mut m = Hmac::<Sha256>::new_from_slice(&*key.mac_key).unwrap();
+        m.update(&id);
+        m.update(&[7u8; 32]);
+        m.update(&3u64.to_le_bytes());
+        let text = format!(
+            "pinned_owner_sign_pk = {}\nmax_generation = 3\nmac = {}\n",
+            hex_encode(&[7u8; 32]),
+            hex_encode(&m.finalize().into_bytes())
+        );
+        let path = store.state_path(&id, StateFile::Owner);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        assert!(!store.check(&id, &key, &[7; 32], 3).unwrap().first_open);
+        assert!(store.exposed(&id, &key).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_old_exposed_json_is_moved_per_vault_and_removed_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(dir.path());
+        let (a, b, key) = ([1u8; 16], [2u8; 16], owner_key());
+        let legacy = dir.path().join("exposed.json");
+        fs::write(
+            &legacy,
+            format!(
+                r#"{{"exposed":[{{"vault":"{}","name":"A","at":10}},{{"vault":"{}","name":"B","at":20}},{{"vault":"{}","name":"bad name","at":1}},{{"vault":"zz","name":"C","at":1}}]}}"#,
+                hex_encode(&a),
+                hex_encode(&b),
+                hex_encode(&a),
+            ),
+        )
+        .unwrap();
+        // Shown before any move.
+        assert_eq!(store.exposed_unchecked(&a).len(), 1);
+        store.record(&a, &key, &[2; 32], 1).unwrap();
+        assert_eq!(store.exposed(&a, &key).unwrap()[0].name, "A");
+        let rest = fs::read_to_string(&legacy).unwrap();
+        assert!(
+            rest.contains(&hex_encode(&b)) && !rest.contains("\"A\""),
+            "{rest}"
+        );
+        assert_eq!(store.exposed_unchecked(&b)[0].at, 20);
+        store.record(&b, &key, &[2; 32], 1).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(store.exposed(&b, &key).unwrap()[0].at, 20);
+        // Garbage is no marks, and is left alone.
+        fs::write(&legacy, "{{{").unwrap();
+        assert!(store.exposed_unchecked(&a).len() == 1);
+        store.record(&a, &key, &[2; 32], 2).unwrap();
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "{{{");
     }
 
     #[test]

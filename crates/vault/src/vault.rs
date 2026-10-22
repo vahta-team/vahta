@@ -861,6 +861,13 @@ impl Vault {
         self.model().header.generation
     }
 
+    /// Forget that `name` was exposed in a transcript, in this machine's record
+    /// of the vault: its value was replaced, or the secret is gone. Whether a
+    /// mark was there.
+    pub fn clear_exposed(&self, store: &LocalStore, name: &str) -> Result<bool, Error> {
+        store.clear_exposed(&self.vault_id(), &self.state_key, name)
+    }
+
     /// Whether this was read from an older format and the next save will
     /// write it in the current one.
     pub fn upgrade_pending(&self) -> bool {
