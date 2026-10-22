@@ -215,7 +215,9 @@ what runs  =  the secret's own rules  ∩  the role  ∩  the session you delega
 3. Run `vahta role balance_check --reason "why"`. If the role is wider than one
    of its secrets' approved rules (a program, a host, a folder or a network the
    secret does not give), the answer says exactly what is wider and no window
-   opens: narrow the role and run it again. Otherwise the person reads the role
+   opens: narrow the role and run it again. Places are compared as places, not as
+   text: `$PROJECT/scripts/x.sh` in the role and an absolute path (or the other way
+   round, or through a symlink) in the secret's rule are the same script. Otherwise the person reads the role
    in plain words and approves it once, with the password. Only that approved
    copy counts: editing `vahta.toml` later changes nothing until
    `vahta role NAME` is approved again, and `vahta check` reports the

@@ -13,9 +13,47 @@
 //! it (`None`) or names a network no wider than the secret's; at run time the
 //! stricter of the two is used.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use vahta_vault::rules::{expand_project_path, is_project_path};
 use vahta_vault::{AgentRole, ApprovedRule, DirRule, HostRule, Network, Program, RuleSet};
+
+/// How the places of both sides are written before they are compared. A role is
+/// written with `$PROJECT/...` or resolved to an absolute path, a secret's rule
+/// is stored in either form, and the same place must not look like two. Both
+/// are expanded from the project root (the canonical one, as the evaluator uses
+/// it) and, where the place exists, resolved through links.
+struct Places {
+    root: PathBuf,
+}
+
+impl Places {
+    fn new(project_root: &Path) -> Places {
+        Places {
+            root: dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf()),
+        }
+    }
+
+    fn path(&self, stored: &str) -> PathBuf {
+        let expanded = expand_project_path(stored, &self.root);
+        let p = Path::new(expanded.as_ref());
+        dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
+    /// An argument of a rule: a place in its comparable form, any other word as
+    /// it is.
+    fn word(&self, w: &str) -> String {
+        if is_project_path(w) || Path::new(w).is_absolute() {
+            self.path(w).to_string_lossy().into_owned()
+        } else {
+            w.to_string()
+        }
+    }
+
+    fn words(&self, args: &[String]) -> Vec<String> {
+        args.iter().map(|a| self.word(a)).collect()
+    }
+}
 
 fn inside(path: &Path, dir: &Path) -> bool {
     !path
@@ -26,7 +64,7 @@ fn inside(path: &Path, dir: &Path) -> bool {
 
 /// Whether the secret's allow rules (or, failing them, its folders) cover
 /// the role's allow rule `r`.
-fn allow_covered(secret: &RuleSet, r: &ApprovedRule) -> bool {
+fn allow_covered(secret: &RuleSet, r: &ApprovedRule, places: &Places) -> bool {
     if secret.allow.is_empty() && secret.dirs.is_empty() {
         // The secret is open: any program is within it.
         return true;
@@ -34,17 +72,18 @@ fn allow_covered(secret: &RuleSet, r: &ApprovedRule) -> bool {
     let Program::Path(program) = &r.program else {
         return false;
     };
+    let (program, args) = (places.path(program), places.words(&r.args));
     let by_rule = secret.allow.iter().any(|s| match &s.program {
         // The role's rule names the same program, with at least the
         // arguments the secret's rule fixes.
-        Program::Path(p) => p == program && r.args.starts_with(&s.args),
+        Program::Path(p) => places.path(p) == program && args.starts_with(&places.words(&s.args)),
         _ => false,
     });
     by_rule
         || secret
             .dirs
             .iter()
-            .any(|d| inside(Path::new(program), Path::new(&d.path)))
+            .any(|d| inside(&program, &places.path(&d.path)))
 }
 
 fn is_ip(host: &str) -> bool {
@@ -68,19 +107,27 @@ fn host_covered(s: &HostRule, r: &HostRule) -> bool {
     }
 }
 
-fn dir_covered(secret: &RuleSet, d: &DirRule) -> bool {
+fn dir_covered(secret: &RuleSet, d: &DirRule, places: &Places) -> bool {
+    let dir = places.path(&d.path);
     secret
         .dirs
         .iter()
-        .any(|s| inside(Path::new(&d.path), Path::new(&s.path)) && (s.write || !d.write))
+        .any(|s| inside(&dir, &places.path(&s.path)) && (s.write || !d.write))
 }
 
 /// What the role asks for that `secret`'s approved rules do not give, one
-/// sentence each. Empty: the role is no wider. `name` is the secret's name.
-pub fn too_wide(role: &AgentRole, name: &str, secret: &RuleSet) -> Vec<String> {
+/// sentence each. Empty: the role is no wider. `name` is the secret's name;
+/// `project_root` is what `$PROJECT` stands for, on both sides.
+pub fn too_wide(
+    role: &AgentRole,
+    name: &str,
+    secret: &RuleSet,
+    project_root: &Path,
+) -> Vec<String> {
+    let places = Places::new(project_root);
     let mut out = Vec::new();
     for r in &role.allow {
-        if !allow_covered(secret, r) {
+        if !allow_covered(secret, r, &places) {
             out.push(format!(
                 "allow `{}` is wider than {name}'s own rules: they do not allow that program{}",
                 r.text,
@@ -122,13 +169,14 @@ pub fn too_wide(role: &AgentRole, name: &str, secret: &RuleSet) -> Vec<String> {
     }
     if !secret.dirs.is_empty() {
         for d in &role.dirs {
-            if dir_covered(secret, d) {
+            if dir_covered(secret, d, &places) {
                 continue;
             }
+            let dir = places.path(&d.path);
             let in_one = secret
                 .dirs
                 .iter()
-                .any(|s| inside(Path::new(&d.path), Path::new(&s.path)));
+                .any(|s| inside(&dir, &places.path(&s.path)));
             out.push(if in_one {
                 format!(
                     "dir `{}` is read-write, and {name}'s directory there is read-only",
@@ -174,6 +222,10 @@ mod tests {
         parse_rule(text, true).unwrap().to_allow(path.to_string())
     }
 
+    fn root() -> &'static Path {
+        Path::new("/work/proj")
+    }
+
     fn host(t: &str) -> HostRule {
         parse_host(t).unwrap()
     }
@@ -215,28 +267,31 @@ mod tests {
     fn allow_must_be_covered_by_the_secrets_allow() {
         let mut r = role();
         r.allow = vec![allow("git push", "/usr/bin/git")];
-        assert!(too_wide(&r, "K", &secret()).is_empty(), "more arguments");
+        assert!(
+            too_wide(&r, "K", &secret(), root()).is_empty(),
+            "more arguments"
+        );
         r.allow = vec![allow("wget", "/usr/bin/wget")];
-        assert_eq!(too_wide(&r, "K", &secret()).len(), 1);
+        assert_eq!(too_wide(&r, "K", &secret(), root()).len(), 1);
         // A secret rule that fixes arguments is not covered by fewer.
         let mut s = secret();
         s.allow = vec![allow("git push", "/usr/bin/git")];
         r.allow = vec![allow("git", "/usr/bin/git")];
-        assert_eq!(too_wide(&r, "K", &s).len(), 1);
+        assert_eq!(too_wide(&r, "K", &s, root()).len(), 1);
         r.allow = vec![allow("git push origin", "/usr/bin/git")];
-        assert!(too_wide(&r, "K", &s).is_empty());
+        assert!(too_wide(&r, "K", &s, root()).is_empty());
         // An open secret covers anything.
         r.allow = vec![allow("wget", "/usr/bin/wget")];
-        assert!(too_wide(&r, "K", &RuleSet::default()).is_empty());
+        assert!(too_wide(&r, "K", &RuleSet::default(), root()).is_empty());
         // A folder covers the programs in it.
         let d = RuleSet {
             dirs: vec![dir("/work/bin", true)],
             ..RuleSet::default()
         };
         r.allow = vec![allow("tool", "/work/bin/tool")];
-        assert!(too_wide(&r, "K", &d).is_empty());
+        assert!(too_wide(&r, "K", &d, root()).is_empty());
         r.allow = vec![allow("tool", "/work/other/tool")];
-        assert_eq!(too_wide(&r, "K", &d).len(), 1);
+        assert_eq!(too_wide(&r, "K", &d, root()).len(), 1);
     }
 
     #[test]
@@ -298,7 +353,7 @@ mod tests {
             r.network = role_net.clone();
             s.network = secret_net.clone();
             assert_eq!(
-                !too_wide(&r, "K", &s).is_empty(),
+                !too_wide(&r, "K", &s, root()).is_empty(),
                 wide,
                 "{role_net:?} under {secret_net:?}"
             );
@@ -319,7 +374,7 @@ mod tests {
             r.network = Some(Network::Hosts(vec![host(role_host)]));
             s.network = Network::Hosts(vec![host(secret_host)]);
             assert_eq!(
-                !too_wide(&r, "K", &s).is_empty(),
+                !too_wide(&r, "K", &s, root()).is_empty(),
                 wide,
                 "{role_host} under {secret_host}"
             );
@@ -332,22 +387,111 @@ mod tests {
         s.dirs = vec![dir("/work", false)];
         let mut r = role();
         r.dirs = vec![dir("/work/sub", false)];
-        assert!(too_wide(&r, "K", &s).is_empty());
+        assert!(too_wide(&r, "K", &s, root()).is_empty());
         r.dirs = vec![dir("/work/sub", true)];
-        assert_eq!(too_wide(&r, "K", &s).len(), 1, "read-only to read-write");
+        assert_eq!(
+            too_wide(&r, "K", &s, root()).len(),
+            1,
+            "read-only to read-write"
+        );
         r.dirs = vec![dir("/elsewhere", false)];
-        assert_eq!(too_wide(&r, "K", &s).len(), 1);
+        assert_eq!(too_wide(&r, "K", &s, root()).len(), 1);
         r.dirs = vec![dir("/work/../etc", false)];
-        assert_eq!(too_wide(&r, "K", &s).len(), 1);
+        assert_eq!(too_wide(&r, "K", &s, root()).len(), 1);
         // A secret with no directories puts no limit.
         s.dirs.clear();
-        assert!(too_wide(&r, "K", &s).is_empty());
+        assert!(too_wide(&r, "K", &s, root()).is_empty());
     }
 
     #[test]
     fn deny_only_adds() {
         let mut r = role();
         r.deny = vec![parse_rule("@shells", false).unwrap().to_deny()];
-        assert!(too_wide(&r, "K", &secret()).is_empty());
+        assert!(too_wide(&r, "K", &secret(), root()).is_empty());
+    }
+
+    #[test]
+    fn project_forms_and_absolute_paths_name_the_same_place() {
+        let root = Path::new("/work/proj");
+        let mut r = role();
+        let mut s = secret();
+        let rel =
+            |text: &str, path: &str| parse_rule(text, true).unwrap().to_allow(path.to_string());
+        // Role relative, secret absolute.
+        r.allow = vec![rel("tool", "$PROJECT/bin/tool")];
+        s.allow = vec![rel("tool", "/work/proj/bin/tool")];
+        assert!(too_wide(&r, "K", &s, root).is_empty());
+        // Role absolute, secret relative.
+        std::mem::swap(&mut r.allow, &mut s.allow);
+        assert!(too_wide(&r, "K", &s, root).is_empty());
+        // Arguments that are places compare the same way.
+        r.allow = vec![rel("tool $PROJECT/a.sh", "$PROJECT/bin/tool")];
+        r.allow[0].args = vec!["$PROJECT/a.sh".into(), "--x".into()];
+        s.allow = vec![rel("tool", "/work/proj/bin/tool")];
+        s.allow[0].args = vec!["/work/proj/a.sh".into()];
+        assert!(too_wide(&r, "K", &s, root).is_empty());
+        // A genuinely wider role is still refused: another program, fewer
+        // arguments, a place outside the project.
+        r.allow = vec![rel("tool", "$PROJECT/bin/other")];
+        assert_eq!(too_wide(&r, "K", &s, root).len(), 1);
+        r.allow = vec![rel("tool", "$PROJECT/bin/tool")];
+        assert_eq!(too_wide(&r, "K", &s, root).len(), 1, "fewer arguments");
+        r.allow = vec![rel("tool", "/work/elsewhere/bin/tool")];
+        s.allow[0].args.clear();
+        assert_eq!(too_wide(&r, "K", &s, root).len(), 1);
+        // Folders: relative inside absolute is narrower, the reverse is wider.
+        let mut d = RuleSet {
+            dirs: vec![dir("/work/proj/src", true)],
+            ..RuleSet::default()
+        };
+        r.allow.clear();
+        r.dirs = vec![dir("$PROJECT/src/gen", true)];
+        assert!(too_wide(&r, "K", &d, root).is_empty());
+        r.dirs = vec![dir("$PROJECT", true)];
+        assert_eq!(too_wide(&r, "K", &d, root).len(), 1);
+        r.dirs = vec![dir("/work/proj/src/gen", false)];
+        d.dirs = vec![dir("$PROJECT/src", true)];
+        assert!(too_wide(&r, "K", &d, root).is_empty());
+        r.dirs = vec![dir("/work/proj/other", false)];
+        assert_eq!(too_wide(&r, "K", &d, root).len(), 1);
+        r.dirs = vec![dir("$PROJECT/src/../other", false)];
+        assert_eq!(too_wide(&r, "K", &d, root).len(), 1, "a `..` is not inside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_reached_through_a_link_is_the_same_project() {
+        let tmp = std::env::temp_dir().join(format!("vahta-role-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let real = tmp.join("real");
+        std::fs::create_dir_all(real.join("bin")).unwrap();
+        std::fs::write(real.join("bin/tool"), "").unwrap();
+        let link = tmp.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canon = dunce::canonicalize(&real).unwrap();
+        let mut r = role();
+        let mut s = secret();
+        r.allow = vec![
+            parse_rule("tool", true)
+                .unwrap()
+                .to_allow("$PROJECT/bin/tool".to_string()),
+        ];
+        s.allow = vec![
+            parse_rule("tool", true)
+                .unwrap()
+                .to_allow(canon.join("bin/tool").to_string_lossy().into_owned()),
+        ];
+        // The project is named through the link, the secret's rule by the real
+        // path: the same place.
+        assert!(too_wide(&r, "K", &s, &link).is_empty());
+        assert!(too_wide(&r, "K", &s, &real).is_empty());
+        // A secret rule written through the link, the project by the real path.
+        s.allow = vec![
+            parse_rule("tool", true)
+                .unwrap()
+                .to_allow(link.join("bin/tool").to_string_lossy().into_owned()),
+        ];
+        assert!(too_wide(&r, "K", &s, &real).is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

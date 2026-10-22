@@ -3576,6 +3576,66 @@ impl Sandbox {
 #[cfg(unix)]
 const LIMITED: &str = "limited to the role";
 
+// Scripts with the executable bit are a Unix thing.
+#[cfg(unix)]
+#[test]
+fn a_role_and_a_secret_name_a_project_script_alike_whichever_way_each_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = sandbox_with_secrets();
+    let scripts = s.project().join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    for name in ["tool.sh", "other.sh"] {
+        let path = scripts.join(name);
+        fs::write(&path, "#!/bin/sh\ntrue\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let canonical = dunce::canonicalize(&scripts).unwrap();
+    let set_secret = |program: String| {
+        let mut vault = s.open_vault();
+        let rule = vahta_vault::rules::parse_rule("./scripts/tool.sh", true)
+            .unwrap()
+            .to_allow(program);
+        vault
+            .set_bindings(
+                "ZETA",
+                Some(vahta_vault::RuleSet {
+                    name: "ZETA".into(),
+                    allow: vec![rule],
+                    network: vahta_vault::Network::App,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+            .unwrap();
+    };
+    let asked = s.asks();
+    // The secret's rule is stored project-relative, the role's script is
+    // resolved to an absolute path: the same place, so not wider.
+    set_secret("$PROJECT/scripts/tool.sh".into());
+    s.write_toml("[roles.r]\nsecrets = [\"ZETA\"]\nallow = [\"./scripts/tool.sh\"]\n");
+    s.approve_role("r");
+    assert_eq!(s.open_vault().roles().len(), 1);
+    // The secret's rule absolute, the role written with $PROJECT.
+    set_secret(canonical.join("tool.sh").to_string_lossy().into_owned());
+    s.write_toml("[roles.q]\nsecrets = [\"ZETA\"]\nallow = [\"$PROJECT/scripts/tool.sh\"]\n");
+    s.approve_role("q");
+    assert_eq!(s.open_vault().roles().len(), 2);
+    // A script the secret does not allow is still wider, in either form.
+    for script in ["./scripts/other.sh", "$PROJECT/scripts/other.sh"] {
+        let before = s.asks();
+        s.write_toml(&format!(
+            "[roles.wide]\nsecrets = [\"ZETA\"]\nallow = [\"{script}\"]\n"
+        ));
+        let out = s.vahta(&["role", "wide"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+        assert!(text(&out.stderr).contains("is wider than ZETA's own rules"));
+        assert_eq!(s.asks(), before, "no window for a wider role");
+    }
+    assert!(s.asks() > asked);
+}
+
 // Runs commands that only a Unix has (sh, printenv, cat, true).
 #[cfg(unix)]
 #[test]

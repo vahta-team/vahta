@@ -135,6 +135,12 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **A role is no longer "wider" for spelling a place another way.** A role's program,
+  argument or folder written `$PROJECT/...` against a secret's rule stored as an absolute
+  path (or the reverse, or through a symlink to the project) was refused as wider. Both
+  sides are now expanded from the project root and resolved before the narrowing check;
+  a role that really names another program, fewer arguments or a folder outside the
+  secret's is still refused.
 - **The hook marks the session for transcript cleanup itself.** When it cuts a secret
   out of a tool's output (or finds one it cannot cut), the daemon is told, and the
   session's transcript is cleaned at `SessionEnd` with no `vahta scrub` run. The
