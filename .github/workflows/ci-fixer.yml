@@ -5,6 +5,18 @@ name: CI fixer
 # again. It never merges, never touches workflows or the Rust pin, and stops
 # after a few attempts in a row, leaving a comment instead.
 #
+# Flaky first: the first failure of a run is re-run once (failed jobs only).
+# If the re-run passes, the test is flaky: nothing is changed, an issue
+# labelled `flaky` names the failed jobs and tests. Only a failure that
+# repeats goes to Claude.
+#
+# Tests only: a fix confined to test code is pushed. A fix that touches the
+# product is not pushed: the patch goes into a comment on the pull request
+# and into an issue labelled `ci-fixer`, for a person or the working agent.
+# Giving up (the attempt limit, or no fix found) also opens such an issue.
+#
+# Quiet on drafts and on pull requests labelled `ci-fixer:off`.
+#
 # Attempts: the repository variable CI_FIX_MAX_ATTEMPTS (default 2) is the
 # limit; it is clamped to 3 whatever it says. An attempt is a commit with the
 # trailer `CI-Fixer: attempt N`; a person's commit on the branch starts the
@@ -34,6 +46,7 @@ jobs:
   fix:
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt == 1 &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.head_branch != 'master' &&
@@ -46,9 +59,11 @@ jobs:
       FAILED_SHA: ${{ github.event.workflow_run.head_sha }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
       MAX_SETTING: ${{ vars.CI_FIX_MAX_ATTEMPTS }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
     steps:
       - name: Checkout the pull request's branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_branch }}
           fetch-depth: 0
@@ -65,6 +80,58 @@ jobs:
           pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -z "$pr" ]; then
             echo "no open pull request for $BRANCH"; proceed false; exit 0
+          fi
+          if [ "$(gh pr view "$pr" --json isDraft --jq .isDraft)" = true ] ||
+             gh pr view "$pr" --json labels --jq '.labels[].name' | grep -qx 'ci-fixer:off'; then
+            echo "pull request #$pr is a draft or labelled ci-fixer:off"; proceed false; exit 0
+          fi
+          # Re-run the failed jobs once and wait for them here. (A re-run's
+          # own failure does not bring this workflow back: only a run's first
+          # attempt does, see `if:` above.)
+          gh run rerun "$RUN_ID" --failed
+          conclusion=""
+          for _ in $(seq 1 40); do
+            sleep 30
+            state=$(gh run view "$RUN_ID" --json attempt,status,conclusion --jq '"\(.attempt) \(.status) \(.conclusion)"' || true)
+            case "$state" in
+              "$((RUN_ATTEMPT + 1)) completed "*) conclusion=${state##* }; break ;;
+            esac
+          done
+          if [ -z "$conclusion" ]; then
+            echo "the re-run did not finish in time"; proceed false; exit 0
+          fi
+          if [ "$(gh api "repos/${GITHUB_REPOSITORY}/branches/${BRANCH}" --jq .commit.sha)" != "$FAILED_SHA" ]; then
+            echo "branch moved while the re-run ran; that push has its own run"; proceed false; exit 0
+          fi
+          # The re-run passed: the failure was flaky. Name it in an issue
+          # and change nothing.
+          if [ "$conclusion" = success ]; then
+            jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+              --jq '.jobs[] | select(.conclusion == "failure") | "\(.id) \(.name)"')
+            names=""; tests=""
+            while read -r id name; do
+              [ -n "$id" ] || continue
+              names="$names, $name"
+              tests="$tests$( { gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" 2>/dev/null \
+                | grep -oE '^.{0,40}test [^ ]+ \.\.\. FAILED' | sed -E 's/^.*test ([^ ]+) .*/\1/' | sort -u | sed 's/^/- `/; s/$/`/'; } || true)
+          "
+            done <<< "$jobs"
+            names=${names#, }
+            first=$(printf '%s\n' "$tests" | grep -m1 . | tr -d '`- ' || true)
+            title="flaky: ${first:-${names:-run $RUN_ID}}"
+            if [ -z "$(gh issue list --state open --label flaky --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
+              gh label create flaky --color fbca04 --description "A test that failed and then passed on the same code" 2>/dev/null || true
+              {
+                echo "Failed on run $RUN_URL and passed when re-run, on the same commit ${FAILED_SHA:0:7} (pull request #$pr)."
+                echo
+                echo "Jobs: ${names:-unknown}"
+                if [ -n "$(printf '%s' "$tests" | tr -d '[:space:]')" ]; then echo; echo "Tests:"; printf '%s\n' "$tests" | grep .; fi
+                echo
+                echo "Opened by the CI fixer. Nothing was changed; this is for the test-suite cleanup."
+              } > /tmp/flaky.md
+              gh issue create --title "$title" --label flaky --body-file /tmp/flaky.md
+            fi
+            proceed false; exit 0
           fi
           base=$(gh pr view "$pr" --json baseRefName --jq .baseRefName)
           git fetch -q origin "$base"
@@ -88,6 +155,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           if [ "$attempts" -ge "$max" ]; then
             gh pr comment "$pr" --body "CI fixer: \`tests\` still fails after $attempts attempt(s) in a row (limit $max). Stopping here; a person needs to look. Failed run: $RUN_URL"
+            gh label create ci-fixer --color d93f0b --description "The CI fixer could not finish; a person or the working agent picks it up" 2>/dev/null || true
+            gh issue create --label ci-fixer --title "CI fixer gave up on #$pr ($BRANCH)" \
+              --body "\`tests\` still fails on #$pr after $attempts fixer attempt(s) in a row (limit $max). Failed run: $RUN_URL"
             proceed false; exit 0
           fi
           proceed true
@@ -95,7 +165,7 @@ jobs:
       - name: Claude fixes the failure
         if: steps.gate.outputs.proceed == 'true'
         id: claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           additional_permissions: |
@@ -128,6 +198,10 @@ jobs:
             - Fix the code. Never weaken, skip, ignore or delete a test; never add
               `#[allow(...)]` to silence a lint unless it is plainly wrong for that line
               (then say why in the summary); never lower a security check.
+            - Fix the cause where it is. If the product is wrong, change the product:
+              the workflow pushes only test-code changes and hands a product
+              change to a person as a patch, so never move a fix into a test to
+              get it pushed.
             - Do not edit anything under .github/, nor rust-toolchain.toml.
             - Never write a real-looking secret anywhere; test values are built at run
               time, as the existing tests do.
@@ -149,9 +223,15 @@ jobs:
           set -euo pipefail
           summary=/tmp/ci-fixer-summary.md
           [ -s "$summary" ] || echo "(Claude left no summary.)" > "$summary"
+          issue() {  # title, body file
+            gh label create ci-fixer --color d93f0b --description "The CI fixer could not finish; a person or the working agent picks it up" 2>/dev/null || true
+            gh issue create --label ci-fixer --title "$1" --body-file "$2"
+          }
           if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
             { echo "CI fixer, attempt $ATTEMPT of $MAX: no change made."; echo; cat "$summary"; } > /tmp/comment.md
             gh pr comment "$PR" --body-file /tmp/comment.md
+            { echo "The CI fixer found no fix for #$PR ($BRANCH), run $RUN_URL."; echo; cat "$summary"; } > /tmp/issue.md
+            issue "CI fixer: no fix for #$PR ($BRANCH)" /tmp/issue.md
             exit 0
           fi
           git add -A
@@ -159,6 +239,22 @@ jobs:
             { echo "CI fixer, attempt $ATTEMPT: refused to push; the change touched workflows or the Rust pin:"; echo; git diff --cached --name-only; } > /tmp/comment.md
             gh pr comment "$PR" --body-file /tmp/comment.md
             exit 1
+          fi
+          # Test code only is pushed. Anything else is the product: the patch
+          # goes to a comment and an issue, and a person decides.
+          product=$(git diff --cached --name-only | grep -Ev '(^|/)tests?/|(^|/)testing\.rs$|_tests?\.rs$|^bench/regression/' || true)
+          if [ -n "$product" ]; then
+            {
+              echo "CI fixer, attempt $ATTEMPT of $MAX: a fix that changes the product, so it is **not pushed**. Files outside test code:"
+              echo; printf '%s\n' "$product" | sed 's/^/- `/; s/$/`/'; echo
+              cat "$summary"; echo
+              echo '<details><summary>Patch</summary>'; echo; echo '```diff'
+              git diff --cached | head -c 50000; echo '```'; echo '</details>'
+            } > /tmp/comment.md
+            gh pr comment "$PR" --body-file /tmp/comment.md
+            title=$(head -n 1 "$summary" | sed 's/^#* *//' | cut -c1-60)
+            issue "CI fixer: product fix proposed for #$PR: $title" /tmp/comment.md
+            exit 0
           fi
           # Someone pushed to the branch while Claude worked (a person fixing
           # the same failure, say): this fix is for a commit that is no longer
