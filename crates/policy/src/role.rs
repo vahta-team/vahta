@@ -15,7 +15,9 @@
 
 use std::path::{Path, PathBuf};
 
-use vahta_vault::rules::{expand_project_path, is_project_path};
+use vahta_vault::rules::{
+    expand_project_path, is_project_path, place_inside, place_key, same_place,
+};
 use vahta_vault::{AgentRole, ApprovedRule, DirRule, HostRule, Network, Program, RuleSet};
 
 /// How the places of both sides are written before they are compared. A role is
@@ -40,11 +42,11 @@ impl Places {
         dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
     }
 
-    /// An argument of a rule: a place in its comparable form, any other word as
-    /// it is.
+    /// An argument of a rule: a place in its comparable form (on Windows case,
+    /// separators and the `\\?\` prefix do not matter), any other word as it is.
     fn word(&self, w: &str) -> String {
         if is_project_path(w) || Path::new(w).is_absolute() {
-            self.path(w).to_string_lossy().into_owned()
+            place_key(&self.path(w).to_string_lossy())
         } else {
             w.to_string()
         }
@@ -53,13 +55,6 @@ impl Places {
     fn words(&self, args: &[String]) -> Vec<String> {
         args.iter().map(|a| self.word(a)).collect()
     }
-}
-
-fn inside(path: &Path, dir: &Path) -> bool {
-    !path
-        .components()
-        .any(|c| c == std::path::Component::ParentDir)
-        && path.starts_with(dir)
 }
 
 /// Whether the secret's allow rules (or, failing them, its folders) cover
@@ -76,14 +71,16 @@ fn allow_covered(secret: &RuleSet, r: &ApprovedRule, places: &Places) -> bool {
     let by_rule = secret.allow.iter().any(|s| match &s.program {
         // The role's rule names the same program, with at least the
         // arguments the secret's rule fixes.
-        Program::Path(p) => places.path(p) == program && args.starts_with(&places.words(&s.args)),
+        Program::Path(p) => {
+            same_place(&places.path(p), &program) && args.starts_with(&places.words(&s.args))
+        }
         _ => false,
     });
     by_rule
         || secret
             .dirs
             .iter()
-            .any(|d| inside(&program, &places.path(&d.path)))
+            .any(|d| place_inside(&program, &places.path(&d.path)))
 }
 
 fn is_ip(host: &str) -> bool {
@@ -112,7 +109,7 @@ fn dir_covered(secret: &RuleSet, d: &DirRule, places: &Places) -> bool {
     secret
         .dirs
         .iter()
-        .any(|s| inside(&dir, &places.path(&s.path)) && (s.write || !d.write))
+        .any(|s| place_inside(&dir, &places.path(&s.path)) && (s.write || !d.write))
 }
 
 /// What the role asks for that `secret`'s approved rules do not give, one
@@ -176,7 +173,7 @@ pub fn too_wide(
             let in_one = secret
                 .dirs
                 .iter()
-                .any(|s| inside(&dir, &places.path(&s.path)));
+                .any(|s| place_inside(&dir, &places.path(&s.path)));
             out.push(if in_one {
                 format!(
                     "dir `{}` is read-write, and {name}'s directory there is read-only",
@@ -408,6 +405,23 @@ mod tests {
         let mut r = role();
         r.deny = vec![parse_rule("@shells", false).unwrap().to_deny()];
         assert!(too_wide(&r, "K", &secret(), root()).is_empty());
+    }
+
+    // On Windows the same script is the same script in any case and with either
+    // separator (the comparison itself is tested on every system in
+    // `vahta_vault::rules`).
+    #[cfg(windows)]
+    #[test]
+    fn windows_places_in_a_role_and_a_secret_differ_only_in_spelling() {
+        let mut r = role();
+        let mut s = secret();
+        let rule = |p: &str| parse_rule("tool", true).unwrap().to_allow(p.to_string());
+        r.allow = vec![rule(r"c:/work/proj/bin/TOOL.exe")];
+        s.allow = vec![rule(r"C:\Work\Proj\bin\tool.exe")];
+        let root = Path::new(r"C:\Work\Proj");
+        assert!(too_wide(&r, "K", &s, root).is_empty());
+        r.allow = vec![rule(r"c:/work/proj/bin/other.exe")];
+        assert_eq!(too_wide(&r, "K", &s, root).len(), 1);
     }
 
     #[test]

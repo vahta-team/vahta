@@ -135,6 +135,11 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **Windows: places in rules are compared the way Windows compares them.** Directories
+  and program paths in rule matching, a secret's `from` list, the "agent can change this
+  file" warning and role narrowing ignore case, `/` against `\` and the `\\?\` prefix on
+  Windows (one helper, `vahta_vault::rules::place_inside`, tested on every OS); other
+  systems are unchanged.
 - **A role is no longer "wider" for spelling a place another way.** A role's program,
   argument or folder written `$PROJECT/...` against a secret's rule stored as an absolute
   path (or the reverse, or through a symlink to the project) was refused as wider. Both

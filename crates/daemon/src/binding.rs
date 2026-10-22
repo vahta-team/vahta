@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use vahta_vault::rules::place_inside;
 use vahta_vault::{ApprovedRule, Network, RuleSet};
 
 /// The rules as the person reads them: `category: c; allow: a, b; deny: d;
@@ -64,7 +65,7 @@ pub(crate) fn rules_text(binding: &RuleSet) -> String {
 pub(crate) fn agent_writable(resolved: &Path, project_root: &Path) -> Option<&'static str> {
     let root =
         crate::pathfind::canonical(project_root).unwrap_or_else(|| project_root.to_path_buf());
-    if resolved.starts_with(&root) {
+    if place_inside(resolved, &root) {
         return Some("this file is inside the project, so the agent can change it");
     }
     #[cfg(unix)]
@@ -78,7 +79,7 @@ pub(crate) fn agent_writable(resolved: &Path, project_root: &Path) -> Option<&'s
     let temps = vec![std::env::temp_dir()];
     for t in temps {
         let t = crate::pathfind::canonical(&t).unwrap_or(t);
-        if resolved.starts_with(&t) {
+        if place_inside(resolved, &t) {
             return Some("this file is in a temporary directory, so the agent can change it");
         }
     }

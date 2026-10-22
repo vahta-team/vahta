@@ -291,7 +291,11 @@ proposes):
 | `allow` | Programs that may use it, by resolved path, with an optional argv prefix |
 | `deny` | Programs that may not, by name or group; **deny wins** |
 | `dirs` | Folders: the command runs inside one, and scripts inside one need no rule |
-| `network` | `none`, `hosts` (a list; on Linux the command reaches only those hosts over TLS through a relay, elsewhere only `vahta http` is bound to them) or `app` |
+| `network` | `none`, `hosts` (a list; on Linux the command reaches only those hosts over TLS through a relay, elsewhere only `vahta http` is bound to them) or `app`. A host written `private:HOST` may resolve to a loopback, private or link-local address; without the marker such an answer is refused |
+
+On Windows, the places in rules (programs, folders, `from` projects, and a role's
+against its secret's) are compared the way the file system does: case, `/` against `\`
+and the `\\?\` prefix make no difference. Elsewhere names are case-sensitive.
 
 ```toml
 [secrets.STRIPE_KEY]

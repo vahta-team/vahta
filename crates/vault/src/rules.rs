@@ -100,6 +100,85 @@ pub fn expand_project_path<'a>(stored: &'a str, root: &Path) -> Cow<'a, str> {
     Cow::Owned(path.to_string_lossy().into_owned())
 }
 
+// --- Comparing places ------------------------------------------------------------------------
+
+/// What two spellings of a place on Windows have in common: separators as `/`,
+/// the verbatim prefix (`\\?\C:\x`, `\\?\UNC\srv\share`) gone, case folded
+/// (the file system ignores it), repeated and trailing separators and `.` parts
+/// gone. A leading `/` or `//` (rooted, or a network share) is kept as a
+/// separate fact. `..` parts are kept so that a caller can refuse them.
+fn windows_parts(text: &str) -> (u8, Vec<String>) {
+    let mut s = text.replace('\\', "/");
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("//?/unc/") {
+        s = format!("//{}", &s[8..]);
+    } else if lower.starts_with("//?/") || lower.starts_with("//./") {
+        s = s[4..].to_string();
+    }
+    let root = if s.starts_with("//") {
+        2
+    } else {
+        u8::from(s.starts_with('/'))
+    };
+    let parts = s
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .map(str::to_lowercase)
+        .collect();
+    (root, parts)
+}
+
+/// Whether `a` and `b` are the same place. With `windows`, compared as Windows
+/// does (see [`windows_parts`]); else as paths are on Unix (component by
+/// component, a trailing separator not mattering). The flag is a parameter so
+/// that tests of the Windows rules run on every system; [`same_place`] passes
+/// this system's.
+pub fn same_place_for(a: &str, b: &str, windows: bool) -> bool {
+    if windows {
+        windows_parts(a) == windows_parts(b)
+    } else {
+        Path::new(a) == Path::new(b)
+    }
+}
+
+/// Whether `path` is `dir` or below it, comparing whole components. A path with
+/// `..` in it is never inside anything. `windows` as for [`same_place_for`].
+pub fn place_inside_for(path: &str, dir: &str, windows: bool) -> bool {
+    if windows {
+        let (path, dir) = (windows_parts(path), windows_parts(dir));
+        path.0 == dir.0 && !path.1.iter().any(|p| p == "..") && path.1.starts_with(&dir.1)
+    } else {
+        let p = Path::new(path);
+        !p.components().any(|c| c == Component::ParentDir) && p.starts_with(dir)
+    }
+}
+
+/// [`same_place_for`] for this system: on Windows the case of names, the kind of
+/// separator and the `\\?\` prefix do not matter.
+pub fn same_place(a: &Path, b: &Path) -> bool {
+    same_place_for(&a.to_string_lossy(), &b.to_string_lossy(), cfg!(windows))
+}
+
+/// [`place_inside_for`] for this system.
+pub fn place_inside(path: &Path, dir: &Path) -> bool {
+    place_inside_for(
+        &path.to_string_lossy(),
+        &dir.to_string_lossy(),
+        cfg!(windows),
+    )
+}
+
+/// A place as a string that is equal for two spellings of the same place on this
+/// system (for comparing a list of words).
+pub fn place_key(text: &str) -> String {
+    if cfg!(windows) {
+        let (root, parts) = windows_parts(text);
+        format!("{}{}", "/".repeat(usize::from(root)), parts.join("/"))
+    } else {
+        Path::new(text).to_string_lossy().into_owned()
+    }
+}
+
 /// `word` in its stored form if it is an absolute path inside one of `roots`.
 fn relative_word(word: &str, roots: &[&Path]) -> String {
     if !Path::new(word).is_absolute() {
@@ -426,6 +505,32 @@ pub fn parse_host(text: &str) -> Result<HostRule, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_places_ignore_case_separators_and_the_verbatim_prefix() {
+        let same = |a: &str, b: &str| same_place_for(a, b, true);
+        assert!(same(r"C:\Work\Proj", "c:/work/proj"));
+        assert!(same(r"\\?\C:\Work\Proj\", "c:/work/proj"));
+        assert!(same(r"\\?\UNC\Srv\Share\x", r"\\srv\share\X"));
+        assert!(same(r"C:\a\.\b", r"C:\A\\B"));
+        assert!(!same(r"C:\work\proj", r"C:\work\proj2"));
+        assert!(!same(r"C:\work", r"D:\work"));
+        // A share is not a rooted path of the current drive.
+        assert!(!same(r"\\srv\share", "/srv/share"));
+        let inside = |p: &str, d: &str| place_inside_for(p, d, true);
+        assert!(inside(r"C:\Work\Proj\bin\Tool.EXE", r"c:/work/PROJ"));
+        assert!(inside(r"\\?\C:\Work\Proj", "C:/work/proj"));
+        assert!(!inside(r"C:\work\proj2\x", r"C:\work\proj"));
+        assert!(!inside(r"C:\work\proj\..\other", r"C:\work\proj"));
+        assert!(!inside(r"C:\work", r"C:\work\proj"));
+        // Unix names stay case-sensitive.
+        assert!(!same_place_for("/Work/proj", "/work/proj", false));
+        assert!(same_place_for("/work/proj/", "/work/proj", false));
+        assert!(place_inside_for("/work/proj/x", "/work/proj", false));
+        assert!(!place_inside_for("/work/Proj/x", "/work/proj", false));
+        assert!(!place_inside_for("/work/proj/../x", "/work/proj", false));
+        assert!(!place_inside_for("/work/proj2", "/work/proj", false));
+    }
 
     #[test]
     fn project_paths_round_trip_with_this_machines_separators() {

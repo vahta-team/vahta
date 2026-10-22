@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use vahta_vault::Peek;
 use vahta_vault::project::{DIR_NAME, Project, calling_project};
+use vahta_vault::rules::place_inside;
 
 use crate::ops::{Ctx, Flow, find_vault, refused};
 use crate::pathfind;
@@ -89,7 +90,7 @@ impl Target {
         };
         let claimed = pathfind::canonical(Path::new(cwd));
         let root = pathfind::canonical(Path::new(vault)).filter(|r| r.is_dir());
-        let inside = |dir: &Path| root.as_ref().is_some_and(|r| dir.starts_with(r));
+        let inside = |dir: &Path| root.as_ref().is_some_and(|r| place_inside(dir, r));
 
         // Where the caller is. A request is only served from the directory
         // the kernel says the peer is in (checked for every request before it
@@ -118,7 +119,7 @@ impl Target {
         {
             return Err(no_vault());
         }
-        if real.starts_with(&root) {
+        if place_inside(&real, &root) {
             // Inside its own project: no opt-in needed.
             return Ok(Target {
                 project,
