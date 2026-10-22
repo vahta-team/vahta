@@ -202,6 +202,19 @@ already open, holds the message too: sending is only ever your word. A requester
 opens more than four windows a minute is held, journaled as suspicious and counted for
 the injection alarm.
 
+**Without the daemon** the hook is the only judge and cannot ask you, so it is
+stricter. The detector's finds hold the message as before, and so does any other
+long key-like string: 20 or more characters of the alphabets keys are written in
+(letters, digits, `-_+/`), with letters and digits both, and the spread of
+characters random text has and words do not. A 40-character git commit id, a UUID,
+an identifier or slug made of short words, and the parts of a path are let through.
+The message says a key-like string of that length was found and that the daemon was
+not running; the text is not repeated. With the daemon up none of this applies: it
+decides, and a long string the detector does not recognise goes on. Likewise the
+hook never answers "allow" for a `vahta run` or `vahta http` by itself when the daemon
+does not answer: that reply comes only from the daemon's yes (see below), and without
+it the harness decides, asking you as it would for any command.
+
 A held or saved message may already be in the harness's prompt history. When you
 choose "save" or "do nothing" the daemon removes it from there too; see
 [transcripts.md](transcripts.md#a-prompt-that-was-blocked).

@@ -135,6 +135,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **The paste check is stricter when the daemon is not running.** Without it the hook
+  cannot ask you, so besides the detector's finds it holds any prompt with a long
+  key-like string (20+ characters of a key alphabet, letters and digits, random-looking;
+  git commit ids, UUIDs, slugs and paths are let through). With the daemon up nothing
+  changes. The hook's own "allow" for `vahta run` and `vahta http` already needed the
+  daemon's yes; each harness now has a fixture for both pinning that without the daemon
+  the decision is the harness's.
 - **Windows: places in rules are compared the way Windows compares them.** Directories
   and program paths in rule matching, a secret's `from` list, the "agent can change this
   file" warning and role narrowing ignore case, `/` against `\` and the `\\?\` prefix on

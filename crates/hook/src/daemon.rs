@@ -241,6 +241,9 @@ pub struct InputCheck {
     /// Saved pastes the person asked the agent to propose rules for, which this
     /// prompt is the first to be able to tell it.
     pub bind: Vec<String>,
+    /// Whether the daemon answered at all. When it did not, the hook is the
+    /// only judge and is stricter (see `strict.rs`).
+    pub reached: bool,
 }
 
 /// The names of the held values a prompt carries, when a daemon of this
@@ -267,6 +270,7 @@ pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> InputCheck
         };
         match deliver(paths.clone(), request) {
             Delivery::Answered(ClientReply::InputNames { names: found, bind }) => {
+                check.reached = true;
                 for n in found {
                     if !check.names.contains(&n) {
                         check.names.push(n);

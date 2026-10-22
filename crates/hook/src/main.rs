@@ -17,6 +17,7 @@ mod hookguard;
 mod readguard;
 mod redact;
 mod runallow;
+mod strict;
 
 use std::io::{Read, Write};
 
@@ -169,14 +170,22 @@ fn secret_in(harness: &str, text: &str) -> Decision {
 /// vault and holds the prompt, "do nothing" holds it. Where no window can be
 /// shown (no daemon, silence past the wait, a prompt too large to show) a
 /// detected secret holds the prompt: this fails closed. A held value alone is
-/// known to the daemon only, so without it there is nothing to find.
+/// known to the daemon only, so without it there is nothing to find; instead,
+/// with no daemon, any long key-like string holds the prompt (`strict.rs`).
 fn prompt(args: &Args, ev: &Event) -> Decision {
     let found = vahta_detect::find_secret(&ev.text)
         .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block);
     let cwd = ev.cwd.as_deref().unwrap_or_default();
     let checked = daemon::input_names(ev.session_id.clone(), cwd, &ev.text);
+    // With no daemon the hook is the only judge and cannot ask the person, so a
+    // prompt the detector passed is looked at again with a lower threshold.
+    let strict = if found.is_none() && !checked.reached {
+        strict::long_token(&ev.text)
+    } else {
+        None
+    };
     let held = checked.names;
-    if found.is_none() && held.is_empty() {
+    if found.is_none() && held.is_empty() && strict.is_none() {
         // A clean prompt after the person saved a paste and asked for rules:
         // the blocked one is gone from the agent's context, so this one tells it.
         return if checked.bind.is_empty() {
@@ -185,9 +194,13 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
             bind_now(&checked.bind)
         };
     }
-    let what = match &found {
-        Some(f) => format!("{} (rule {})", f.category, f.rule),
-        None => "the value of a secret Vahta holds".to_string(),
+    let what = match (&found, strict) {
+        (Some(f), _) => format!("{} (rule {})", f.category, f.rule),
+        (None, Some(n)) => format!(
+            "a long key-like string ({n} characters; Vahta cannot tell a key from other text \
+             while its daemon is not running)"
+        ),
+        (None, None) => "the value of a secret Vahta holds".to_string(),
     };
     let not_sent = |why: &str| {
         let msg = format!(
