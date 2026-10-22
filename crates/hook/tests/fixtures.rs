@@ -590,3 +590,53 @@ fn a_secret_in_a_payload_past_the_parser_limits_is_still_denied() {
     let out = run_raw("claude", "before_tool", &payload);
     assert!(out.contains("\"deny\""), "{out}");
 }
+
+/// The journal is the person's: an agent may neither run `vahta journal` nor
+/// read the file (it lies in Vahta's data directory, which the hook guards like
+/// `.vahta/`).
+#[test]
+fn the_journal_is_refused_to_an_agent_as_a_command_and_as_a_file() {
+    use std::io::Write;
+    let data = std::env::temp_dir().join(format!("vahta-j-{}", std::process::id()));
+    let ask = |command: &str| {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": "/tmp",
+        })
+        .to_string();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vahta-hook"))
+            .args(["--harness", "claude", "--event", "before_tool"])
+            .env_remove("VAHTA_HOOK_DISABLE")
+            .env("VAHTA_DATA_DIR", &data)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn vahta-hook");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(payload.as_bytes())
+            .expect("write stdin");
+        String::from_utf8_lossy(&child.wait_with_output().expect("wait").stdout).into_owned()
+    };
+    let out = ask("vahta journal --kind suspicious");
+    assert!(out.contains("\"deny\""), "{out}");
+    assert!(
+        out.contains("it would show an agent which of its actions were noticed"),
+        "{out}"
+    );
+    let file = data.join("journal.jsonl");
+    for cmd in [
+        format!("cat {}", file.display()),
+        format!("tail -n 20 {}", file.display()),
+        format!("grep alarm {}", file.display()),
+    ] {
+        let out = ask(&cmd);
+        assert!(out.contains("\"deny\""), "{cmd}: {out}");
+    }
+    // Other Vahta commands and unrelated files are as before.
+    assert_eq!(ask("vahta list"), "");
+}

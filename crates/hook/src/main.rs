@@ -517,6 +517,12 @@ fn deny_vahta_command(invocation: &str, harness: &str) -> Decision {
                  to start, to {reconnect}."
             )
         }
+    } else if invocation.ends_with("journal") {
+        format!(
+            "vahta blocked `{invocation}`: the journal is for the person: it would show an agent \
+             which of its actions were noticed. Do not read it; ask the person if you need to know \
+             what happened."
+        )
     } else if invocation.ends_with("_surface") {
         format!(
             "vahta blocked `{invocation}`: it is Vahta's prompt window, which only Vahta opens, for \
@@ -1048,6 +1054,15 @@ mod connector_text_tests {
         assert!(said("vahta unlock --connector", "codex").contains("restart the Codex session"));
         assert!(said("vahta unlock --connector", "cursor").contains("Cursor's settings"));
         assert!(!said("vahta unlock --connector", "codex").contains("/mcp"));
+    }
+
+    #[test]
+    fn the_journal_is_for_the_person() {
+        let m = said("vahta journal", "claude");
+        assert!(
+            m.contains("the journal is for the person: it would show an agent which of its actions were noticed"),
+            "{m}"
+        );
     }
 
     #[test]

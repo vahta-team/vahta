@@ -97,19 +97,19 @@ pub(crate) fn text(kind: Kind, names: &[String], who: &str) -> (&'static str, St
     let body = match kind {
         Kind::NotFromHarness => format!(
             "A process that is not {who} tried to start the MCP server for {names}. Nothing \
-             ran. See `vahta daemon status`."
+             ran. See `vahta journal --kind suspicious`."
         ),
         Kind::CommandNotAllowed => format!(
             "The MCP server for {names} was asked to run `{who}`, which its rules do not \
-             allow. Nothing ran. See `vahta list --connector`."
+             allow. Nothing ran. See `vahta journal --kind suspicious`."
         ),
         Kind::ValueInOutput => format!(
-            "The MCP server for {names} printed its own key. Vahta hid it. Check the \
-             server you allowed: `vahta list --connector`."
+            "The MCP server for {names} printed its own key. Vahta hid it. See \
+             `vahta journal --kind suspicious`, and check the server you allowed."
         ),
         Kind::RefusalBurst => format!(
             "Many launches of MCP servers ({names}) were refused in a short time. Nothing \
-             ran. See `vahta daemon status` and `vahta list --connector`."
+             ran. See `vahta journal --kind refused`."
         ),
     };
     ("Vahta", body)

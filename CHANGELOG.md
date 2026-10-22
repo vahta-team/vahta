@@ -70,6 +70,10 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   process's session covers its other servers and ends with it. See
   docs/connectors.md.
 
+- **`vahta journal`** shows the journal in plain words (`--last`, `--since`, `--secret`,
+  `--kind`, `--json`), suspicious lines marked `!`. It reads the file, needs no
+  daemon, and is refused to agents by the hook.
+
 - **Connectors, second round.** There is no `vahta unlock --connector` and no
   until-reboot session: the connectors session belongs to the harness process
   that asked (pid and start time), opens with the connectors password in a window

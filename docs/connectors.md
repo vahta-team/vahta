@@ -177,8 +177,8 @@ never a value:
 | The connector's own key turned up in its server's output (Vahta hid it) | "The MCP server for NAME printed its own key. Vahta hid it." |
 | Many refused launches in a short time (the same score the injection alarm keeps) | "Many launches of MCP servers (NAME) were refused in a short time. Nothing ran." |
 
-Each points to `vahta daemon status` or `vahta list --connector`, which show the
-refused launches. Limits: at most one notification per vault, kind and connector
+Each points to `vahta journal` (try `vahta journal --kind connector`), which
+shows the events in plain words, suspicious ones marked `!`. Limits: at most one notification per vault, kind and connector
 every 10 minutes, and five in all in that time, so an agent cannot flood your
 desktop. Every event is in the journal whether or not it was shown, and a
 notification that was sent adds a `notified` line (kind and connector names).
