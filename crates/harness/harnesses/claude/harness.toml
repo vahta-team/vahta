@@ -223,6 +223,14 @@ style = "json"
 # context; `reason` is shown to the person only.
 body = { decision = "block", reason = "{user_message}" }
 
+[replies.prompt.notice]
+style = "json"
+# A clean prompt may carry context for the model (docs read 2026-10-01,
+# https://code.claude.com/docs/en/hooks: UserPromptSubmit additionalContext).
+# Used once after the person saved a pasted secret and asked the agent to
+# propose rules for it: the blocked prompt itself is erased from the context.
+body = { hookSpecificOutput = { hookEventName = "UserPromptSubmit", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
+
 [replies.after_tool.notice]
 style = "json"
 # additionalContext is appended to what the model sees; systemMessage is shown

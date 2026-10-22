@@ -126,6 +126,14 @@ body = { hookSpecificOutput = { hookEventName = "PreToolUse", permissionDecision
 style = "json"
 body = { decision = "block", reason = "{user_message}" }
 
+[replies.prompt.notice]
+style = "json"
+# UserPromptSubmit takes additionalContext in Codex's hooks too (docs read
+# 2026-10-13); not seen to work live, so the hook stays silent unless
+# VAHTA_HOOK_UNVERIFIED is set.
+verified = false
+body = { hookSpecificOutput = { hookEventName = "UserPromptSubmit", additionalContext = "{agent_message}" }, systemMessage = "{user_message}" }
+
 [replies.after_tool.notice]
 style = "json"
 # Codex's PostToolUse accepts systemMessage (shown to the person as a warning),

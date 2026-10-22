@@ -885,8 +885,13 @@ pub enum PromptDecision {
     /// A false alarm (or already one): the prompt goes on.
     Send {},
     /// The value was saved in the project's vault under `name`; the prompt
-    /// must not go.
-    Saved { name: String },
+    /// must not go. `bind`: the person also asked, in the same window, for the
+    /// agent to be told to propose rules for it now.
+    Saved {
+        name: String,
+        #[serde(default)]
+        bind: bool,
+    },
     /// The prompt must not go: the person chose to do nothing, or gave no
     /// answer (`no_answer`: the time ran out or the window was closed).
     Held { no_answer: bool },
@@ -1278,9 +1283,15 @@ pub enum ClientReply {
         name: String,
     },
     /// The answer to a [`ClientRequest::CheckInput`]: the names of the held
-    /// values the text carries, in order of first appearance, each once.
+    /// values the text carries, in order of first appearance, each once. `bind`:
+    /// secrets the person saved from a blocked prompt in this project and asked
+    /// the agent to propose rules for; each is named once, to the first clean
+    /// prompt that follows (a blocked prompt is erased from the agent's context,
+    /// so this is how the agent hears).
     InputNames {
         names: Vec<String>,
+        #[serde(default)]
+        bind: Vec<String>,
     },
     /// The answer to a [`ClientRequest::PromptAsk`].
     PromptAnswer {

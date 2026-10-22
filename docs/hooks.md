@@ -176,6 +176,36 @@ test pins the keys). Live checks still to do:
 - The cut happens in what the model is shown. The tool itself ran with the
   real output: a file it wrote, a request it sent, are not changed.
 
+## Secrets in what you type
+
+The prompt hook (Claude Code `UserPromptSubmit`, Codex the same, Cursor
+`beforeSubmitPrompt`) looks at the message before the agent does. A secret the
+detector recognises, or the value of a secret Vahta holds in any encoding, puts the
+message before you in a window (a kind and a length, never the value) with three
+ways out:
+
+- **False alarm, send it** (or "Send it anyway"): the message goes on, and the same
+  value does not ask again until the daemon exits (kept as keyed hashes in memory).
+- **Save to the project vault as NAME** (offered for a detected value, with a name
+  taken from its kind): the value is stored, the message is held, and the agent is
+  not told the value. A second question follows in the same window: *Have the agent
+  propose rules now?* Yes means the first clean message you send afterwards reaches
+  the agent with a note (Claude Code's `additionalContext`) to propose rules for
+  `[secrets.NAME]` in `vahta.toml` and run `vahta bind NAME`, which you approve in
+  one window. The held message is erased from the agent's context, so it cannot be
+  told then; the note waits, in memory, up to an hour, for your next message in that
+  project. Either way the held message tells you the secret has no rules yet.
+- **Do nothing**: the message is held.
+
+No answer in 100 seconds, no daemon, a message too large to show, or another window
+already open, holds the message too: sending is only ever your word. A requester that
+opens more than four windows a minute is held, journaled as suspicious and counted for
+the injection alarm.
+
+A held or saved message may already be in the harness's prompt history. When you
+choose "save" or "do nothing" the daemon removes it from there too; see
+[transcripts.md](transcripts.md#a-prompt-that-was-blocked).
+
 ## Running unattended: when the hook says "allow"
 
 An agent harness stops a `vahta run` call to ask the person (Claude Code's

@@ -135,6 +135,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **Save from the paste window: "propose rules now".** After "Save to the project
+  vault" a second question asks whether the agent should propose rules for the new
+  secret. If you say yes, the first clean message you send afterwards reaches the agent
+  with an instruction (secret name only) to write `[secrets.NAME]` in `vahta.toml` and
+  run `vahta bind NAME`; the blocked message itself is erased from the agent's context,
+  so it cannot carry it. Either way the held message now tells you the secret still
+  needs rules. Codex's version of the note stays off until it is seen to work.
 - **Prompt history.** `vahta scrub --transcript` also cleans Claude Code's and
   Codex's `history.jsonl` (the prompts kept for arrow-up), and when the paste check
   holds a prompt (the person chose "save" or "do nothing") the daemon removes that

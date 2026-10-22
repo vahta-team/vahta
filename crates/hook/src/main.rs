@@ -174,9 +174,16 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
     let found = vahta_detect::find_secret(&ev.text)
         .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block);
     let cwd = ev.cwd.as_deref().unwrap_or_default();
-    let held = daemon::input_names(ev.session_id.clone(), cwd, &ev.text);
+    let checked = daemon::input_names(ev.session_id.clone(), cwd, &ev.text);
+    let held = checked.names;
     if found.is_none() && held.is_empty() {
-        return Decision::Allow;
+        // A clean prompt after the person saved a paste and asked for rules:
+        // the blocked one is gone from the agent's context, so this one tells it.
+        return if checked.bind.is_empty() {
+            Decision::Allow
+        } else {
+            bind_now(&checked.bind)
+        };
     }
     let what = match &found {
         Some(f) => format!("{} (rule {})", f.category, f.rule),
@@ -204,16 +211,7 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
     );
     match outcome {
         daemon::PromptOutcome::Send => Decision::Allow,
-        daemon::PromptOutcome::Saved(name) => {
-            let msg = format!(
-                "Saved as {name}. Your message was not sent; send it again without the key \
-                 (refer to it as {name})."
-            );
-            Decision::Deny {
-                user_message: msg.clone(),
-                agent_message: msg,
-            }
-        }
+        daemon::PromptOutcome::Saved { name, bind } => saved(&name, bind),
         daemon::PromptOutcome::Held { no_answer: false } => Decision::Deny {
             user_message: "vahta did not send this message because it contained a secret. \
                            Send it again without the secret."
@@ -231,6 +229,63 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
         daemon::PromptOutcome::Unasked => {
             not_sent("Vahta could not ask you about it (no daemon answered), so it was not sent.")
         }
+    }
+}
+
+/// The message after the person saved a pasted value: the name to use instead,
+/// the hint that it still needs rules, and, if the person asked for it in the
+/// window, the instruction for the agent to start the bind flow. The person
+/// decided; the agent only gets the instruction.
+fn saved(name: &str, bind: bool) -> Decision {
+    let sent = format!(
+        "Saved as {name}. Your message was not sent; send it again without the key \
+         (refer to it as {name})."
+    );
+    let user_message = if bind {
+        format!(
+            "{sent} The agent will be asked to propose rules for {name} with your next message; \
+             you approve them in one window."
+        )
+    } else {
+        format!(
+            "{sent} {name} has no rules yet: ask the agent to propose them (`vahta bind {name}`) \
+             before it is used."
+        )
+    };
+    let agent_message = if bind {
+        format!(
+            "{sent} The person asked you to set up rules for {name} now: propose them for \
+             [secrets.{name}] in vahta.toml (allow, network, dirs; ask the person if unsure what \
+             it is for), then run `vahta bind {name}` so the person can approve them in one \
+             window. Do not ask for the value."
+        )
+    } else {
+        format!(
+            "{sent} {name} has no rules yet; when the person wants to use it, propose rules for \
+             [secrets.{name}] in vahta.toml and run `vahta bind {name}`."
+        )
+    };
+    Decision::Deny {
+        user_message,
+        agent_message,
+    }
+}
+
+/// The clean prompt that follows a save the person asked rules for: the agent
+/// is told, with the secret's name only, to start the bind flow.
+fn bind_now(names: &[String]) -> Decision {
+    let list = names.join(", ");
+    Decision::Notice {
+        user_message: format!(
+            "vahta: asked the agent to propose rules for {list}; you approve them in one window."
+        ),
+        agent_message: format!(
+            "The person saved a pasted secret to the project vault as {list} and asked you to \
+             set up its rules now. Before using it: propose rules for [secrets.NAME] in \
+             vahta.toml for each (allow, network, dirs; ask the person if unsure what it is \
+             for), then run `vahta bind NAME` so the person can approve them in one window. \
+             Never ask for the value."
+        ),
     }
 }
 

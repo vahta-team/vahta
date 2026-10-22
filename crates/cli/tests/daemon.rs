@@ -4989,11 +4989,23 @@ fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
         r#"{"secret":"correct horse"}"#,
     ]);
     let said = blocked_reason(&s.hook_prompt(&format!("here: {key}")));
-    assert_eq!(
-        said,
-        "Saved as ANTHROPIC_KEY. Your message was not sent; send it again without the key \
-         (refer to it as ANTHROPIC_KEY)."
+    assert!(
+        said.starts_with(
+            "Saved as ANTHROPIC_KEY. Your message was not sent; send it again without the key \
+             (refer to it as ANTHROPIC_KEY)."
+        ),
+        "{said}"
     );
+    // The window asked about rules (and "Not now" is what a script that says
+    // nothing gives): the person is pointed to the bind flow, the agent is not
+    // told to start it.
+    assert!(said.contains("vahta bind ANTHROPIC_KEY"), "{said}");
+    assert!(
+        s.window_log()
+            .iter()
+            .any(|e| e["options"].to_string().contains("propose rules now"))
+    );
+    assert!(s.hook_prompt("please summarise the readme").is_none());
     assert_eq!(
         s.open_vault().get("ANTHROPIC_KEY").unwrap().expose(),
         key.as_bytes()
@@ -5123,6 +5135,40 @@ fn scrub_cleans_the_prompt_histories_of_both_harnesses_in_any_scope() {
         keep.1
     );
     assert!(!fs::read_to_string(&codex).unwrap().ends_with('\n'));
+}
+
+#[test]
+fn after_a_save_the_person_can_have_the_agent_told_to_propose_rules_with_the_next_prompt() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("p");
+    // The choice, the name, the tier, the password, then "propose rules now".
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+        r#"{"choose":0}"#,
+    ]);
+    let said = blocked_reason(&s.hook_prompt(&format!("here: {key}")));
+    assert!(said.contains("will be asked to propose rules"), "{said}");
+    assert!(!said.contains(&key));
+    // The blocked prompt is gone from the agent's context; the next clean one
+    // carries the instruction, once, with the name and never the value.
+    let next = s
+        .hook_prompt("please summarise the readme")
+        .expect("the agent is told");
+    let context = next["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        context.contains("vahta bind NAME")
+            && context.contains("vahta.toml")
+            && context.contains("ANTHROPIC_KEY")
+            && !context.contains(&key),
+        "{next}"
+    );
+    assert!(s.hook_prompt("and now the changelog please").is_none());
+    assert!(s.journal().contains("bind_offered_yes"));
 }
 
 #[test]

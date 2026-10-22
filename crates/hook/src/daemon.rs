@@ -233,16 +233,26 @@ fn prompt_wait() -> Duration {
 /// the person; the hook holds it.
 pub const MAX_PROMPT: usize = 160 * 1024;
 
+/// What the daemon says about a prompt's text.
+#[derive(Default)]
+pub struct InputCheck {
+    /// The held values it carries.
+    pub names: Vec<String>,
+    /// Saved pastes the person asked the agent to propose rules for, which this
+    /// prompt is the first to be able to tell it.
+    pub bind: Vec<String>,
+}
+
 /// The names of the held values a prompt carries, when a daemon of this
 /// version runs and answers within [`WAIT`] (checked in pieces, like a tool
 /// call). Anything else is empty: nothing is known.
-pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> InputCheck {
+    let mut check = InputCheck::default();
     if text.len() < MIN_CHECKED {
-        return names;
+        return check;
     }
     let Ok(paths) = Paths::from_env(None) else {
-        return names;
+        return check;
     };
     let mut start = 0;
     for _ in 0..CHECK_PIECES {
@@ -256,15 +266,20 @@ pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String
             text: text[start..end].to_string(),
         };
         match deliver(paths.clone(), request) {
-            Delivery::Answered(ClientReply::InputNames { names: found }) => {
+            Delivery::Answered(ClientReply::InputNames { names: found, bind }) => {
                 for n in found {
-                    if !names.contains(&n) {
-                        names.push(n);
+                    if !check.names.contains(&n) {
+                        check.names.push(n);
+                    }
+                }
+                for n in bind {
+                    if !check.bind.contains(&n) {
+                        check.bind.push(n);
                     }
                 }
             }
             Delivery::Answered(_) => {}
-            Delivery::NoDaemon | Delivery::Lost => return names,
+            Delivery::NoDaemon | Delivery::Lost => return check,
         }
         if end >= text.len() {
             break;
@@ -274,7 +289,7 @@ pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String
             start += 1;
         }
     }
-    names
+    check
 }
 
 /// What came of asking the person about a prompt.
@@ -282,7 +297,8 @@ pub enum PromptOutcome {
     /// A false alarm: the prompt goes on.
     Send,
     /// Saved in the project's vault under this name; the prompt must not go.
-    Saved(String),
+    /// `bind`: the person asked for the agent to propose rules for it now.
+    Saved { name: String, bind: bool },
     /// The person chose not to send it, or gave no answer.
     Held { no_answer: bool },
     /// Another window is open, or this process asked too often.
@@ -315,7 +331,7 @@ pub fn prompt_ask(
     match deliver_within(paths, request, prompt_wait()) {
         Delivery::Answered(ClientReply::PromptAnswer { answer }) => match answer {
             PromptDecision::Send {} => PromptOutcome::Send,
-            PromptDecision::Saved { name } => PromptOutcome::Saved(name),
+            PromptDecision::Saved { name, bind } => PromptOutcome::Saved { name, bind },
             PromptDecision::Held { no_answer } => PromptOutcome::Held { no_answer },
             PromptDecision::Busy { limited } => PromptOutcome::Busy { limited },
         },
