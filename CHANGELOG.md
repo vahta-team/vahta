@@ -135,6 +135,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **The agent is told which secret was blocked.** When a value Vahta holds is refused in a
+  command, a file write, an MCP argument or a prompt, or cut from a tool's output, the
+  message for the agent now names the secret (and, for input, how the value was written)
+  and says to use `vahta run --secret NAME -- ...`; before, only the person heard the
+  name. Never the value or a part of it. A value only the detector knew still gets the
+  old advice. The daemon marks which cuts are a secret's name so a detector's kind is
+  never offered as one.
 - **The paste check is stricter when the daemon is not running.** Without it the hook
   cannot ask you, so besides the detector's finds it holds any prompt with a long
   key-like string (20+ characters of a key alphabet, letters and digits, random-looking;

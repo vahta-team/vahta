@@ -14,7 +14,7 @@
   },
   "stdout": {
     "decision": "block",
-    "reason": "vahta did not send this message because it contained a secret. Send it again without the secret."
+    "reason": "vahta did not send this message because it contained a secret. Send it again without the secret. To use ZETA, run the command that needs it with `vahta run --secret ZETA -- ...`."
   },
   "exit": 0,
   "prompt_ask": [

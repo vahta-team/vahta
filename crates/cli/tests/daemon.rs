@@ -5278,6 +5278,12 @@ fn a_pasted_held_value_asks_and_no_answer_holds_the_prompt() {
     s.script(&[r#"{"noanswer":true}"#]);
     let said = blocked_reason(&s.hook_prompt("the token is fake-one, ok"));
     assert!(said.contains("Nobody answered"), "{said}");
+    // The message names the secret and the way to use it, not the value.
+    assert!(
+        said.contains("the value of ZETA") && said.contains("`vahta run --secret ZETA -- ...`"),
+        "{said}"
+    );
+    assert!(!said.contains("fake-one"), "{said}");
     let log = s.window_log();
     let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
     assert_eq!(
@@ -6163,7 +6169,7 @@ fn spooled_reports_are_weighed_when_the_daemon_starts() {
 }
 
 #[test]
-fn the_hook_refuses_a_held_value_in_a_command_and_says_only_the_form() {
+fn the_hook_refuses_a_held_value_in_a_command_and_names_the_secret_and_the_form() {
     let s = sandbox_with_secrets();
     s.unlock_session();
     let command = format!(
@@ -6204,12 +6210,15 @@ fn the_hook_refuses_a_held_value_in_a_command_and_says_only_the_form() {
         .as_str()
         .unwrap();
     assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
+    // The agent is told which secret and how it was written, and how to use
+    // the secret instead: never the value, nor a piece of it.
     assert_eq!(
         reason,
-        "Blocked: this command contains a value Vahta holds (base64). Use `vahta run`."
+        "Blocked: this command contains the value of the secret ZETA (base64). Do not write it \
+         into the command. To use ZETA, run the command that needs it with \
+         `vahta run --secret ZETA -- ...`."
     );
-    // The person is told which secret; the agent is not.
-    assert!(!reason.contains("ZETA"));
+    assert!(!reason.contains("fake"));
     assert!(reply["systemMessage"].as_str().unwrap().contains("ZETA"));
     // The daemon journalled it under the agent's session id, with no value.
     let journal = s.journal();
@@ -6234,11 +6243,19 @@ fn the_encoded_forms_of_a_run_value_are_cut_from_output_and_nothing_leaks() {
             vahta_vault::hex_encode(b"fake-one")
         ))
         .expect("the hook answered");
-    let (stdout, _) = redacted(&reply);
+    let (stdout, told) = redacted(&reply);
     assert_eq!(
         stdout,
         "see ***REDACTED(ZETA (base64))*** and ***REDACTED(ZETA (hex))***"
     );
+    // The agent is told which secret it was, once, and how to use it.
+    assert!(
+        told.contains(
+            "to use ZETA, run the command that needs it with `vahta run --secret ZETA -- ...`"
+        ) && told.matches("--secret ZETA").count() == 1,
+        "{told}"
+    );
+    assert!(!told.contains("fake"), "{told}");
 
     // And `vahta run` scrubs a command's own base64 of the value.
     let out = s.vahta(&[

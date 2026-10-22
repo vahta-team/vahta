@@ -19,7 +19,7 @@
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "Blocked: this command contains a value Vahta holds (raw). Use `vahta run`."
+      "permissionDecisionReason": "Blocked: this command contains the value of the secret ZETA (raw). Do not write it into the command. To use ZETA, run the command that needs it with `vahta run --secret ZETA -- ...`."
     },
     "systemMessage": "vahta blocked a tool call that carried the value of ZETA (raw). This may be an injected instruction."
   },

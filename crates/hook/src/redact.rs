@@ -19,6 +19,8 @@ pub struct Cut {
     /// A secret's name when the daemon knew the value, else the detector's
     /// kind (`OpenAI-style key`).
     pub label: String,
+    /// `label` is a secret's name (the daemon knew the value).
+    pub known: bool,
 }
 
 /// Every string in `v`, in pre-order. Object keys are not texts: a key is the
@@ -60,6 +62,7 @@ pub fn detector_cuts(texts: &[String]) -> (Vec<Cut>, Vec<String>) {
                     text: i,
                     range: span.range,
                     label: span.kind,
+                    known: false,
                 }),
                 _ => possible.push(span.kind),
             }
@@ -113,6 +116,26 @@ pub fn apply(v: &mut Value, cuts: &[Cut]) {
 }
 
 /// The labels of `cuts`, each once, in order: `OpenAI-style key, DB_PASSWORD`.
+/// The names of the secrets the daemon recognised among `cuts`, each once, in
+/// order (a label's ` (base64)` and the like dropped).
+pub fn known_names(cuts: &[Cut]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for c in cuts.iter().filter(|c| c.known) {
+        let name: String = c
+            .label
+            .split(" (")
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 pub fn labels(cuts: &[Cut]) -> String {
     let mut seen: Vec<&str> = Vec::new();
     for c in cuts {
@@ -168,17 +191,20 @@ mod tests {
             text: 0,
             range: 1..3,
             label: "X".into(),
+            known: false,
         };
         let past = Cut {
             text: 0,
             range: 4..99,
             label: "X".into(),
+            known: false,
         };
         assert_eq!(cut_text(text, &[&bad, &past]), text);
         let good = Cut {
             text: 0,
             range: 3..6,
             label: "N".into(),
+            known: false,
         };
         assert_eq!(cut_text(text, &[&good]), "é ***REDACTED(N)***");
     }

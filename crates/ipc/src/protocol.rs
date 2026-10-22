@@ -932,6 +932,10 @@ pub struct OutputSpan {
     pub start: usize,
     pub end: usize,
     pub label: String,
+    /// In the daemon's answer: `label` is the name of a secret it holds (not a
+    /// detector's kind), so the agent can be told which to use with `vahta run`.
+    #[serde(default)]
+    pub known: bool,
 }
 
 /// What the client sends while a command runs: the command's input, and the
@@ -1281,8 +1285,9 @@ pub enum ClientReply {
     NoOpinion {},
     /// The answer to a `ToolCheck` that found a held value: the tool call
     /// must be refused. `form` is how the value was written (`base64`,
-    /// `hex`, `raw`...), which the agent may be told; `name` is the secret's
-    /// name, for the person only.
+    /// `hex`, `raw`...) and `name` is the secret's name; the agent is told both
+    /// (never the value, nor any part of it) with the way to use the secret
+    /// without writing it: `vahta run --secret NAME -- ...`.
     ToolDeny {
         form: String,
         name: String,

@@ -29,6 +29,14 @@ After every tool call, before the model sees the result:
    the model is told it cannot be shown, and the person is told what was cut.
 4. Clean output gets no answer at all and reaches the model as it was.
 
+**Which secret.** When the value was one Vahta holds, the message for the model names
+the secret (`STRIPE_KEY`), never the value or any part of it, and says how to use it
+without writing it out: ``vahta run --secret STRIPE_KEY -- ...``. The same goes for a
+tool call refused because it carries a held value (a command, a file write, an MCP
+argument; the message also says how it was written, `raw`, `base64`, `hex`...) and for
+a prompt held because of one. A value only the detector recognised has a kind
+(`OpenAI-style key`), not a name, and the old advice to use `vahta run`.
+
 The hook never starts the daemon and waits at most 0.3 seconds for it. If the
 daemon is not there, or does not answer, the detector's cuts stand: the hook
 never lets through more than it did before there was a daemon.

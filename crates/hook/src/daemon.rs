@@ -389,6 +389,7 @@ pub fn scan(scan: Scan) -> Option<Answer> {
                 start: c.range.start,
                 end: c.range.end,
                 label: c.label,
+                known: c.known,
             })
             .collect(),
         possible: scan.possible,
@@ -401,6 +402,7 @@ pub fn scan(scan: Scan) -> Option<Answer> {
                     text: s.text,
                     range: s.start..s.end,
                     label: s.label,
+                    known: s.known,
                 })
                 .collect(),
             reference,
