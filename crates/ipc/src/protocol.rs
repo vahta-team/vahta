@@ -423,10 +423,13 @@ pub enum ClientRequest {
         #[serde(default)]
         vault: Option<String>,
     },
-    /// End this project's sessions, or all of them. No password.
+    /// End this project's sessions, or all of them, or (`connector`) only the
+    /// connectors session. No password.
     Lock {
         cwd: String,
         all: bool,
+        #[serde(default)]
+        connector: bool,
     },
     /// List the sessions.
     Sessions {},

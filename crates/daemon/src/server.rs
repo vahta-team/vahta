@@ -751,8 +751,12 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     .unwrap_or_else(|r| r),
                 false,
             ),
-            ClientRequest::Lock { cwd, all } => (
-                session_ops::lock(&ctx, &cwd, all).unwrap_or_else(|r| r),
+            ClientRequest::Lock {
+                cwd,
+                all,
+                connector,
+            } => (
+                session_ops::lock(&ctx, &cwd, all, connector).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Run {

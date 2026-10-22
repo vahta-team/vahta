@@ -120,7 +120,7 @@ commands:
   role    propose an agent role for a task, or `--remove` one (the person approves)
   delegate  narrow your session for a sub-agent (or to a --role) and run it
   unlock  open a session: one password, then `vahta run` needs no window
-  lock    end this project's sessions (no password)
+  lock    end this project's sessions, or --all, or --connector (no password)
   sessions  list sessions, or `kill ID` one (no password)
   config  `config unlock`: which unlock method is tried first (no password)
   devices  list, pair, extend, revoke or declare lost the phones that open the vault

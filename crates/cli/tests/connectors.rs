@@ -695,6 +695,28 @@ fn the_daemon_stays_while_a_connectors_session_is_open_and_lock_ends_it() {
 }
 
 #[test]
+fn lock_connector_ends_only_the_connectors_session_and_plain_lock_leaves_it() {
+    let s = Sandbox::with_connector_idle(true, None);
+    s.unlock_until_reboot();
+    // A plain lock is the project's, whatever it holds (a project with no
+    // vault still has sessions to end).
+    fs::create_dir_all(s.proj.join(".vahta")).unwrap();
+    assert_eq!(s.vahta(&s.proj, &["lock"]).status.code(), Some(0));
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // `--connector` ends it, says so, and a second one has nothing to end.
+    let out = s.vahta(&s.proj, &["lock", "--connector"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("ended the connectors session"));
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    let out = s.vahta(&s.proj, &["lock", "--connector"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("no connectors session"));
+    assert!(s.journal().contains("(connectors)"));
+}
+
+#[test]
 fn a_refusal_for_no_session_notifies_once_per_harness_per_while() {
     let s = Sandbox::with_connector(true);
     assert!(s.notifications().is_empty());

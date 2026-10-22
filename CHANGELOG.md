@@ -135,6 +135,8 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **`vahta lock --connector`** ends the connectors session and nothing else (before,
+  only `lock --all` and `sessions kill` did); a plain `vahta lock` still leaves it.
 - **DNS rebinding in the host filter.** A name allowed by `network = hosts` that
   resolves to a loopback, private, shared (100.64/10), link-local or unspecified
   address is refused by the relay under `vahta run` and by `vahta http`, with the

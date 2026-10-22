@@ -33,7 +33,7 @@ nothing was done.
 | `vahta reveal NAME` | Show the value in the window until a key is pressed or 60 seconds pass. | yes |
 | `vahta copy NAME` | Put the value on the clipboard; it is cleared after 30 seconds if it is unchanged. Needs `wl-copy`, `xclip`, `xsel`, `pbcopy` or `clip`. | yes |
 | `vahta unlock [--vault DIR] [--secret NAME]... [--for DURATION] [--label TEXT]` | Open a **session** (below). With `--vault`, a session for another project's vault, bound to the pair ([Using a vault from another project](#using-a-vault-from-another-project)). | yes |
-| `vahta lock [--all]` | End this project's sessions, or all of them. | no |
+| `vahta lock [--all\|--connector]` | End this project's sessions, or all of them, or only the connectors session. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
 | `vahta run [--vault DIR] [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
 | `vahta http [--vault DIR] --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
