@@ -145,7 +145,7 @@ commands:
 
 Run `vahta <command> --help` for the options.
 
-init, add, list, check, bind, unlock, run and remove also take --connector: they
+init, add, list, check, bind, run and remove also take --connector: they
 then work on the connectors vault (the keys of the MCP servers your coding agents
 start) instead of the project's. See docs/connectors.md.
 ";

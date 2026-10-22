@@ -135,8 +135,6 @@ pub(crate) struct Shared {
     pub(crate) connector_refusals: Mutex<Vec<vahta_ipc::protocol::ConnectorRefusal>>,
     /// Who has the turn to ask the person about each vault (`gate.rs`).
     pub(crate) gates: crate::gate::Gates,
-    /// When each harness was last told the connectors are locked.
-    pub(crate) notified: Mutex<std::collections::HashMap<String, Instant>>,
     /// The ways to unlock a vault.
     pub(crate) unlockers: vahta_auth::Registry,
     /// How devices are reached.
@@ -178,7 +176,11 @@ impl Shared {
     }
 
     pub(crate) fn status(&self) -> StatusInfo {
-        let connectors = self.sessions.lock().ok().and_then(|s| s.connectors_state());
+        let connectors = self
+            .sessions
+            .lock()
+            .map(|s| s.connectors_open())
+            .unwrap_or(false);
         StatusInfo {
             version: self.options.version.clone(),
             pid: std::process::id(),
@@ -188,8 +190,7 @@ impl Shared {
             runtime_dir: self.options.paths.runtime.display().to_string(),
             alarm_at: self.alarm.raised_at(),
             connector_refusals: self.connector_refusals(),
-            connectors_session: connectors.is_some(),
-            connectors_until_reboot: connectors == Some(true),
+            connectors_session: connectors,
         }
     }
 }
@@ -298,7 +299,6 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
         gates: crate::gate::Gates::default(),
-        notified: Mutex::new(std::collections::HashMap::new()),
         unlockers: vahta_auth::Registry::standard(),
         links,
         started: Instant::now(),
@@ -374,19 +374,6 @@ fn sweep_sessions(shared: &Arc<Shared>) {
             Ok(mut sessions) => sessions.sweep(Instant::now(), &alive),
             Err(_) => continue,
         };
-        // A session that lasts until a reboot ends when the boot id changes.
-        let rebooted = match (
-            shared.sessions.lock().map(|s| s.any_until_reboot()),
-            crate::testing::boot_id(),
-        ) {
-            (Ok(true), Some(now_boot)) => shared
-                .sessions
-                .lock()
-                .map(|mut s| s.end_other_boot(&now_boot))
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        shared.record_ended(rebooted);
         // Taken one after the other, never one inside the other.
         let live: Vec<String> = shared
             .sessions

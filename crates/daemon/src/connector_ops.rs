@@ -1,5 +1,5 @@
-//! The connectors vault: `--connector` on `init`, `add`, `bind`, `remove`,
-//! `unlock` and `run`.
+//! The connectors vault: `--connector` on `init`, `add`, `bind`, `remove` and
+//! `run`.
 //!
 //! Harnesses (Claude Code, Codex, Cursor) start MCP servers at user scope, and
 //! such a server's API key belongs to no project. So there is **one connectors
@@ -13,39 +13,46 @@
 //!   `allow` rules of the one command that is its server; without both it has no
 //!   rules (`NoRules`);
 //! * `remote` and `from` do not apply to it;
-//! * its session is the person's: one `vahta unlock --connector`, not anchored
-//!   to a process tree (a harness started from a desktop launcher is not below
-//!   the terminal that unlocked), lasts until the machine reboots unless
-//!   `--for` limits it, and covers only the connectors vault's secrets;
-//! * `vahta run --connector` never opens a window. A harness gives a server
-//!   about 30 seconds to start and shows the person none of its stderr, so
-//!   with no session the launch is refused at once (exit code 3), journaled,
-//!   and remembered for `vahta status`.
+//! * its session belongs to a **harness process**, not to the person or the
+//!   daemon: the first `vahta run --connector` from a Claude Code (or Codex, or
+//!   Cursor) process opens a password window at once ("this process wants its
+//!   MCP servers: ..."), and on the right password a session anchored to that
+//!   process (pid and start time) covers the connectors bound to its harness.
+//!   Its other servers, started by the same process, wait for that one window
+//!   and then start with none. Another process has no session of its own and
+//!   gets its own window; a session never passes between processes. It ends
+//!   with the process (or `vahta lock --all`, `sessions kill`, a reboot);
+//! * the password is all that opens it, so a harness that gives a server about
+//!   30 seconds to start gets its window immediately. If the client goes away
+//!   the window is withdrawn and nothing runs; if the person cancels or the
+//!   password is wrong the server exits at once with a line on stderr that
+//!   says to reconnect it in the harness after unlocking.
 //!
 //! **The harness check** is a speed bump, not a wall: the direct parent of the
 //! `vahta run` client must be a process of a harness the secret is bound to.
 //! The allow rule and the hook are the boundary. See [`parent_is_harness`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use vahta_os::ProcessId;
 
 use vahta_vault::project::Project;
 use vahta_vault::{Peek, RuleSet, Tier, Vault, VaultKind, valid_harnesses};
 
 use crate::bind_ops::BindArgs;
 use crate::encoded::EncodedSet;
+use crate::gate::{Admission, UseKey};
 use crate::journal::Entry;
 use crate::ops::{
     Ctx, Flow, Store, cancelled, check_name, error, from_surface, from_vault, lines_for, refused,
     refused_names,
 };
 use crate::protocol::{
-    ClientReply, ConnectorCmd, ConnectorRefusal, DurationSpec, NameIssue, RefusalKind, Secret,
+    ClientReply, ConnectorCmd, ConnectorRefusal, NameIssue, RefusalKind, Secret,
 };
 use crate::run_ops::{Prepared, RunArgs};
-use crate::session::{self, Role, Session, ask_time, info_of};
-use crate::session_ops::{describe, duration_of, resolve_names};
-use crate::surface::sanitize_label;
+use crate::session::{self, Role, Session};
 use vahta_auth::Action;
 
 /// The refusals kept for `vahta status`, one per secret, newest last.
@@ -119,7 +126,6 @@ pub(crate) fn handle(ctx: &Ctx<'_>, cmd: ConnectorCmd) -> Handled {
                 harnesses,
             },
         ),
-        ConnectorCmd::Unlock { duration, label } => unlock(&c, duration, label),
         ConnectorCmd::Run {
             cwd,
             argv,
@@ -316,58 +322,225 @@ fn private_dir(dir: &std::path::Path) {
     let _ = dir;
 }
 
-// --- unlock --------------------------------------------------------------------------
+// --- the harness's session -------------------------------------------------------------
 
-/// Open the connectors session. Not anchored to a process: it belongs to the
-/// person, and to the daemon, until its deadline or a lock.
-fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<ClientReply> {
-    let (project, vault_path) = find(ctx)?;
-    let peek = Vault::peek(&vault_path).map_err(from_vault)?;
-    peek.verified_for_unlock(ctx.store()).map_err(from_vault)?;
-    let names = resolve_names(&peek, None)?;
-    // No `--for`: until the machine reboots, so servers start with no window all
-    // day. `forever` is the same (the daemon does not outlive a boot).
-    let until_reboot = matches!(
-        duration,
-        DurationSpec::Default {} | DurationSpec::Forever {}
+/// The harness process that started the `vahta run --connector` client: what a
+/// connectors session is anchored to.
+pub(crate) struct Harness {
+    /// Its pid and start time, so a reused pid is another process.
+    pub id: ProcessId,
+    /// `claude`, `codex` or `cursor`.
+    pub kind: &'static str,
+}
+
+/// `(session id, scope, delegated)`, as `find_session` gives.
+type Found = (String, Vec<String>, bool);
+
+/// How a harness is called in a window.
+fn harness_title(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        _ => "Cursor",
+    }
+}
+
+/// What the person does to start a server again once it is unlocked.
+fn reconnect_hint(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "reconnect the server in Claude Code (`/mcp`)",
+        "codex" => "restart the Codex session",
+        _ => "reload the MCP server in Cursor's settings",
+    }
+}
+
+/// The open connectors session of this vault that belongs to `harness`.
+pub(crate) fn session_of(
+    ctx: &Ctx<'_>,
+    peek: &Peek,
+    harness: Option<&Harness>,
+) -> Flow<Option<Found>> {
+    let Some(harness) = harness else {
+        return Ok(None);
+    };
+    let now = Instant::now();
+    let sessions = ctx
+        .shared
+        .sessions
+        .lock()
+        .map_err(|_| error("the session table is unusable"))?;
+    Ok(sessions
+        .iter()
+        .filter(|s| {
+            s.connector
+                && s.vault_id == peek.vault_id
+                && s.parent.is_none()
+                && s.anchor == harness.id
+                && s.deadline.is_none_or(|d| d > now)
+        })
+        .last()
+        .map(|s| (s.id.clone(), s.scope.clone(), false)))
+}
+
+/// A launch whose harness process has no session covering its secret opens a
+/// password window at once, and on the right password a session anchored to
+/// that process; then it goes on. Every launch of the same process waits for
+/// that one window (`gate.rs`) and shares its answer.
+///
+/// A client that goes away takes the window with it and nothing runs. A "no" or
+/// a wrong password ends the launch with the line the harness shows: the person
+/// reconnects the server after unlocking.
+pub(crate) fn ensure_session(
+    ctx: &Ctx<'_>,
+    project: &Project,
+    vault_path: &Path,
+    peek: &Peek,
+    names: &[String],
+    harness: Option<&Harness>,
+    found: Option<Found>,
+) -> Flow<Option<Found>> {
+    let covers = |f: &Option<Found>| {
+        f.as_ref()
+            .is_some_and(|(_, scope, _)| names.iter().all(|n| scope.contains(n)))
+    };
+    if covers(&found) {
+        return Ok(found);
+    }
+    let Some(harness) = harness else {
+        return Err(error(
+            "cannot tell which harness process started this; nothing was run",
+        ));
+    };
+    let key = UseKey(format!(
+        "connectors:{}:{}",
+        harness.id.pid, harness.id.start_time
+    ));
+    loop {
+        ctx.gone.watch();
+        let turn = match ctx
+            .shared
+            .gates
+            .enter(&peek.vault_id, Some(&key), ctx.gone.cancel())
+        {
+            Admission::Turn(turn) => turn,
+            Admission::Refused(reply) => return Err(hint_reconnect(reply, harness.kind)),
+            Admission::Gone => return Err(client_gone(ctx, peek, names)),
+            Admission::Granted(_) | Admission::Look => {
+                // The window of another request may have opened our session.
+                let now = session_of(ctx, peek, Some(harness))?;
+                if covers(&now) {
+                    return Ok(now);
+                }
+                continue;
+            }
+        };
+        let now = session_of(ctx, peek, Some(harness))?;
+        if covers(&now) {
+            turn.session_opened();
+            return Ok(now);
+        }
+        let opened = open_session(ctx, project, vault_path, peek, harness);
+        if ctx.gone.is_gone() {
+            // Whatever the window came to, nobody is waiting for the server.
+            turn.fell();
+            return Err(client_gone(ctx, peek, names));
+        }
+        return match opened {
+            Ok(session) => {
+                turn.session_opened();
+                Ok(Some(session))
+            }
+            Err(reply) => {
+                let reply = hint_reconnect(reply, harness.kind);
+                // The person's no, or a wrong password, is every waiter's of
+                // this process; the others take their own turn.
+                turn.refused(Some(key), &reply);
+                Err(reply)
+            }
+        };
+    }
+}
+
+/// The end of a launch whose client went away: the journal says so (never
+/// "started").
+fn client_gone(ctx: &Ctx<'_>, peek: &Peek, names: &[String]) -> ClientReply {
+    ctx.journal(Entry::new("run").vault(&peek.vault_id).names(names).result(
+        "cancelled",
+        Some("the client went away before the command started; nothing was run"),
+    ));
+    cancelled()
+}
+
+/// Add to a "no" or a failure the line the harness shows the person.
+fn hint_reconnect(reply: ClientReply, kind: &str) -> ClientReply {
+    let tail = format!(
+        " The connectors were not unlocked and the server did not start: {} to be asked for \
+         the connectors password again.",
+        reconnect_hint(kind)
     );
-    let boot = if until_reboot {
-        Some(crate::testing::boot_id().ok_or_else(|| {
-            error("cannot read this machine's boot id; use --for to give an end time")
-        })?)
-    } else {
-        None
-    };
-    let lasts = if until_reboot {
-        None
-    } else {
-        duration_of(duration, ctx.shared.options.config.session_minutes)?
-    };
-    let me = vahta_os::identity_of(std::process::id())
-        .map_err(|_| error("cannot tell this daemon's own identity; nothing was opened"))?;
+    match reply {
+        ClientReply::Cancelled { message } => ClientReply::Cancelled {
+            message: format!("{message}.{tail}"),
+        },
+        ClientReply::Error { message } => ClientReply::Error {
+            message: format!("{message}.{tail}"),
+        },
+        ClientReply::Refused(mut r) => {
+            r.message = format!("{}.{tail}", r.message);
+            ClientReply::Refused(r)
+        }
+        other => other,
+    }
+}
 
-    let title = "Open the connectors session";
+/// The window and the session: the connectors password, and a session anchored
+/// to `harness` that covers the connectors bound to its kind.
+fn open_session(
+    ctx: &Ctx<'_>,
+    project: &Project,
+    vault_path: &Path,
+    peek: &Peek,
+    harness: &Harness,
+) -> Flow<Found> {
+    let names: Vec<String> = {
+        let mut names: Vec<String> = peek
+            .entries
+            .iter()
+            .filter(|e| e.tier == Tier::Session)
+            .filter(|e| {
+                peek.bindings.iter().any(|b| {
+                    b.name == e.name
+                        && !b.allow.is_empty()
+                        && b.harnesses.iter().any(|h| h == harness.kind)
+                })
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        names.sort();
+        names
+    };
+    let who = format!("{} (pid {})", harness_title(harness.kind), harness.id.pid);
+    let title = "Unlock MCP servers";
     let mut window = ctx.window(title)?;
-    let mut lines = lines_for(&project, &vault_path);
-    lines.push(format!("Connectors: {}", names.join(", ")));
-    lines.push(match lasts {
-        None => "Lasts: until this computer restarts, or `vahta lock`".to_string(),
-        some => format!("Lasts: {}", describe(some)),
-    });
+    let mut lines = lines_for(project, vault_path);
+    lines.push(format!("{who} wants its MCP servers: {}", names.join(", ")));
+    lines.push(format!(
+        "Lasts: until {who} exits, or `vahta lock --all`. Another process asks for itself."
+    ));
     lines.push(
-        "Allows: the servers of these connectors to be started by Claude Code, Codex or Cursor \
-         with no window, each by its own command. Not revealing, copying or changing anything."
+        "Allows: the servers of these connectors to be started by that process with no window, \
+         each by its own command. Not revealing, copying or changing anything."
             .to_string(),
     );
-    let mut panel = ctx.panel(title, lines);
-    panel.agent_note = label.as_deref().and_then(sanitize_label);
+    lines.push("Enter the connectors password to allow it, or cancel.".to_string());
+    let panel = ctx.panel(title, lines);
     let action = Action::Unlock {
         names: names.clone(),
-        duration_secs: lasts.map(|d| d.as_secs()),
+        duration_secs: None,
     };
-    let mut vault = crate::ops::unlock_as(ctx, window.as_mut(), &vault_path, &panel, action)?;
+    let mut vault = crate::ops::unlock_as(ctx, window.as_mut(), vault_path, &panel, action)?;
     if vault.upgrade_pending() {
-        vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+        vault.save(vault_path, ctx.store()).map_err(from_vault)?;
     }
     let keys = vault.session_keys(&names).map_err(from_vault)?;
     let held: Vec<(String, vahta_vault::SecretValue)> = names
@@ -380,14 +553,12 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
     let vault_id = vault.vault_id();
     drop(vault);
 
-    let now = Instant::now();
-    let deadline = lasts.map(|d| now + d);
     let id = session::new_id().ok_or_else(|| error("the system random generator failed"))?;
     let session = Session {
         id: id.clone(),
         tenant: "local",
         vault_id,
-        vault_path: vault_path.clone(),
+        vault_path: vault_path.to_path_buf(),
         project: project.root.clone(),
         used_from: None,
         scope: names.clone(),
@@ -395,26 +566,32 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
         forms,
         role: Role::Runner,
         agent_role: None,
-        anchor: me,
-        anchor_exe: session::CONNECTORS_ANCHOR.to_string(),
+        anchor: harness.id,
+        anchor_exe: harness.kind.to_string(),
         parent: None,
-        deadline,
-        length: deadline.map(|d| d.saturating_duration_since(now)),
-        ask_at: deadline.map(|d| ask_time(now, d)),
+        deadline: None,
+        length: None,
+        ask_at: None,
         extension_pending: false,
-        label: panel.agent_note.clone(),
+        label: None,
         uses: 0,
-        boot,
+        connector: true,
     };
-    let info = info_of(&session, now);
     let replaced = {
         let mut sessions = ctx
             .shared
             .sessions
             .lock()
             .map_err(|_| error("the session table is unusable"))?;
+        // A session of this process that no longer covers all (a connector was
+        // added since) is replaced by the new one.
         let replaced = sessions.end_where(
-            |s| s.parent.is_none() && s.vault_id == vault_id && s.anchor == me,
+            |s| {
+                s.connector
+                    && s.parent.is_none()
+                    && s.vault_id == vault_id
+                    && s.anchor == harness.id
+            },
             "replaced",
         );
         sessions.add(session);
@@ -430,35 +607,13 @@ fn unlock(ctx: &Ctx<'_>, duration: DurationSpec, label: Option<String>) -> Flow<
             .result(
                 "ok",
                 Some(&format!(
-                    "connectors; {}",
-                    if until_reboot {
-                        "until reboot".to_string()
-                    } else {
-                        describe(lasts)
-                    }
+                    "connectors; {} pid {}; until that process exits",
+                    harness.kind, harness.id.pid
                 )),
             ),
     );
-    window.close(Some("Connectors session open. This window can be closed."));
-    Ok(ClientReply::Session(Box::new(info)))
-}
-
-/// The open connectors session of this vault: `(id, scope, delegated)` as
-/// `find_session` gives, found by the vault alone and not by any ancestor.
-pub(crate) fn session_of(ctx: &Ctx<'_>, peek: &Peek) -> Flow<Option<(String, Vec<String>, bool)>> {
-    let now = Instant::now();
-    let sessions = ctx
-        .shared
-        .sessions
-        .lock()
-        .map_err(|_| error("the session table is unusable"))?;
-    Ok(sessions
-        .iter()
-        .filter(|s| {
-            s.vault_id == peek.vault_id && s.parent.is_none() && s.deadline.is_none_or(|d| d > now)
-        })
-        .last()
-        .map(|s| (s.id.clone(), s.scope.clone(), false)))
+    window.close(Some("MCP servers unlocked. This window can be closed."));
+    Ok((id, names, false))
 }
 
 // --- run -----------------------------------------------------------------------------
@@ -491,13 +646,10 @@ fn run(
         Err(ClientReply::Refused(mut r)) => {
             let hint = hint_for(r.kind, &name);
             ctx.shared.note_refusal(&name, r.kind, &hint);
-            if r.kind == RefusalKind::NoSession {
-                // The harness hides the server's stderr; this is how the person
-                // learns why it did not start.
-                let harness = parent_facts(ctx)
-                    .and_then(|p| harness_of(&p.exe, p.command.as_deref()))
-                    .unwrap_or("harness");
-                ctx.shared.notify_locked(harness);
+            if r.kind == RefusalKind::Stale {
+                // The vault changed under the session: it is of no use again.
+                // End this process's, so the next start asks for the password.
+                end_stale(ctx);
             }
             // The harness that started this reads none of it; the person may
             // run the server by hand to see why.
@@ -517,13 +669,21 @@ fn run(
     }
 }
 
+/// End the connectors session of the harness process that started this client.
+fn end_stale(ctx: &Ctx<'_>) {
+    let Some(parent) = parent_facts(ctx) else {
+        return;
+    };
+    let ended = match ctx.shared.sessions.lock() {
+        Ok(mut sessions) => sessions.end_where(|s| s.connector && s.anchor == parent.id, "stale"),
+        Err(_) => return,
+    };
+    ctx.shared.record_ended(ended);
+}
+
 /// What the person does about a refused launch.
 fn hint_for(kind: RefusalKind, name: &str) -> String {
     match kind {
-        RefusalKind::NoSession => {
-            "no connectors session: run `vahta unlock --connector`, then start the harness again"
-                .to_string()
-        }
         RefusalKind::NotFromHarness => {
             "not started by a harness it is bound to (the harness must start `vahta run` \
              itself, not through a shell or a script)"
@@ -545,7 +705,9 @@ fn hint_for(kind: RefusalKind, name: &str) -> String {
             "there is no such connector: see `vahta list --connector`".to_string()
         }
         RefusalKind::Stale => {
-            "the session no longer covers it: run `vahta unlock --connector` again".to_string()
+            "the connectors vault changed since this harness process unlocked it: reconnect the \
+             server in the harness and enter the connectors password again"
+                .to_string()
         }
         _ => "refused".to_string(),
     }
@@ -596,8 +758,8 @@ pub(crate) fn unruled(peek: &Peek, names: &[String]) -> Vec<String> {
 /// A connector's server is started by the harness it is bound to: the direct
 /// parent of the `vahta run` client. Refused otherwise, as `NotFromHarness`,
 /// journaled as suspicious and counted for the injection alarm like a refusal
-/// by the rules.
-pub(crate) fn check_harness(ctx: &Ctx<'_>, peek: &Peek, names: &[String]) -> Flow<()> {
+/// by the rules. Gives the harness process, which a session is anchored to.
+pub(crate) fn check_harness(ctx: &Ctx<'_>, peek: &Peek, names: &[String]) -> Flow<Option<Harness>> {
     let parent = parent_facts(ctx);
     for n in names {
         let Some(binding) = peek.bindings.iter().find(|b| &b.name == n) else {
@@ -644,54 +806,24 @@ pub(crate) fn check_harness(ctx: &Ctx<'_>, peek: &Peek, names: &[String]) -> Flo
             }],
         ));
     }
-    Ok(())
-}
-
-/// A launch with no session behind it, or one that does not cover the secret,
-/// is refused at once: no window, because the harness would give up on the
-/// server in about 30 seconds and show the person nothing.
-pub(crate) fn require_session(
-    ctx: &Ctx<'_>,
-    peek: &Peek,
-    names: &[String],
-    found: &Option<(String, Vec<String>, bool)>,
-) -> Flow<()> {
-    let covered = found
-        .as_ref()
-        .is_some_and(|(_, scope, _)| names.iter().all(|n| scope.contains(n)));
-    if covered {
-        return Ok(());
-    }
-    ctx.journal(
-        Entry::new("run_refused")
-            .vault(&peek.vault_id)
-            .names(names)
-            .result(
-                "refused",
-                Some("no_session; connector refused at once, no window opened"),
-            ),
-    );
-    let message = format!(
-        "no connectors session covers {}: the person runs `vahta unlock --connector [--for 8h]` \
-         in their own terminal, then starts the harness again. No window was opened; the \
-         harness would not wait for one.",
-        names.join(", ")
-    );
-    Err(refused_names(
-        RefusalKind::NoSession,
-        message,
-        names
-            .iter()
-            .map(|n| NameIssue {
-                name: n.clone(),
-                why: RefusalKind::NoSession,
-            })
-            .collect(),
-    ))
+    // The harness kind this launch is of: one the parent is, and the secrets
+    // are all bound to.
+    Ok(parent.and_then(|p| {
+        let kind = ["claude", "codex", "cursor"].into_iter().find(|h| {
+            parent_is_harness(Some(&p.exe), p.command.as_deref(), &[h.to_string()])
+                && names.iter().all(|n| {
+                    peek.bindings
+                        .iter()
+                        .any(|b| &b.name == n && b.harnesses.iter().any(|x| x == h))
+                })
+        })?;
+        Some(Harness { id: p.id, kind })
+    }))
 }
 
 /// What is known of the process that started the `vahta run` client.
 struct Parent {
+    id: ProcessId,
     exe: String,
     command: Option<String>,
 }
@@ -709,15 +841,8 @@ fn parent_facts(ctx: &Ctx<'_>) -> Option<Parent> {
     // The parent may have exited and its pid been reused since the exe was
     // read; the client's parent is checked again after.
     let command = vahta_os::command_line(ppid);
-    (vahta_os::parent_of(ctx.pid).ok()? == ppid).then_some(Parent { exe, command })
-}
-
-/// Which harness a parent process is, by the same rules as
-/// [`parent_is_harness`].
-fn harness_of(exe: &str, command: Option<&str>) -> Option<&'static str> {
-    ["claude", "codex", "cursor"]
-        .into_iter()
-        .find(|h| parent_is_harness(Some(exe), command, &[h.to_string()]))
+    let id = vahta_os::identity_of(ppid).ok()?;
+    (vahta_os::parent_of(ctx.pid).ok()? == ppid).then_some(Parent { id, exe, command })
 }
 
 /// Whether a parent process with executable `exe` (and, where the system

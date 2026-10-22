@@ -65,15 +65,17 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 - **The connectors vault** (`--connector`): one vault per user, in Vahta's data
   directory, for the keys of the MCP servers Claude Code, Codex and Cursor start.
   Each connector names its harnesses and its server command; `vahta run --connector`
-  starts it with no window while `vahta unlock --connector` is open, checks the
-  direct parent is a harness it is bound to, and refuses at once, visibly in
-  `vahta daemon status`, when there is no session. See docs/connectors.md.
+  starts it, checks the direct parent is a harness it is bound to, and opens a
+  password window at once for the first server a harness process starts; that
+  process's session covers its other servers and ends with it. See
+  docs/connectors.md.
 
-- **Connectors, second round.** `vahta unlock --connector` with no `--for` lasts
-  until the machine reboots (boot id, read in `vahta-os`) and the daemon stays up
-  with it; `--for 8h` limits it. A launch refused for want of a session raises a
-  desktop notification (at most one per harness per ten minutes). The output hook
-  now cuts a connector's key by value in any agent's tool output, while the
+- **Connectors, second round.** There is no `vahta unlock --connector` and no
+  until-reboot session: the connectors session belongs to the harness process
+  that asked (pid and start time), opens with the connectors password in a window
+  at its first launch, is shared by that process's concurrent launches, and ends
+  when the process exits. Another Claude Code or a Codex asks for itself. The
+  output hook now cuts a connector's key by value in any agent's tool output, while the
   connectors session is open and for a while after a connector run. `vahta run
   --connector --as NAME=VAR` renames the variable. An `allow` rule may be
   "program + package" (`npx @pkg/server`) for `npx`, `bunx`, `uvx` and `pipx run`:

@@ -4,12 +4,16 @@
 //! The harness is stood in for by the test process itself: a test build of the
 //! daemon takes `VAHTA_TEST_CONNECTOR_PARENT` as the name of a parent process
 //! that counts as every harness. A sandbox made without it has the test process
-//! for what it is, a parent that is no harness.
+//! for what it is, a parent that is no harness. A second harness process is a
+//! copy of a shell under that same name (`HarnessCopy`).
+//!
+//! A connectors session belongs to the harness process that asked: the first
+//! launch from a process opens a password window, the rest of that process's
+//! launches use its session.
 
 #![cfg(unix)]
 
 use std::fs;
-use std::ops::Not;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -69,8 +73,6 @@ impl Sandbox {
             .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
             .env("VAHTA_CONFIG_DIR", self.root.join("config"))
             .env_remove("VAHTA_TEST_DAEMON_VERSION")
-            .env("VAHTA_TEST_BOOT_ID_FILE", self.root.join("boot-id"))
-            .env("VAHTA_TEST_NOTIFY_LOG", self.root.join("notify.log"))
             .env("VAHTA_TEST_SURFACE", self.root.join("script.jsonl"))
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
             .env_remove("DISPLAY")
@@ -136,7 +138,6 @@ impl Sandbox {
     fn with_connector_idle(as_harness: bool, idle: Option<u32>) -> Sandbox {
         let mut s = Sandbox::new(as_harness);
         s.idle = idle;
-        fs::write(s.root.join("boot-id"), "boot-one\n").unwrap();
         s.script(&[PW_ANSWER, r#"{"ack":true}"#]);
         let out = s.vahta(&s.root, &["init", "--connector"]);
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -158,27 +159,33 @@ impl Sandbox {
         s
     }
 
+    /// The first launch from this harness process: it opens the password
+    /// window, and its session then serves the rest.
     fn unlock(&self) {
         self.script(&[PW_ANSWER]);
-        let out = self.vahta(&self.root, &["unlock", "--connector", "--for", "8h"]);
+        let out = self.run_connector(KEY, &["printenv", KEY]);
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        assert!(text(&out.stdout).contains("connectors session"));
     }
 
-    /// Unlock with no `--for`: until the machine reboots.
-    fn unlock_until_reboot(&self) -> String {
-        self.script(&[PW_ANSWER]);
-        let out = self.vahta(&self.root, &["unlock", "--connector"]);
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        text(&out.stdout)
+    /// A launch with `args` as a command in its own process, to run beside
+    /// others.
+    fn spawn_launch(&self, command: &[&str]) -> std::process::Child {
+        let mut args = vec!["run", "--connector", "--secret", KEY, "--"];
+        args.extend_from_slice(command);
+        self.command(&self.root)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn vahta")
     }
 
-    fn notifications(&self) -> Vec<String> {
-        fs::read_to_string(self.root.join("notify.log"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
-            .collect()
+    /// The open sessions, as `vahta sessions --json` says.
+    fn sessions(&self) -> Vec<Value> {
+        let out = self.vahta(&self.root, &["sessions", "--json"]);
+        let doc: Value = serde_json::from_str(&text(&out.stdout)).unwrap_or(Value::Null);
+        doc["sessions"].as_array().cloned().unwrap_or_default()
     }
 
     /// The real hook, given a tool's output as Claude would, from this process.
@@ -298,45 +305,292 @@ fn with_a_session_a_connector_starts_with_no_window_and_gets_its_value() {
 }
 
 #[test]
-fn with_no_session_a_launch_is_refused_at_once_and_the_refusal_is_seen_in_status() {
+fn the_first_launch_of_a_harness_process_opens_one_window_and_the_next_none() {
     let s = Sandbox::with_connector(true);
-    let windows = s.windows();
-    let started = std::time::Instant::now();
+    let passwords = s.passwords();
+    s.script(&[PW_ANSWER]);
     let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(10),
-        "the refusal is fast"
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), format!("***REDACTED({KEY})***\n"));
+    assert_eq!(
+        s.passwords(),
+        passwords + 1,
+        "one window for the first launch"
     );
-    let err = text(&out.stderr);
-    assert!(err.contains("no connectors session"), "{err}");
-    assert!(err.contains("vahta unlock --connector"), "{err}");
-    assert!(!text(&out.stdout).contains(&value_of("a")));
-    assert_eq!(s.windows(), windows, "no window was opened");
-    assert!(s.journal().contains("no_session"));
-    // The person finds out in `vahta daemon status` and in `list --connector`.
-    let status = s.vahta(&s.root, &["daemon", "status"]);
-    let shown = text(&status.stdout);
+    // The window says whose servers they are and what to enter.
+    let shown = s
+        .window_log()
+        .iter()
+        .rfind(|e| e["ask"] == "password")
+        .unwrap()
+        .to_string();
     assert!(
-        shown.contains(&format!("connector {KEY} was refused at"))
-            && shown.contains("no connectors session")
-            && shown.contains("vahta unlock --connector"),
+        shown.contains("Claude Code (pid") && shown.contains("wants its MCP servers"),
         "{shown}"
     );
-    let list = s.vahta(&s.root, &["list", "--connector"]);
-    assert!(text(&list.stdout).contains(&format!("connector {KEY} was refused at")));
-    // Unlocking and starting again works, with no window for the run.
-    s.unlock();
+    assert!(
+        shown.contains(KEY) && !shown.contains(&value_of("a")),
+        "{shown}"
+    );
+    // The session is this process's, and the journal names the harness and pid.
+    let sessions = s.sessions();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0]["anchor_exe"], "claude");
+    assert_eq!(sessions[0]["anchor_pid"], std::process::id());
+    assert!(sessions[0]["remaining_secs"].is_null());
+    let journal = s.journal();
+    assert!(
+        journal.contains(&format!("connectors; claude pid {}", std::process::id())),
+        "{journal}"
+    );
+    // The second launch from the same process asks nothing.
     let windows = s.windows();
     let out = s.run_connector(KEY, &["printenv", KEY]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.windows(), windows, "no window for the second launch");
+    assert!(!journal.contains(&value_of("a")));
+    // The daemon status tells a connectors session is open.
+    let status = text(&s.vahta(&s.root, &["daemon", "status"]).stdout);
+    assert!(status.contains("connectors session: open"), "{status}");
+}
+
+#[test]
+fn launches_at_once_from_one_harness_process_share_one_window() {
+    let s = Sandbox::with_connector(true);
+    let windows = s.passwords();
+    // The person takes a moment: all three launches are waiting by then.
+    s.script(&[r#"{"secret":"correct horse","after_ms":800}"#]);
+    let kids: Vec<_> = (0..3).map(|_| s.spawn_launch(&["printenv", KEY])).collect();
+    for kid in kids {
+        let out = kid.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), format!("***REDACTED({KEY})***\n"));
+    }
+    assert_eq!(s.passwords(), windows + 1, "one window for all three");
+    assert_eq!(s.sessions().len(), 1);
+    assert_eq!(s.journal().matches("\"session_start\"").count(), 1);
+}
+
+#[test]
+fn a_no_for_launches_at_once_fails_them_all_with_the_hint_after_one_window() {
+    let s = Sandbox::with_connector(true);
+    let windows = s.passwords();
+    s.script(&[r#"{"cancel":true,"after_ms":800}"#]);
+    let started = std::time::Instant::now();
+    let kids: Vec<_> = (0..2).map(|_| s.spawn_launch(&["printenv", KEY])).collect();
+    for kid in kids {
+        let out = kid.wait_with_output().unwrap();
+        assert_ne!(out.status.code(), Some(0));
+        assert!(!text(&out.stdout).contains(&value_of("a")));
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("reconnect the server in Claude Code (`/mcp`)"),
+            "{err}"
+        );
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(s.passwords(), windows + 1, "one window, one no");
+    assert!(s.sessions().is_empty());
+    // Reconnecting asks again.
+    s.unlock();
+    assert_eq!(s.sessions().len(), 1);
+}
+
+#[test]
+fn a_wrong_password_ends_the_launch_fast_with_the_hint() {
+    let s = Sandbox::with_connector(true);
+    s.script(&[
+        r#"{"secret":"wrong one"}"#,
+        r#"{"secret":"wrong two"}"#,
+        r#"{"secret":"wrong three"}"#,
+    ]);
+    let started = std::time::Instant::now();
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("reconnect the server in Claude Code (`/mcp`)"),
+        "{err}"
+    );
+    assert!(!text(&out.stdout).contains(&value_of("a")));
+    assert!(s.sessions().is_empty());
+}
+
+#[test]
+fn a_cancelled_window_ends_the_launch_fast_and_the_next_launch_asks_again() {
+    let s = Sandbox::with_connector(true);
+    s.script(&[r#"{"cancel":true}"#]);
+    let started = std::time::Instant::now();
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("not unlocked") && err.contains("/mcp"),
+        "{err}"
+    );
+    assert!(s.sessions().is_empty());
+    let windows = s.passwords();
+    s.unlock();
+    assert_eq!(s.passwords(), windows + 1, "asked again");
+}
+
+// The harness gave up on the server and killed `vahta run`: the window goes
+// with it and nothing runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_client_that_goes_away_takes_the_window_with_it_and_nothing_runs() {
+    let s = Sandbox::with_connector(true);
+    s.script(&[r#"{"hang":true}"#]);
+    let mut client = s.spawn_launch(&["printenv", KEY]);
+    let asked = s.passwords();
+    wait_until("the password window", 10, || s.passwords() == asked + 1);
+    client.kill().unwrap();
+    let _ = client.wait();
+    wait_until("the window to be withdrawn", 5, || {
+        s.window_log().iter().any(|e| e["close"] == "withdrawn")
+    });
+    wait_until("the journal to say so", 5, || {
+        s.journal().contains("went away before the command started")
+    });
+    let journal = s.journal();
+    assert!(journal.contains("\"result\":\"cancelled\""), "{journal}");
+    assert!(!journal.contains("\"result\":\"started\""), "{journal}");
+    assert!(s.sessions().is_empty());
+    // Nothing keeps the vault's turn: the next launch gets its window.
+    s.unlock();
+}
+
+/// A shell under the harness stand-in's name: another harness process.
+#[cfg(target_os = "linux")]
+fn harness_copy(s: &Sandbox) -> PathBuf {
+    let sh = fs::canonicalize("/bin/sh").unwrap();
+    let me = std::env::current_exe().unwrap();
+    let dir = s.root.join("harness-b");
+    fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join(me.file_name().unwrap());
+    fs::copy(sh, &copy).unwrap();
+    copy
+}
+
+/// `vahta run --connector` started by `harness` (a copy of a shell), which then
+/// stays `then` before it exits.
+#[cfg(target_os = "linux")]
+fn launch_under(s: &Sandbox, harness: &Path, then: &str) -> std::process::Child {
+    let script = format!(
+        "'{}' run --connector --secret {KEY} -- printenv {KEY}; echo \"code=$?\"; {then}; exit 0",
+        env!("CARGO_BIN_EXE_vahta")
+    );
+    let mut cmd = Command::new(harness);
+    let base = s.command(&s.root);
+    for (k, v) in base.get_envs() {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+    cmd.current_dir(&s.root)
+        .args(["-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the harness copy")
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn another_harness_process_gets_its_own_window_and_a_session_never_passes_between() {
+    let s = Sandbox::with_connector(true);
+    let b = harness_copy(&s);
+    s.unlock();
+    let windows = s.passwords();
+    // A second process has no session: its own window.
+    s.script(&[PW_ANSWER]);
+    let kid = launch_under(&s, &b, "sleep 4");
+    wait_until("the second process's session", 10, || {
+        s.sessions().len() == 2
+    });
+    assert_eq!(
+        s.passwords(),
+        windows + 1,
+        "the second process asked for itself"
+    );
+    // The first process still needs none, and the two sessions are two
+    // processes'.
+    let windows = s.passwords();
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.passwords(), windows);
+    let mut pids: Vec<u64> = s
+        .sessions()
+        .iter()
+        .filter_map(|x| x["anchor_pid"].as_u64())
+        .collect();
+    pids.sort();
+    pids.dedup();
+    assert_eq!(pids.len(), 2, "{pids:?}");
+    assert!(pids.contains(&u64::from(std::process::id())), "{pids:?}");
+    let out = kid.wait_with_output().unwrap();
+    assert!(
+        text(&out.stdout).contains("code=0"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_session_ends_with_its_harness_process() {
+    let s = Sandbox::with_connector(true);
+    let b = harness_copy(&s);
+    s.script(&[PW_ANSWER]);
+    let kid = launch_under(&s, &b, "sleep 3");
+    wait_until("the session of the second process", 10, || {
+        !s.sessions().is_empty()
+    });
+    let session = s.sessions().remove(0);
+    let pid = session["anchor_pid"].as_u64().unwrap();
+    assert_ne!(pid, u64::from(std::process::id()));
+    let out = kid.wait_with_output().unwrap();
+    assert!(
+        text(&out.stdout).contains("code=0"),
+        "{}",
+        text(&out.stderr)
+    );
+    wait_until("the session to end with its process", 10, || {
+        s.sessions().is_empty()
+    });
+    wait_until("the journal to say why", 10, || {
+        s.journal()
+            .contains(&format!("anchor_exited; connectors; claude pid {pid}"))
+    });
+}
+
+#[test]
+fn unlock_connector_is_gone_and_says_how_it_works_now() {
+    let s = Sandbox::with_connector(true);
+    let windows = s.windows();
+    for args in [
+        &["unlock", "--connector"][..],
+        &["unlock", "--connector", "--for", "8h"],
+    ] {
+        let out = s.vahta(&s.root, args);
+        assert!(!out.status.success());
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("no such step") && err.contains("/mcp"),
+            "{err}"
+        );
+    }
     assert_eq!(s.windows(), windows);
+    assert!(s.sessions().is_empty());
 }
 
 #[test]
 fn a_parent_that_is_no_harness_is_refused_and_marked_suspicious() {
     let s = Sandbox::with_connector(false);
-    s.unlock();
     let windows = s.windows();
     let out = s.run_connector(KEY, &["printenv", KEY]);
     assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
@@ -406,10 +660,15 @@ fn a_connector_whose_rules_were_cleared_is_refused_as_having_no_rules() {
     s.script(&[r#"{"choose":0}"#, PW_ANSWER]);
     let out = s.vahta(&s.root, &["bind", "--connector", KEY, "--clear"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    s.unlock();
+    let windows = s.windows();
     let out = s.run_connector(KEY, &["printenv", KEY]);
     assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("no harnesses or no allow rule"));
+    assert_eq!(
+        s.windows(),
+        windows,
+        "no window for a connector with no rules"
+    );
     let out = s.vahta(&s.root, &["check", "--connector"]);
     assert_eq!(out.status.code(), Some(1));
 }
@@ -539,11 +798,11 @@ fn the_project_session_does_not_start_a_connector_and_the_connector_session_does
     );
     s.script(&[PW_ANSWER]);
     assert_eq!(s.vahta(&s.proj, &["unlock"]).status.code(), Some(0));
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("no connectors session"));
-    // And the connectors session covers no project secret.
+    // The project's session opens nothing for a connector: it asks for its own.
+    let windows = s.passwords();
     s.unlock();
+    assert_eq!(s.passwords(), windows + 1);
+    // And the connectors session covers no project secret.
     let out = s.vahta(
         &s.proj,
         &[
@@ -609,7 +868,7 @@ fn a_connector_with_hosts_reaches_only_its_host() {
         ],
     );
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    s.unlock();
+    s.script(&[PW_ANSWER]);
     let code = format!(
         "import socket,ssl\nctx=ssl.create_default_context(cafile='{}')\ns=ctx.wrap_socket(socket.create_connection(('other.localhost',{}),timeout=5),server_hostname='other.localhost')\ns.sendall(b'GET / HTTP/1.1\\r\\n\\r\\n')\nprint(b'connector-ok' in s.recv(4096))\ntry:\n    socket.getaddrinfo('example.com',443)\n    print('resolved')\nexcept OSError:\n    print('noresolve')",
         s.root.join("ca.pem").display(),
@@ -625,52 +884,9 @@ fn a_connector_with_hosts_reaches_only_its_host() {
 }
 
 #[test]
-fn with_no_end_time_the_session_lasts_until_the_boot_id_changes() {
-    let s = Sandbox::with_connector(true);
-    let said = s.unlock_until_reboot();
-    assert!(said.contains("until this computer restarts"), "{said}");
-    // Shown by `sessions` and `daemon status`.
-    let list = text(&s.vahta(&s.root, &["sessions"]).stdout);
-    assert!(list.contains("until reboot"), "{list}");
-    let status = text(&s.vahta(&s.root, &["daemon", "status"]).stdout);
-    assert!(
-        status.contains("connectors session: open until"),
-        "{status}"
-    );
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    // The machine "reboots".
-    fs::write(s.root.join("boot-id"), "boot-two\n").unwrap();
-    wait_until("the session to end", 10, || {
-        text(&s.vahta(&s.root, &["daemon", "status"]).stdout)
-            .contains("connectors session")
-            .not()
-    });
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("no connectors session"));
-    let status = text(&s.vahta(&s.root, &["daemon", "status"]).stdout);
-    assert!(!status.contains("connectors session: open"), "{status}");
-    assert!(s.journal().contains("reboot"));
-}
-
-#[test]
-fn a_session_with_an_end_time_is_not_a_reboot_session() {
-    let s = Sandbox::with_connector(true);
-    s.unlock();
-    let list = text(&s.vahta(&s.root, &["sessions"]).stdout);
-    assert!(!list.contains("until reboot"), "{list}");
-    // A changed boot id does not end it.
-    fs::write(s.root.join("boot-id"), "boot-two\n").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-}
-
-#[test]
 fn the_daemon_stays_while_a_connectors_session_is_open_and_lock_ends_it() {
     let s = Sandbox::with_connector_idle(true, Some(1));
-    s.unlock_until_reboot();
+    s.unlock();
     let pid_of = |s: &Sandbox| -> Value {
         let out = s.vahta(&s.root, &["daemon", "status", "--json"]);
         serde_json::from_str(&text(&out.stdout)).unwrap_or(Value::Null)
@@ -683,65 +899,48 @@ fn the_daemon_stays_while_a_connectors_session_is_open_and_lock_ends_it() {
     assert_eq!(after["pid"], before, "the daemon exited and came back");
     assert_eq!(after["connectors_session"], true);
     assert!(!s.journal().contains("daemon_idle_exit"));
+    let windows = s.windows();
     let out = s.run_connector(KEY, &["printenv", KEY]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    // `lock` ends it, and then the daemon may go idle.
+    assert_eq!(s.windows(), windows);
+    // `lock --all` ends it, and then the daemon may go idle.
     assert_eq!(s.vahta(&s.root, &["lock", "--all"]).status.code(), Some(0));
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(s.sessions().is_empty());
+    assert!(s.journal().contains("locked; connectors; claude pid"));
     wait_until("the idle exit", 15, || {
         s.journal().contains("daemon_idle_exit")
     });
+    // After a lock the same process is asked again.
+    s.unlock();
 }
 
 #[test]
-fn lock_connector_ends_only_the_connectors_session_and_plain_lock_leaves_it() {
+fn lock_connector_ends_every_connectors_session_and_plain_lock_leaves_them() {
     let s = Sandbox::with_connector_idle(true, None);
-    s.unlock_until_reboot();
+    s.unlock();
     // A plain lock is the project's, whatever it holds (a project with no
     // vault still has sessions to end).
     fs::create_dir_all(s.proj.join(".vahta")).unwrap();
     assert_eq!(s.vahta(&s.proj, &["lock"]).status.code(), Some(0));
+    let windows = s.passwords();
     let out = s.run_connector(KEY, &["printenv", KEY]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        s.passwords(),
+        windows,
+        "the session survived the plain lock"
+    );
     // `--connector` ends it, says so, and a second one has nothing to end.
     let out = s.vahta(&s.proj, &["lock", "--connector"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains("ended the connectors session"));
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert!(s.sessions().is_empty());
     let out = s.vahta(&s.proj, &["lock", "--connector"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains("no connectors session"));
     assert!(s.journal().contains("(connectors)"));
-}
-
-#[test]
-fn a_refusal_for_no_session_notifies_once_per_harness_per_while() {
-    let s = Sandbox::with_connector(true);
-    assert!(s.notifications().is_empty());
-    for _ in 0..3 {
-        let out = s.run_connector(KEY, &["printenv", KEY]);
-        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    }
-    let notes = s.notifications();
-    assert_eq!(notes.len(), 1, "{notes:?}");
-    assert!(notes[0].contains("Connectors are locked"), "{notes:?}");
-    assert!(notes[0].contains("vahta unlock --connector"), "{notes:?}");
-    assert!(!notes[0].contains(&value_of("a")));
-    // A refusal for another reason says nothing.
+    // The same process is asked again.
     s.unlock();
-    let out = s.run_connector(KEY, &["true"]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    assert_eq!(s.notifications().len(), 1);
-}
-
-#[test]
-fn no_notification_for_a_launch_that_is_not_from_a_harness() {
-    let s = Sandbox::with_connector(false);
-    let out = s.run_connector(KEY, &["printenv", KEY]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    assert!(s.notifications().is_empty());
 }
 
 #[test]
@@ -749,7 +948,7 @@ fn the_hook_redacts_a_connectors_value_in_any_agents_output() {
     let s = Sandbox::with_connector(true);
     let value = value_of("a");
     // Nothing is known of it while locked and never run, bar the detector.
-    s.unlock_until_reboot();
+    s.unlock();
     let reply = s
         .hook_after_tool(&format!("the key is {value} ok"))
         .expect("the value is cut");
