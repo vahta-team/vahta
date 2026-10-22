@@ -486,14 +486,37 @@ fn deny_hook_tamper(t: &hookguard::Tampering) -> Decision {
     }
 }
 
+/// What the person does to start a connector's server again, by harness.
+fn reconnect_text(harness: &str) -> &'static str {
+    match harness {
+        "claude" => "reconnect it with `/mcp` in Claude Code",
+        "codex" => "restart the Codex session",
+        "cursor" => "reload the MCP server in Cursor's settings",
+        _ => "reconnect it in the harness",
+    }
+}
+
 /// Refusing a Vahta command that is for the person only.
-fn deny_vahta_command(invocation: &str) -> Decision {
+fn deny_vahta_command(invocation: &str, harness: &str) -> Decision {
     let msg = if invocation.ends_with("--connector") {
-        format!(
-            "vahta blocked `{invocation}`: the connectors vault is set up by the person in their \
-             own terminal. The harness starts a connector's server itself; do not run it from \
-             here. Ask the person if a connector needs a change."
-        )
+        let reconnect = reconnect_text(harness);
+        if invocation.contains(" unlock ") || invocation.contains(" run ") {
+            format!(
+                "vahta blocked `{invocation}`: there is nothing to run. The connectors vault is \
+                 unlocked by the person, in a password window that opens when the harness \
+                 starts an MCP server; an agent cannot start a connector's server or unlock it. \
+                 If a server failed to start, ask the person to {reconnect} (they enter the \
+                 connectors password when the window opens)."
+            )
+        } else {
+            format!(
+                "vahta blocked `{invocation}`: the connectors vault is set up by the person in \
+                 their own terminal. The harness starts a connector's server itself, and the \
+                 person unlocks it in a password window that opens then; there is nothing to run \
+                 from here. Ask the person if a connector needs a change, or, if a server failed \
+                 to start, to {reconnect}."
+            )
+        }
     } else if invocation.ends_with("_surface") {
         format!(
             "vahta blocked `{invocation}`: it is Vahta's prompt window, which only Vahta opens, for \
@@ -527,7 +550,7 @@ fn deny_read(file: &str, kind: &str) -> Decision {
 
 /// A tool call about to run. `explicit` says whether this harness can be told
 /// "allow" out loud for this event.
-fn before_tool(ev: &Event, explicit: bool) -> (Decision, Option<Signal>) {
+fn before_tool(ev: &Event, explicit: bool, harness: &str) -> (Decision, Option<Signal>) {
     // Commands for the person only, then Vahta's own files: both are
     // refused whatever else is in the call, and the answer names the
     // command or the path, not the text.
@@ -537,7 +560,7 @@ fn before_tool(ev: &Event, explicit: bool) -> (Decision, Option<Signal>) {
         let signal = Signal::AgentGuard {
             command: invocation.clone(),
         };
-        return (deny_vahta_command(&invocation), Some(signal));
+        return (deny_vahta_command(&invocation, harness), Some(signal));
     }
     if let Some(file) = vahta_file_touched(ev) {
         let signal = Signal::VahtaFileTouch { path: file.clone() };
@@ -636,12 +659,16 @@ fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
 /// of something an agent tried is evidence for its alarm.
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
     match args.kind {
-        Kind::BeforeTool => before_tool(ev, m.can_allow_explicit(Kind::BeforeTool)),
+        Kind::BeforeTool => before_tool(ev, m.can_allow_explicit(Kind::BeforeTool), &args.harness),
         // Codex asks the hook when it is about to ask the person. The same
         // judgement as before the call; the only thing worth saying is an
         // allow, and the refusals were already made (and reported) there.
         Kind::PermissionRequest => {
-            let (decision, _) = before_tool(ev, m.can_allow_explicit(Kind::PermissionRequest));
+            let (decision, _) = before_tool(
+                ev,
+                m.can_allow_explicit(Kind::PermissionRequest),
+                &args.harness,
+            );
             (decision, None)
         }
         Kind::BeforeRead => {
@@ -992,6 +1019,43 @@ mod name_tests {
         let (agent, _) = redact_messages(&[cut("OpenAI-style key", false)], None);
         assert!(
             agent.ends_with("to use a secret, run the command that needs it with `vahta run`.")
+        );
+    }
+}
+
+#[cfg(test)]
+mod connector_text_tests {
+    use super::{Decision, deny_vahta_command};
+
+    fn said(invocation: &str, harness: &str) -> String {
+        match deny_vahta_command(invocation, harness) {
+            Decision::Deny { agent_message, .. } => agent_message,
+            other => panic!("not a denial: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unlock_and_run_of_the_connectors_explain_the_new_flow() {
+        for inv in ["vahta unlock --connector", "vahta run --connector"] {
+            let m = said(inv, "claude");
+            assert!(m.contains("nothing to run"), "{m}");
+            assert!(
+                m.contains("password window that opens when the harness starts"),
+                "{m}"
+            );
+            assert!(m.contains("`/mcp` in Claude Code"), "{m}");
+        }
+        assert!(said("vahta unlock --connector", "codex").contains("restart the Codex session"));
+        assert!(said("vahta unlock --connector", "cursor").contains("Cursor's settings"));
+        assert!(!said("vahta unlock --connector", "codex").contains("/mcp"));
+    }
+
+    #[test]
+    fn the_other_connector_commands_say_the_person_sets_them_up() {
+        let m = said("vahta add --connector", "claude");
+        assert!(
+            m.contains("set up by the person") && m.contains("/mcp"),
+            "{m}"
         );
     }
 }
