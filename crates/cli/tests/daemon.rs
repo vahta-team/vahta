@@ -8023,6 +8023,113 @@ print("DONE", len(ok), all(ok))
         }
     }
 
+    /// Go resolves names itself (its own resolver, or glibc through cgo,
+    /// chosen by `/etc/nsswitch.conf` and `GODEBUG=netdns`), and a binary
+    /// built with `CGO_ENABLED=0` never loads glibc. Each way must reach the
+    /// allowed name and nothing else. Skipped when no Go toolchain is
+    /// installed; the build is offline (`GOTOOLCHAIN=local`, `GOPROXY=off`).
+    #[test]
+    fn go_reaches_the_allowed_name_with_each_resolver() {
+        let go_ok = std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !go_ok {
+            eprintln!("skipped: no Go toolchain");
+            return;
+        }
+        let server = TestServer::start(|_| Reply::ok(b"go-ok"));
+        let Some(s) = setup_named("tools.example", server.port) else {
+            return;
+        };
+        let dir = s.root.join("go");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("main.go"),
+            r#"package main
+
+import (
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+)
+
+func main() {
+	c := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}}
+	r, err := c.Get(os.Args[1])
+	if err != nil {
+		fmt.Println("GO failed", err)
+		return
+	}
+	b, _ := io.ReadAll(r.Body)
+	fmt.Println("GO", string(b))
+}
+"#,
+        )
+        .unwrap();
+        let build = |out: &str, cgo: &str| {
+            let o = std::process::Command::new("go")
+                .args(["build", "-o", out, "main.go"])
+                .current_dir(&dir)
+                .env("CGO_ENABLED", cgo)
+                .env("GOTOOLCHAIN", "local")
+                .env("GOPROXY", "off")
+                .env("GOFLAGS", "-mod=mod")
+                .env("GOCACHE", dir.join("cache"))
+                .env("GOPATH", dir.join("path"))
+                .env("HOME", &s.root)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "go build: {}", text(&o.stderr));
+            dir.join(out).to_string_lossy().into_owned()
+        };
+        let with_cgo = build("with-cgo", "1");
+        let pure = build("pure", "0");
+        let url = format!("https://tools.example:{}/p", server.port);
+        let cases = [
+            ("cgo, default resolver", &with_cgo, None),
+            ("cgo, netdns=go", &with_cgo, Some("netdns=go")),
+            ("cgo, netdns=cgo", &with_cgo, Some("netdns=cgo")),
+            ("CGO_ENABLED=0", &pure, None),
+        ];
+        for (what, bin, godebug) in cases {
+            let mut env = vec![];
+            if let Some(g) = godebug {
+                env.push(format!("GODEBUG={g}"));
+            }
+            let run = |target: &str| {
+                let mut args = vec!["run", "--secret", "ZETA", "--"];
+                let pre: Vec<&str> = if env.is_empty() {
+                    vec![]
+                } else {
+                    vec!["env", env[0].as_str()]
+                };
+                args.extend(pre);
+                args.push(bin);
+                args.push(target);
+                let out = s.vahta(&args);
+                format!("{}{}", text(&out.stdout), text(&out.stderr))
+            };
+            let good = run(&url);
+            assert!(good.contains("GO go-ok"), "{what}: allowed name: {good}");
+            let bad = run("https://example.com/");
+            assert!(
+                bad.contains("GO failed") && !bad.contains("GO <"),
+                "{what}: another name got through: {bad}"
+            );
+            let ip = run("https://1.1.1.1/");
+            assert!(
+                ip.contains("GO failed"),
+                "{what}: an address got through: {ip}"
+            );
+        }
+    }
+
     #[test]
     fn the_relay_ends_with_the_command_and_leaves_no_process() {
         let server = TestServer::start(|_| Reply::ok(b"x"));
