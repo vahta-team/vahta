@@ -577,12 +577,17 @@ pub enum ClientRequest {
     /// The hook: a session of `harness` began, or (`ended`) ended. At its end
     /// the daemon cleans the transcript it marked. Fire and forget; `session`
     /// is the harness's own id, which the transcript's file name carries.
+    /// `dirty`: the hook cut a secret out of a tool's output (or could not) in
+    /// this session, so the session's transcript is marked for that cleanup
+    /// without anyone running a command.
     TranscriptNote {
         harness: String,
         session: Option<String>,
         cwd: String,
         ended: bool,
         roots: TranscriptRoots,
+        #[serde(default)]
+        dirty: bool,
     },
     /// Ask the person to let the agent see what was cut out of a tool's
     /// output kept under `reference`. Only the agent whose hook made the

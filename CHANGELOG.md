@@ -135,6 +135,10 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **The hook marks the session for transcript cleanup itself.** When it cuts a secret
+  out of a tool's output (or finds one it cannot cut), the daemon is told, and the
+  session's transcript is cleaned at `SessionEnd` with no `vahta scrub` run. The
+  hook's note to the agent no longer asks for the command first.
 - **Save from the paste window: "propose rules now".** After "Save to the project
   vault" a second question asks whether the agent should propose rules for the new
   secret. If you say yes, the first clean message you send afterwards reaches the agent

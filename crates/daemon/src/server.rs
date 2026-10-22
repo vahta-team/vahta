@@ -902,8 +902,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 cwd: _,
                 ended,
                 roots,
+                dirty,
             } => (
-                crate::transcript::note(&ctx, &harness, session.as_deref(), ended, roots),
+                crate::transcript::note(&ctx, &harness, session.as_deref(), ended, dirty, roots),
                 false,
             ),
             ClientRequest::OutputObserved {

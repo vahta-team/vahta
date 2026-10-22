@@ -334,6 +334,12 @@ fn scrub_hint(harness: &str) -> &'static str {
     if harness == "cursor" {
         // Cursor keeps its chats in a database that `vahta scrub` does not touch.
         " The current conversation still holds it until a new chat."
+    } else if harness == "claude" {
+        // The hook marked the session, and Claude's SessionEnd hook cleans it.
+        " The session is marked for cleanup (if Vahta's daemon is running): its transcript \
+         file is cleaned when the session ends, and `vahta scrub --transcript` cleans the \
+         files of finished sessions now. The current conversation still holds it until /clear \
+         or a new session."
     } else {
         " `vahta scrub --transcript` removes it from the transcript files on disk (the running \
          session's file is cleaned when the session ends), but the current conversation still \
@@ -807,6 +813,18 @@ fn run() -> Option<vahta_harness::Output> {
         );
     }
     let (decision, signal) = decide(&manifest, &args, &event);
+    // A secret cut out of an output (or one that reached the transcript): the
+    // transcript is marked for the cleanup at the session's end, by the hook
+    // itself, so the agent need not run anything.
+    if args.kind == Kind::AfterTool
+        && matches!(decision, Decision::Redact { .. } | Decision::Notice { .. })
+    {
+        daemon::session_dirty(
+            event.session_id.clone(),
+            &args.harness,
+            event.cwd.clone().unwrap_or_default(),
+        );
+    }
     if let Some(signal) = signal {
         daemon::report(
             &args.harness,

@@ -420,6 +420,20 @@ pub fn observed(tool: String, kinds: Vec<String>, likely: usize, possible: usize
 /// session's transcript from a closed one and clean the marked one at the end.
 /// Its answer does not matter.
 pub fn session_note(session: Option<String>, harness: &str, cwd: String, ended: bool) {
+    transcript_note(session, harness, cwd, ended, false);
+}
+
+/// Tell the daemon the hook cut a secret out of a tool's output in this
+/// session (or could not), so that the session's transcript is cleaned when the
+/// session ends. Its answer does not matter, and with no daemon there is no one
+/// to tell.
+pub fn session_dirty(session: Option<String>, harness: &str, cwd: String) {
+    if session.is_some() {
+        transcript_note(session, harness, cwd, false, true);
+    }
+}
+
+fn transcript_note(session: Option<String>, harness: &str, cwd: String, ended: bool, dirty: bool) {
     let home = dirs::home_dir();
     let _ = ask(ClientRequest::TranscriptNote {
         harness: harness.to_string(),
@@ -427,5 +441,6 @@ pub fn session_note(session: Option<String>, harness: &str, cwd: String, ended: 
         cwd,
         ended,
         roots: vahta_ipc::protocol::TranscriptRoots::from_env(home.as_deref()),
+        dirty,
     });
 }

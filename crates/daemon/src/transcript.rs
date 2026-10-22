@@ -26,7 +26,9 @@
 //!   file is open when it changed in the last minute, or when a hook has said
 //!   its session began and not ended and it changed in the last six hours. An
 //!   open file is read, its secrets are recorded as exposed, and it is marked;
-//!   the session's `SessionEnd` hook then has the daemon clean it.
+//!   the session's `SessionEnd` hook then has the daemon clean it. The hook also
+//!   marks the session itself when it cuts a secret out of a tool's output (or
+//!   cannot), so that its transcript is cleaned at its end with no command.
 //! * **Exposed.** A secret found in a transcript is recorded in the machine's
 //!   authenticated record of its vault (`vahta_vault::store`: name and time, in
 //!   the MAC, so deleting the mark is detected), and `vahta list` and `vahta
@@ -70,6 +72,10 @@ pub(crate) struct Marks {
     /// Files found to hold a secret while their session ran.
     /// Keys of the files (see [`path_key`]).
     deferred: HashSet<String>,
+    /// `harness:session` of sessions in which the hook cut a secret out of a
+    /// tool's output: their transcript is cleaned at their end whether or not a
+    /// scrub found something while they ran.
+    dirty: HashSet<String>,
 }
 
 fn key(harness: &str, session: &str) -> String {
@@ -460,6 +466,7 @@ pub(crate) fn note(
     harness: &str,
     session: Option<&str>,
     ended: bool,
+    dirty: bool,
     roots: TranscriptRoots,
 ) -> ClientReply {
     let (Some(session), true) = (session, matches!(harness, "claude" | "codex")) else {
@@ -468,20 +475,31 @@ pub(crate) fn note(
     if !ended {
         if let Ok(mut m) = ctx.shared.marks.lock() {
             m.live.insert(key(harness, session), Instant::now());
+            if dirty {
+                m.dirty.insert(key(harness, session));
+            }
         }
         return ClientReply::Ok {};
     }
-    if let Ok(mut m) = ctx.shared.marks.lock() {
-        m.live.remove(&key(harness, session));
-    }
+    let was_dirty = ctx
+        .shared
+        .marks
+        .lock()
+        .map(|mut m| {
+            m.live.remove(&key(harness, session));
+            m.dirty.remove(&key(harness, session))
+        })
+        .unwrap_or(false);
     let files: Vec<Found> = of_session(harness, session, &roots)
         .into_iter()
         .filter(|f| {
-            ctx.shared
-                .marks
-                .lock()
-                .map(|m| m.deferred.contains(&path_key(&f.path)))
-                .unwrap_or(false)
+            was_dirty
+                || ctx
+                    .shared
+                    .marks
+                    .lock()
+                    .map(|m| m.deferred.contains(&path_key(&f.path)))
+                    .unwrap_or(false)
         })
         .collect();
     if files.is_empty() {

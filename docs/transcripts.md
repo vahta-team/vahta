@@ -87,6 +87,13 @@ later it cleans the marked files of that session. Codex has no end-of-session
 event in the hooks Vahta registers, so a deferred Codex file is cleaned by the
 next `vahta scrub --transcript` once it is quiet.
 
+The hook marks the session itself, with no command: when it cuts a secret out of
+a tool's output (or finds one it cannot cut, in Observe mode or for a tool the
+harness will not let it rewrite) it tells the daemon, which then cleans that
+session's transcript at its end whether or not a scrub ever found something
+while it ran. This needs the daemon to be running at that moment and the
+harness to give the hook a session id.
+
 The daemon forgets its marks when it restarts. A file is then judged by its
 modification time alone.
 

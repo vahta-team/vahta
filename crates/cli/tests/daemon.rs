@@ -8069,6 +8069,56 @@ fn an_old_exposed_json_is_moved_into_the_record_when_its_vault_is_opened() {
 }
 
 #[test]
+fn the_hook_marks_a_session_whose_output_it_cut_and_the_end_of_the_session_cleans_it() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let id = "marked-session-0001";
+    let other_id = "unmarked-session-0002";
+    let folder = s.claude_project_folder();
+    let line = serde_json::json!({"type":"user","message":{"content":format!("leaked {one}")}})
+        .to_string();
+    // Both are running (just written) and no scrub is ever run.
+    let marked = folder.join(format!("{id}.jsonl"));
+    let unmarked = folder.join(format!("{other_id}.jsonl"));
+    s.transcript(&marked, std::slice::from_ref(&line), 0);
+    s.transcript(&unmarked, std::slice::from_ref(&line), 0);
+    s.hook_session_event("session_start", "SessionStart", id);
+    s.hook_session_event("session_start", "SessionStart", other_id);
+
+    // The agent's tool printed a held value; the hook cuts it, and marks the session.
+    let reply = s
+        .hook_event(
+            "after_tool",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "cat notes.txt"},
+                "tool_response": {"stdout": format!("see {one}"), "stderr": ""},
+                "cwd": s.project(), "session_id": id,
+            }),
+        )
+        .expect("the output is cut");
+    let (stdout, _) = redacted(&reply);
+    assert!(stdout.contains("REDACTED(ZETA)"), "{stdout}");
+
+    s.hook_session_event("session_end", "SessionEnd", id);
+    s.hook_session_event("session_end", "SessionEnd", other_id);
+    wait_until("the marked transcript to be cleaned", 15, || {
+        !fs::read_to_string(&marked)
+            .unwrap_or_default()
+            .contains(&one)
+    });
+    assert!(
+        fs::read_to_string(&marked)
+            .unwrap()
+            .contains("REDACTED(ZETA)")
+    );
+    // The session the hook did not mark, and no scrub found, is left alone.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(fs::read_to_string(&unmarked).unwrap().contains(&one));
+}
+
+#[test]
 fn scrub_needs_the_flag_and_all_covers_other_projects() {
     let s = sandbox_with_secrets();
     s.unlock_session();
