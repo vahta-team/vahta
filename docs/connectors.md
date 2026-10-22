@@ -47,6 +47,8 @@ A server that must call its own API gets its hosts with the other rules, for
 example `--net hosts:api.github.com` on `vahta add|bind --connector`. On Linux
 the server then runs with no network except TLS to those hosts (see
 [agent-usage.md](agent-usage.md)); on macOS and Windows that is not enforced.
+A host that resolves to this machine or the local network is refused unless the
+rule writes it `private:HOST`, as for any secret.
 
 `vahta list --connector` shows each connector, its harnesses and command, and the
 launches that were refused; `vahta check --connector` fails if one has no rules.
