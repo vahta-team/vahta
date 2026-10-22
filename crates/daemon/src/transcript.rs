@@ -19,6 +19,9 @@
 //!   by default the ones whose recorded working directory is the caller's.
 //!   The client says where (the daemon's own environment may differ).
 //!   Cursor keeps chats in a SQLite database and is not touched.
+//! * **Prompt history.** `history.jsonl` of Claude Code and of Codex (the
+//!   prompts the person sent, for arrow-up recall) is cleaned the same way, in
+//!   every scope, and never deferred (`history.rs`).
 //! * **A running session** is not rewritten while the harness appends to it. A
 //!   file is open when it changed in the last minute, or when a hook has said
 //!   its session began and not ended and it changed in the last six hours. An
@@ -99,6 +102,10 @@ impl Harness {
 struct Found {
     harness: Harness,
     path: PathBuf,
+    /// The harness's prompt history (see `history.rs`): one file for the whole
+    /// account, appended to whenever the person sends a prompt, so it is never
+    /// deferred to a session's end.
+    history: bool,
 }
 
 /// Regular `.jsonl` files under `dir`, not following links.
@@ -179,6 +186,7 @@ fn discover(cwd: &Path, all: bool, roots: &TranscriptRoots) -> Vec<Found> {
         out.extend(files.into_iter().map(|path| Found {
             harness: Harness::Claude,
             path,
+            history: false,
         }));
     }
     if let Some(codex) = &roots.codex {
@@ -198,8 +206,24 @@ fn discover(cwd: &Path, all: bool, roots: &TranscriptRoots) -> Vec<Found> {
                 .map(|path| Found {
                     harness: Harness::Codex,
                     path,
+                    history: false,
                 }),
         );
+    }
+    // The prompt histories are the account's, not a project's: in scope whatever
+    // the scope is.
+    for (harness, root) in [
+        (Harness::Claude, &roots.claude),
+        (Harness::Codex, &roots.codex),
+    ] {
+        let path = root.as_ref().map(|r| Path::new(r).join("history.jsonl"));
+        if let Some(path) = path.filter(|p| p.is_file()) {
+            out.push(Found {
+                harness,
+                path,
+                history: true,
+            });
+        }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup_by(|a, b| a.path == b.path);
@@ -238,6 +262,7 @@ fn of_session(harness: &str, session: &str, roots: &TranscriptRoots) -> Vec<Foun
                     .map(|path| Found {
                         harness: Harness::Claude,
                         path,
+                        history: false,
                     }),
             );
         }
@@ -254,6 +279,7 @@ fn of_session(harness: &str, session: &str, roots: &TranscriptRoots) -> Vec<Foun
             out.extend(files.into_iter().map(|path| Found {
                 harness: Harness::Codex,
                 path,
+                history: false,
             }));
         }
         _ => {}
@@ -344,6 +370,7 @@ fn handle(
         return None;
     }
     let open = !force_closed
+        && !found.history
         && shared
             .marks
             .lock()
@@ -355,7 +382,13 @@ fn handle(
         }
         (TranscriptState::Deferred, tally)
     } else {
-        match jsonl::rewrite(&found.path, cleaner) {
+        // A history is appended to at any time: try again if it grew meanwhile.
+        let rewritten = if found.history {
+            jsonl::rewrite_retrying(&found.path, cleaner)
+        } else {
+            jsonl::rewrite(&found.path, cleaner)
+        };
+        match rewritten {
             Ok(Rewrite::Done(t)) => {
                 if let Ok(mut m) = shared.marks.lock() {
                     m.deferred.remove(&path_key(&found.path));

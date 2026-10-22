@@ -25,6 +25,7 @@ mod encoded;
 mod gate;
 mod gone;
 mod guard_ops;
+mod history;
 mod host_relay;
 mod http_ops;
 mod input_ops;

@@ -4850,6 +4850,8 @@ impl Sandbox {
             .args(["--harness", "claude", "--event", kind])
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("home/.claude"))
+            .env("CODEX_HOME", self.root.join("home/.codex"))
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("VAHTA_HOOK_DISABLE")
             .env("VAHTA_DATA_DIR", self.root.join("data"))
@@ -5002,6 +5004,125 @@ fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
             .contains(&key)
     );
     assert!(s.journal().contains("prompt_secret") && !s.journal().contains(&key));
+}
+
+/// A prompt history line as Claude Code writes it, and as Codex does.
+fn history_lines(prompt: &str) -> (String, String) {
+    (
+        serde_json::json!({"display": prompt, "pastedContents": {}, "timestamp": 1_700_000_000_000u64,
+            "project": "/p", "sessionId": "s1"})
+        .to_string(),
+        serde_json::json!({"session_id": "s1", "ts": 1_700_000_000u64, "text": prompt}).to_string(),
+    )
+}
+
+#[test]
+fn a_blocked_prompt_is_taken_out_of_the_history_when_the_person_saves_or_does_nothing() {
+    let s = sandbox_with_secrets();
+    let (claude, codex) = (
+        s.claude_dir().join("history.jsonl"),
+        s.root.join("home/.codex/history.jsonl"),
+    );
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    let fine = history_lines("please summarise the readme");
+    for (path, line) in [(&claude, &fine.0), (&codex, &fine.1)] {
+        fs::write(path, format!("{line}\n")).unwrap();
+    }
+    let append = |prompt: &str| {
+        let (c, x) = history_lines(prompt);
+        for (path, line) in [(&claude, c), (&codex, x)] {
+            let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(f, "{line}").unwrap();
+        }
+    };
+    let forgotten = |path: &Path, gone: &str| {
+        wait_until("the history entry to go", 15, || {
+            !fs::read_to_string(path).unwrap().contains(gone)
+        });
+    };
+
+    // "Do nothing": the entry the harness wrote goes, the others stay.
+    let key = pasted_key("m");
+    let prompt = format!("here: {key}");
+    append(&prompt);
+    s.script(&[r#"{"choose":2}"#]);
+    blocked_reason(&s.hook_prompt(&prompt));
+    for path in [&claude, &codex] {
+        forgotten(path, &key);
+        let left = fs::read_to_string(path).unwrap();
+        assert!(left.contains("summarise the readme"), "{left}");
+        left.lines()
+            .for_each(|l| assert!(serde_json::from_str::<Value>(l).is_ok(), "{l}"));
+    }
+
+    // "Save": the same, and an entry written after the hook answered goes too.
+    let key = pasted_key("n");
+    let prompt = format!("and: {key}");
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    blocked_reason(&s.hook_prompt(&prompt));
+    append(&prompt);
+    for path in [&claude, &codex] {
+        forgotten(path, &key);
+    }
+    let journal = s.journal();
+    assert!(journal.contains("history_forget") && !journal.contains(&key));
+
+    // "False alarm": the person sent it, the history keeps it.
+    let key = pasted_key("o");
+    let prompt = format!("sent: {key}");
+    append(&prompt);
+    s.script(&[r#"{"choose":0}"#]);
+    assert!(s.hook_prompt(&prompt).is_none());
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(fs::read_to_string(&claude).unwrap().contains(&key));
+}
+
+#[test]
+fn scrub_cleans_the_prompt_histories_of_both_harnesses_in_any_scope() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let (claude, codex) = (
+        s.claude_dir().join("history.jsonl"),
+        s.root.join("home/.codex/history.jsonl"),
+    );
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    let keep = history_lines("an ordinary prompt");
+    let bad = history_lines(&format!("the key is {one}"));
+    fs::write(&claude, format!("{}\n{}\n", keep.0, bad.0)).unwrap();
+    fs::write(&codex, format!("{}\n{}", bad.1, keep.1)).unwrap();
+    // Recently written, as a history is: it is still cleaned.
+    let out = s.vahta(&["scrub", "--transcript", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let states: Vec<&str> = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["cleaned", "cleaned"], "{doc}");
+    for (path, lines) in [(&claude, 2), (&codex, 2)] {
+        let now = fs::read_to_string(path).unwrap();
+        assert!(!now.contains(&one), "{now}");
+        assert!(now.contains("REDACTED(ZETA)") && now.contains("an ordinary prompt"));
+        assert_eq!(now.lines().count(), lines);
+        now.lines()
+            .for_each(|l| assert!(serde_json::from_str::<Value>(l).is_ok(), "{l}"));
+    }
+    // Byte for byte where nothing changed, including a missing final newline.
+    assert_eq!(
+        fs::read_to_string(&codex).unwrap().lines().last().unwrap(),
+        keep.1
+    );
+    assert!(!fs::read_to_string(&codex).unwrap().ends_with('\n'));
 }
 
 #[test]

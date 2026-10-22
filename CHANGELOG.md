@@ -135,6 +135,11 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **Prompt history.** `vahta scrub --transcript` also cleans Claude Code's and
+  Codex's `history.jsonl` (the prompts kept for arrow-up), and when the paste check
+  holds a prompt (the person chose "save" or "do nothing") the daemon removes that
+  prompt's entry from both files at once, then again a few times as the harness may
+  write it late. Atomic rewrite, never cut short while the harness appends.
 - **"Exposed in a transcript" can no longer be erased by deleting a file.** The marks
   moved from `exposed.json` into the machine's authenticated record of each vault (the
   one that pins the owner key); a deleted or edited mark fails the next unlock as

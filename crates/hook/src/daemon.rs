@@ -20,7 +20,9 @@ use std::time::Duration;
 use vahta_ipc::client::Connector;
 use vahta_ipc::config::{Config, HookOutput, HookTool};
 use vahta_ipc::paths::Paths;
-use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan, PromptDecision, Signal};
+use vahta_ipc::protocol::{
+    ClientReply, ClientRequest, OutputSpan, PromptDecision, Signal, TranscriptRoots,
+};
 use vahta_ipc::spool::{self, SpoolLine};
 
 use crate::redact::Cut;
@@ -308,6 +310,7 @@ pub fn prompt_ask(
         cwd: cwd.to_string(),
         text: text.to_string(),
         detected,
+        roots: TranscriptRoots::from_env(dirs::home_dir().as_deref()),
     };
     match deliver_within(paths, request, prompt_wait()) {
         Delivery::Answered(ClientReply::PromptAnswer { answer }) => match answer {

@@ -640,6 +640,10 @@ pub enum ClientRequest {
         cwd: String,
         text: String,
         detected: Option<String>,
+        /// Where the harnesses keep their prompt history, so that a blocked
+        /// prompt can be taken out of it (see the daemon's `history.rs`).
+        #[serde(default)]
+        roots: TranscriptRoots,
     },
     /// The hook asks, before a `vahta run` runs, whether the command inside it
     /// passes every named secret's own rules, so the harness need not ask the

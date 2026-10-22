@@ -942,8 +942,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 cwd,
                 text,
                 detected,
+                roots,
             } => (
-                crate::input_ops::prompt_ask(&ctx, &harness, &cwd, text, detected)
+                crate::input_ops::prompt_ask(&ctx, &harness, &cwd, text, detected, roots)
                     .unwrap_or_else(|r| r),
                 false,
             ),

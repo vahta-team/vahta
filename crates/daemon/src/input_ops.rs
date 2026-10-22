@@ -37,7 +37,7 @@ use vahta_vault::{Vault, valid_name};
 use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, find_vault, from_surface};
 use crate::output::{Asked, HeldCut, anchor_of, known_values, save};
-use crate::protocol::{ClientReply, PromptDecision};
+use crate::protocol::{ClientReply, PromptDecision, TranscriptRoots};
 use crate::scrub::Scrubber;
 use crate::surface::sanitize_label;
 
@@ -266,6 +266,7 @@ pub(crate) fn prompt_ask(
     cwd: &str,
     text: String,
     detected: Option<String>,
+    roots: TranscriptRoots,
 ) -> Flow<ClientReply> {
     let text = Zeroizing::new(text);
     let remembered = |ctx: &Ctx<'_>, domain: u8, value: &[u8]| -> [u8; 32] {
@@ -328,6 +329,20 @@ pub(crate) fn prompt_ask(
         .filter(|f| f.known)
         .map(|f| f.label.clone())
         .collect();
+    // The message did not go, but the harness may have written it to its prompt
+    // history on the way: take it out (see `history.rs`).
+    let forget = |found: &[Found]| {
+        let values = found
+            .iter()
+            .filter(|f| !f.range.is_empty())
+            .map(|f| text[f.range.clone()].to_string())
+            .collect();
+        crate::history::forget_soon(
+            roots.clone(),
+            crate::history::Blocked::new(&text, values),
+            ctx.shared.journal.clone(),
+        );
+    };
     let record = |result: &str, found: &[Found]| {
         ctx.journal(Entry::new("prompt_secret").names(&names).result(
             result,
@@ -517,6 +532,7 @@ pub(crate) fn prompt_ask(
             ) {
                 Ok(name) => {
                     record("saved", &found);
+                    forget(&found);
                     window.close(Some(&format!("Saved {name}. Your message was not sent.")));
                     Ok(ClientReply::PromptAnswer {
                         answer: PromptDecision::Saved { name },
@@ -533,6 +549,7 @@ pub(crate) fn prompt_ask(
         }
         Some(Way::Nothing) => {
             record("held", &found);
+            forget(&found);
             window.close(Some("Your message was not sent."));
             Ok(held(false))
         }

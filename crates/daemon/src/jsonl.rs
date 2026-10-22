@@ -424,6 +424,102 @@ pub(crate) fn rewrite(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
     result
 }
 
+/// How many times a rewrite of a file the harness keeps appending to is tried
+/// again when it grew in the meantime.
+const APPEND_RETRIES: usize = 5;
+const APPEND_PAUSE: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// [`rewrite`] for a file that is appended to while it is open (a prompt
+/// history): when the harness appended during the pass nothing was replaced, so
+/// the pass is made again, a few times. Never replaces a file it did not read in
+/// full; the result is [`Rewrite::Changed`] only if it never got a quiet moment.
+pub(crate) fn rewrite_retrying(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
+    let mut last = Rewrite::Changed;
+    for attempt in 0..APPEND_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(APPEND_PAUSE);
+        }
+        last = rewrite(path, cleaner)?;
+        if matches!(last, Rewrite::Done(_)) {
+            break;
+        }
+    }
+    Ok(last)
+}
+
+/// Replace `path` without the lines for which `drop_line` says so (it gets the
+/// line's text, without its terminator; a line that is not UTF-8 is kept).
+/// Everything else is copied byte for byte. Atomic like [`rewrite`], and retried
+/// like [`rewrite_retrying`] when the harness appended in the meantime. The
+/// number of lines dropped; the file is not touched when there are none.
+pub(crate) fn drop_lines(path: &Path, drop_line: &dyn Fn(&str) -> bool) -> io::Result<usize> {
+    for attempt in 0..APPEND_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(APPEND_PAUSE);
+        }
+        let before = stamp(path)?;
+        let meta = std::fs::metadata(path)?;
+        let mut kept: Vec<u8> = Vec::new();
+        let mut dropped = 0usize;
+        {
+            let mut reader = BufReader::with_capacity(256 * 1024, File::open(path)?);
+            let mut raw: Vec<u8> = Vec::new();
+            loop {
+                raw.clear();
+                let n = reader
+                    .by_ref()
+                    .take(MAX_LINE as u64 + 1)
+                    .read_until(b'\n', &mut raw)?;
+                if n == 0 {
+                    break;
+                }
+                let body_end = raw.len() - raw.ends_with(b"\n") as usize;
+                let body_end = body_end - raw[..body_end].ends_with(b"\r") as usize;
+                let gone = raw.len() <= MAX_LINE
+                    && std::str::from_utf8(&raw[..body_end]).is_ok_and(drop_line);
+                if gone {
+                    dropped += 1;
+                } else {
+                    kept.extend_from_slice(&raw);
+                }
+            }
+        }
+        if dropped == 0 {
+            return Ok(0);
+        }
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.vahta-{}.tmp", std::process::id()));
+        let done = (|| -> io::Result<bool> {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(&kept)?;
+            file.set_permissions(meta.permissions())?;
+            file.set_modified(before.1)?;
+            file.sync_all()?;
+            drop(file);
+            if stamp(path)? != before {
+                return Ok(false);
+            }
+            std::fs::rename(&tmp, path)?;
+            #[cfg(unix)]
+            if let Ok(d) = File::open(dir) {
+                let _ = d.sync_all();
+            }
+            Ok(true)
+        })();
+        if !matches!(done, Ok(true)) {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        if done? {
+            return Ok(dropped);
+        }
+    }
+    Err(io::Error::other("the file kept changing"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
