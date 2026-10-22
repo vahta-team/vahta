@@ -30,6 +30,8 @@ struct Sandbox {
     as_harness: bool,
     /// The daemon's idle time in seconds, when a test wants it short.
     idle: Option<u32>,
+    /// Refusals count for the injection alarm (a test of the burst notice).
+    alarm_on: bool,
 }
 
 fn text(b: &[u8]) -> String {
@@ -59,6 +61,7 @@ impl Sandbox {
             root,
             as_harness,
             idle: None,
+            alarm_on: false,
         }
     }
 
@@ -73,12 +76,17 @@ impl Sandbox {
             .env("VAHTA_RUNTIME_DIR", self.root.join("run"))
             .env("VAHTA_CONFIG_DIR", self.root.join("config"))
             .env_remove("VAHTA_TEST_DAEMON_VERSION")
+            .env("VAHTA_TEST_NOTIFY_LOG", self.root.join("notify.log"))
             .env("VAHTA_TEST_SURFACE", self.root.join("script.jsonl"))
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
-            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1")
-            .env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
+            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1");
+        if self.alarm_on {
+            cmd.env_remove("VAHTA_TEST_MUTE_REFUSAL_ALARM");
+        } else {
+            cmd.env("VAHTA_TEST_MUTE_REFUSAL_ALARM", "1");
+        }
         match self.idle {
             Some(n) => cmd.env("VAHTA_TEST_IDLE_SECONDS", n.to_string()),
             None => cmd.env_remove("VAHTA_TEST_IDLE_SECONDS"),
@@ -157,6 +165,15 @@ impl Sandbox {
         );
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         s
+    }
+
+    /// The desktop notifications the daemon sent, one per line.
+    fn notifications(&self) -> Vec<String> {
+        fs::read_to_string(self.root.join("notify.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     /// The first launch from this harness process: it opens the password
@@ -1027,4 +1044,96 @@ fn as_puts_a_connectors_value_in_another_variable() {
             text(&out.stderr)
         );
     }
+}
+
+// Silent when all is well: opening a session and launching never notify.
+#[test]
+fn a_normal_launch_never_notifies() {
+    let s = Sandbox::with_connector(true);
+    s.script(&[PW_ANSWER]);
+    for _ in 0..2 {
+        let out = s.run_connector(KEY, &["printenv", "HOME"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+    assert!(s.notifications().is_empty(), "{:?}", s.notifications());
+    assert!(!s.journal().contains("\"notified\""));
+}
+
+#[test]
+fn a_launch_by_a_process_that_is_not_the_harness_notifies_once_per_while() {
+    let s = Sandbox::with_connector(false);
+    for _ in 0..3 {
+        let out = s.run_connector(KEY, &["printenv", "HOME"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    }
+    let notes = s.notifications();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains(&format!(
+        "not Claude Code tried to start the MCP server for {KEY}"
+    )));
+    assert!(notes[0].contains("Nothing ran"), "{notes:?}");
+    assert!(!notes[0].contains(&value_of("a")));
+    let journal = s.journal();
+    assert_eq!(journal.matches("\"notified\"").count(), 1, "{journal}");
+    assert!(journal.contains("not_from_harness"));
+}
+
+#[test]
+fn a_command_outside_the_rules_notifies_once() {
+    let s = Sandbox::with_connector(true);
+    s.script(&[PW_ANSWER]);
+    let out = s.run_connector(KEY, &["printenv", "HOME"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    for _ in 0..2 {
+        let out = s.run_connector(KEY, &["npx", "-p", "evil", "@pkg/server"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    }
+    let notes = s.notifications();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains(KEY) && notes[0].contains("npx -p evil"),
+        "{notes:?}"
+    );
+    assert!(notes[0].contains("rules do not allow") && notes[0].contains("Nothing ran"));
+    assert!(s.journal().contains("command_not_allowed"));
+}
+
+#[test]
+fn a_server_that_prints_its_own_key_notifies() {
+    let s = Sandbox::with_connector(true);
+    s.unlock();
+    let notes = s.notifications();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains(&format!("MCP server for {KEY} printed its own key")));
+    assert!(!notes[0].contains(&value_of("a")));
+    // Again within the while: said once.
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.notifications().len(), 1);
+    let journal = s.journal();
+    assert!(journal.contains("value_in_output") && !journal.contains(&value_of("a")));
+}
+
+#[test]
+fn a_burst_of_refused_launches_notifies_through_the_alarms_score() {
+    let mut s = Sandbox::with_connector(true);
+    s.alarm_on = true;
+    // The daemon that made the vault runs with the alarm muted: start afresh.
+    s.vahta(&s.root, &["daemon", "stop"]);
+    s.script(&[PW_ANSWER]);
+    let out = s.run_connector(KEY, &["printenv", "HOME"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(s.notifications().is_empty());
+    for _ in 0..2 {
+        let out = s.run_connector(KEY, &["true"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    }
+    let notes = s.notifications();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("Many launches of MCP servers")),
+        "{notes:?}"
+    );
+    assert!(s.journal().contains("refusal_burst"));
 }

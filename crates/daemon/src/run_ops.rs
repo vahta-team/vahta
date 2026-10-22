@@ -88,6 +88,8 @@ pub(crate) struct Prepared {
     pub relay_private: Vec<(String, u16)>,
     /// The vault the run belongs to, for the relay's journal lines.
     pub vault_id: [u8; 16],
+    /// The run is the server of a connector (`--connector`).
+    pub connector: bool,
 }
 
 fn to_os(bytes: &[u8]) -> OsString {
@@ -554,7 +556,10 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
                 .as_deref()
                 .and_then(|p| p.file_name())
                 .map_or_else(|| argv[0].clone(), |f| f.to_string_lossy().into_owned());
-            crate::report::rule_refusal(ctx, &refused, Some(&shown), false);
+            let raised = crate::report::rule_refusal(ctx, &refused, Some(&shown), false);
+            if ctx.connector {
+                crate::connector_ops::notify_refused(ctx, &peek, &refused, &argv, raised);
+            }
             return Err(not_allowed(
                 ctx,
                 &peek,
@@ -758,6 +763,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             Vec::new()
         },
         vault_id: peek.vault_id,
+        connector: ctx.connector,
     })
 }
 

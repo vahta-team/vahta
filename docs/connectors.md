@@ -162,6 +162,29 @@ server in its settings. You are asked again then.
 
 `vahta unlock --connector` no longer exists; it prints this flow and exits.
 
+## When Vahta tells you something
+
+Vahta is silent when all is well: a launch with a session, or the password
+window on the first one, is not news. It raises a desktop notification
+(`notify-send` on Linux, `osascript` on macOS, a PowerShell toast on Windows)
+only when something is really off, in plain words, naming the connector and
+never a value:
+
+| What happened | What it says |
+|---|---|
+| A process that is not the connector's harness tried to start its server | "A process that is not Claude Code tried to start the MCP server for NAME. Nothing ran." |
+| A command outside the connector's `allow` rules (a different package or version, `npx -p`, `uvx --from`, another program) | "The MCP server for NAME was asked to run `npx -p evil ...`, which its rules do not allow. Nothing ran." |
+| The connector's own key turned up in its server's output (Vahta hid it) | "The MCP server for NAME printed its own key. Vahta hid it." |
+| Many refused launches in a short time (the same score the injection alarm keeps) | "Many launches of MCP servers (NAME) were refused in a short time. Nothing ran." |
+
+Each points to `vahta daemon status` or `vahta list --connector`, which show the
+refused launches. Limits: at most one notification per vault, kind and connector
+every 10 minutes, and five in all in that time, so an agent cannot flood your
+desktop. Every event is in the journal whether or not it was shown, and a
+notification that was sent adds a `notified` line (kind and connector names).
+Where the desktop has no notification service nothing is shown and only the
+journal remembers.
+
 ## Keys kept in a project vault
 
 Not every key is a connector. If a server's key lives in a project vault

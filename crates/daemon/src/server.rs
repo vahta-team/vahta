@@ -135,6 +135,8 @@ pub(crate) struct Shared {
     pub(crate) connector_refusals: Mutex<Vec<vahta_ipc::protocol::ConnectorRefusal>>,
     /// Who has the turn to ask the person about each vault (`gate.rs`).
     pub(crate) gates: crate::gate::Gates,
+    /// What was told to the person on the desktop, to limit it (`notify.rs`).
+    pub(crate) notices: Mutex<crate::notify::Limiter>,
     /// The ways to unlock a vault.
     pub(crate) unlockers: vahta_auth::Registry,
     /// How devices are reached.
@@ -299,6 +301,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
         gates: crate::gate::Gates::default(),
+        notices: Mutex::new(crate::notify::Limiter::default()),
         unlockers: vahta_auth::Registry::standard(),
         links,
         started: Instant::now(),

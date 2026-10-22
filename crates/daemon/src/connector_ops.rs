@@ -336,15 +336,6 @@ pub(crate) struct Harness {
 /// `(session id, scope, delegated)`, as `find_session` gives.
 type Found = (String, Vec<String>, bool);
 
-/// How a harness is called in a window.
-fn harness_title(kind: &str) -> &'static str {
-    match kind {
-        "claude" => "Claude Code",
-        "codex" => "Codex",
-        _ => "Cursor",
-    }
-}
-
 /// What the person does to start a server again once it is unlocked.
 fn reconnect_hint(kind: &str) -> &'static str {
     match kind {
@@ -519,7 +510,11 @@ fn open_session(
         names.sort();
         names
     };
-    let who = format!("{} (pid {})", harness_title(harness.kind), harness.id.pid);
+    let who = format!(
+        "{} (pid {})",
+        crate::notify::harness_title(harness.kind),
+        harness.id.pid
+    );
     let title = "Unlock MCP servers";
     let mut window = ctx.window(title)?;
     let mut lines = lines_for(project, vault_path);
@@ -669,6 +664,37 @@ fn run(
     }
 }
 
+/// Tell the person a connector's launch was refused by its rules (a command
+/// that is not the server it allows), and, when the refusals have added up to
+/// the injection alarm's threshold, that too.
+pub(crate) fn notify_refused(
+    ctx: &Ctx<'_>,
+    peek: &Peek,
+    names: &[String],
+    argv: &[String],
+    raised: bool,
+) {
+    let words: Vec<&str> = argv.iter().take(4).map(String::as_str).collect();
+    let shown: String = crate::run_ops::sanitize_for_message(&words.join(" "))
+        .chars()
+        .take(80)
+        .collect();
+    ctx.shared.notify_suspicious(
+        &peek.vault_id,
+        crate::notify::Kind::CommandNotAllowed,
+        names,
+        &shown,
+    );
+    if raised {
+        burst(ctx, peek, names);
+    }
+}
+
+fn burst(ctx: &Ctx<'_>, peek: &Peek, names: &[String]) {
+    ctx.shared
+        .notify_suspicious(&peek.vault_id, crate::notify::Kind::RefusalBurst, names, "");
+}
+
 /// End the connectors session of the harness process that started this client.
 fn end_stale(ctx: &Ctx<'_>) {
     let Some(parent) = parent_facts(ctx) else {
@@ -792,7 +818,16 @@ pub(crate) fn check_harness(ctx: &Ctx<'_>, peek: &Peek, names: &[String]) -> Flo
                     )),
                 ),
         );
-        crate::report::rule_refusal(ctx, std::slice::from_ref(n), None, false);
+        let raised = crate::report::rule_refusal(ctx, std::slice::from_ref(n), None, false);
+        ctx.shared.notify_suspicious(
+            &peek.vault_id,
+            crate::notify::Kind::NotFromHarness,
+            std::slice::from_ref(n),
+            &binding.harnesses.join(","),
+        );
+        if raised {
+            burst(ctx, peek, std::slice::from_ref(n));
+        }
         return Err(refused_names(
             RefusalKind::NotFromHarness,
             format!(

@@ -74,7 +74,10 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   until-reboot session: the connectors session belongs to the harness process
   that asked (pid and start time), opens with the connectors password in a window
   at its first launch, is shared by that process's concurrent launches, and ends
-  when the process exits. Another Claude Code or a Codex asks for itself. The
+  when the process exits. Another Claude Code or a Codex asks for itself. A
+  desktop notification (rate limited, journaled as `notified`) says when a
+  connector is launched by a process that is not its harness, by a command outside
+  its rules, prints its own key, or is refused in a burst. The
   output hook now cuts a connector's key by value in any agent's tool output, while the
   connectors session is open and for a while after a connector run. `vahta run
   --connector --as NAME=VAR` renames the variable. An `allow` rule may be

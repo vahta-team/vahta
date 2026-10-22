@@ -35,6 +35,7 @@ mod link_devices;
 pub use link_devices::LinkDevices;
 mod lock;
 mod members_ops;
+mod notify;
 mod ops;
 mod output;
 mod pathfind;

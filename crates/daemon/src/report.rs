@@ -238,25 +238,30 @@ pub(crate) fn feed_spooled(shared: &Arc<Shared>, lines: Spooled) {
 
 /// A `vahta run` or `vahta http` that a secret's rules refused counts for the
 /// alarm: one aimed at a network tool, shell or interpreter at once, anything
-/// else on repetition (see `alarm.rs`). The agent's reply is unchanged.
+/// else on repetition (see `alarm.rs`). The agent's reply is unchanged. Says
+/// whether this refusal took the agent past the alarm's threshold.
 pub(crate) fn rule_refusal(
     ctx: &Ctx<'_>,
     secrets: &[String],
     program: Option<&str>,
     no_rules: bool,
-) {
+) -> bool {
     if crate::testing::refusal_alarm_muted() {
-        return;
+        return false;
     }
     let subject = subject_of(ctx, "", None);
     let (weight, what) = alarm::refusal_weight(secrets, program, no_rules);
     let what = clean(&what);
-    if let Some(verdict) = ctx
+    match ctx
         .shared
         .alarm
         .record_scored(&subject, weight, what, Instant::now())
     {
-        alarm::raise(ctx.shared, subject, verdict);
+        Some(verdict) => {
+            alarm::raise(ctx.shared, subject, verdict);
+            true
+        }
+        None => false,
     }
 }
 

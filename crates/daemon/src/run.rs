@@ -75,6 +75,7 @@ fn pump(
     writer: Writer,
     stderr: bool,
     finished: Arc<AtomicBool>,
+    redacted: Arc<AtomicBool>,
 ) {
     let frame = |bytes: &[u8]| {
         let data = b64_encode(bytes);
@@ -127,6 +128,9 @@ fn pump(
         }
     }
     emit(scrubber.finish());
+    if scrubber.redacted() {
+        redacted.store(true, Ordering::SeqCst);
+    }
 }
 
 /// End a command: asked nicely, then not.
@@ -204,6 +208,7 @@ pub(crate) fn execute(
         relay_hosts,
         relay_private,
         vault_id,
+        connector,
     } = prepared;
 
     // The file that was checked is the file that runs: not a second lookup of
@@ -295,22 +300,25 @@ pub(crate) fn execute(
     }
 
     let finished = Arc::new(AtomicBool::new(false));
+    let redacted = Arc::new(AtomicBool::new(false));
     let mut pumps: Vec<JoinHandle<()>> = Vec::new();
     if let Some(out) = child.stdout.take() {
-        let (w, f, s) = (
+        let (w, f, s, r) = (
             writer.clone(),
             finished.clone(),
             Scrubber::with_encodings(values.clone()),
+            redacted.clone(),
         );
-        pumps.push(std::thread::spawn(move || pump(out, s, w, false, f)));
+        pumps.push(std::thread::spawn(move || pump(out, s, w, false, f, r)));
     }
     if let Some(err) = child.stderr.take() {
-        let (w, f, s) = (
+        let (w, f, s, r) = (
             writer.clone(),
             finished.clone(),
             Scrubber::with_encodings(values.clone()),
+            redacted.clone(),
         );
-        pumps.push(std::thread::spawn(move || pump(err, s, w, true, f)));
+        pumps.push(std::thread::spawn(move || pump(err, s, w, true, f, r)));
     }
     drop(values);
 
@@ -356,6 +364,15 @@ pub(crate) fn execute(
         std::thread::sleep(Duration::from_millis(10));
     }
     finished.store(true, Ordering::SeqCst);
+    // A connector's server that printed its own key is not an ordinary run.
+    if connector && redacted.load(Ordering::SeqCst) {
+        shared.notify_suspicious(
+            &vault_id,
+            crate::notify::Kind::ValueInOutput,
+            &names,
+            "the server",
+        );
+    }
 
     let (code, signal) = match status {
         Ok(Ok(s)) => exit_of(s),
