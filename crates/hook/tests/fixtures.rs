@@ -632,10 +632,12 @@ fn the_journal_is_refused_to_an_agent_as_a_command_and_as_a_file() {
         "{out}"
     );
     let file = data.join("journal.jsonl");
+    // Quoted, as a shell needs a Windows path to be: unquoted, bash (and the
+    // hook, which reads the command as bash does) takes each `\` as an escape.
     for cmd in [
-        format!("cat {}", file.display()),
-        format!("tail -n 20 {}", file.display()),
-        format!("grep alarm {}", file.display()),
+        format!("cat \"{}\"", file.display()),
+        format!("tail -n 20 \"{}\"", file.display()),
+        format!("grep alarm \"{}\"", file.display()),
     ] {
         let out = ask(&cmd);
         assert!(out.contains("\"deny\""), "{cmd}: {out}");
