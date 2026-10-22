@@ -295,7 +295,7 @@ pub(crate) fn known_values(
             values.extend(s.forms.targets());
         }
         for s in sessions.iter() {
-            if s.anchor_exe == crate::session::CONNECTORS_ANCHOR && s.parent.is_none() {
+            if s.connector && s.parent.is_none() {
                 values.extend(s.forms.targets());
             }
         }

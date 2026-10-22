@@ -6,6 +6,8 @@
 //! an agent, it could answer a window meant for the person. Each one asks for
 //! the password, but an agent asking the person to approve them is exactly the
 //! approval fatigue Vahta exists to remove, and none of them has an agent use.
+//! `vahta journal` is refused too: the journal is for the person, and it would
+//! show an agent which of its actions were noticed.
 //! The connectors vault is the person's alone: `init`, `add`, `bind`, `remove`,
 //! `unlock` and `run` with `--connector` are refused too. The harness starts
 //! `vahta run --connector` itself; an agent that runs it from its Bash tool is
@@ -25,7 +27,7 @@
 use crate::readguard::{Tok, WRAPPERS, is_assignment, tokenize};
 
 /// Subcommands an agent may not run.
-const FORBIDDEN: &[&str] = &["reveal", "copy", "_surface"];
+const FORBIDDEN: &[&str] = &["reveal", "copy", "_surface", "journal"];
 
 /// Subcommands that are refused when they carry `--connector`.
 const CONNECTOR_FORBIDDEN: &[&str] = &["init", "add", "bind", "remove", "unlock", "run"];
@@ -171,6 +173,9 @@ mod tests {
             "C:\\bin\\vahta.exe copy X",
             "vahta.EXE reveal X",
             "pwsh -Command 'vahta copy X'",
+            "vahta journal",
+            "vh journal --kind suspicious",
+            "bash -c 'cd /tmp && vahta journal --last 5'",
         ] {
             assert!(forbidden_command(cmd).is_some(), "{cmd}");
         }

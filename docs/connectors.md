@@ -47,6 +47,8 @@ A server that must call its own API gets its hosts with the other rules, for
 example `--net hosts:api.github.com` on `vahta add|bind --connector`. On Linux
 the server then runs with no network except TLS to those hosts (see
 [agent-usage.md](agent-usage.md)); on macOS and Windows that is not enforced.
+A host that resolves to this machine or the local network is refused unless the
+rule writes it `private:HOST`, as for any secret.
 
 `vahta list --connector` shows each connector, its harnesses and command, and the
 launches that were refused; `vahta check --connector` fails if one has no rules.
@@ -111,53 +113,79 @@ startup_timeout_sec = 30
 }
 ```
 
-## Every day: unlock once, then work
+## Every day: the harness asks, you answer
 
-```sh
-vahta unlock --connector
+There is nothing to run first. The first time a Claude Code, Codex or Cursor
+process starts one of its connectors, a password window opens at once:
+
+> Claude Code (pid 4242) wants its MCP servers: GITHUB_PERSONAL_ACCESS_TOKEN,
+> GMAIL_TOKEN. Enter the connectors password.
+
+Type the password of the connectors vault (or use whatever else your unlock
+windows already accept for it, such as a paired phone). A session opens that
+belongs to **that process**, by pid and start time, and covers the connectors
+bound to its harness. Every other server that process starts, now or later, runs
+with no window. Honestly: **each new harness process asks once**. A second Claude
+Code, a Codex, or the same Claude Code after you quit and started it again has no
+session of its own and gets its own window; a session never passes from one
+process to another, and there is no way to leave the connectors open "for the
+day" or until a reboot.
+
+A harness starts several servers at once. Their launches wait for one window and
+share its answer: all start when you type the password, or all fail when you
+cancel. While the window for one harness process is open, another process's
+window waits its turn (one window at a time per vault).
+
+The session ends when the harness process exits, and also on `vahta lock --all`,
+`vahta sessions kill ID`, `vahta lock --connector`, when the machine goes to sleep or the injection alarm
+goes off, and at a reboot. `vahta sessions` shows it ("claude (pid 4242)", no end
+time) and so does `vahta daemon status`. It is never extended or timed out, and
+`vahta lock --connector` ends the connectors sessions of every harness process
+(and nothing else); `vahta lock` without `--all` does not touch them (it ends
+the current project's sessions). The journal names the harness and its pid when a connectors session
+opens and when it ends, never a value.
+
+**The harness waits about 30 seconds.** The window opens immediately, so answer
+it promptly. If the harness gives up on a server and kills `vahta run`, Vahta
+withdraws the window and nothing runs (journal: `cancelled`). If you cancel, or
+the password is wrong after three tries, the server exits at once with a line on
+its stderr, which the harness may show you:
+
+```
+vahta run: cancelled; nothing was done. The connectors were not unlocked and the
+server did not start: reconnect the server in Claude Code (`/mcp`) to be asked for
+the connectors password again.
 ```
 
-You type the password once. With no `--for` the session lasts **until the
-computer restarts**: every server starts with no window, for as long as the
-machine is up, and the daemon does not exit for being idle while it is open.
-`vahta unlock --connector --for 8h` ends it after 8 hours instead (a Vahta
-window asks shortly before whether to extend it, as for any session).
+**Reconnect after a no.** A server that did not start stays down until the
+harness starts it again. In Claude Code run `/mcp` and reconnect the server (or
+restart Claude Code); in Codex restart the session; in Cursor reload the MCP
+server in its settings. You are asked again then.
 
-The session is yours, not a process tree's, so it covers a harness started from a
-launcher as well as from a terminal. `vahta sessions` shows it ("until reboot")
-and so does `vahta daemon status`. It ends when:
+`vahta unlock --connector` no longer exists; it prints this flow and exits.
 
-- the machine restarts (Vahta compares the boot id: `/proc/sys/kernel/random/boot_id`
-  on Linux, the boot time on macOS and Windows), or the daemon is stopped;
-- you run `vahta lock --connector` (only this session), `vahta lock --all` or
-  `vahta sessions kill ID`;
-- the machine goes to sleep, or the injection alarm goes off;
-- the `--for` time runs out.
+## When Vahta tells you something
 
-`vahta lock` without `--all` ends the sessions of the current project only, not
-this one; `vahta lock --connector` ends this one only, not the project's.
+Vahta is silent when all is well: a launch with a session, or the password
+window on the first one, is not news. It raises a desktop notification
+(`notify-send` on Linux, `osascript` on macOS, a PowerShell toast on Windows)
+only when something is really off, in plain words, naming the connector and
+never a value:
 
-**What you see when you forgot.** No window opens: the harness would give up on
-the server in about 30 seconds and show you nothing. The launch is refused at
-once with exit code 3, the server never starts, and the harness reports a closed
-connection. Vahta tells you in two ways. A desktop notification appears
-("Connectors are locked: run `vahta unlock --connector`, then reconnect the
-server"), at most once per harness every 10 minutes; it uses `notify-send` on
-Linux, `osascript` on macOS and a PowerShell toast on Windows, and if it cannot
-be shown nothing is said. And Vahta remembers the refusal:
+| What happened | What it says |
+|---|---|
+| A process that is not the connector's harness tried to start its server | "A process that is not Claude Code tried to start the MCP server for NAME. Nothing ran." |
+| A command outside the connector's `allow` rules (a different package or version, `npx -p`, `uvx --from`, another program) | "The MCP server for NAME was asked to run `npx -p evil ...`, which its rules do not allow. Nothing ran." |
+| The connector's own key turned up in its server's output (Vahta hid it) | "The MCP server for NAME printed its own key. Vahta hid it." |
+| Many refused launches in a short time (the same score the injection alarm keeps) | "Many launches of MCP servers (NAME) were refused in a short time. Nothing ran." |
 
-```
-$ vahta daemon status
-...
-connector GITHUB_PERSONAL_ACCESS_TOKEN was refused at 2026-10-15 09:12:40 UTC: no connectors session: run `vahta unlock --connector`, then start the harness again
-```
-
-`vahta list --connector` shows the same line, and the journal has it.
-
-**Reconnect after unlocking.** A server that was refused stays down until the
-harness starts it again. In Claude Code run `/mcp` and reconnect the server
-(or restart Claude Code); in Codex restart the session; in Cursor reload the MCP
-server in its settings. No new unlock is needed for the next start.
+Each points to `vahta journal` (try `vahta journal --kind connector`), which
+shows the events in plain words, suspicious ones marked `!`. Limits: at most one notification per vault, kind and connector
+every 10 minutes, and five in all in that time, so an agent cannot flood your
+desktop. Every event is in the journal whether or not it was shown, and a
+notification that was sent adds a `notified` line (kind and connector names).
+Where the desktop has no notification service nothing is shown and only the
+journal remembers.
 
 ## Keys kept in a project vault
 
@@ -171,8 +199,9 @@ day opens a window for the password, and the harness is waiting meanwhile:
 - **Codex** waits `startup_timeout_sec` (10 seconds by default) per server:
   `startup_timeout_sec = 120` under `[mcp_servers.NAME]`.
 
-Open a session first (`vahta unlock`) so no window is needed, or use a connector,
-which never waits for a window.
+Open a session first (`vahta unlock`) so no window is needed, or use a connector:
+its window opens at once on the first launch of a harness process and the rest of
+that process's servers share it.
 
 ## Rules for package runners
 
@@ -216,7 +245,9 @@ matches the command with the runner's harmless flags in front of it:
    here, so a `node` or `bun` parent counts as Claude Code. A start from any
    other parent is refused (`NotFromHarness`), journaled as suspicious and
    counted for the injection alarm.
-3. A connectors session must be open and cover the connector.
+3. The harness process that started it must have a connectors session that
+   covers the connector; with none, a password window opens (see above) and the
+   launch waits for it.
 
 ## What this does not protect against
 

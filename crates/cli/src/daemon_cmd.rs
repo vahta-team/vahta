@@ -97,11 +97,7 @@ fn status_text(s: &StatusInfo) -> String {
         text.push_str(&alarm_text(at));
     }
     if s.connectors_session {
-        text.push_str(if s.connectors_until_reboot {
-            "\nconnectors session: open until this computer restarts (or `vahta lock`)"
-        } else {
-            "\nconnectors session: open"
-        });
+        text.push_str("\nconnectors session: open (see `vahta sessions`)");
     }
     for line in crate::connector_cmd::refusal_lines(&s.connector_refusals) {
         text.push('\n');
@@ -256,7 +252,6 @@ fn status(env: &Env, json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write)
                     "alarm_at": s.alarm_at,
                     "connector_refusals": s.connector_refusals,
                     "connectors_session": s.connectors_session,
-                    "connectors_until_reboot": s.connectors_until_reboot,
                 });
                 let _ = writeln!(
                     stdout,

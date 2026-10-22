@@ -4,7 +4,7 @@
 //! belongs to no project. The connectors vault is one per user, in Vahta's own
 //! data directory, and it is set up by the person in their own terminal. The
 //! commands are the ordinary ones with `--connector`: `init`, `add`, `list`,
-//! `check`, `bind`, `unlock`, `run` and `remove`. `--connector` never uses a
+//! `check`, `bind`, `run` and `remove`. `--connector` never uses a
 //! project's vault, and a project's commands never use this one.
 //!
 //! `list` and `check` read the vault without a password or a daemon, and show
@@ -16,14 +16,13 @@ use std::io::Write;
 use serde_json::json;
 use vahta_ipc::paths::{connectors_manifest, connectors_vault};
 use vahta_ipc::protocol::{
-    ClientReply, ClientRequest, ConnectorCmd, ConnectorRefusal, DurationSpec, RuleArgs, Tier,
+    ClientReply, ClientRequest, ConnectorCmd, ConnectorRefusal, RuleArgs, Tier,
 };
 use vahta_vault::manifest;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{Peek, Vault, VaultKind};
 
 use crate::daemon_cmd;
-use crate::session_cmds::parse_duration;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 const COMMANDS: &[&str] = &[
@@ -70,17 +69,18 @@ in a window with the vault password). `--from` does not apply.
 ";
 
 pub const UNLOCK_USAGE: &str = "\
-usage: vahta unlock --connector [--for DURATION] [--label TEXT] [--json]
+vahta unlock --connector: there is no such step any more.
 
-Open the connectors session, in your own terminal, before you start the harness:
-the password once, then `vahta run --connector` starts each server with no
-window until the session ends. The harnesses give a server about 30 seconds to
-start and show you nothing of its error output, so without a session a launch
-is refused at once (see `vahta daemon status`). The session is yours, not a
-process tree's: it covers a harness started from a launcher too.
+The connectors vault opens by itself, when a harness needs it. The first time a
+Claude Code (or Codex, or Cursor) process starts one of its MCP servers, a
+password window opens at once, naming that process and its servers. Type the
+connectors password there: the process's other servers start with no more
+questions, for as long as that process runs. A second Claude Code, or a Codex,
+asks for itself. The session ends when the process exits (or on
+`vahta lock --all`, `vahta sessions kill`, a reboot).
 
-  --for DURATION  end it after this long (for example 8h). Without it the session
-                  lasts until the computer restarts (or `vahta lock --all`).
+If the window was cancelled or the password was wrong, the server did not start:
+reconnect it in the harness (`/mcp` in Claude Code) to be asked again.
 ";
 
 pub const RUN_USAGE: &str = "\
@@ -89,7 +89,10 @@ usage: vahta run --connector --secret NAME [--as NAME=VAR] [--] COMMAND [ARGS...
 How a harness starts the MCP server of a connector. Put it in the harness's
 config in place of the server's own command (see docs/connectors.md). The
 command must be one of NAME's allow rules, and the harness must be one NAME is
-bound to. With no connectors session it is refused at once (exit 3).
+bound to. The first server a harness process starts opens a window for the connectors
+password; the rest of that process's servers share it. A cancelled window or a
+wrong password ends the launch (reconnect the server in the harness to be asked
+again).
 
   --as NAME=VAR   put the secret in the variable VAR, when the server reads its
                   key from a name other than NAME (as `vahta run --as` does)
@@ -151,6 +154,10 @@ pub fn dispatch(
         return None;
     }
     let usage = usage_of(command);
+    if command == "unlock" {
+        let _ = write!(stderr, "{UNLOCK_USAGE}");
+        return Some(EXIT_USAGE);
+    }
     let parsed = match parse(command, &args[1..]) {
         Parsed::Help => {
             let _ = stdout.write_all(usage.as_bytes());
@@ -165,7 +172,6 @@ pub fn dispatch(
     Some(match command {
         "list" => list(&parsed, env, stdout, stderr),
         "check" => check(&parsed, env, stdout, stderr),
-        "unlock" => unlock(&parsed, env, stdout, stderr),
         "run" => run(parsed, env, stdout, stderr),
         _ => {
             let json = parsed.json;
@@ -208,7 +214,6 @@ struct Args {
     rules: RuleArgs,
     clear: bool,
     tier: Option<Tier>,
-    duration: Option<DurationSpec>,
     label: Option<String>,
     named: Option<String>,
     renames: Vec<(String, String)>,
@@ -280,12 +285,7 @@ fn parse(command: &str, args: &[String]) -> Parsed {
                     "invalid --tier value: {other:?} (a connector's secret is always session)"
                 )),
             }),
-            "--for" if command == "unlock" => value("--for")
-                .and_then(|v| parse_duration(&v))
-                .map(|d| p.duration = Some(d)),
-            "--label" if matches!(command, "unlock" | "run") => {
-                value("--label").map(|v| p.label = Some(v))
-            }
+            "--label" if command == "run" => value("--label").map(|v| p.label = Some(v)),
             "--as" if command == "run" => value("--as").and_then(|v| match v.split_once('=') {
                 Some((n, var)) if !n.is_empty() && !var.is_empty() => {
                     p.renames.push((n.to_string(), var.to_string()));
@@ -357,62 +357,6 @@ fn request_of(command: &str, mut p: Args) -> Result<ConnectorCmd, String> {
                 dirs: p.rules.dirs,
                 net: p.rules.net,
             })
-        }
-    }
-}
-
-fn human_secs(secs: u64) -> String {
-    if secs >= 3600 {
-        format!("{}h{:02}m", secs / 3600, secs % 3600 / 60)
-    } else if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
-fn unlock(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
-    if !p.positional.is_empty() {
-        let _ = write!(
-            stderr,
-            "vahta unlock: error: unexpected argument\n\n{UNLOCK_USAGE}"
-        );
-        return EXIT_USAGE;
-    }
-    let request = ClientRequest::Connector {
-        cmd: ConnectorCmd::Unlock {
-            duration: p.duration.unwrap_or(DurationSpec::Default {}),
-            label: p.label.clone(),
-        },
-    };
-    let mut conn = match daemon_cmd::connect(env, "unlock", stderr) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    match conn.request(&request) {
-        Ok(ClientReply::Session(info)) => {
-            if p.json {
-                let _ = writeln!(stdout, "{}", json!({"ok": true, "session": &*info}));
-            } else {
-                let _ = writeln!(
-                    stdout,
-                    "connectors session {} open for {}; {}",
-                    info.id,
-                    info.names.join(", "),
-                    match info.remaining_secs {
-                        _ if info.until_reboot => "lasts until this computer restarts".to_string(),
-                        Some(s) => format!("lasts {}", human_secs(s)),
-                        None => "lasts until revoked".to_string(),
-                    }
-                );
-                let _ = writeln!(stdout, "Start the harness now.");
-            }
-            EXIT_CLEAN
-        }
-        Ok(other) => daemon_cmd::report("unlock", &other, p.json, stdout, stderr),
-        Err(e) => {
-            let _ = writeln!(stderr, "vahta unlock: error: {e}");
-            EXIT_DAEMON
         }
     }
 }

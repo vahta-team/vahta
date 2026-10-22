@@ -42,13 +42,22 @@ impl Shared {
     /// Journal sessions that have ended. Their keys are already overwritten.
     pub(crate) fn record_ended(&self, ended: Vec<Ended>) {
         for e in ended {
+            // A connectors session says whose it was: the harness and its pid.
+            let reason = if e.session.connector {
+                format!(
+                    "{}; connectors; {} pid {}",
+                    e.reason, e.session.anchor_exe, e.session.anchor.pid
+                )
+            } else {
+                e.reason.to_string()
+            };
             self.journal.record(
                 Entry::new("session_end")
                     .session(&e.session.id, e.session.parent.as_deref())
                     .vault(&e.session.vault_id)
                     .names(&e.session.scope)
                     .role(e.session.agent_role.as_ref().map(|r| r.name.as_str()))
-                    .result("ended", Some(e.reason))
+                    .result("ended", Some(&reason))
                     .uses(e.session.uses),
             );
         }
@@ -381,7 +390,7 @@ pub(crate) fn unlock_session(
             label: panel.agent_note.clone(),
             uses: 0,
             agent_role: role.clone(),
-            boot: None,
+            connector: false,
         };
         let info = info_of(&session, now);
         let replaced = {
@@ -499,8 +508,8 @@ pub(crate) fn lock(ctx: &Ctx<'_>, cwd: &str, all: bool, connector: bool) -> Flow
     })
 }
 
-/// `vahta lock --connector`: end the connectors session (and anything narrowed
-/// from it) and no other.
+/// `vahta lock --connector`: end the connectors sessions of every harness
+/// process (and anything narrowed from them) and no other.
 fn lock_connectors(ctx: &Ctx<'_>) -> Flow<ClientReply> {
     let ended = {
         let mut sessions = ctx
@@ -508,19 +517,16 @@ fn lock_connectors(ctx: &Ctx<'_>) -> Flow<ClientReply> {
             .sessions
             .lock()
             .map_err(|_| crate::ops::error("the session table is unusable"))?;
-        sessions.end_where(
-            |s| s.parent.is_none() && s.anchor_exe == crate::session::CONNECTORS_ANCHOR,
-            "locked",
-        )
+        sessions.end_where(|s| s.parent.is_none() && s.connector, "locked")
     };
     let n = ended.len();
     ctx.shared.record_ended(ended);
     ctx.journal(Entry::new("lock").result("ok", Some(&format!("{n} ended (connectors)"))));
     Ok(ClientReply::Done {
-        message: if n == 0 {
-            "no connectors session to end".to_string()
-        } else {
-            "ended the connectors session".to_string()
+        message: match n {
+            0 => "no connectors session to end".to_string(),
+            1 => "ended the connectors session".to_string(),
+            n => format!("ended {n} connectors sessions"),
         },
     })
 }

@@ -128,6 +128,12 @@ impl Paths {
         self.runtime.join("daemon.lock")
     }
 
+    /// How many times in a row the hook has started a daemon that did not come
+    /// up (`vahta-hook`'s autostart; cleared at reboot with the runtime dir).
+    pub fn hook_starts_file(&self) -> PathBuf {
+        self.runtime.join("hook-starts")
+    }
+
     /// Held by the hook watchdog (`vahta _guard`) for as long as it runs.
     pub fn guard_lock_file(&self) -> PathBuf {
         self.runtime.join("guard.lock")

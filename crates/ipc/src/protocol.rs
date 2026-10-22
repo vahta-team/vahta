@@ -836,13 +836,9 @@ pub enum ConnectorCmd {
         dirs: Vec<String>,
         net: Option<String>,
     },
-    /// Open the connectors session: the password once, then
-    /// `vahta run --connector` needs no window until it ends.
-    Unlock {
-        duration: DurationSpec,
-        label: Option<String>,
-    },
-    /// Run the server of one connector. The reply is `RunStarted`, then the
+    /// Run the server of one connector. The harness process that started the
+    /// client has a connectors session or gets a password window now. The
+    /// reply is `RunStarted`, then the
     /// connection carries [`RunInput`] and [`RunOutput`] as for `Run`.
     Run {
         /// Where the client is; checked against the kernel.
@@ -1136,9 +1132,6 @@ pub struct SessionInfo {
     /// The agent role the session is limited to, if any.
     #[serde(default)]
     pub agent_role: Option<String>,
-    /// The connectors session that lasts until the machine reboots.
-    #[serde(default)]
-    pub until_reboot: bool,
 }
 
 /// Why a request was refused outright, before any window.
@@ -1377,9 +1370,6 @@ pub struct StatusInfo {
     /// A connectors session is open.
     #[serde(default)]
     pub connectors_session: bool,
-    /// That session lasts until the machine reboots.
-    #[serde(default)]
-    pub connectors_until_reboot: bool,
 }
 
 // --- Surface messages --------------------------------------------------------------------

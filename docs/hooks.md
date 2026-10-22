@@ -37,9 +37,26 @@ argument; the message also says how it was written, `raw`, `base64`, `hex`...) a
 a prompt held because of one. A value only the detector recognised has a kind
 (`OpenAI-style key`), not a name, and the old advice to use `vahta run`.
 
-The hook never starts the daemon and waits at most 0.3 seconds for it. If the
-daemon is not there, or does not answer, the detector's cuts stand: the hook
-never lets through more than it did before there was a daemon.
+The hook waits at most 0.3 seconds for the daemon. If none is running it starts
+one in the background and waits at most 1.2 seconds for it, so the first call of
+the day is usually served by it; if it is not up in time, that call is judged by
+the hook alone (the stricter no-daemon mode) and the next call looks again. The
+rules of the start:
+
+- only when nothing answers on the socket: a daemon that answers is never
+  joined by a second one (the daemon's own lock refuses one anyway);
+- only the `vahta` binary in the same directory as `vahta-hook`, found from the
+  hook's own path. Never a lookup through `PATH` or the working directory, so an
+  agent cannot plant its own `vahta`. With none there, the hook does not start
+  anything;
+- after 3 failed starts in a row it stops trying, until it sees a daemon answer
+  or the machine restarts. The count is the file `hook-starts` in the runtime
+  directory, written by rename; a file that cannot be read or is not a number
+  means "do not start";
+- the daemon records `daemon_start` with "started by hook" in the journal.
+
+If the daemon is not there, or does not answer, the detector's cuts stand: the
+hook never lets through more than it did before there was a daemon.
 
 ## When the agent needs what was cut
 
@@ -285,7 +302,7 @@ is every one of these:
 - the rules do not allow it, the secret is each-use or has no rules, the vault
   is not found or not verified, the program is not on `PATH`;
 - no daemon running, a daemon of another version, or no answer in 0.3 seconds
-  (the same wait as every other hook question). The hook never starts a daemon.
+  (the same wait as every other hook question). The hook starts one only as described above, and this call is not held for it.
 
 The hook never denies from this path: the normal `vahta run` refuses with its
 own message (exit 3) and the fix. Refusals made before this (the person-only

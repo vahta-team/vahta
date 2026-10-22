@@ -42,6 +42,7 @@ mod devices_cmd;
 mod guard_cmd;
 mod hooks_cmd;
 mod http_cmd;
+mod journal_cmd;
 mod members_cmd;
 mod output_cmd;
 mod remote_cmd;
@@ -122,6 +123,7 @@ commands:
   unlock  open a session: one password, then `vahta run` needs no window
   lock    end this project's sessions, or --all, or --connector (no password)
   sessions  list sessions, or `kill ID` one (no password)
+  journal  what Vahta did lately, in plain words (no password; for you, not an agent)
   config  `config unlock`: which unlock method is tried first (no password)
   devices  list, pair, extend, revoke or declare lost the phones that open the vault
   recover  forgot the password: use the recovery key and choose a new one
@@ -145,7 +147,7 @@ commands:
 
 Run `vahta <command> --help` for the options.
 
-init, add, list, check, bind, unlock, run and remove also take --connector: they
+init, add, list, check, bind, run and remove also take --connector: they
 then work on the connectors vault (the keys of the MCP servers your coding agents
 start) instead of the project's. See docs/connectors.md.
 ";
@@ -463,6 +465,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("recover") => devices_cmd::run_recover(&args[1..], env, stdout, stderr),
         Some("lock") => session_cmds::run_lock(&args[1..], env, stdout, stderr),
         Some("sessions") => session_cmds::run_sessions(&args[1..], env, stdout, stderr),
+        Some("journal") => journal_cmd::run(&args[1..], env, stdout, stderr),
         Some("id") => members_cmd::run_id(&args[1..], env, stdout, stderr),
         Some("members") => members_cmd::run_members(&args[1..], env, stdout, stderr),
         Some("grant") => members_cmd::run_grant(true, &args[1..], env, stdout, stderr),

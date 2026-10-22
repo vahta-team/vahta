@@ -88,6 +88,8 @@ pub(crate) struct Prepared {
     pub relay_private: Vec<(String, u16)>,
     /// The vault the run belongs to, for the relay's journal lines.
     pub vault_id: [u8; 16],
+    /// The run is the server of a connector (`--connector`).
+    pub connector: bool,
 }
 
 fn to_os(bytes: &[u8]) -> OsString {
@@ -447,10 +449,14 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
     let names: Vec<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
 
     // A connector's server is started by its harness, and by the connectors
-    // session alone: no ancestor, no window.
-    let found = if ctx.connector {
-        crate::connector_ops::check_harness(ctx, &peek, &names)?;
-        crate::connector_ops::session_of(ctx, &peek)?
+    // session of that harness process alone, which a password window opens.
+    let harness = if ctx.connector {
+        crate::connector_ops::check_harness(ctx, &peek, &names)?
+    } else {
+        None
+    };
+    let mut found = if ctx.connector {
+        crate::connector_ops::session_of(ctx, &peek, harness.as_ref())?
     } else {
         find_session(ctx, &peek, target.used_from.as_deref())?
     };
@@ -550,7 +556,10 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
                 .as_deref()
                 .and_then(|p| p.file_name())
                 .map_or_else(|| argv[0].clone(), |f| f.to_string_lossy().into_owned());
-            crate::report::rule_refusal(ctx, &refused, Some(&shown), false);
+            let raised = crate::report::rule_refusal(ctx, &refused, Some(&shown), false);
+            if ctx.connector {
+                crate::connector_ops::notify_refused(ctx, &peek, &refused, &argv, raised);
+            }
             return Err(not_allowed(
                 ctx,
                 &peek,
@@ -616,7 +625,15 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         )));
     };
     if ctx.connector {
-        crate::connector_ops::require_session(ctx, &peek, &names, &found)?;
+        found = crate::connector_ops::ensure_session(
+            ctx,
+            &project,
+            &vault_path,
+            &peek,
+            &names,
+            harness.as_ref(),
+            found,
+        )?;
     }
 
     let shown: Vec<String> = pairs
@@ -746,6 +763,7 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
             Vec::new()
         },
         vault_id: peek.vault_id,
+        connector: ctx.connector,
     })
 }
 
@@ -1454,7 +1472,7 @@ pub(crate) fn delegate(
         label: label.as_deref().and_then(sanitize_label),
         uses: 0,
         agent_role: eff_role.clone(),
-        boot: None,
+        connector: false,
     };
     let info = info_of(&session, now);
     sessions.add(session);

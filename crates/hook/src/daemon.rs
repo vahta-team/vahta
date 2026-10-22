@@ -1,7 +1,8 @@
 //! Asking a running daemon about a tool's output.
 //!
-//! The hook never starts a daemon and never waits long for one: it runs on
-//! every tool call. If one is running, of this version, and answers within
+//! The hook starts a daemon only when none answers, within the limits of
+//! `autostart.rs`, and never waits long for one: it runs on every tool call.
+//! If one is running, of this version, and answers within
 //! [`WAIT`], its answer is the cut list: the detector's finds plus the values
 //! it holds for this agent, minus what the person has let through, and a
 //! reference to the original it kept. Anything else (no daemon, another
@@ -82,8 +83,31 @@ fn deliver(paths: Paths, request: ClientRequest) -> Delivery {
     deliver_within(paths, request, WAIT)
 }
 
-/// [`deliver`] with another limit.
+/// [`deliver`] with another limit. With no daemon answering, one is started
+/// (`autostart.rs`) and the request tried once more; if it is not up in time
+/// the answer is `NoDaemon` and the hook goes on strict.
 fn deliver_within(paths: Paths, request: ClientRequest, wait: Duration) -> Delivery {
+    let first = attempt(paths.clone(), request.clone(), wait);
+    match first {
+        Delivery::NoDaemon => {
+            let started = std::env::current_exe()
+                .ok()
+                .is_some_and(|hook| crate::autostart::ensure(&paths, &hook));
+            if started {
+                attempt(paths, request, wait)
+            } else {
+                Delivery::NoDaemon
+            }
+        }
+        Delivery::Answered(_) => {
+            crate::autostart::seen_answering(&paths);
+            first
+        }
+        Delivery::Lost => first,
+    }
+}
+
+fn attempt(paths: Paths, request: ClientRequest, wait: Duration) -> Delivery {
     let connector = Connector {
         paths,
         version: vahta_ipc::VERSION.to_string(),

@@ -1,8 +1,10 @@
 //! The client side: find the daemon, starting it if the caller allows, say
 //! hello, and ask.
 //!
-//! Only the `vahta` command starts a daemon. The hook never does: a hook runs
-//! on every tool call and must stay cheap and quiet.
+//! The `vahta` command starts a daemon when there is none. The hook may too,
+//! but only through [`Connector::start_by`] and `vahta-hook`'s own rules (the
+//! `vahta` next to the hook, a few tries, a short wait): a hook runs on every
+//! tool call and must stay cheap and quiet.
 //!
 //! The handshake compares versions. A daemon of another version with no live
 //! sessions is told to stop and a new one is started; with live sessions it is
@@ -191,7 +193,35 @@ impl Connector {
         }
     }
 
+    /// Start a daemon now, without waiting for it, and tell it who started it
+    /// (`hook`, for its journal). Does not look whether one is running: the
+    /// caller has, and the daemon's own lock keeps a second from living.
+    pub fn start_by(&self, who: &str) -> Result<(), ClientError> {
+        let Some(start) = &self.start else {
+            return Err(ClientError::Unavailable("not allowed to start it".into()));
+        };
+        self.spawn_daemon(start, Some(who))
+    }
+
+    /// Whether a daemon of this version answers within `wait`, polled.
+    pub fn wait_running(&self, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Ok(Some(conn)) = self.connect_running() {
+                return conn.daemon.ok && conn.daemon.version == self.version;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
     fn start_daemon(&self, command: &[OsString]) -> Result<(), ClientError> {
+        self.spawn_daemon(command, None)
+    }
+
+    fn spawn_daemon(&self, command: &[OsString], by: Option<&str>) -> Result<(), ClientError> {
         let Some((program, args)) = command.split_first() else {
             return Err(ClientError::Unavailable(
                 "no command to start it".to_string(),
@@ -200,14 +230,17 @@ impl Connector {
         // The daemon is told exactly the directories this client resolved, so
         // the two cannot disagree about where the socket is, whatever the
         // environment this process happens to carry.
-        vahta_os::spawn_detached(
-            Command::new(program)
-                .args(args)
-                .env("VAHTA_RUNTIME_DIR", &self.paths.runtime)
-                .env("VAHTA_DATA_DIR", &self.paths.data)
-                .env("VAHTA_CONFIG_DIR", &self.paths.config),
-        )
-        .map_err(|e| ClientError::Unavailable(format!("cannot start it: {e}")))
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .env("VAHTA_RUNTIME_DIR", &self.paths.runtime)
+            .env("VAHTA_DATA_DIR", &self.paths.data)
+            .env("VAHTA_CONFIG_DIR", &self.paths.config);
+        match by {
+            Some(who) => cmd.env("VAHTA_STARTED_BY", who),
+            None => cmd.env_remove("VAHTA_STARTED_BY"),
+        };
+        vahta_os::spawn_detached(&mut cmd)
+            .map_err(|e| ClientError::Unavailable(format!("cannot start it: {e}")))
     }
 
     /// Wait for a daemon that has been told to stop to leave the socket.

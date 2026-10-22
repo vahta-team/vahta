@@ -50,6 +50,8 @@ pub struct Scrubber {
     /// [`Scrubber::flush_held`]. They stay as context, so that the rest of a
     /// value whose start was let go is still taken out.
     released: usize,
+    /// How many values were taken out so far.
+    redactions: u64,
 }
 
 /// A match: where it is and which target.
@@ -79,6 +81,7 @@ impl Scrubber {
             max_len,
             pending: Zeroizing::new(Vec::new()),
             released: 0,
+            redactions: 0,
         }
     }
 
@@ -181,7 +184,13 @@ impl Scrubber {
             .unwrap_or(0)
     }
 
-    fn marker(&self, target: usize, out: &mut Vec<u8>) {
+    /// Whether a value has been taken out of the output so far.
+    pub fn redacted(&self) -> bool {
+        self.redactions > 0
+    }
+
+    fn marker(&mut self, target: usize, out: &mut Vec<u8>) {
+        self.redactions += 1;
         out.extend_from_slice(b"***REDACTED(");
         out.extend_from_slice(self.targets[target].name.as_bytes());
         out.extend_from_slice(b")***");

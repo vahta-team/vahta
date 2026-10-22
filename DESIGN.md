@@ -157,7 +157,12 @@ share it.
 The hook reads a harness event on stdin and answers allow or deny, and must never
 brick the agent: a failure means allow. It checks tool input (detector, held values
 through the daemon, Vahta's own files, hook settings, commands for the person) and
-rewrites tool output. It never starts the daemon and waits at most 0.3 s for it.
+rewrites tool output. It waits at most 0.3 s for the daemon. When none answers it starts one in the
+background (only the `vahta` next to the hook binary, never one found through `PATH`
+or the working directory), waits at most 1.2 s for it, and gives up for good after
+three failed starts in a row (a count in the runtime directory, cleared when a
+daemon is seen answering); late or never, that call is strict and the next one looks
+at the socket again.
 Each refusal is reported to the daemon, or spooled to disk when none is running.
 
 ## Watchdog and alarm

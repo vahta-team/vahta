@@ -98,9 +98,6 @@ fn human_secs(secs: u64) -> String {
 }
 
 fn left_text(info: &SessionInfo) -> String {
-    if info.until_reboot {
-        return "until reboot".to_string();
-    }
     info.remaining_secs
         .map_or("until revoked".to_string(), human_secs)
 }
