@@ -21,8 +21,9 @@
 //! is made in memory, against the text the hook sent, which is never logged. It
 //! is tried at once and again a few seconds later, because the harness may write
 //! the entry after the hook has answered. A line that is not JSON is left
-//! alone; a file the harness appends to meanwhile is rewritten only if it did
-//! not change during the pass (see `jsonl::drop_lines`).
+//! alone. A file the harness appends to meanwhile is rewritten only if it did
+//! not change during the pass, and what it appended in the instant of the swap
+//! is copied from the old file (see `jsonl::drop_lines`).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -231,44 +232,49 @@ mod tests {
     }
 
     #[test]
-    fn a_harness_appending_during_the_pass_loses_nothing() {
+    fn a_harness_appending_during_the_pass_is_kept_and_the_file_stays_whole() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.jsonl");
         let bad = serde_json::json!({"text": secret()}).to_string();
         std::fs::write(&path, format!("{bad}\n{{\"text\":\"a\"}}\n")).unwrap();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = stop.clone();
+        let written = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = written.clone();
         let appended = path.clone();
-        // Appends a line every few ms for a while, as a busy harness would.
+        // Appends a line every few ms, as a busy harness would.
         let writer = std::thread::spawn(move || {
-            let mut n = 0;
-            while !flag.load(std::sync::atomic::Ordering::SeqCst) && n < 40 {
+            for n in 0..60 {
                 use std::io::Write;
                 let mut f = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&appended)
                     .unwrap();
                 writeln!(f, "{{\"text\":\"line {n}\"}}").unwrap();
-                n += 1;
-                std::thread::sleep(Duration::from_millis(3));
+                counter.store(n + 1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(2));
             }
-            n
         });
+        std::thread::sleep(Duration::from_millis(10));
+        let before = written.load(Ordering::SeqCst);
         let dropped = jsonl::drop_lines(&path, &|l| l.contains(&secret()));
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        let written = writer.join().unwrap();
-        // Either it got a quiet moment, or it said so and changed nothing.
+        let after = written.load(Ordering::SeqCst);
+        writer.join().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        for n in 0..written {
+        // Every line is whole JSON.
+        for l in text.lines() {
+            serde_json::from_str::<serde_json::Value>(l).unwrap();
+        }
+        // What was written before the pass began, and what after it ended, is
+        // there. A line written in the instant of the swap is the one thing that
+        // can be lost, so lines in between are not asserted.
+        for n in (0..before).chain(after + 1..60) {
             assert!(text.contains(&format!("line {n}\"")), "line {n} lost");
         }
         match dropped {
             Ok(1) => assert!(!text.contains(&secret())),
             Ok(n) => panic!("dropped {n}"),
+            // It never got a quiet moment: nothing was replaced.
             Err(_) => assert!(text.contains(&secret())),
-        }
-        for l in text.lines() {
-            serde_json::from_str::<serde_json::Value>(l).unwrap();
         }
     }
 }

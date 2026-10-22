@@ -41,7 +41,7 @@ arrow-up recall. They belong to the whole account, not a project, so they are
 cleaned whatever the scope, with the same values and the same rewrite as a
 transcript. They are not held back for a session's end: a harness appends to
 them whenever a prompt is sent, so if one grew while being cleaned the pass is
-made again (a few times) and the file is only ever replaced whole.
+made again (a few times), and the file is only ever replaced whole.
 
 Not covered: Cursor's chats; the large tool results and the pasted-text files
 Claude may keep as separate files next to a session or its history.
@@ -57,8 +57,9 @@ again a few times over the next ten seconds, since the harness may write the
 entry after the hook has answered. The match is made in memory against the text
 the hook sent; the text is not logged, only a count (`history_forget`). A
 line that is not JSON is left alone, the rewrite goes through a temp file
-and a rename, and if the harness appended meanwhile the pass starts again, so
-the file is never cut short. "False alarm" (the person sent the message) leaves
+and a rename, and if the harness appended meanwhile the pass starts again.
+What it appends in the instant of the swap is copied over from the old file;
+only a line it is in the middle of writing at that very moment can be lost. "False alarm" (the person sent the message) leaves
 the history as it is.
 
 ### How a file is rewritten
