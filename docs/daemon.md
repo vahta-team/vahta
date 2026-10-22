@@ -225,6 +225,12 @@ in Vahta that opens a network connection.
   network use, which is what a command-only binding approves) are refused with
   `vahta bind NAME --net hosts:HOST` as the proposal. All secrets of a request
   must pass. The person's approval is the check; the agent can only propose.
+  A name that resolves to a loopback, private, shared (100.64/10), link-local or
+  unspecified address is not connected to (the address checked is the one used), and
+  the error says which address and how to allow it: the host written `private:HOST`
+  (`--net hosts:private:db.internal.example:5432`). The relay under `vahta run`
+  applies the same rule. A role cannot be given `private:` for a host its secret's
+  rule lists without it.
 - **Values.** The same as `vahta run`: a session that covers the names, else a
   window asks for the password for this one request (it shows the secrets and
   `METHOD host`); each-use secrets always ask; a delegated session cannot ask for

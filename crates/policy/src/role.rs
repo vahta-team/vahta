@@ -53,6 +53,10 @@ fn is_ip(host: &str) -> bool {
 
 /// Whether every destination host rule `r` allows is also allowed by `s`.
 fn host_covered(s: &HostRule, r: &HostRule) -> bool {
+    // A role that may reach private addresses needs a secret rule that may.
+    if r.allows_private() && !s.allows_private() {
+        return false;
+    }
     if s.port.is_some() && s.port != r.port {
         return false;
     }
@@ -297,6 +301,27 @@ mod tests {
                 !too_wide(&r, "K", &s).is_empty(),
                 wide,
                 "{role_net:?} under {secret_net:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_role_cannot_allow_private_resolution_the_secret_does_not() {
+        let mut r = role();
+        let mut s = secret();
+        for (role_host, secret_host, wide) in [
+            ("private:db.corp", "db.corp", true),
+            ("private:db.corp", "private:db.corp", false),
+            ("db.corp", "private:db.corp", false),
+            ("db.corp", "db.corp", false),
+            ("private:db.corp", "private:*.corp", false),
+        ] {
+            r.network = Some(Network::Hosts(vec![host(role_host)]));
+            s.network = Network::Hosts(vec![host(secret_host)]);
+            assert_eq!(
+                !too_wide(&r, "K", &s).is_empty(),
+                wide,
+                "{role_host} under {secret_host}"
             );
         }
     }

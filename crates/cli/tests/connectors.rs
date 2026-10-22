@@ -592,7 +592,7 @@ fn a_connector_with_hosts_reaches_only_its_host() {
         eprintln!("skipped: no python");
         return;
     };
-    let net = format!("hosts:other.localhost:{}", server.port);
+    let net = format!("hosts:private:other.localhost:{}", server.port);
     s.script(&[PW_ANSWER, &typed(&value_of("a")), r#"{"choose":0}"#]);
     let out = s.vahta(
         &s.root,

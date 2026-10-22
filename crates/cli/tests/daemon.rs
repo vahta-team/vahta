@@ -6589,8 +6589,9 @@ mod http {
     }
 
     fn host(h: &str, subdomains: bool, port: Option<u16>) -> HostRule {
+        // The test servers are on loopback, which a rule must allow explicitly.
         HostRule {
-            text: h.to_string(),
+            text: format!("private:{h}"),
             host: h.to_string(),
             subdomains,
             port,
@@ -6672,6 +6673,31 @@ mod http {
         assert!(journal.contains("\"status\":200") && journal.contains("\"bytes\":2"));
         assert!(journal.contains(&format!("\"host\":\"localhost:{}\"", server.port)));
         assert!(!journal.contains("fake-") && !journal.contains("/v1") && !journal.contains("x=1"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_local_address_is_refused_without_the_marker() {
+        let s = sandbox();
+        let server = TestServer::start(|_| Reply::ok(b"reached"));
+        // The same rule as the other tests, but without `private:`.
+        let plain = HostRule {
+            text: "localhost".into(),
+            ..host("localhost", false, Some(server.port))
+        };
+        approve(&s, "ZETA", Network::Hosts(vec![plain]));
+        pw(&s);
+        let url = format!("https://localhost:{}/", server.port);
+        let out = s.vahta(&["http", "--secret", "ZETA", "-H", "K: {ZETA}", &url]);
+        assert_ne!(out.status.code(), Some(0));
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("loopback") && err.contains("private:localhost"),
+            "{err}"
+        );
+        assert!(server.seen().is_empty(), "nothing reached the server");
+        let journal = s.journal();
+        assert!(journal.contains("\"event\":\"http_request\""), "{journal}");
+        assert!(journal.contains("loopback"), "{journal}");
     }
 
     #[test]
@@ -7820,6 +7846,12 @@ mod host_relay {
     }
 
     fn setup_named(name: &str, port: u16) -> Option<Sandbox> {
+        setup_rule(name, port, true)
+    }
+
+    /// `private`: the rule carries the marker that allows a loopback answer
+    /// (the test servers are on loopback).
+    fn setup_rule(name: &str, port: u16, private: bool) -> Option<Sandbox> {
         if !vahta_os::network_isolation_available() {
             eprintln!("skipped: no unprivileged network namespaces here");
             return None;
@@ -7833,7 +7865,7 @@ mod host_relay {
                 Some(RuleSet {
                     name: "ZETA".into(),
                     network: Network::Hosts(vec![HostRule {
-                        text: format!("{name}:{port}"),
+                        text: format!("{}{name}:{port}", if private { "private:" } else { "" }),
                         host: name.into(),
                         subdomains: false,
                         port: Some(port),
@@ -7923,6 +7955,34 @@ except (ssl.SSLError, OSError) as e:
         // Only the host name, never what travelled.
         assert!(!journal.contains("relay-works"));
         assert!(!journal.contains("fake-relay-1"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_local_address_is_refused_without_the_marker() {
+        let server = TestServer::start(|_| Reply::ok(b"relay-works"));
+        // The relay's stand-in for DNS answers 127.0.0.1, as a rebound name would.
+        let Some(s) = setup_rule(NAME, server.port, false) else {
+            return;
+        };
+        let code = format!(
+            r#"{}
+try:
+    print("GOT", b"relay-works" in get())
+except (ssl.SSLError, OSError) as e:
+    print("CLOSED", type(e).__name__)
+"#,
+            prelude(&s, server.port)
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("CLOSED"), "{out}");
+        assert!(server.seen().is_empty(), "nothing reached the server");
+        let journal = s.journal();
+        assert!(journal.contains("net_relay_refused"), "{journal}");
+        assert!(
+            journal.contains("resolved to 127.0.0.1") && journal.contains("loopback"),
+            "{journal}"
+        );
+        assert!(journal.contains(&format!("private:{NAME}")), "{journal}");
     }
 
     #[test]

@@ -128,7 +128,12 @@ accepted by `run`, `http`, `unlock`, `delegate`, `list` and `check`.
   and journaled as suspicious, and the journal counts connections and bytes per
   host. Port 443 is the default; `host:PORT` lists another (a TLS hello there is
   checked the same way). `*.` wildcards and IP-address entries are not relayed
-  (reach those with `vahta http`). With several secrets, only hosts every one of
+  (reach those with `vahta http`). A name that resolves, outside the sandbox, to a
+  loopback, private (10/8, 172.16/12, 192.168/16, fc00::/7), shared
+  (100.64/10), link-local or unspecified address is refused and journaled (DNS
+  rebinding: a public name must not lead into the machine or the local network);
+  the person writes `private:db.internal.example:5432` in the host list to allow
+  that for one host. The same holds for `vahta http`. With several secrets, only hosts every one of
   them lists are reachable. Programs that do their own DNS or ignore
   `/etc/hosts` (a static binary with a built-in resolver that skips it, DNS over
   HTTPS to an IP) simply fail. On macOS and Windows nothing filters the network:

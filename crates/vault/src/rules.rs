@@ -379,7 +379,9 @@ impl ParsedRule {
 /// One network destination as written: `host`, `*.host` (every name beneath
 /// it, not the host itself), either with an optional `:port`. The host is a DNS
 /// name or an IPv4 literal, case-insensitive; no scheme, no path, no wildcard
-/// anywhere but a leading `*.`. The error is a short sentence for the person.
+/// anywhere but a leading `*.`. A leading `private:` marks a rule that lets the
+/// name resolve to a loopback, private or link-local address (refused
+/// otherwise); it stays in `text`. The error is a short sentence for the person.
 pub fn parse_host(text: &str) -> Result<HostRule, String> {
     let shown = text.trim();
     let bad = |why: &str| Err(format!("host `{shown}`: {why}"));
@@ -389,12 +391,13 @@ pub fn parse_host(text: &str) -> Result<HostRule, String> {
     if shown.contains("://") || shown.contains('/') {
         return bad("write only the host name, with no scheme or path");
     }
-    let (name, port) = match shown.rsplit_once(':') {
+    let unmarked = shown.strip_prefix(crate::PRIVATE_MARK).unwrap_or(shown);
+    let (name, port) = match unmarked.rsplit_once(':') {
         Some((name, port)) => match port.parse::<u16>() {
             Ok(p) if p != 0 => (name, Some(p)),
             _ => return bad("the port is a number from 1 to 65535"),
         },
-        None => (shown, None),
+        None => (unmarked, None),
     };
     let (name, subdomains) = match name.strip_prefix("*.") {
         Some(rest) => (rest, true),
@@ -509,6 +512,21 @@ mod tests {
             ("example.org", true, Some(8443))
         );
         assert!(parse_host("10.0.0.5:80").is_ok());
+        assert!(!h.allows_private());
+        // The private marker stays in the text and does not change the host.
+        let p = parse_host("private:DB.Internal.example:5432").unwrap();
+        assert_eq!(
+            (p.host.as_str(), p.subdomains, p.port, p.allows_private()),
+            ("db.internal.example", false, Some(5432), true)
+        );
+        assert_eq!(p.text, "private:DB.Internal.example:5432");
+        let p = parse_host("private:*.corp.example").unwrap();
+        assert_eq!(
+            (p.host.as_str(), p.subdomains, p.port),
+            ("corp.example", true, None)
+        );
+        assert!(parse_host("private:").is_err());
+        assert!(parse_host("private:private:a.com").is_err());
         for bad in [
             "",
             "https://a.com",

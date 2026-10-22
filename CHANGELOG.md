@@ -135,6 +135,12 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **DNS rebinding in the host filter.** A name allowed by `network = hosts` that
+  resolves to a loopback, private, shared (100.64/10), link-local or unspecified
+  address is refused by the relay under `vahta run` and by `vahta http`, with the
+  address and the reason in the error and the journal. A host rule written
+  `private:HOST[:PORT]` allows it for that host; a role cannot widen a secret's rule
+  that way.
 - **A window no longer outlives a client that gave up.** When the harness killed
   `vahta run` (or `unlock`, `http`, `bind`, ...) while a password or approval window
   was open, the window stayed up to five minutes and the journal said the command

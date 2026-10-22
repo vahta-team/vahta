@@ -202,6 +202,7 @@ pub(crate) fn execute(
         program,
         isolate_network,
         relay_hosts,
+        relay_private,
         vault_id,
     } = prepared;
 
@@ -271,6 +272,7 @@ pub(crate) fn execute(
                 .map(|(host, port)| crate::host_relay::Target {
                     host: host.clone(),
                     port: *port,
+                    allow_private: relay_private.contains(&(host.clone(), *port)),
                 })
                 .collect(),
             shared.journal.clone(),

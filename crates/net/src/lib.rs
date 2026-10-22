@@ -21,7 +21,9 @@
 //!
 //! Nothing here knows about secrets: a caller hands it a finished request.
 
+mod private;
 mod url;
+pub use private::{private_kind, refusal_text};
 pub use url::{DEFAULT_PORT, Url, UrlError, encode_component};
 
 #[cfg(feature = "client")]
