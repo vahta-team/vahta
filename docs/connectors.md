@@ -129,12 +129,13 @@ and so does `vahta daemon status`. It ends when:
 
 - the machine restarts (Vahta compares the boot id: `/proc/sys/kernel/random/boot_id`
   on Linux, the boot time on macOS and Windows), or the daemon is stopped;
-- you run `vahta lock --all` (or `vahta sessions kill ID`);
+- you run `vahta lock --connector` (only this session), `vahta lock --all` or
+  `vahta sessions kill ID`;
 - the machine goes to sleep, or the injection alarm goes off;
 - the `--for` time runs out.
 
 `vahta lock` without `--all` ends the sessions of the current project only, not
-this one.
+this one; `vahta lock --connector` ends this one only, not the project's.
 
 **What you see when you forgot.** No window opens: the harness would give up on
 the server in about 30 seconds and show you nothing. The launch is refused at

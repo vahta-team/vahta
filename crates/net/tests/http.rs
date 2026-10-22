@@ -7,8 +7,34 @@ use vahta_net::{Error, Method, Options, Request, fetch};
 fn options() -> Options {
     Options {
         extra_root_pem: Some(vahta_net::test_server::CA_PEM.to_vec()),
+        // The test server is on loopback.
+        allow_private: true,
         ..Options::default()
     }
+}
+
+#[test]
+fn a_name_that_resolves_to_a_local_address_is_refused_unless_allowed() {
+    let server = TestServer::start(|_| Reply::ok(b"reached"));
+    let strict = Options {
+        allow_private: false,
+        ..options()
+    };
+    for host in ["localhost", "127.0.0.1"] {
+        let err = fetch(&get(format!("https://{host}:{}/", server.port)), &strict).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            matches!(err, Error::Connect(_)) && text.contains("loopback") && text.contains(host),
+            "{text}"
+        );
+    }
+    assert!(server.seen().is_empty(), "nothing reached the server");
+    let ok = fetch(
+        &get(format!("https://localhost:{}/", server.port)),
+        &options(),
+    )
+    .unwrap();
+    assert_eq!(ok.body, b"reached");
 }
 
 fn get(url: String) -> Request {
@@ -87,7 +113,10 @@ fn the_certificate_is_checked() {
     // Without the extra root the public roots do not know this server.
     let err = fetch(
         &get(format!("https://localhost:{}/", server.port)),
-        &Options::default(),
+        &Options {
+            allow_private: true,
+            ..Options::default()
+        },
     )
     .unwrap_err();
     assert!(matches!(err, Error::Tls(_)), "{err}");

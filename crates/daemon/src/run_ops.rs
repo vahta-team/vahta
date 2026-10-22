@@ -83,6 +83,9 @@ pub(crate) struct Prepared {
     /// With `isolate_network`: the hosts and ports the command may still
     /// reach, through the daemon's relay (Linux). Empty: none.
     pub relay_hosts: Vec<(String, u16)>,
+    /// The part of `relay_hosts` whose rules let the name resolve to a private
+    /// address (`private:HOST`).
+    pub relay_private: Vec<(String, u16)>,
     /// The vault the run belongs to, for the relay's journal lines.
     pub vault_id: [u8; 16],
 }
@@ -737,6 +740,11 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
         } else {
             Vec::new()
         },
+        relay_private: if isolate_network {
+            reachable.private()
+        } else {
+            Vec::new()
+        },
         vault_id: peek.vault_id,
     })
 }
@@ -748,34 +756,60 @@ pub(crate) fn prepare(ctx: &Ctx<'_>, args: RunArgs) -> Flow<Prepared> {
 #[derive(Default)]
 struct Reachable {
     /// `None`: no restricting rule seen yet.
-    allowed: Option<Vec<(String, u16)>>,
+    allowed: Option<Vec<(String, u16, bool)>>,
 }
 
 impl Reachable {
     fn restrict(&mut self, network: &vahta_vault::Network) {
         // A name the relay can serve: not a wildcard and not an address.
-        let listed: Vec<(String, u16)> = match network {
+        let listed: Vec<(String, u16, bool)> = match network {
             vahta_vault::Network::Hosts(rules) => rules
                 .iter()
                 .filter(|r| !r.subdomains && r.host.parse::<std::net::Ipv4Addr>().is_err())
-                .map(|r| (r.host.clone(), r.port.unwrap_or(443)))
+                .map(|r| (r.host.clone(), r.port.unwrap_or(443), r.allows_private()))
                 .collect(),
             _ => Vec::new(),
         };
         self.allowed = Some(match self.allowed.take() {
             None => listed,
-            Some(prev) => prev.into_iter().filter(|h| listed.contains(h)).collect(),
+            // Private resolution stays allowed only if every rule allows it.
+            Some(prev) => prev
+                .into_iter()
+                .filter_map(|(host, port, private)| {
+                    let same = |l: &&(String, u16, bool)| l.0 == host && l.1 == port;
+                    let allowed_here = listed.iter().filter(same).collect::<Vec<_>>();
+                    (!allowed_here.is_empty()).then(|| {
+                        let all = private && allowed_here.iter().any(|l| l.2);
+                        (host, port, all)
+                    })
+                })
+                .collect(),
         });
     }
 
-    fn hosts(self) -> Vec<(String, u16)> {
+    fn hosts(&self) -> Vec<(String, u16)> {
         let mut hosts: Vec<(String, u16)> = Vec::new();
-        for h in self.allowed.unwrap_or_default() {
+        for (host, port, _) in self.allowed.iter().flatten() {
+            let h = (host.clone(), *port);
             if !hosts.contains(&h) {
                 hosts.push(h);
             }
         }
         hosts
+    }
+
+    /// The listed hosts that may resolve to a private address. A host listed
+    /// twice is private only if every listing says so.
+    fn private(&self) -> Vec<(String, u16)> {
+        let all = self.allowed.iter().flatten();
+        self.hosts()
+            .into_iter()
+            .filter(|(h, p)| {
+                all.clone()
+                    .filter(|(lh, lp, _)| lh == h && lp == p)
+                    .all(|(_, _, private)| *private)
+            })
+            .collect()
     }
 }
 
@@ -1445,6 +1479,32 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn private_resolution_survives_only_where_every_rule_allows_it() {
+        let hosts = |texts: &[&str]| {
+            vahta_vault::Network::Hosts(
+                texts
+                    .iter()
+                    .map(|t| vahta_vault::rules::parse_host(t).unwrap())
+                    .collect(),
+            )
+        };
+        let mut r = Reachable::default();
+        r.restrict(&hosts(&["private:a.corp", "b.corp", "c.corp"]));
+        assert_eq!(r.private(), [("a.corp".to_string(), 443)]);
+        // A second rule that lists a.corp without the marker takes it away.
+        r.restrict(&hosts(&["a.corp", "b.corp"]));
+        assert_eq!(
+            r.hosts(),
+            [("a.corp".to_string(), 443), ("b.corp".to_string(), 443)]
+        );
+        assert!(r.private().is_empty());
+        let mut r = Reachable::default();
+        r.restrict(&hosts(&["private:a.corp"]));
+        r.restrict(&hosts(&["private:a.corp"]));
+        assert_eq!(r.private(), [("a.corp".to_string(), 443)]);
     }
 
     #[test]

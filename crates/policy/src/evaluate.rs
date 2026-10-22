@@ -41,10 +41,11 @@
 //! `deny` is a speed bump (a program in no group, or a renamed copy of one,
 //! gets past it). `allow` is the guard.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use vahta_vault::rules::{
     GROUPS, LAUNCHERS, expand_project_path, in_group, is_project_path, normalize_program_name,
+    place_inside, same_place,
 };
 use vahta_vault::{ApprovedRule, Network, Program, RuleSet};
 
@@ -120,6 +121,19 @@ fn args_len(rule: &ApprovedRule, argv: &[String], root: &Path) -> Option<usize> 
                 _ => w.clone(),
             })
             .collect();
+        if cfg!(windows) {
+            // Names there differ in case and separators only.
+            let key = |w: &String| {
+                if Path::new(w).is_absolute() {
+                    vahta_vault::rules::place_key(w)
+                } else {
+                    w.clone()
+                }
+            };
+            expanded.args = expanded.args.iter().map(key).collect();
+            let resolved: Vec<String> = resolved.iter().map(key).collect();
+            return crate::runner::rule_match(&expanded, &resolved);
+        }
         crate::runner::rule_match(&expanded, &resolved)
     } else {
         crate::runner::rule_match(rule, rest)
@@ -163,10 +177,11 @@ fn names_of(resolved: Option<&Path>, argv: &[String]) -> Vec<String> {
     names
 }
 
-/// Whether `path` is `dir` or below it. Compares whole components, and a path
-/// with `..` in it never matches.
+/// Whether `path` is `dir` or below it. Compares whole components, a path
+/// with `..` in it never matches, and on Windows case, separators and the
+/// verbatim prefix do not matter.
 fn inside(path: &Path, dir: &Path) -> bool {
-    !path.components().any(|c| c == Component::ParentDir) && path.starts_with(dir)
+    place_inside(path, dir)
 }
 
 fn shown(path: &Path, root: &Path) -> String {
@@ -195,7 +210,7 @@ pub fn extra_args<'a>(
         .iter()
         .filter(|r| {
             matches!(&r.program, Program::Path(p)
-                if Path::new(expand_project_path(p, &root).as_ref()) == resolved)
+                if same_place(Path::new(expand_project_path(p, &root).as_ref()), resolved))
         })
         .filter_map(|r| args_len(r, argv, &root))
         .max()
@@ -272,7 +287,7 @@ pub fn evaluate(rules: &RuleSet, ctx: &Ctx<'_>) -> Verdict {
         };
         let by_rule = rules.allow.iter().any(|rule| match &rule.program {
             Program::Path(p) => {
-                Path::new(expand_project_path(p, &root).as_ref()) == resolved
+                same_place(Path::new(expand_project_path(p, &root).as_ref()), resolved)
                     && args_match(rule, argv, &root)
             }
             _ => false,
@@ -713,6 +728,45 @@ mod tests {
             ),
             allowed()
         );
+    }
+
+    // The Windows rules themselves (`place_inside_for` and `same_place_for` with
+    // `windows` set) are tested on every system in `vahta_vault::rules`; this
+    // is the evaluator using them where the file system really ignores case.
+    #[cfg(windows)]
+    #[test]
+    fn windows_programs_and_folders_match_without_regard_to_case_or_separator() {
+        let b = RuleSet {
+            name: "K".into(),
+            allow: vec![allow("git", r"C:\Tools\Git.exe")],
+            dirs: vec![dir(r"C:\Work\Proj")],
+            network: Network::App,
+            ..RuleSet::default()
+        };
+        let verdict = eval_in(
+            &b,
+            Some(Path::new("c:/tools/git.exe")),
+            &["git"],
+            r"c:\work\proj\sub",
+            true,
+        );
+        assert_eq!(verdict, allowed());
+        let other = eval_in(
+            &b,
+            Some(Path::new("c:/tools/gitx.exe")),
+            &["git"],
+            r"c:\work\proj",
+            true,
+        );
+        assert!(matches!(other, Verdict::NotAllowed { .. }));
+        let outside = eval_in(
+            &b,
+            Some(Path::new("c:/tools/git.exe")),
+            &["git"],
+            r"c:\work\proj2",
+            true,
+        );
+        assert!(matches!(outside, Verdict::Refused { .. }));
     }
 
     #[test]

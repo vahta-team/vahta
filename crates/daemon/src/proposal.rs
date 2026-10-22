@@ -280,7 +280,16 @@ pub(crate) fn build(
     if let Some(c) = category {
         c.check(&rule_set)?;
     }
-    let warnings = warnings_for(&resolved, &rule_set.dirs, root);
+    let mut warnings = warnings_for(&resolved, &rule_set.dirs, root);
+    if let Network::Hosts(hosts) = &rule_set.network {
+        for h in hosts.iter().filter(|h| h.allows_private()) {
+            warnings.push(format!(
+                "{}: this name may resolve to the machine itself or the local network (a private, \
+                 loopback or link-local address), which is refused otherwise",
+                h.text
+            ));
+        }
+    }
     // Stored relative to the project, so the vault says the same on every
     // machine (see `rules::PROJECT_ROOT`).
     let mut rule_set = rule_set;

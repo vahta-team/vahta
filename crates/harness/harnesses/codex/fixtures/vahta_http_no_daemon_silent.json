@@ -1,0 +1,18 @@
+{
+  "event": "permission_request",
+  "env": {},
+  "files": {
+    "proj/vahta.toml": "[secrets.API_KEY]\n"
+  },
+  "stdin": {
+    "hook_event_name": "PermissionRequest",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "vahta http --secret API_KEY -H 'Authorization: Bearer {API_KEY}' https://api.example.com/v1/items"
+    },
+    "cwd": "{{TMP}}/proj",
+    "session_id": "s1"
+  },
+  "stdout": null,
+  "exit": 0
+}

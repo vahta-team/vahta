@@ -19,14 +19,20 @@
 //!   by default the ones whose recorded working directory is the caller's.
 //!   The client says where (the daemon's own environment may differ).
 //!   Cursor keeps chats in a SQLite database and is not touched.
+//! * **Prompt history.** `history.jsonl` of Claude Code and of Codex (the
+//!   prompts the person sent, for arrow-up recall) is cleaned the same way, in
+//!   every scope, and never deferred (`history.rs`).
 //! * **A running session** is not rewritten while the harness appends to it. A
 //!   file is open when it changed in the last minute, or when a hook has said
 //!   its session began and not ended and it changed in the last six hours. An
 //!   open file is read, its secrets are recorded as exposed, and it is marked;
-//!   the session's `SessionEnd` hook then has the daemon clean it.
-//! * **Exposed.** A secret found in a transcript is written to `exposed.json`
-//!   (name, vault, time), and `vahta list` and `vahta check` say to rotate it
-//!   until it is reset or removed.
+//!   the session's `SessionEnd` hook then has the daemon clean it. The hook also
+//!   marks the session itself when it cuts a secret out of a tool's output (or
+//!   cannot), so that its transcript is cleaned at its end with no command.
+//! * **Exposed.** A secret found in a transcript is recorded in the machine's
+//!   authenticated record of its vault (`vahta_vault::store`: name and time, in
+//!   the MAC, so deleting the mark is detected), and `vahta list` and `vahta
+//!   check` say to rotate it until it is reset or removed.
 //!
 //! The values are the sessions' own (the caller must have unlocked); with none,
 //! only the detector's finds are taken out.
@@ -36,10 +42,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use vahta_ipc::exposed::{Exposed, exposed_file};
 use vahta_ipc::protocol::{
     ClientReply, TranscriptFile, TranscriptReport, TranscriptRoots, TranscriptState,
 };
+use vahta_vault::store::StateKey;
 
 use crate::journal::Entry;
 use crate::jsonl::{self, Cleaner, Rewrite, Tally};
@@ -66,6 +72,10 @@ pub(crate) struct Marks {
     /// Files found to hold a secret while their session ran.
     /// Keys of the files (see [`path_key`]).
     deferred: HashSet<String>,
+    /// `harness:session` of sessions in which the hook cut a secret out of a
+    /// tool's output: their transcript is cleaned at their end whether or not a
+    /// scrub found something while they ran.
+    dirty: HashSet<String>,
 }
 
 fn key(harness: &str, session: &str) -> String {
@@ -98,6 +108,10 @@ impl Harness {
 struct Found {
     harness: Harness,
     path: PathBuf,
+    /// The harness's prompt history (see `history.rs`): one file for the whole
+    /// account, appended to whenever the person sends a prompt, so it is never
+    /// deferred to a session's end.
+    history: bool,
 }
 
 /// Regular `.jsonl` files under `dir`, not following links.
@@ -178,6 +192,7 @@ fn discover(cwd: &Path, all: bool, roots: &TranscriptRoots) -> Vec<Found> {
         out.extend(files.into_iter().map(|path| Found {
             harness: Harness::Claude,
             path,
+            history: false,
         }));
     }
     if let Some(codex) = &roots.codex {
@@ -197,8 +212,24 @@ fn discover(cwd: &Path, all: bool, roots: &TranscriptRoots) -> Vec<Found> {
                 .map(|path| Found {
                     harness: Harness::Codex,
                     path,
+                    history: false,
                 }),
         );
+    }
+    // The prompt histories are the account's, not a project's: in scope whatever
+    // the scope is.
+    for (harness, root) in [
+        (Harness::Claude, &roots.claude),
+        (Harness::Codex, &roots.codex),
+    ] {
+        let path = root.as_ref().map(|r| Path::new(r).join("history.jsonl"));
+        if let Some(path) = path.filter(|p| p.is_file()) {
+            out.push(Found {
+                harness,
+                path,
+                history: true,
+            });
+        }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup_by(|a, b| a.path == b.path);
@@ -237,6 +268,7 @@ fn of_session(harness: &str, session: &str, roots: &TranscriptRoots) -> Vec<Foun
                     .map(|path| Found {
                         harness: Harness::Claude,
                         path,
+                        history: false,
                     }),
             );
         }
@@ -253,6 +285,7 @@ fn of_session(harness: &str, session: &str, roots: &TranscriptRoots) -> Vec<Foun
             out.extend(files.into_iter().map(|path| Found {
                 harness: Harness::Codex,
                 path,
+                history: false,
             }));
         }
         _ => {}
@@ -284,46 +317,44 @@ fn is_open(marks: &Marks, harness: Harness, path: &Path) -> bool {
         })
 }
 
+/// Where a name found in a transcript is recorded as exposed: its vault and the
+/// key of this machine's record of that vault.
+type Vaults = HashMap<String, ([u8; 16], Arc<StateKey>)>;
+
 /// The held values of the caller, and which vault each name is from.
-fn held(ctx: &Ctx<'_>) -> (Vec<jsonl::Value>, HashMap<String, [u8; 16]>) {
+fn held(ctx: &Ctx<'_>) -> (Vec<jsonl::Value>, Vaults) {
     let chain = vahta_os::ancestor_chain(ctx.pid, vahta_os::MAX_ANCESTORS);
     let anchor = anchor_of(ctx);
     let values = known_values(ctx, &chain, anchor.as_ref().map(|(a, _)| a));
     let mut vaults = HashMap::new();
     if let Ok(sessions) = ctx.shared.sessions.lock() {
         for s in sessions.covering(&chain) {
+            let key = Arc::new(s.keys.state_key());
             for name in &s.scope {
-                vaults.insert(name.clone(), s.vault_id);
+                vaults.insert(name.clone(), (s.vault_id, key.clone()));
             }
         }
     }
     (values, vaults)
 }
 
-/// Record `names` as exposed. Names the caller has no session for have no
-/// vault to be recorded under and are left out.
-fn mark_exposed(shared: &Shared, names: &[String], vaults: &HashMap<String, [u8; 16]>) {
-    let file = exposed_file(shared.store.root());
-    let mut exposed = Exposed::load(&file);
+/// Record `names` as exposed, in the machine's authenticated record of each
+/// name's vault. Names the caller has no session for have no vault to be
+/// recorded under and are left out.
+fn mark_exposed(shared: &Shared, names: &[String], vaults: &Vaults) {
     let at = vahta_ipc::state::now();
-    let mut changed = false;
+    let mut groups: Vec<([u8; 16], Arc<StateKey>, Vec<String>)> = Vec::new();
     for name in names {
-        if let Some(vault) = vaults.get(name) {
-            changed |= exposed.mark(&vahta_vault::hex_encode(vault), name, at);
+        let Some((vault, key)) = vaults.get(name) else {
+            continue;
+        };
+        match groups.iter_mut().find(|g| g.0 == *vault) {
+            Some(g) => g.2.push(name.clone()),
+            None => groups.push((*vault, key.clone(), vec![name.clone()])),
         }
     }
-    if changed {
-        let _ = exposed.save(&file);
-    }
-}
-
-/// Forget that `name` of `vault` was exposed: its value was replaced, or the
-/// secret is gone.
-pub(crate) fn clear_exposed(shared: &Shared, vault: &[u8; 16], name: &str) {
-    let file = exposed_file(shared.store.root());
-    let mut exposed = Exposed::load(&file);
-    if exposed.clear(&vahta_vault::hex_encode(vault), name) {
-        let _ = exposed.save(&file);
+    for (vault, key, mine) in groups {
+        let _ = shared.store.mark_exposed(&vault, &key, &mine, at);
     }
 }
 
@@ -345,6 +376,7 @@ fn handle(
         return None;
     }
     let open = !force_closed
+        && !found.history
         && shared
             .marks
             .lock()
@@ -356,7 +388,13 @@ fn handle(
         }
         (TranscriptState::Deferred, tally)
     } else {
-        match jsonl::rewrite(&found.path, cleaner) {
+        // A history is appended to at any time: try again if it grew meanwhile.
+        let rewritten = if found.history {
+            jsonl::rewrite_retrying(&found.path, cleaner)
+        } else {
+            jsonl::rewrite(&found.path, cleaner)
+        };
+        match rewritten {
             Ok(Rewrite::Done(t)) => {
                 if let Ok(mut m) = shared.marks.lock() {
                     m.deferred.remove(&path_key(&found.path));
@@ -428,6 +466,7 @@ pub(crate) fn note(
     harness: &str,
     session: Option<&str>,
     ended: bool,
+    dirty: bool,
     roots: TranscriptRoots,
 ) -> ClientReply {
     let (Some(session), true) = (session, matches!(harness, "claude" | "codex")) else {
@@ -436,20 +475,31 @@ pub(crate) fn note(
     if !ended {
         if let Ok(mut m) = ctx.shared.marks.lock() {
             m.live.insert(key(harness, session), Instant::now());
+            if dirty {
+                m.dirty.insert(key(harness, session));
+            }
         }
         return ClientReply::Ok {};
     }
-    if let Ok(mut m) = ctx.shared.marks.lock() {
-        m.live.remove(&key(harness, session));
-    }
+    let was_dirty = ctx
+        .shared
+        .marks
+        .lock()
+        .map(|mut m| {
+            m.live.remove(&key(harness, session));
+            m.dirty.remove(&key(harness, session))
+        })
+        .unwrap_or(false);
     let files: Vec<Found> = of_session(harness, session, &roots)
         .into_iter()
         .filter(|f| {
-            ctx.shared
-                .marks
-                .lock()
-                .map(|m| m.deferred.contains(&path_key(&f.path)))
-                .unwrap_or(false)
+            was_dirty
+                || ctx
+                    .shared
+                    .marks
+                    .lock()
+                    .map(|m| m.deferred.contains(&path_key(&f.path)))
+                    .unwrap_or(false)
         })
         .collect();
     if files.is_empty() {

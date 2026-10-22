@@ -131,6 +131,14 @@ impl FakeDaemon {
                     .collect()
             })
             .unwrap_or_default();
+        let bind: Vec<String> = script["bind"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let prompt = script["prompt"].as_str().unwrap_or("").to_string();
         let asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let prompts: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
@@ -139,8 +147,12 @@ impl FakeDaemon {
         std::thread::spawn(move || {
             while let Ok(mut stream) = listener.accept() {
                 let (log, version) = (log.clone(), version.clone());
-                let (known, prompt, prompt_log) =
-                    (known.clone(), prompt.clone(), prompt_log.clone());
+                let (known, bind, prompt, prompt_log) = (
+                    known.clone(),
+                    bind.clone(),
+                    prompt.clone(),
+                    prompt_log.clone(),
+                );
                 std::thread::spawn(move || {
                     let Ok(Some(_hello)) = read_frame::<Hello>(&mut stream) else {
                         return;
@@ -201,6 +213,12 @@ impl FakeDaemon {
                             }
                             ClientRequest::CheckInput { .. } => ClientReply::InputNames {
                                 names: known.clone(),
+                                // Only to a prompt that carries nothing held.
+                                bind: if known.is_empty() {
+                                    bind.clone()
+                                } else {
+                                    Vec::new()
+                                },
                             },
                             ClientRequest::ToolCheck { .. } => match known.first() {
                                 Some(name) => ClientReply::ToolDeny {
@@ -231,7 +249,16 @@ impl FakeDaemon {
                                         std::thread::sleep(std::time::Duration::from_secs(60));
                                     },
                                     other => match other.strip_prefix("saved:") {
-                                        Some(name) => D::Saved { name: name.into() },
+                                        Some(rest) => {
+                                            let (name, bind) = match rest.strip_suffix(":bind") {
+                                                Some(n) => (n, true),
+                                                None => (rest, false),
+                                            };
+                                            D::Saved {
+                                                name: name.into(),
+                                                bind,
+                                            }
+                                        }
                                         None => {
                                             let error = ClientReply::Error {
                                                 message: "scripted failure".into(),

@@ -50,13 +50,16 @@ exporting and every change always ask for the password.
 ";
 
 pub const LOCK_USAGE: &str = "\
-usage: vahta lock [--all] [--json]
+usage: vahta lock [--all | --connector] [--json]
 
-End this project's sessions, or with --all every session. No password is needed:
-this can only take access away. A command that is already running keeps the
-values it was given; ending a session cannot take them back.
+End this project's sessions, or with --all every session, or with --connector
+only the connectors session (the one `vahta unlock --connector` opens). No
+password is needed: this can only take access away. A command that is already
+running keeps the values it was given; ending a session cannot take them back.
+A plain `vahta lock` leaves the connectors session alone.
 
-  --all     every session, not only this project's
+  --all         every session, not only this project's
+  --connector   only the connectors session, nothing else
   --json    machine-readable result
 ";
 
@@ -227,10 +230,11 @@ pub fn run_unlock(
 }
 
 pub fn run_lock(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
-    let (mut all, mut json) = (false, false);
+    let (mut all, mut connector, mut json) = (false, false, false);
     for a in args {
         match a.as_str() {
             "--all" => all = true,
+            "--connector" => connector = true,
             "--json" => json = true,
             "-h" | "--help" => {
                 let _ = stdout.write_all(LOCK_USAGE.as_bytes());
@@ -248,6 +252,7 @@ pub fn run_lock(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut
     let request = ClientRequest::Lock {
         cwd: env.cwd.to_string_lossy().into_owned(),
         all,
+        connector,
     };
     daemon_cmd::request(env, "lock", &request, json, stdout, stderr)
 }

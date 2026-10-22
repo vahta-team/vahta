@@ -200,7 +200,7 @@ fn build(e: &RoleEntry, project: &Project, path: Option<&OsString>) -> Result<Bu
 
 /// Why each secret of `role` is wider than its approved rules, or a refusal
 /// when a secret is missing or has none.
-fn check_narrower(role: &AgentRole, peek: &Peek) -> Flow<()> {
+fn check_narrower(role: &AgentRole, peek: &Peek, project: &Project) -> Flow<()> {
     let mut wider: Vec<String> = Vec::new();
     for s in &role.secrets {
         if !peek.entries.iter().any(|e| &e.name == s) {
@@ -221,7 +221,7 @@ fn check_narrower(role: &AgentRole, peek: &Peek) -> Flow<()> {
                 }],
             ));
         };
-        wider.extend(vahta_policy::role::too_wide(role, s, rules));
+        wider.extend(vahta_policy::role::too_wide(role, s, rules, &project.root));
     }
     if wider.is_empty() {
         return Ok(());
@@ -285,7 +285,7 @@ pub(crate) fn role(ctx: &Ctx<'_>, args: RoleArgs) -> Flow<ClientReply> {
         let (new, resolved, warnings) = build(e, &project, path.as_ref())
             .map_err(|m| error(format!("role {}: {m}", e.name)))?;
         // Checked before any window: a role wider than a secret is never shown.
-        if let Err(reply) = check_narrower(&new, &peek) {
+        if let Err(reply) = check_narrower(&new, &peek, &project) {
             ctx.journal(
                 Entry::new("role_refused")
                     .vault(&peek.vault_id)

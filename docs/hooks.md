@@ -29,6 +29,14 @@ After every tool call, before the model sees the result:
    the model is told it cannot be shown, and the person is told what was cut.
 4. Clean output gets no answer at all and reaches the model as it was.
 
+**Which secret.** When the value was one Vahta holds, the message for the model names
+the secret (`STRIPE_KEY`), never the value or any part of it, and says how to use it
+without writing it out: ``vahta run --secret STRIPE_KEY -- ...``. The same goes for a
+tool call refused because it carries a held value (a command, a file write, an MCP
+argument; the message also says how it was written, `raw`, `base64`, `hex`...) and for
+a prompt held because of one. A value only the detector recognised has a kind
+(`OpenAI-style key`), not a name, and the old advice to use `vahta run`.
+
 The hook never starts the daemon and waits at most 0.3 seconds for it. If the
 daemon is not there, or does not answer, the detector's cuts stand: the hook
 never lets through more than it did before there was a daemon.
@@ -175,6 +183,49 @@ test pins the keys). Live checks still to do:
   notice.
 - The cut happens in what the model is shown. The tool itself ran with the
   real output: a file it wrote, a request it sent, are not changed.
+
+## Secrets in what you type
+
+The prompt hook (Claude Code `UserPromptSubmit`, Codex the same, Cursor
+`beforeSubmitPrompt`) looks at the message before the agent does. A secret the
+detector recognises, or the value of a secret Vahta holds in any encoding, puts the
+message before you in a window (a kind and a length, never the value) with three
+ways out:
+
+- **False alarm, send it** (or "Send it anyway"): the message goes on, and the same
+  value does not ask again until the daemon exits (kept as keyed hashes in memory).
+- **Save to the project vault as NAME** (offered for a detected value, with a name
+  taken from its kind): the value is stored, the message is held, and the agent is
+  not told the value. A second question follows in the same window: *Have the agent
+  propose rules now?* Yes means the first clean message you send afterwards reaches
+  the agent with a note (Claude Code's `additionalContext`) to propose rules for
+  `[secrets.NAME]` in `vahta.toml` and run `vahta bind NAME`, which you approve in
+  one window. The held message is erased from the agent's context, so it cannot be
+  told then; the note waits, in memory, up to an hour, for your next message in that
+  project. Either way the held message tells you the secret has no rules yet.
+- **Do nothing**: the message is held.
+
+No answer in 100 seconds, no daemon, a message too large to show, or another window
+already open, holds the message too: sending is only ever your word. A requester that
+opens more than four windows a minute is held, journaled as suspicious and counted for
+the injection alarm.
+
+**Without the daemon** the hook is the only judge and cannot ask you, so it is
+stricter. The detector's finds hold the message as before, and so does any other
+long key-like string: 20 or more characters of the alphabets keys are written in
+(letters, digits, `-_+/`), with letters and digits both, and the spread of
+characters random text has and words do not. A 40-character git commit id, a UUID,
+an identifier or slug made of short words, and the parts of a path are let through.
+The message says a key-like string of that length was found and that the daemon was
+not running; the text is not repeated. With the daemon up none of this applies: it
+decides, and a long string the detector does not recognise goes on. Likewise the
+hook never answers "allow" for a `vahta run` or `vahta http` by itself when the daemon
+does not answer: that reply comes only from the daemon's yes (see below), and without
+it the harness decides, asking you as it would for any command.
+
+A held or saved message may already be in the harness's prompt history. When you
+choose "save" or "do nothing" the daemon removes it from there too; see
+[transcripts.md](transcripts.md#a-prompt-that-was-blocked).
 
 ## Running unattended: when the hook says "allow"
 

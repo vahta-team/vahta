@@ -20,7 +20,9 @@ use std::time::Duration;
 use vahta_ipc::client::Connector;
 use vahta_ipc::config::{Config, HookOutput, HookTool};
 use vahta_ipc::paths::Paths;
-use vahta_ipc::protocol::{ClientReply, ClientRequest, OutputSpan, PromptDecision, Signal};
+use vahta_ipc::protocol::{
+    ClientReply, ClientRequest, OutputSpan, PromptDecision, Signal, TranscriptRoots,
+};
 use vahta_ipc::spool::{self, SpoolLine};
 
 use crate::redact::Cut;
@@ -231,16 +233,29 @@ fn prompt_wait() -> Duration {
 /// the person; the hook holds it.
 pub const MAX_PROMPT: usize = 160 * 1024;
 
+/// What the daemon says about a prompt's text.
+#[derive(Default)]
+pub struct InputCheck {
+    /// The held values it carries.
+    pub names: Vec<String>,
+    /// Saved pastes the person asked the agent to propose rules for, which this
+    /// prompt is the first to be able to tell it.
+    pub bind: Vec<String>,
+    /// Whether the daemon answered at all. When it did not, the hook is the
+    /// only judge and is stricter (see `strict.rs`).
+    pub reached: bool,
+}
+
 /// The names of the held values a prompt carries, when a daemon of this
 /// version runs and answers within [`WAIT`] (checked in pieces, like a tool
 /// call). Anything else is empty: nothing is known.
-pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> InputCheck {
+    let mut check = InputCheck::default();
     if text.len() < MIN_CHECKED {
-        return names;
+        return check;
     }
     let Ok(paths) = Paths::from_env(None) else {
-        return names;
+        return check;
     };
     let mut start = 0;
     for _ in 0..CHECK_PIECES {
@@ -254,15 +269,21 @@ pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String
             text: text[start..end].to_string(),
         };
         match deliver(paths.clone(), request) {
-            Delivery::Answered(ClientReply::InputNames { names: found }) => {
+            Delivery::Answered(ClientReply::InputNames { names: found, bind }) => {
+                check.reached = true;
                 for n in found {
-                    if !names.contains(&n) {
-                        names.push(n);
+                    if !check.names.contains(&n) {
+                        check.names.push(n);
+                    }
+                }
+                for n in bind {
+                    if !check.bind.contains(&n) {
+                        check.bind.push(n);
                     }
                 }
             }
             Delivery::Answered(_) => {}
-            Delivery::NoDaemon | Delivery::Lost => return names,
+            Delivery::NoDaemon | Delivery::Lost => return check,
         }
         if end >= text.len() {
             break;
@@ -272,7 +293,7 @@ pub fn input_names(session: Option<String>, cwd: &str, text: &str) -> Vec<String
             start += 1;
         }
     }
-    names
+    check
 }
 
 /// What came of asking the person about a prompt.
@@ -280,7 +301,8 @@ pub enum PromptOutcome {
     /// A false alarm: the prompt goes on.
     Send,
     /// Saved in the project's vault under this name; the prompt must not go.
-    Saved(String),
+    /// `bind`: the person asked for the agent to propose rules for it now.
+    Saved { name: String, bind: bool },
     /// The person chose not to send it, or gave no answer.
     Held { no_answer: bool },
     /// Another window is open, or this process asked too often.
@@ -308,11 +330,12 @@ pub fn prompt_ask(
         cwd: cwd.to_string(),
         text: text.to_string(),
         detected,
+        roots: TranscriptRoots::from_env(dirs::home_dir().as_deref()),
     };
     match deliver_within(paths, request, prompt_wait()) {
         Delivery::Answered(ClientReply::PromptAnswer { answer }) => match answer {
             PromptDecision::Send {} => PromptOutcome::Send,
-            PromptDecision::Saved { name } => PromptOutcome::Saved(name),
+            PromptDecision::Saved { name, bind } => PromptOutcome::Saved { name, bind },
             PromptDecision::Held { no_answer } => PromptOutcome::Held { no_answer },
             PromptDecision::Busy { limited } => PromptOutcome::Busy { limited },
         },
@@ -366,6 +389,7 @@ pub fn scan(scan: Scan) -> Option<Answer> {
                 start: c.range.start,
                 end: c.range.end,
                 label: c.label,
+                known: c.known,
             })
             .collect(),
         possible: scan.possible,
@@ -378,6 +402,7 @@ pub fn scan(scan: Scan) -> Option<Answer> {
                     text: s.text,
                     range: s.start..s.end,
                     label: s.label,
+                    known: s.known,
                 })
                 .collect(),
             reference,
@@ -401,6 +426,20 @@ pub fn observed(tool: String, kinds: Vec<String>, likely: usize, possible: usize
 /// session's transcript from a closed one and clean the marked one at the end.
 /// Its answer does not matter.
 pub fn session_note(session: Option<String>, harness: &str, cwd: String, ended: bool) {
+    transcript_note(session, harness, cwd, ended, false);
+}
+
+/// Tell the daemon the hook cut a secret out of a tool's output in this
+/// session (or could not), so that the session's transcript is cleaned when the
+/// session ends. Its answer does not matter, and with no daemon there is no one
+/// to tell.
+pub fn session_dirty(session: Option<String>, harness: &str, cwd: String) {
+    if session.is_some() {
+        transcript_note(session, harness, cwd, false, true);
+    }
+}
+
+fn transcript_note(session: Option<String>, harness: &str, cwd: String, ended: bool, dirty: bool) {
     let home = dirs::home_dir();
     let _ = ask(ClientRequest::TranscriptNote {
         harness: harness.to_string(),
@@ -408,5 +447,6 @@ pub fn session_note(session: Option<String>, harness: &str, cwd: String, ended: 
         cwd,
         ended,
         roots: vahta_ipc::protocol::TranscriptRoots::from_env(home.as_deref()),
+        dirty,
     });
 }

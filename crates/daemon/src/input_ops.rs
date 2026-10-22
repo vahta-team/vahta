@@ -37,13 +37,16 @@ use vahta_vault::{Vault, valid_name};
 use crate::journal::Entry;
 use crate::ops::{Ctx, Flow, find_vault, from_surface};
 use crate::output::{Asked, HeldCut, anchor_of, known_values, save};
-use crate::protocol::{ClientReply, PromptDecision};
+use crate::protocol::{ClientReply, PromptDecision, TranscriptRoots};
 use crate::scrub::Scrubber;
 use crate::surface::sanitize_label;
 
 /// How long the window waits for the person. The hook gives up later (it is
 /// told 120 s by its harness), so the daemon's "held" arrives first.
 pub const ASK_WAIT: Duration = Duration::from_secs(100);
+/// How long the question "should the agent propose rules?" waits after a save.
+/// No answer is "not now".
+const BIND_WAIT: Duration = Duration::from_secs(20);
 /// At most this many false alarms are remembered; the oldest goes first.
 const MAX_REMEMBERED: usize = 4096;
 /// At most this many values are listed in the window.
@@ -184,15 +187,62 @@ fn known_in(ctx: &Ctx<'_>, text: &str) -> Vec<(usize, usize, String)> {
     Scrubber::new(values).spans(text.as_bytes())
 }
 
-/// `CheckInput`: the names of the held values `text` carries.
-pub(crate) fn check_input(ctx: &Ctx<'_>, text: &str) -> ClientReply {
+/// How long a saved secret waits for the next prompt to tell the agent about it.
+const BIND_PENDING_FOR: Duration = Duration::from_secs(3600);
+
+/// Secrets the person saved from a blocked prompt and asked the agent to
+/// propose rules for, by project. Memory only.
+#[derive(Default)]
+pub(crate) struct PendingBind {
+    items: Vec<(PathBuf, String, Instant)>,
+}
+
+impl PendingBind {
+    fn add(&mut self, project: PathBuf, name: String) {
+        self.items
+            .retain(|(p, n, _)| !(p == &project && n == &name));
+        self.items.push((project, name, Instant::now()));
+    }
+
+    /// The names waiting for `project`, which are then no longer waiting.
+    fn take(&mut self, project: &std::path::Path) -> Vec<String> {
+        self.items
+            .retain(|(_, _, at)| at.elapsed() < BIND_PENDING_FOR);
+        let mut out = Vec::new();
+        self.items.retain(|(p, name, _)| {
+            let mine = p == project;
+            if mine {
+                out.push(name.clone());
+            }
+            !mine
+        });
+        out
+    }
+}
+
+/// `CheckInput`: the names of the held values `text` carries, and, for a text
+/// that carries none, the secrets waiting for the agent to be told to propose
+/// rules for them.
+pub(crate) fn check_input(ctx: &Ctx<'_>, cwd: &str, text: &str) -> ClientReply {
     let mut names: Vec<String> = Vec::new();
     for (_, _, name) in known_in(ctx, text) {
         if !names.contains(&name) {
             names.push(name);
         }
     }
-    ClientReply::InputNames { names }
+    let bind = match (
+        names.is_empty(),
+        vahta_vault::project::Project::find(std::path::Path::new(cwd)),
+    ) {
+        (true, Some(project)) => ctx
+            .shared
+            .pending_bind
+            .lock()
+            .map(|mut p| p.take(&project.root))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    ClientReply::InputNames { names, bind }
 }
 
 /// One thing found in a prompt.
@@ -266,6 +316,7 @@ pub(crate) fn prompt_ask(
     cwd: &str,
     text: String,
     detected: Option<String>,
+    roots: TranscriptRoots,
 ) -> Flow<ClientReply> {
     let text = Zeroizing::new(text);
     let remembered = |ctx: &Ctx<'_>, domain: u8, value: &[u8]| -> [u8; 32] {
@@ -328,6 +379,20 @@ pub(crate) fn prompt_ask(
         .filter(|f| f.known)
         .map(|f| f.label.clone())
         .collect();
+    // The message did not go, but the harness may have written it to its prompt
+    // history on the way: take it out (see `history.rs`).
+    let forget = |found: &[Found]| {
+        let values = found
+            .iter()
+            .filter(|f| !f.range.is_empty())
+            .map(|f| text[f.range.clone()].to_string())
+            .collect();
+        crate::history::forget_soon(
+            roots.clone(),
+            crate::history::Blocked::new(&text, values),
+            ctx.shared.journal.clone(),
+        );
+    };
     let record = |result: &str, found: &[Found]| {
         ctx.journal(Entry::new("prompt_secret").names(&names).result(
             result,
@@ -517,9 +582,57 @@ pub(crate) fn prompt_ask(
             ) {
                 Ok(name) => {
                     record("saved", &found);
+                    forget(&found);
+                    // The agent cannot propose rules for a secret it has not been
+                    // told about; the person decides whether it is told to.
+                    let bind = {
+                        let panel = ctx.panel(
+                            &format!("Saved {name}"),
+                            vec![
+                                format!(
+                                    "{name} is in the project vault. Your message was not sent."
+                                ),
+                                "Nothing limits what may use it yet: it needs rules (which \
+                                 programs, which hosts)."
+                                    .to_string(),
+                            ],
+                        );
+                        let options = vec![
+                            "Have the agent propose rules now".to_string(),
+                            "Not now".to_string(),
+                        ];
+                        matches!(
+                            window.choose_within(
+                                &panel,
+                                "Should the agent propose rules for it?",
+                                &options,
+                                BIND_WAIT,
+                            ),
+                            Ok(Some(0))
+                        )
+                    };
+                    if bind
+                        && let Some(project) =
+                            vahta_vault::project::Project::find(std::path::Path::new(cwd))
+                        && let Ok(mut pending) = ctx.shared.pending_bind.lock()
+                    {
+                        pending.add(project.root, name.clone());
+                    }
+                    ctx.journal(
+                        Entry::new("prompt_secret")
+                            .names(std::slice::from_ref(&name))
+                            .result(
+                                if bind {
+                                    "bind_offered_yes"
+                                } else {
+                                    "bind_offered_no"
+                                },
+                                None,
+                            ),
+                    );
                     window.close(Some(&format!("Saved {name}. Your message was not sent.")));
                     Ok(ClientReply::PromptAnswer {
-                        answer: PromptDecision::Saved { name },
+                        answer: PromptDecision::Saved { name, bind },
                     })
                 }
                 Err(_) => {
@@ -533,6 +646,7 @@ pub(crate) fn prompt_ask(
         }
         Some(Way::Nothing) => {
             record("held", &found);
+            forget(&found);
             window.close(Some("Your message was not sent."));
             Ok(held(false))
         }

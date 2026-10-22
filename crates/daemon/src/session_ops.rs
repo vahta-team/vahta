@@ -453,7 +453,10 @@ fn all_or_project(
     }
 }
 
-pub(crate) fn lock(ctx: &Ctx<'_>, cwd: &str, all: bool) -> Flow<ClientReply> {
+pub(crate) fn lock(ctx: &Ctx<'_>, cwd: &str, all: bool, connector: bool) -> Flow<ClientReply> {
+    if connector && !all {
+        return lock_connectors(ctx);
+    }
     let (project, vault_id) = if all {
         (None, None)
     } else {
@@ -492,6 +495,32 @@ pub(crate) fn lock(ctx: &Ctx<'_>, cwd: &str, all: bool) -> Flow<ClientReply> {
             "no sessions to end".to_string()
         } else {
             format!("ended {n} session(s)")
+        },
+    })
+}
+
+/// `vahta lock --connector`: end the connectors session (and anything narrowed
+/// from it) and no other.
+fn lock_connectors(ctx: &Ctx<'_>) -> Flow<ClientReply> {
+    let ended = {
+        let mut sessions = ctx
+            .shared
+            .sessions
+            .lock()
+            .map_err(|_| crate::ops::error("the session table is unusable"))?;
+        sessions.end_where(
+            |s| s.parent.is_none() && s.anchor_exe == crate::session::CONNECTORS_ANCHOR,
+            "locked",
+        )
+    };
+    let n = ended.len();
+    ctx.shared.record_ended(ended);
+    ctx.journal(Entry::new("lock").result("ok", Some(&format!("{n} ended (connectors)"))));
+    Ok(ClientReply::Done {
+        message: if n == 0 {
+            "no connectors session to end".to_string()
+        } else {
+            "ended the connectors session".to_string()
         },
     })
 }

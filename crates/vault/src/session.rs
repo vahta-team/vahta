@@ -91,6 +91,13 @@ impl SessionKeys {
         self.keys.iter().any(|k| k.name == name)
     }
 
+    /// The key of the machine's record for this vault that these keys were
+    /// opened for. It authenticates the record's exposed marks
+    /// ([`LocalStore::mark_exposed`]).
+    pub fn state_key(&self) -> StateKey {
+        StateKey::from_mac(self.state_file, *self.mac_key)
+    }
+
     /// A copy limited to `names`, which must all be covered: what a delegated
     /// child session keeps of its parent's keys.
     pub fn narrowed(&self, names: &[String]) -> Result<SessionKeys, Error> {

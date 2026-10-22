@@ -153,6 +153,13 @@ impl Sandbox {
         self.project().join(".vahta/vault.vht")
     }
 
+    /// This machine's record of the project's vault (pin, generation, exposed
+    /// marks) in the data directory.
+    fn state_file(&self) -> PathBuf {
+        let id = vahta_vault::hex_encode(&self.open_vault().vault_id());
+        self.root.join("data/vaults").join(id).join("state")
+    }
+
     /// Open the project's vault directly, as a check that the daemon wrote what
     /// it said.
     fn open_vault(&self) -> Vault {
@@ -3569,6 +3576,66 @@ impl Sandbox {
 #[cfg(unix)]
 const LIMITED: &str = "limited to the role";
 
+// Scripts with the executable bit are a Unix thing.
+#[cfg(unix)]
+#[test]
+fn a_role_and_a_secret_name_a_project_script_alike_whichever_way_each_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = sandbox_with_secrets();
+    let scripts = s.project().join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    for name in ["tool.sh", "other.sh"] {
+        let path = scripts.join(name);
+        fs::write(&path, "#!/bin/sh\ntrue\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let canonical = dunce::canonicalize(&scripts).unwrap();
+    let set_secret = |program: String| {
+        let mut vault = s.open_vault();
+        let rule = vahta_vault::rules::parse_rule("./scripts/tool.sh", true)
+            .unwrap()
+            .to_allow(program);
+        vault
+            .set_bindings(
+                "ZETA",
+                Some(vahta_vault::RuleSet {
+                    name: "ZETA".into(),
+                    allow: vec![rule],
+                    network: vahta_vault::Network::App,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        vault
+            .save(&s.vault_path(), &LocalStore::new(s.root.join("data")))
+            .unwrap();
+    };
+    let asked = s.asks();
+    // The secret's rule is stored project-relative, the role's script is
+    // resolved to an absolute path: the same place, so not wider.
+    set_secret("$PROJECT/scripts/tool.sh".into());
+    s.write_toml("[roles.r]\nsecrets = [\"ZETA\"]\nallow = [\"./scripts/tool.sh\"]\n");
+    s.approve_role("r");
+    assert_eq!(s.open_vault().roles().len(), 1);
+    // The secret's rule absolute, the role written with $PROJECT.
+    set_secret(canonical.join("tool.sh").to_string_lossy().into_owned());
+    s.write_toml("[roles.q]\nsecrets = [\"ZETA\"]\nallow = [\"$PROJECT/scripts/tool.sh\"]\n");
+    s.approve_role("q");
+    assert_eq!(s.open_vault().roles().len(), 2);
+    // A script the secret does not allow is still wider, in either form.
+    for script in ["./scripts/other.sh", "$PROJECT/scripts/other.sh"] {
+        let before = s.asks();
+        s.write_toml(&format!(
+            "[roles.wide]\nsecrets = [\"ZETA\"]\nallow = [\"{script}\"]\n"
+        ));
+        let out = s.vahta(&["role", "wide"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+        assert!(text(&out.stderr).contains("is wider than ZETA's own rules"));
+        assert_eq!(s.asks(), before, "no window for a wider role");
+    }
+    assert!(s.asks() > asked);
+}
+
 // Runs commands that only a Unix has (sh, printenv, cat, true).
 #[cfg(unix)]
 #[test]
@@ -4843,6 +4910,8 @@ impl Sandbox {
             .args(["--harness", "claude", "--event", kind])
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("home/.claude"))
+            .env("CODEX_HOME", self.root.join("home/.codex"))
             .env_remove("XDG_RUNTIME_DIR")
             .env_remove("VAHTA_HOOK_DISABLE")
             .env("VAHTA_DATA_DIR", self.root.join("data"))
@@ -4980,11 +5049,23 @@ fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
         r#"{"secret":"correct horse"}"#,
     ]);
     let said = blocked_reason(&s.hook_prompt(&format!("here: {key}")));
-    assert_eq!(
-        said,
-        "Saved as ANTHROPIC_KEY. Your message was not sent; send it again without the key \
-         (refer to it as ANTHROPIC_KEY)."
+    assert!(
+        said.starts_with(
+            "Saved as ANTHROPIC_KEY. Your message was not sent; send it again without the key \
+             (refer to it as ANTHROPIC_KEY)."
+        ),
+        "{said}"
     );
+    // The window asked about rules (and "Not now" is what a script that says
+    // nothing gives): the person is pointed to the bind flow, the agent is not
+    // told to start it.
+    assert!(said.contains("vahta bind ANTHROPIC_KEY"), "{said}");
+    assert!(
+        s.window_log()
+            .iter()
+            .any(|e| e["options"].to_string().contains("propose rules now"))
+    );
+    assert!(s.hook_prompt("please summarise the readme").is_none());
     assert_eq!(
         s.open_vault().get("ANTHROPIC_KEY").unwrap().expose(),
         key.as_bytes()
@@ -4995,6 +5076,159 @@ fn a_pasted_secret_can_be_saved_to_the_project_vault_and_the_prompt_is_held() {
             .contains(&key)
     );
     assert!(s.journal().contains("prompt_secret") && !s.journal().contains(&key));
+}
+
+/// A prompt history line as Claude Code writes it, and as Codex does.
+fn history_lines(prompt: &str) -> (String, String) {
+    (
+        serde_json::json!({"display": prompt, "pastedContents": {}, "timestamp": 1_700_000_000_000u64,
+            "project": "/p", "sessionId": "s1"})
+        .to_string(),
+        serde_json::json!({"session_id": "s1", "ts": 1_700_000_000u64, "text": prompt}).to_string(),
+    )
+}
+
+#[test]
+fn a_blocked_prompt_is_taken_out_of_the_history_when_the_person_saves_or_does_nothing() {
+    let s = sandbox_with_secrets();
+    let (claude, codex) = (
+        s.claude_dir().join("history.jsonl"),
+        s.root.join("home/.codex/history.jsonl"),
+    );
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    let fine = history_lines("please summarise the readme");
+    for (path, line) in [(&claude, &fine.0), (&codex, &fine.1)] {
+        fs::write(path, format!("{line}\n")).unwrap();
+    }
+    let append = |prompt: &str| {
+        let (c, x) = history_lines(prompt);
+        for (path, line) in [(&claude, c), (&codex, x)] {
+            let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(f, "{line}").unwrap();
+        }
+    };
+    let forgotten = |path: &Path, gone: &str| {
+        wait_until("the history entry to go", 15, || {
+            !fs::read_to_string(path).unwrap().contains(gone)
+        });
+    };
+
+    // "Do nothing": the entry the harness wrote goes, the others stay.
+    let key = pasted_key("m");
+    let prompt = format!("here: {key}");
+    append(&prompt);
+    s.script(&[r#"{"choose":2}"#]);
+    blocked_reason(&s.hook_prompt(&prompt));
+    for path in [&claude, &codex] {
+        forgotten(path, &key);
+        let left = fs::read_to_string(path).unwrap();
+        assert!(left.contains("summarise the readme"), "{left}");
+        left.lines()
+            .for_each(|l| assert!(serde_json::from_str::<Value>(l).is_ok(), "{l}"));
+    }
+
+    // "Save": the same, and an entry written after the hook answered goes too.
+    let key = pasted_key("n");
+    let prompt = format!("and: {key}");
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    blocked_reason(&s.hook_prompt(&prompt));
+    append(&prompt);
+    for path in [&claude, &codex] {
+        forgotten(path, &key);
+    }
+    let journal = s.journal();
+    assert!(journal.contains("history_forget") && !journal.contains(&key));
+
+    // "False alarm": the person sent it, the history keeps it.
+    let key = pasted_key("o");
+    let prompt = format!("sent: {key}");
+    append(&prompt);
+    s.script(&[r#"{"choose":0}"#]);
+    assert!(s.hook_prompt(&prompt).is_none());
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(fs::read_to_string(&claude).unwrap().contains(&key));
+}
+
+#[test]
+fn scrub_cleans_the_prompt_histories_of_both_harnesses_in_any_scope() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let (claude, codex) = (
+        s.claude_dir().join("history.jsonl"),
+        s.root.join("home/.codex/history.jsonl"),
+    );
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    let keep = history_lines("an ordinary prompt");
+    let bad = history_lines(&format!("the key is {one}"));
+    fs::write(&claude, format!("{}\n{}\n", keep.0, bad.0)).unwrap();
+    fs::write(&codex, format!("{}\n{}", bad.1, keep.1)).unwrap();
+    // Recently written, as a history is: it is still cleaned.
+    let out = s.vahta(&["scrub", "--transcript", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let states: Vec<&str> = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["cleaned", "cleaned"], "{doc}");
+    for (path, lines) in [(&claude, 2), (&codex, 2)] {
+        let now = fs::read_to_string(path).unwrap();
+        assert!(!now.contains(&one), "{now}");
+        assert!(now.contains("REDACTED(ZETA)") && now.contains("an ordinary prompt"));
+        assert_eq!(now.lines().count(), lines);
+        now.lines()
+            .for_each(|l| assert!(serde_json::from_str::<Value>(l).is_ok(), "{l}"));
+    }
+    // Byte for byte where nothing changed, including a missing final newline.
+    assert_eq!(
+        fs::read_to_string(&codex).unwrap().lines().last().unwrap(),
+        keep.1
+    );
+    assert!(!fs::read_to_string(&codex).unwrap().ends_with('\n'));
+}
+
+#[test]
+fn after_a_save_the_person_can_have_the_agent_told_to_propose_rules_with_the_next_prompt() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("p");
+    // The choice, the name, the tier, the password, then "propose rules now".
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+        r#"{"choose":0}"#,
+    ]);
+    let said = blocked_reason(&s.hook_prompt(&format!("here: {key}")));
+    assert!(said.contains("will be asked to propose rules"), "{said}");
+    assert!(!said.contains(&key));
+    // The blocked prompt is gone from the agent's context; the next clean one
+    // carries the instruction, once, with the name and never the value.
+    let next = s
+        .hook_prompt("please summarise the readme")
+        .expect("the agent is told");
+    let context = next["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        context.contains("vahta bind NAME")
+            && context.contains("vahta.toml")
+            && context.contains("ANTHROPIC_KEY")
+            && !context.contains(&key),
+        "{next}"
+    );
+    assert!(s.hook_prompt("and now the changelog please").is_none());
+    assert!(s.journal().contains("bind_offered_yes"));
 }
 
 #[test]
@@ -5044,6 +5278,12 @@ fn a_pasted_held_value_asks_and_no_answer_holds_the_prompt() {
     s.script(&[r#"{"noanswer":true}"#]);
     let said = blocked_reason(&s.hook_prompt("the token is fake-one, ok"));
     assert!(said.contains("Nobody answered"), "{said}");
+    // The message names the secret and the way to use it, not the value.
+    assert!(
+        said.contains("the value of ZETA") && said.contains("`vahta run --secret ZETA -- ...`"),
+        "{said}"
+    );
+    assert!(!said.contains("fake-one"), "{said}");
     let log = s.window_log();
     let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
     assert_eq!(
@@ -5929,7 +6169,7 @@ fn spooled_reports_are_weighed_when_the_daemon_starts() {
 }
 
 #[test]
-fn the_hook_refuses_a_held_value_in_a_command_and_says_only_the_form() {
+fn the_hook_refuses_a_held_value_in_a_command_and_names_the_secret_and_the_form() {
     let s = sandbox_with_secrets();
     s.unlock_session();
     let command = format!(
@@ -5970,12 +6210,15 @@ fn the_hook_refuses_a_held_value_in_a_command_and_says_only_the_form() {
         .as_str()
         .unwrap();
     assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
+    // The agent is told which secret and how it was written, and how to use
+    // the secret instead: never the value, nor a piece of it.
     assert_eq!(
         reason,
-        "Blocked: this command contains a value Vahta holds (base64). Use `vahta run`."
+        "Blocked: this command contains the value of the secret ZETA (base64). Do not write it \
+         into the command. To use ZETA, run the command that needs it with \
+         `vahta run --secret ZETA -- ...`."
     );
-    // The person is told which secret; the agent is not.
-    assert!(!reason.contains("ZETA"));
+    assert!(!reason.contains("fake"));
     assert!(reply["systemMessage"].as_str().unwrap().contains("ZETA"));
     // The daemon journalled it under the agent's session id, with no value.
     let journal = s.journal();
@@ -6000,11 +6243,19 @@ fn the_encoded_forms_of_a_run_value_are_cut_from_output_and_nothing_leaks() {
             vahta_vault::hex_encode(b"fake-one")
         ))
         .expect("the hook answered");
-    let (stdout, _) = redacted(&reply);
+    let (stdout, told) = redacted(&reply);
     assert_eq!(
         stdout,
         "see ***REDACTED(ZETA (base64))*** and ***REDACTED(ZETA (hex))***"
     );
+    // The agent is told which secret it was, once, and how to use it.
+    assert!(
+        told.contains(
+            "to use ZETA, run the command that needs it with `vahta run --secret ZETA -- ...`"
+        ) && told.matches("--secret ZETA").count() == 1,
+        "{told}"
+    );
+    assert!(!told.contains("fake"), "{told}");
 
     // And `vahta run` scrubs a command's own base64 of the value.
     let out = s.vahta(&[
@@ -6589,8 +6840,9 @@ mod http {
     }
 
     fn host(h: &str, subdomains: bool, port: Option<u16>) -> HostRule {
+        // The test servers are on loopback, which a rule must allow explicitly.
         HostRule {
-            text: h.to_string(),
+            text: format!("private:{h}"),
             host: h.to_string(),
             subdomains,
             port,
@@ -6672,6 +6924,31 @@ mod http {
         assert!(journal.contains("\"status\":200") && journal.contains("\"bytes\":2"));
         assert!(journal.contains(&format!("\"host\":\"localhost:{}\"", server.port)));
         assert!(!journal.contains("fake-") && !journal.contains("/v1") && !journal.contains("x=1"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_local_address_is_refused_without_the_marker() {
+        let s = sandbox();
+        let server = TestServer::start(|_| Reply::ok(b"reached"));
+        // The same rule as the other tests, but without `private:`.
+        let plain = HostRule {
+            text: "localhost".into(),
+            ..host("localhost", false, Some(server.port))
+        };
+        approve(&s, "ZETA", Network::Hosts(vec![plain]));
+        pw(&s);
+        let url = format!("https://localhost:{}/", server.port);
+        let out = s.vahta(&["http", "--secret", "ZETA", "-H", "K: {ZETA}", &url]);
+        assert_ne!(out.status.code(), Some(0));
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("loopback") && err.contains("private:localhost"),
+            "{err}"
+        );
+        assert!(server.seen().is_empty(), "nothing reached the server");
+        let journal = s.journal();
+        assert!(journal.contains("\"event\":\"http_request\""), "{journal}");
+        assert!(journal.contains("loopback"), "{journal}");
     }
 
     #[test]
@@ -7711,9 +7988,12 @@ fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_ex
         .unwrap();
     assert!(age > Duration::from_secs(3000));
 
-    // Exposure: the daemon wrote names, never a value.
-    let exposed = fs::read_to_string(s.root.join("data/exposed.json")).unwrap();
-    assert!(exposed.contains("ZETA") && exposed.contains("BETA") && !exposed.contains("fake"));
+    // Exposure: the daemon wrote names into the machine's record of the vault
+    // (not a file of its own), never a value.
+    assert!(!s.root.join("data/exposed.json").exists());
+    let exposed = fs::read_to_string(s.state_file()).unwrap();
+    assert!(exposed.contains("exposed = ZETA") && exposed.contains("exposed = BETA"));
+    assert!(!exposed.contains("fake"));
     fs::write(
         s.project().join("vahta.toml"),
         "[secrets.ZETA]\n[secrets.BETA]\n",
@@ -7784,6 +8064,138 @@ fn scrub_takes_values_out_of_closed_transcripts_defers_the_open_one_and_marks_ex
 }
 
 #[test]
+fn an_exposed_mark_cannot_be_erased_without_the_next_unlock_saying_so() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let folder = s.claude_project_folder();
+    s.transcript(
+        &folder.join("aaaaaaaa-0000-closed.jsonl"),
+        &[serde_json::json!({"t": format!("v {one}")}).to_string()],
+        3600,
+    );
+    let out = s.vahta(&["scrub", "--transcript"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let state = s.state_file();
+    let good = fs::read_to_string(&state).unwrap();
+    assert!(good.contains("exposed = ZETA"), "{good}");
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\n[secrets.BETA]\n",
+    )
+    .unwrap();
+    let shown = text(&s.vahta(&["list"]).stdout);
+    assert!(shown.contains("vahta reset ZETA"), "{shown}");
+
+    // An agent deleting the line: `list` reads without the key and so cannot
+    // tell, but the next open of the vault refuses.
+    let erased: String =
+        good.lines()
+            .filter(|l| !l.starts_with("exposed = "))
+            .fold(String::new(), |mut acc, l| {
+                acc.push_str(l);
+                acc.push('\n');
+                acc
+            });
+    fs::write(&state, &erased).unwrap();
+    assert!(!text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+    assert_eq!(s.vahta(&["lock", "--all"]).status.code(), Some(0));
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    let out = s.vahta(&["unlock"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = text(&out.stderr);
+    assert!(err.contains("integrity check"), "{err}");
+
+    // Put back, it opens again and the mark is still there.
+    fs::write(&state, &good).unwrap();
+    s.script(&[r#"{"secret":"correct horse"}"#]);
+    assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
+    assert!(text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+}
+
+#[test]
+fn an_old_exposed_json_is_moved_into_the_record_when_its_vault_is_opened() {
+    let s = sandbox_with_secrets();
+    let vault_hex = vahta_vault::hex_encode(&s.open_vault().vault_id());
+    let legacy = s.root.join("data/exposed.json");
+    let other = "0".repeat(32);
+    fs::write(
+        &legacy,
+        format!(
+            r#"{{"exposed":[{{"vault":"{vault_hex}","name":"ZETA","at":1700000000}},{{"vault":"{other}","name":"OTHER","at":5}}]}}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        s.project().join("vahta.toml"),
+        "[secrets.ZETA]\n[secrets.BETA]\n",
+    )
+    .unwrap();
+    // Shown at once, from the old file.
+    assert!(text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+    // The first unlock of the vault moves its entry; the other vault's stays.
+    s.unlock_session();
+    assert!(
+        fs::read_to_string(s.state_file())
+            .unwrap()
+            .contains("exposed = ZETA 1700000000")
+    );
+    let rest = fs::read_to_string(&legacy).unwrap();
+    assert!(rest.contains("OTHER") && !rest.contains("ZETA"), "{rest}");
+    assert!(text(&s.vahta(&["list"]).stdout).contains("vahta reset ZETA"));
+}
+
+#[test]
+fn the_hook_marks_a_session_whose_output_it_cut_and_the_end_of_the_session_cleans_it() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let one = ["fake", "-one"].concat();
+    let id = "marked-session-0001";
+    let other_id = "unmarked-session-0002";
+    let folder = s.claude_project_folder();
+    let line = serde_json::json!({"type":"user","message":{"content":format!("leaked {one}")}})
+        .to_string();
+    // Both are running (just written) and no scrub is ever run.
+    let marked = folder.join(format!("{id}.jsonl"));
+    let unmarked = folder.join(format!("{other_id}.jsonl"));
+    s.transcript(&marked, std::slice::from_ref(&line), 0);
+    s.transcript(&unmarked, std::slice::from_ref(&line), 0);
+    s.hook_session_event("session_start", "SessionStart", id);
+    s.hook_session_event("session_start", "SessionStart", other_id);
+
+    // The agent's tool printed a held value; the hook cuts it, and marks the session.
+    let reply = s
+        .hook_event(
+            "after_tool",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "cat notes.txt"},
+                "tool_response": {"stdout": format!("see {one}"), "stderr": ""},
+                "cwd": s.project(), "session_id": id,
+            }),
+        )
+        .expect("the output is cut");
+    let (stdout, _) = redacted(&reply);
+    assert!(stdout.contains("REDACTED(ZETA)"), "{stdout}");
+
+    s.hook_session_event("session_end", "SessionEnd", id);
+    s.hook_session_event("session_end", "SessionEnd", other_id);
+    wait_until("the marked transcript to be cleaned", 15, || {
+        !fs::read_to_string(&marked)
+            .unwrap_or_default()
+            .contains(&one)
+    });
+    assert!(
+        fs::read_to_string(&marked)
+            .unwrap()
+            .contains("REDACTED(ZETA)")
+    );
+    // The session the hook did not mark, and no scrub found, is left alone.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(fs::read_to_string(&unmarked).unwrap().contains(&one));
+}
+
+#[test]
 fn scrub_needs_the_flag_and_all_covers_other_projects() {
     let s = sandbox_with_secrets();
     s.unlock_session();
@@ -7820,6 +8232,12 @@ mod host_relay {
     }
 
     fn setup_named(name: &str, port: u16) -> Option<Sandbox> {
+        setup_rule(name, port, true)
+    }
+
+    /// `private`: the rule carries the marker that allows a loopback answer
+    /// (the test servers are on loopback).
+    fn setup_rule(name: &str, port: u16, private: bool) -> Option<Sandbox> {
         if !vahta_os::network_isolation_available() {
             eprintln!("skipped: no unprivileged network namespaces here");
             return None;
@@ -7833,7 +8251,7 @@ mod host_relay {
                 Some(RuleSet {
                     name: "ZETA".into(),
                     network: Network::Hosts(vec![HostRule {
-                        text: format!("{name}:{port}"),
+                        text: format!("{}{name}:{port}", if private { "private:" } else { "" }),
                         host: name.into(),
                         subdomains: false,
                         port: Some(port),
@@ -7923,6 +8341,34 @@ except (ssl.SSLError, OSError) as e:
         // Only the host name, never what travelled.
         assert!(!journal.contains("relay-works"));
         assert!(!journal.contains("fake-relay-1"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_local_address_is_refused_without_the_marker() {
+        let server = TestServer::start(|_| Reply::ok(b"relay-works"));
+        // The relay's stand-in for DNS answers 127.0.0.1, as a rebound name would.
+        let Some(s) = setup_rule(NAME, server.port, false) else {
+            return;
+        };
+        let code = format!(
+            r#"{}
+try:
+    print("GOT", b"relay-works" in get())
+except (ssl.SSLError, OSError) as e:
+    print("CLOSED", type(e).__name__)
+"#,
+            prelude(&s, server.port)
+        );
+        let out = run_python(&s, &code);
+        assert!(out.contains("CLOSED"), "{out}");
+        assert!(server.seen().is_empty(), "nothing reached the server");
+        let journal = s.journal();
+        assert!(journal.contains("net_relay_refused"), "{journal}");
+        assert!(
+            journal.contains("resolved to 127.0.0.1") && journal.contains("loopback"),
+            "{journal}"
+        );
+        assert!(journal.contains(&format!("private:{NAME}")), "{journal}");
     }
 
     #[test]

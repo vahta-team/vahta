@@ -21,7 +21,7 @@
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "Blocked: this would write a value Vahta holds into a file (raw). Use `vahta run`."
+      "permissionDecisionReason": "Blocked: this would write the value of the secret ZETA (raw) into a file. Do not write it out. To use ZETA, run the command that needs it with `vahta run --secret ZETA -- ...`."
     },
     "systemMessage": "vahta blocked Edit: it would write the value of the secret ZETA (raw) into a file."
   },

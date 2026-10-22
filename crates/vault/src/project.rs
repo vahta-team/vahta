@@ -76,9 +76,12 @@ impl Project {
 }
 
 /// Whether a project at `project` is one of the `roots` or below one: the
-/// test behind a secret's `from` list.
+/// test behind a secret's `from` list. On Windows case, separators and the
+/// verbatim prefix do not matter.
 pub fn covers(roots: &[String], project: &Path) -> bool {
-    roots.iter().any(|r| project.starts_with(Path::new(r)))
+    roots
+        .iter()
+        .any(|r| crate::rules::place_inside(project, Path::new(r)))
 }
 
 /// The project a directory belongs to for remote use: the nearest directory

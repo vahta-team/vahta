@@ -33,7 +33,7 @@ nothing was done.
 | `vahta reveal NAME` | Show the value in the window until a key is pressed or 60 seconds pass. | yes |
 | `vahta copy NAME` | Put the value on the clipboard; it is cleared after 30 seconds if it is unchanged. Needs `wl-copy`, `xclip`, `xsel`, `pbcopy` or `clip`. | yes |
 | `vahta unlock [--vault DIR] [--secret NAME]... [--for DURATION] [--label TEXT]` | Open a **session** (below). With `--vault`, a session for another project's vault, bound to the pair ([Using a vault from another project](#using-a-vault-from-another-project)). | yes |
-| `vahta lock [--all]` | End this project's sessions, or all of them. | no |
+| `vahta lock [--all\|--connector]` | End this project's sessions, or all of them, or only the connectors session. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
 | `vahta run [--vault DIR] [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
 | `vahta http [--vault DIR] --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
@@ -225,6 +225,12 @@ in Vahta that opens a network connection.
   network use, which is what a command-only binding approves) are refused with
   `vahta bind NAME --net hosts:HOST` as the proposal. All secrets of a request
   must pass. The person's approval is the check; the agent can only propose.
+  A name that resolves to a loopback, private, shared (100.64/10), link-local or
+  unspecified address is not connected to (the address checked is the one used), and
+  the error says which address and how to allow it: the host written `private:HOST`
+  (`--net hosts:private:db.internal.example:5432`). The relay under `vahta run`
+  applies the same rule. A role cannot be given `private:` for a host its secret's
+  rule lists without it.
 - **Values.** The same as `vahta run`: a session that covers the names, else a
   window asks for the password for this one request (it shows the secrets and
   `METHOD host`); each-use secrets always ask; a delegated session cannot ask for
@@ -285,7 +291,11 @@ proposes):
 | `allow` | Programs that may use it, by resolved path, with an optional argv prefix |
 | `deny` | Programs that may not, by name or group; **deny wins** |
 | `dirs` | Folders: the command runs inside one, and scripts inside one need no rule |
-| `network` | `none`, `hosts` (a list; on Linux the command reaches only those hosts over TLS through a relay, elsewhere only `vahta http` is bound to them) or `app` |
+| `network` | `none`, `hosts` (a list; on Linux the command reaches only those hosts over TLS through a relay, elsewhere only `vahta http` is bound to them) or `app`. A host written `private:HOST` may resolve to a loopback, private or link-local address; without the marker such an answer is refused |
+
+On Windows, the places in rules (programs, folders, `from` projects, and a role's
+against its secret's) are compared the way the file system does: case, `/` against `\`
+and the `\\?\` prefix make no difference. Elsewhere names are case-sensitive.
 
 ```toml
 [secrets.STRIPE_KEY]

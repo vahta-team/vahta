@@ -135,6 +135,59 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **The agent is told which secret was blocked.** When a value Vahta holds is refused in a
+  command, a file write, an MCP argument or a prompt, or cut from a tool's output, the
+  message for the agent now names the secret (and, for input, how the value was written)
+  and says to use `vahta run --secret NAME -- ...`; before, only the person heard the
+  name. Never the value or a part of it. A value only the detector knew still gets the
+  old advice. The daemon marks which cuts are a secret's name so a detector's kind is
+  never offered as one.
+- **The paste check is stricter when the daemon is not running.** Without it the hook
+  cannot ask you, so besides the detector's finds it holds any prompt with a long
+  key-like string (20+ characters of a key alphabet, letters and digits, random-looking;
+  git commit ids, UUIDs, slugs and paths are let through). With the daemon up nothing
+  changes. The hook's own "allow" for `vahta run` and `vahta http` already needed the
+  daemon's yes; each harness now has a fixture for both pinning that without the daemon
+  the decision is the harness's.
+- **Windows: places in rules are compared the way Windows compares them.** Directories
+  and program paths in rule matching, a secret's `from` list, the "agent can change this
+  file" warning and role narrowing ignore case, `/` against `\` and the `\\?\` prefix on
+  Windows (one helper, `vahta_vault::rules::place_inside`, tested on every OS); other
+  systems are unchanged.
+- **A role is no longer "wider" for spelling a place another way.** A role's program,
+  argument or folder written `$PROJECT/...` against a secret's rule stored as an absolute
+  path (or the reverse, or through a symlink to the project) was refused as wider. Both
+  sides are now expanded from the project root and resolved before the narrowing check;
+  a role that really names another program, fewer arguments or a folder outside the
+  secret's is still refused.
+- **The hook marks the session for transcript cleanup itself.** When it cuts a secret
+  out of a tool's output (or finds one it cannot cut), the daemon is told, and the
+  session's transcript is cleaned at `SessionEnd` with no `vahta scrub` run. The
+  hook's note to the agent no longer asks for the command first.
+- **Save from the paste window: "propose rules now".** After "Save to the project
+  vault" a second question asks whether the agent should propose rules for the new
+  secret. If you say yes, the first clean message you send afterwards reaches the agent
+  with an instruction (secret name only) to write `[secrets.NAME]` in `vahta.toml` and
+  run `vahta bind NAME`; the blocked message itself is erased from the agent's context,
+  so it cannot carry it. Either way the held message now tells you the secret still
+  needs rules. Codex's version of the note stays off until it is seen to work.
+- **Prompt history.** `vahta scrub --transcript` also cleans Claude Code's and
+  Codex's `history.jsonl` (the prompts kept for arrow-up), and when the paste check
+  holds a prompt (the person chose "save" or "do nothing") the daemon removes that
+  prompt's entry from both files at once, then again a few times as the harness may
+  write it late. Atomic rewrite, never cut short while the harness appends.
+- **"Exposed in a transcript" can no longer be erased by deleting a file.** The marks
+  moved from `exposed.json` into the machine's authenticated record of each vault (the
+  one that pins the owner key); a deleted or edited mark fails the next unlock as
+  tampering. An existing `exposed.json` is migrated once per vault and removed.
+- **`vahta lock --connector`** ends the connectors session and nothing else (before,
+  only `lock --all` and `sessions kill` did); a plain `vahta lock` still leaves it.
+- **DNS rebinding in the host filter.** A name allowed by `network = hosts` that
+  resolves to a loopback, private, shared (100.64/10), link-local or unspecified
+  address is refused by the relay under `vahta run` and by `vahta http`, with the
+  address and the reason in the error and the journal. A host rule written
+  `private:HOST[:PORT]` allows it for that host; a role cannot widen a secret's rule
+  that way.
 - **A window no longer outlives a client that gave up.** When the harness killed
   `vahta run` (or `unlock`, `http`, `bind`, ...) while a password or approval window
   was open, the window stayed up to five minutes and the journal said the command

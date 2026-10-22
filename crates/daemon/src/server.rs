@@ -125,6 +125,8 @@ pub(crate) struct Shared {
     pub(crate) marks: Mutex<crate::transcript::Marks>,
     /// Prompt values the person called false alarms (see `input_ops.rs`).
     pub(crate) remembered: Mutex<crate::input_ops::Remembered>,
+    /// Saved pastes the agent is to be told to propose rules for.
+    pub(crate) pending_bind: Mutex<crate::input_ops::PendingBind>,
     /// One prompt window at a time, and how often (see `input_ops.rs`).
     pub(crate) prompt_gate: crate::input_ops::Gate,
     /// What agents have tried, weighed (see `alarm.rs`).
@@ -291,6 +293,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         outputs: Mutex::new(outputs),
         marks: Mutex::new(crate::transcript::Marks::default()),
         remembered: Mutex::new(remembered),
+        pending_bind: Mutex::default(),
         prompt_gate: Default::default(),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
@@ -751,8 +754,12 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                     .unwrap_or_else(|r| r),
                 false,
             ),
-            ClientRequest::Lock { cwd, all } => (
-                session_ops::lock(&ctx, &cwd, all).unwrap_or_else(|r| r),
+            ClientRequest::Lock {
+                cwd,
+                all,
+                connector,
+            } => (
+                session_ops::lock(&ctx, &cwd, all, connector).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::Run {
@@ -895,8 +902,9 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
                 cwd: _,
                 ended,
                 roots,
+                dirty,
             } => (
-                crate::transcript::note(&ctx, &harness, session.as_deref(), ended, roots),
+                crate::transcript::note(&ctx, &harness, session.as_deref(), ended, dirty, roots),
                 false,
             ),
             ClientRequest::OutputObserved {
@@ -929,17 +937,18 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             ),
             ClientRequest::CheckInput {
                 session: _,
-                cwd: _,
+                cwd,
                 text,
-            } => (crate::input_ops::check_input(&ctx, &text), false),
+            } => (crate::input_ops::check_input(&ctx, &cwd, &text), false),
             ClientRequest::PromptAsk {
                 session: _,
                 harness,
                 cwd,
                 text,
                 detected,
+                roots,
             } => (
-                crate::input_ops::prompt_ask(&ctx, &harness, &cwd, text, detected)
+                crate::input_ops::prompt_ask(&ctx, &harness, &cwd, text, detected, roots)
                     .unwrap_or_else(|r| r),
                 false,
             ),

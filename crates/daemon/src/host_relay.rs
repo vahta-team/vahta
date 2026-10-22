@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -151,6 +151,9 @@ fn server_name(body: &[u8]) -> Option<Option<String>> {
 pub(crate) struct Target {
     pub host: String,
     pub port: u16,
+    /// The rule lets the name resolve to a loopback, private or link-local
+    /// address. Otherwise such an answer is refused (DNS rebinding).
+    pub allow_private: bool,
 }
 
 #[derive(Default)]
@@ -361,9 +364,16 @@ fn serve(mut client: TcpStream, target: &Target, inner: &Inner) {
         }
     }
     let _ = client.set_read_timeout(None);
-    let Ok(mut upstream) = connect_out(&target.host, target.port) else {
-        inner.tally(&target.host, |t| t.refused += 1);
-        return;
+    let mut upstream = match connect_out(&target.host, target.port, target.allow_private) {
+        Ok(s) => s,
+        Err(Connect::Private(why)) => {
+            inner.refuse(&target.host, &why);
+            return;
+        }
+        Err(Connect::Failed) => {
+            inner.tally(&target.host, |t| t.refused += 1);
+            return;
+        }
     };
     let _ = upstream.set_nodelay(true);
     inner.tally(&target.host, |t| t.connections += 1);
@@ -429,20 +439,56 @@ fn pump(from: &mut TcpStream, to: &mut TcpStream, stop: &AtomicBool, count: &Ato
     let _ = to.shutdown(Shutdown::Write);
 }
 
-/// Connect to the real host, from outside the command's namespace. The name is
-/// resolved here, by the system.
-fn connect_out(host: &str, port: u16) -> std::io::Result<TcpStream> {
-    if let Some(ip) = crate::testing::relay_connect_override() {
-        return TcpStream::connect_timeout(&(ip, port).into(), CONNECT_WAIT);
+/// Why the real host was not reached.
+enum Connect {
+    /// The name resolved only to addresses the rule does not allow; the text
+    /// says which (for the journal and the reason line).
+    Private(String),
+    Failed,
+}
+
+/// Which of `addrs` may be connected to: all of them with `allow_private`,
+/// else the public ones. When none is left and some were refused, the reason.
+fn usable(host: &str, addrs: Vec<IpAddr>, allow_private: bool) -> Result<Vec<IpAddr>, Connect> {
+    if allow_private {
+        return Ok(addrs);
     }
-    let mut last = std::io::Error::other("the name did not resolve");
-    for addr in (host, port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&addr, CONNECT_WAIT) {
-            Ok(s) => return Ok(s),
-            Err(e) => last = e,
+    let mut refused = None;
+    let kept: Vec<IpAddr> = addrs
+        .into_iter()
+        .filter(|ip| match vahta_net::private_kind(*ip) {
+            None => true,
+            Some(kind) => {
+                refused.get_or_insert((*ip, kind));
+                false
+            }
+        })
+        .collect();
+    match (kept.is_empty(), refused) {
+        (true, Some((ip, kind))) => Err(Connect::Private(vahta_net::refusal_text(host, ip, kind))),
+        _ => Ok(kept),
+    }
+}
+
+/// Connect to the real host, from outside the command's namespace. The name is
+/// resolved here, by the system; an answer in a loopback, private, link-local
+/// or unspecified range is not connected to unless the rule allows it, and the
+/// connection goes to the address that was checked.
+fn connect_out(host: &str, port: u16, allow_private: bool) -> Result<TcpStream, Connect> {
+    let resolved: Vec<IpAddr> = match crate::testing::relay_connect_override() {
+        Some(ip) => vec![ip],
+        None => (host, port)
+            .to_socket_addrs()
+            .map_err(|_| Connect::Failed)?
+            .map(|a| a.ip())
+            .collect(),
+    };
+    for ip in usable(host, resolved, allow_private)? {
+        if let Ok(s) = TcpStream::connect_timeout(&(ip, port).into(), CONNECT_WAIT) {
+            return Ok(s);
         }
     }
-    Err(last)
+    Err(Connect::Failed)
 }
 
 #[cfg(test)]
@@ -526,6 +572,37 @@ mod tests {
             parse_hello(&two),
             Hello::Name(Some("split.example.com".into()))
         );
+    }
+
+    #[test]
+    fn a_name_that_resolves_locally_is_refused_unless_the_rule_allows_it() {
+        let ips = |l: &[&str]| -> Vec<IpAddr> { l.iter().map(|s| s.parse().unwrap()).collect() };
+        // Only local answers: refused, with the address and kind.
+        let Err(Connect::Private(why)) = usable("a.example", ips(&["127.0.0.1"]), false) else {
+            panic!("loopback must be refused");
+        };
+        assert!(why.contains("a.example") && why.contains("127.0.0.1") && why.contains("loopback"));
+        for ip in [
+            "10.0.0.1",
+            "192.168.0.9",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "0.0.0.0",
+        ] {
+            assert!(matches!(
+                usable("a.example", ips(&[ip]), false),
+                Err(Connect::Private(_))
+            ));
+        }
+        // A public answer next to a local one: only the public one is used.
+        let kept = usable("a.example", ips(&["10.0.0.1", "93.184.216.34"]), false).ok();
+        assert_eq!(kept, Some(ips(&["93.184.216.34"])));
+        // The rule's marker allows them all.
+        let kept = usable("a.example", ips(&["10.0.0.1", "127.0.0.1"]), true).ok();
+        assert_eq!(kept, Some(ips(&["10.0.0.1", "127.0.0.1"])));
+        // No answer at all is a failure to connect, not a private one.
+        assert!(matches!(usable("a.example", vec![], false), Ok(v) if v.is_empty()));
     }
 
     #[test]

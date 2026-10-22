@@ -65,6 +65,9 @@ pub struct Options {
     pub total_timeout: Duration,
     /// How many same-host redirects are followed.
     pub max_redirects: u32,
+    /// Connect to a name that resolves to a loopback, private, link-local or
+    /// unspecified address. Off: such an answer is refused (DNS rebinding).
+    pub allow_private: bool,
     /// Trust this PEM certificate instead of the public roots (tests only).
     #[cfg(feature = "test-roots")]
     pub extra_root_pem: Option<Vec<u8>>,
@@ -76,6 +79,7 @@ impl Default for Options {
             connect_timeout: Duration::from_secs(10),
             total_timeout: Duration::from_secs(30),
             max_redirects: 3,
+            allow_private: false,
             #[cfg(feature = "test-roots")]
             extra_root_pem: None,
         }
@@ -203,7 +207,70 @@ fn agent(options: &Options, remaining: Duration) -> Result<ureq::Agent, Error> {
         .timeout_global(Some(remaining))
         .user_agent("vahta-http")
         .build();
-    Ok(ureq::Agent::new_with_config(config))
+    Ok(ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::new(),
+        PublicOnly {
+            inner: ureq::unversioned::resolver::DefaultResolver::default(),
+            allow_private: options.allow_private,
+        },
+    ))
+}
+
+/// The refusal the resolver gives, carried through ureq's I/O error.
+#[derive(Debug)]
+struct PrivateAnswer(String);
+
+impl fmt::Display for PrivateAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PrivateAnswer {}
+
+/// The system resolver, minus the addresses a public name must not lead to
+/// (unless the rule allowed them). Connecting uses what this returns, so the
+/// answer that was checked is the one connected to.
+#[derive(Debug)]
+struct PublicOnly {
+    inner: ureq::unversioned::resolver::DefaultResolver,
+    allow_private: bool,
+}
+
+impl ureq::unversioned::resolver::Resolver for PublicOnly {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let all = self.inner.resolve(uri, config, timeout)?;
+        if self.allow_private {
+            return Ok(all);
+        }
+        let mut kept = self.empty();
+        let mut first_refused = None;
+        for addr in all.iter() {
+            match crate::private_kind(addr.ip()) {
+                None => kept.push(*addr),
+                Some(kind) => {
+                    first_refused.get_or_insert((addr.ip(), kind));
+                }
+            }
+        }
+        match (kept.is_empty(), first_refused) {
+            (true, Some((ip, kind))) => {
+                let host = uri.host().unwrap_or("the host");
+                let text = crate::refusal_text(host, ip, kind);
+                Err(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    PrivateAnswer(text),
+                )))
+            }
+            _ => Ok(kept),
+        }
+    }
 }
 
 fn map_error(e: ureq::Error) -> Error {
@@ -215,7 +282,10 @@ fn map_error(e: ureq::Error) -> Error {
             io.get_ref()
                 .map_or_else(|| "invalid data".to_string(), |inner| inner.to_string()),
         ),
-        ureq::Error::Io(io) => Error::Connect(format!("{:?}", io.kind())),
+        ureq::Error::Io(io) => match io.get_ref().and_then(|e| e.downcast_ref::<PrivateAnswer>()) {
+            Some(refusal) => Error::Connect(refusal.0.clone()),
+            None => Error::Connect(format!("{:?}", io.kind())),
+        },
         ureq::Error::Rustls(e) => Error::Tls(e.to_string()),
         ureq::Error::ConnectionFailed => Error::Connect("the connection failed".to_string()),
         _ => Error::Other("an HTTP error".to_string()),

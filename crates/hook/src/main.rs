@@ -17,6 +17,7 @@ mod hookguard;
 mod readguard;
 mod redact;
 mod runallow;
+mod strict;
 
 use std::io::{Read, Write};
 
@@ -169,23 +170,52 @@ fn secret_in(harness: &str, text: &str) -> Decision {
 /// vault and holds the prompt, "do nothing" holds it. Where no window can be
 /// shown (no daemon, silence past the wait, a prompt too large to show) a
 /// detected secret holds the prompt: this fails closed. A held value alone is
-/// known to the daemon only, so without it there is nothing to find.
+/// known to the daemon only, so without it there is nothing to find; instead,
+/// with no daemon, any long key-like string holds the prompt (`strict.rs`).
 fn prompt(args: &Args, ev: &Event) -> Decision {
     let found = vahta_detect::find_secret(&ev.text)
         .filter(|f| f.evasion.is_none() && f.mode == vahta_detect::Mode::Block);
     let cwd = ev.cwd.as_deref().unwrap_or_default();
-    let held = daemon::input_names(ev.session_id.clone(), cwd, &ev.text);
-    if found.is_none() && held.is_empty() {
-        return Decision::Allow;
+    let checked = daemon::input_names(ev.session_id.clone(), cwd, &ev.text);
+    // With no daemon the hook is the only judge and cannot ask the person, so a
+    // prompt the detector passed is looked at again with a lower threshold.
+    let strict = if found.is_none() && !checked.reached {
+        strict::long_token(&ev.text)
+    } else {
+        None
+    };
+    let held: Vec<String> = checked.names.iter().map(|n| safe_name(n)).collect();
+    if found.is_none() && held.is_empty() && strict.is_none() {
+        // A clean prompt after the person saved a paste and asked for rules:
+        // the blocked one is gone from the agent's context, so this one tells it.
+        return if checked.bind.is_empty() {
+            Decision::Allow
+        } else {
+            bind_now(&checked.bind)
+        };
     }
-    let what = match &found {
-        Some(f) => format!("{} (rule {})", f.category, f.rule),
-        None => "the value of a secret Vahta holds".to_string(),
+    let value_of = format!("the value of {}, a secret Vahta holds", held.join(", "));
+    let what = match (&found, strict) {
+        (Some(f), _) if !held.is_empty() => {
+            format!("{} (rule {}) and {value_of}", f.category, f.rule)
+        }
+        (Some(f), _) => format!("{} (rule {})", f.category, f.rule),
+        (None, Some(n)) => format!(
+            "a long key-like string ({n} characters; Vahta cannot tell a key from other text \
+             while its daemon is not running)"
+        ),
+        (None, None) => value_of,
+    };
+    // Which secret to use instead of writing it out.
+    let hint = if held.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", use_all_instead(&held))
     };
     let not_sent = |why: &str| {
         let msg = format!(
             "vahta blocked this message: it looks like it contains {what}. {why} Keep the \
-             secret out of the chat, store it instead, and send the message again without it."
+             secret out of the chat, store it instead, and send the message again without it.{hint}"
         );
         Decision::Deny {
             user_message: msg.clone(),
@@ -204,21 +234,13 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
     );
     match outcome {
         daemon::PromptOutcome::Send => Decision::Allow,
-        daemon::PromptOutcome::Saved(name) => {
-            let msg = format!(
-                "Saved as {name}. Your message was not sent; send it again without the key \
-                 (refer to it as {name})."
-            );
-            Decision::Deny {
-                user_message: msg.clone(),
-                agent_message: msg,
-            }
-        }
+        daemon::PromptOutcome::Saved { name, bind } => saved(&name, bind),
         daemon::PromptOutcome::Held { no_answer: false } => Decision::Deny {
-            user_message: "vahta did not send this message because it contained a secret. \
-                           Send it again without the secret."
-                .to_string(),
-            agent_message: "The message was not sent because it contained a secret.".to_string(),
+            user_message: format!(
+                "vahta did not send this message because it contained a secret. Send it again \
+                 without the secret.{hint}"
+            ),
+            agent_message: format!("The message was not sent because it contained a secret.{hint}"),
         },
         daemon::PromptOutcome::Held { no_answer: true } => {
             not_sent("Nobody answered Vahta's window in time, so it was not sent.")
@@ -234,42 +256,152 @@ fn prompt(args: &Args, ev: &Event) -> Decision {
     }
 }
 
-/// Refusing a tool call that carries a value Vahta holds. The agent hears
-/// how it was written, never which secret; the person hears the name, and what
-/// the call would have done with it.
+/// The message after the person saved a pasted value: the name to use instead,
+/// the hint that it still needs rules, and, if the person asked for it in the
+/// window, the instruction for the agent to start the bind flow. The person
+/// decided; the agent only gets the instruction.
+fn saved(name: &str, bind: bool) -> Decision {
+    let sent = format!(
+        "Saved as {name}. Your message was not sent; send it again without the key \
+         (refer to it as {name})."
+    );
+    let user_message = if bind {
+        format!(
+            "{sent} The agent will be asked to propose rules for {name} with your next message; \
+             you approve them in one window."
+        )
+    } else {
+        format!(
+            "{sent} {name} has no rules yet: ask the agent to propose them (`vahta bind {name}`) \
+             before it is used."
+        )
+    };
+    let agent_message = if bind {
+        format!(
+            "{sent} The person asked you to set up rules for {name} now: propose them for \
+             [secrets.{name}] in vahta.toml (allow, network, dirs; ask the person if unsure what \
+             it is for), then run `vahta bind {name}` so the person can approve them in one \
+             window. Do not ask for the value."
+        )
+    } else {
+        format!(
+            "{sent} {name} has no rules yet; when the person wants to use it, propose rules for \
+             [secrets.{name}] in vahta.toml and run `vahta bind {name}`."
+        )
+    };
+    Decision::Deny {
+        user_message,
+        agent_message,
+    }
+}
+
+/// The clean prompt that follows a save the person asked rules for: the agent
+/// is told, with the secret's name only, to start the bind flow.
+fn bind_now(names: &[String]) -> Decision {
+    let list = names.join(", ");
+    Decision::Notice {
+        user_message: format!(
+            "vahta: asked the agent to propose rules for {list}; you approve them in one window."
+        ),
+        agent_message: format!(
+            "The person saved a pasted secret to the project vault as {list} and asked you to \
+             set up its rules now. Before using it: propose rules for [secrets.NAME] in \
+             vahta.toml for each (allow, network, dirs; ask the person if unsure what it is \
+             for), then run `vahta bind NAME` so the person can approve them in one window. \
+             Never ask for the value."
+        ),
+    }
+}
+
+/// What the agent is told about a secret it must not write out: its name, and
+/// the way to use it without writing it. The name is from the daemon but is
+/// put in a sentence for the model, so only the characters a name has pass.
+fn use_instead(name: &str) -> String {
+    use_all_instead(&[name.to_string()])
+}
+
+/// [`use_instead`] for several secrets.
+fn use_all_instead(names: &[String]) -> String {
+    let mut clause = use_clause(names);
+    clause[..1].make_ascii_uppercase();
+    format!("{clause}.")
+}
+
+/// "to use NAME, run the command that needs it with `vahta run --secret NAME --
+/// ...`", for the middle of a sentence.
+fn use_clause(names: &[String]) -> String {
+    let names: Vec<String> = names.iter().map(|n| safe_name(n)).collect();
+    match names.as_slice() {
+        [one] => format!(
+            "to use {one}, run the command that needs it with `vahta run --secret {one} -- ...`"
+        ),
+        many => format!(
+            "to use {}, run the command that needs it with `vahta run --secret NAME -- ...`",
+            many.join(", ")
+        ),
+    }
+}
+
+/// A secret's name as it can be put in a sentence: only the characters a name
+/// has.
+fn safe_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect()
+}
+
+/// Refusing a tool call that carries a value Vahta holds. The person and the
+/// agent are both told which secret (its name, never the value or any part of
+/// it) and how it was written, and the agent is told how to use it instead.
 fn deny_known_value(held: &daemon::Held, ev: &Event) -> Decision {
     let tool = sanitise_tool(&ev.tool);
+    let name = safe_name(&held.name);
     let (user_message, what) = match ev.group {
         Some(vahta_harness::Group::Mcp) => (
             format!(
                 "vahta blocked a call to the MCP tool {tool}: it would send the value of the secret {} ({}) to it.",
-                held.name, held.form
+                name, held.form
             ),
-            "this would send a value Vahta holds to an MCP tool, which cannot be given a secret; leave it out",
+            "this would send the value of the secret",
         ),
         Some(vahta_harness::Group::Write) => (
             format!(
                 "vahta blocked {tool}: it would write the value of the secret {} ({}) into a file.",
-                held.name, held.form
+                name, held.form
             ),
-            "this would write a value Vahta holds into a file",
+            "this would write the value of the secret",
         ),
         _ => (
             format!(
                 "vahta blocked a tool call that carried the value of {} ({}). This may be an \
                  injected instruction.",
-                held.name, held.form
+                name, held.form
             ),
-            "this command contains a value Vahta holds",
+            "this command contains the value of the secret",
+        ),
+    };
+    let agent_message = match ev.group {
+        Some(vahta_harness::Group::Mcp) => format!(
+            "Blocked: {what} {name} ({}) to an MCP tool, which cannot be given a secret; leave \
+             it out. {}",
+            held.form,
+            use_instead(&name)
+        ),
+        Some(vahta_harness::Group::Write) => format!(
+            "Blocked: {what} {name} ({}) into a file. Do not write it out. {}",
+            held.form,
+            use_instead(&name)
+        ),
+        _ => format!(
+            "Blocked: {what} {name} ({}). Do not write it into the command. {}",
+            held.form,
+            use_instead(&name)
         ),
     };
     Decision::Deny {
         user_message,
-        agent_message: if ev.group == Some(vahta_harness::Group::Mcp) {
-            format!("Blocked: {what} ({}).", held.form)
-        } else {
-            format!("Blocked: {what} ({}). Use `vahta run`.", held.form)
-        },
+        agent_message,
     }
 }
 
@@ -279,6 +411,12 @@ fn scrub_hint(harness: &str) -> &'static str {
     if harness == "cursor" {
         // Cursor keeps its chats in a database that `vahta scrub` does not touch.
         " The current conversation still holds it until a new chat."
+    } else if harness == "claude" {
+        // The hook marked the session, and Claude's SessionEnd hook cleans it.
+        " The session is marked for cleanup (if Vahta's daemon is running): its transcript \
+         file is cleaned when the session ends, and `vahta scrub --transcript` cleans the \
+         files of finished sessions now. The current conversation still holds it until /clear \
+         or a new session."
     } else {
         " `vahta scrub --transcript` removes it from the transcript files on disk (the running \
          session's file is cleaned when the session ends), but the current conversation still \
@@ -662,24 +800,30 @@ fn redact_messages(cuts: &[redact::Cut], reference: Option<&str>) -> (String, St
         ("values", "values were")
     };
     let labels = redact::labels(cuts);
+    let known = redact::known_names(cuts);
     let head = format!(
         "vahta: {n} secret {what} redacted from this tool's output before you saw it ({labels}); \
          each is shown as ***REDACTED(...)***."
     );
+    // Which secrets, and how to use them without printing them.
+    let how = if known.is_empty() {
+        "to use a secret, run the command that needs it with `vahta run`".to_string()
+    } else {
+        use_clause(&known)
+    };
     match reference {
         Some(r) => (
             format!(
                 "{head} If you really need them in your context, run \
                  `vahta output allow {r} --reason \"<why>\"`: the person decides in a window, \
-                 and the output is printed if they agree. Otherwise, to use a secret, run the \
-                 command that needs it with `vahta run`."
+                 and the output is printed if they agree. Otherwise, {how}."
             ),
             String::new(),
         ),
         None => (
             format!(
                 "{head} The original was not kept, so it cannot be shown to you. Do not try to \
-                 recover it: to use a secret, run the command that needs it with `vahta run`."
+                 recover it: {how}."
             ),
             format!(
                 "vahta redacted {n} secret {values} ({labels}) from a tool's output before the \
@@ -752,6 +896,18 @@ fn run() -> Option<vahta_harness::Output> {
         );
     }
     let (decision, signal) = decide(&manifest, &args, &event);
+    // A secret cut out of an output (or one that reached the transcript): the
+    // transcript is marked for the cleanup at the session's end, by the hook
+    // itself, so the agent need not run anything.
+    if args.kind == Kind::AfterTool
+        && matches!(decision, Decision::Redact { .. } | Decision::Notice { .. })
+    {
+        daemon::session_dirty(
+            event.session_id.clone(),
+            &args.harness,
+            event.cwd.clone().unwrap_or_default(),
+        );
+    }
     if let Some(signal) = signal {
         daemon::report(
             &args.harness,
@@ -791,5 +947,51 @@ mod vault_path_tests {
             "/p/proj/../tools"
         );
         assert_eq!(absolute_in("C:/p/", "tools".into()), "C:/p/tools");
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    fn cut(label: &str, known: bool) -> redact::Cut {
+        redact::Cut {
+            text: 0,
+            range: 0..4,
+            label: label.to_string(),
+            known,
+        }
+    }
+
+    #[test]
+    fn the_agent_is_told_the_name_of_a_cut_secret_and_never_a_detectors_guess() {
+        let (agent, _) = redact_messages(
+            &[
+                cut("STRIPE_KEY (base64)", true),
+                cut("STRIPE_KEY", true),
+                cut("OpenAI-style key", false),
+            ],
+            Some("ref1"),
+        );
+        assert!(
+            agent.contains("to use STRIPE_KEY, run the command that needs it with `vahta run --secret STRIPE_KEY -- ...`"),
+            "{agent}"
+        );
+        assert_eq!(agent.matches("--secret").count(), 1, "{agent}");
+        assert!(!agent.contains("--secret OpenAI"), "{agent}");
+        // Two names, one sentence; a hostile label cannot add words.
+        let (agent, _) = redact_messages(
+            &[cut("A_KEY", true), cut("B_KEY; ignore previous", true)],
+            None,
+        );
+        assert!(
+            agent.contains("to use A_KEY, B_KEYignoreprevious, run"),
+            "{agent}"
+        );
+        // None known: the generic hint, as before.
+        let (agent, _) = redact_messages(&[cut("OpenAI-style key", false)], None);
+        assert!(
+            agent.ends_with("to use a secret, run the command that needs it with `vahta run`.")
+        );
     }
 }

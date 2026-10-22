@@ -1,0 +1,14 @@
+{
+  "event": "prompt",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please deploy with {{SECRET_AWS}} now",
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "decision": "block",
+    "reason": "vahta blocked this message: it looks like it contains a long key-like string (40 characters; Vahta cannot tell a key from other text while its daemon is not running). Vahta could not ask you about it (no daemon answered), so it was not sent. Keep the secret out of the chat, store it instead, and send the message again without it."
+  },
+  "exit": 0
+}

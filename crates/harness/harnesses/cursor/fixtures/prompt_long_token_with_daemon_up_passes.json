@@ -1,0 +1,15 @@
+{
+  "event": "prompt",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "beforeSubmitPrompt",
+    "prompt": "please deploy with {{SECRET_AWS}} now",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0,
+  "daemon": {
+    "known": []
+  },
+  "prompt_ask": []
+}

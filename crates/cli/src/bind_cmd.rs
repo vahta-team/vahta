@@ -55,7 +55,10 @@ options:
   --dir PATH        a folder whose programs may use it, and in which it may be
                     used (`PATH:ro` for read-only)
   --net WHAT        none, app, or hosts:H[,H...] (only these hosts: on Linux
-                    any program, through a relay; `vahta http` everywhere)
+                    any program, through a relay; `vahta http` everywhere).
+                    A name that resolves to a loopback, private or link-local
+                    address is refused; write private:H for a host that may
+                    resolve there (private:db.corp:5432)
   --from PROJECT    a project folder (absolute) this secret may also be used
                     from, besides the vault's own project (repeatable; needs
                     `vahta remote on`). The caller's project must be that

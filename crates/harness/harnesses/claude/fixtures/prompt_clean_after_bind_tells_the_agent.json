@@ -1,0 +1,25 @@
+{
+  "event": "prompt",
+  "env": {},
+  "daemon": {
+    "known": [],
+    "prompt": "held",
+    "bind": [
+      "ANTHROPIC_API_KEY"
+    ]
+  },
+  "stdin": {
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please summarise the readme",
+    "cwd": "/work/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "UserPromptSubmit",
+      "additionalContext": "The person saved a pasted secret to the project vault as ANTHROPIC_API_KEY and asked you to set up its rules now. Before using it: propose rules for [secrets.NAME] in vahta.toml for each (allow, network, dirs; ask the person if unsure what it is for), then run `vahta bind NAME` so the person can approve them in one window. Never ask for the value."
+    },
+    "systemMessage": "vahta: asked the agent to propose rules for ANTHROPIC_API_KEY; you approve them in one window."
+  },
+  "exit": 0,
+  "prompt_ask": []
+}

@@ -423,10 +423,13 @@ pub enum ClientRequest {
         #[serde(default)]
         vault: Option<String>,
     },
-    /// End this project's sessions, or all of them. No password.
+    /// End this project's sessions, or all of them, or (`connector`) only the
+    /// connectors session. No password.
     Lock {
         cwd: String,
         all: bool,
+        #[serde(default)]
+        connector: bool,
     },
     /// List the sessions.
     Sessions {},
@@ -574,12 +577,17 @@ pub enum ClientRequest {
     /// The hook: a session of `harness` began, or (`ended`) ended. At its end
     /// the daemon cleans the transcript it marked. Fire and forget; `session`
     /// is the harness's own id, which the transcript's file name carries.
+    /// `dirty`: the hook cut a secret out of a tool's output (or could not) in
+    /// this session, so the session's transcript is marked for that cleanup
+    /// without anyone running a command.
     TranscriptNote {
         harness: String,
         session: Option<String>,
         cwd: String,
         ended: bool,
         roots: TranscriptRoots,
+        #[serde(default)]
+        dirty: bool,
     },
     /// Ask the person to let the agent see what was cut out of a tool's
     /// output kept under `reference`. Only the agent whose hook made the
@@ -637,6 +645,10 @@ pub enum ClientRequest {
         cwd: String,
         text: String,
         detected: Option<String>,
+        /// Where the harnesses keep their prompt history, so that a blocked
+        /// prompt can be taken out of it (see the daemon's `history.rs`).
+        #[serde(default)]
+        roots: TranscriptRoots,
     },
     /// The hook asks, before a `vahta run` runs, whether the command inside it
     /// passes every named secret's own rules, so the harness need not ask the
@@ -878,8 +890,13 @@ pub enum PromptDecision {
     /// A false alarm (or already one): the prompt goes on.
     Send {},
     /// The value was saved in the project's vault under `name`; the prompt
-    /// must not go.
-    Saved { name: String },
+    /// must not go. `bind`: the person also asked, in the same window, for the
+    /// agent to be told to propose rules for it now.
+    Saved {
+        name: String,
+        #[serde(default)]
+        bind: bool,
+    },
     /// The prompt must not go: the person chose to do nothing, or gave no
     /// answer (`no_answer`: the time ran out or the window was closed).
     Held { no_answer: bool },
@@ -915,6 +932,10 @@ pub struct OutputSpan {
     pub start: usize,
     pub end: usize,
     pub label: String,
+    /// In the daemon's answer: `label` is the name of a secret it holds (not a
+    /// detector's kind), so the agent can be told which to use with `vahta run`.
+    #[serde(default)]
+    pub known: bool,
 }
 
 /// What the client sends while a command runs: the command's input, and the
@@ -1264,16 +1285,23 @@ pub enum ClientReply {
     NoOpinion {},
     /// The answer to a `ToolCheck` that found a held value: the tool call
     /// must be refused. `form` is how the value was written (`base64`,
-    /// `hex`, `raw`...), which the agent may be told; `name` is the secret's
-    /// name, for the person only.
+    /// `hex`, `raw`...) and `name` is the secret's name; the agent is told both
+    /// (never the value, nor any part of it) with the way to use the secret
+    /// without writing it: `vahta run --secret NAME -- ...`.
     ToolDeny {
         form: String,
         name: String,
     },
     /// The answer to a [`ClientRequest::CheckInput`]: the names of the held
-    /// values the text carries, in order of first appearance, each once.
+    /// values the text carries, in order of first appearance, each once. `bind`:
+    /// secrets the person saved from a blocked prompt in this project and asked
+    /// the agent to propose rules for; each is named once, to the first clean
+    /// prompt that follows (a blocked prompt is erased from the agent's context,
+    /// so this is how the agent hears).
     InputNames {
         names: Vec<String>,
+        #[serde(default)]
+        bind: Vec<String>,
     },
     /// The answer to a [`ClientRequest::PromptAsk`].
     PromptAnswer {

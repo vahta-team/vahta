@@ -28,7 +28,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -51,6 +51,8 @@ pub(crate) struct Tally {
     pub patterns: usize,
     /// The secrets' names behind `values`, each once (no form suffix).
     pub names: BTreeSet<String>,
+    /// How many bytes of the file the pass read.
+    pub consumed: u64,
 }
 
 impl Tally {
@@ -327,8 +329,13 @@ pub(crate) fn clean_line(
 
 /// Read `path` line by line, clean each, and write the result to `sink` when
 /// there is one. Counts what was found.
-fn pass(path: &Path, cleaner: &Cleaner, mut sink: Option<&mut dyn Write>) -> io::Result<Tally> {
-    let mut reader = BufReader::with_capacity(256 * 1024, File::open(path)?);
+fn pass(path: &Path, cleaner: &Cleaner, sink: Option<&mut dyn Write>) -> io::Result<Tally> {
+    pass_file(File::open(path)?, cleaner, sink)
+}
+
+/// [`pass`] over a file already open.
+fn pass_file(file: File, cleaner: &Cleaner, mut sink: Option<&mut dyn Write>) -> io::Result<Tally> {
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
     let mut tally = Tally::default();
     let mut raw: Vec<u8> = Vec::new();
     loop {
@@ -342,10 +349,13 @@ fn pass(path: &Path, cleaner: &Cleaner, mut sink: Option<&mut dyn Write>) -> io:
         if n == 0 {
             break;
         }
+        tally.consumed += n as u64;
         if raw.len() > MAX_LINE {
             if let Some(w) = sink.as_deref_mut() {
                 w.write_all(&raw)?;
-                io::copy(&mut reader, w)?;
+                tally.consumed += io::copy(&mut reader, w)?;
+            } else {
+                tally.consumed += io::copy(&mut reader, &mut io::sink())?;
             }
             break;
         }
@@ -385,12 +395,35 @@ fn stamp(path: &Path) -> io::Result<(u64, SystemTime)> {
     Ok((m.len(), m.modified()?))
 }
 
+/// What was appended to the file after `read` bytes of it were read, copied to
+/// the end of the file now at `path`: the harness may have written to the old
+/// file between the last read and the rename. A line the harness was in the
+/// middle of writing at that moment is the one thing this cannot save.
+fn carry_over(old: &mut File, read: u64, path: &Path) {
+    let Ok(len) = old.metadata().map(|m| m.len()) else {
+        return;
+    };
+    if len <= read {
+        return;
+    }
+    let mut tail = Vec::new();
+    let copied = old
+        .seek(SeekFrom::Start(read))
+        .and_then(|_| old.take(len - read).read_to_end(&mut tail));
+    if copied.is_ok()
+        && let Ok(mut now) = OpenOptions::new().append(true).open(path)
+    {
+        let _ = now.write_all(&tail);
+    }
+}
+
 /// Replace `path` with its cleaned self, atomically. The file is read twice
 /// (see the module doc); it is only replaced if it is the file the first read
 /// saw, so a harness that appended in between loses nothing.
 pub(crate) fn rewrite(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
     let before = stamp(path)?;
     let meta = std::fs::metadata(path)?;
+    let mut old = File::open(path)?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
         .file_name()
@@ -400,7 +433,7 @@ pub(crate) fn rewrite(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
     let result = (|| -> io::Result<Rewrite> {
         let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         let mut w = BufWriter::with_capacity(256 * 1024, file);
-        let tally = pass(path, cleaner, Some(&mut w))?;
+        let tally = pass_file(old.try_clone()?, cleaner, Some(&mut w))?;
         w.flush()?;
         let file = w.into_inner().map_err(|e| e.into_error())?;
         file.set_permissions(meta.permissions())?;
@@ -412,6 +445,7 @@ pub(crate) fn rewrite(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
             return Ok(Rewrite::Changed);
         }
         std::fs::rename(&tmp, path)?;
+        carry_over(&mut old, tally.consumed, path);
         #[cfg(unix)]
         if let Ok(d) = File::open(dir) {
             let _ = d.sync_all();
@@ -422,6 +456,113 @@ pub(crate) fn rewrite(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// How many times a rewrite of a file the harness keeps appending to is tried
+/// again when it grew in the meantime.
+const APPEND_RETRIES: usize = 5;
+/// The largest file [`drop_lines`] holds in memory.
+const MAX_DROP_FILE: u64 = 512 * 1024 * 1024;
+const APPEND_PAUSE: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// [`rewrite`] for a file that is appended to while it is open (a prompt
+/// history): when the harness appended during the pass nothing was replaced, so
+/// the pass is made again, a few times. Never replaces a file it did not read in
+/// full; the result is [`Rewrite::Changed`] only if it never got a quiet moment.
+pub(crate) fn rewrite_retrying(path: &Path, cleaner: &Cleaner) -> io::Result<Rewrite> {
+    let mut last = Rewrite::Changed;
+    for attempt in 0..APPEND_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(APPEND_PAUSE);
+        }
+        last = rewrite(path, cleaner)?;
+        if matches!(last, Rewrite::Done(_)) {
+            break;
+        }
+    }
+    Ok(last)
+}
+
+/// Replace `path` without the lines for which `drop_line` says so (it gets the
+/// line's text, without its terminator; a line that is not UTF-8 is kept).
+/// Everything else is copied byte for byte. Atomic like [`rewrite`], and retried
+/// like [`rewrite_retrying`] when the harness appended in the meantime. The
+/// number of lines dropped; the file is not touched when there are none.
+pub(crate) fn drop_lines(path: &Path, drop_line: &dyn Fn(&str) -> bool) -> io::Result<usize> {
+    for attempt in 0..APPEND_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(APPEND_PAUSE);
+        }
+        let before = stamp(path)?;
+        if before.0 > MAX_DROP_FILE {
+            return Err(io::Error::other(
+                "the file is too large to rewrite in memory",
+            ));
+        }
+        let meta = std::fs::metadata(path)?;
+        let mut old = File::open(path)?;
+        let mut kept: Vec<u8> = Vec::new();
+        let mut dropped = 0usize;
+        let mut consumed = 0u64;
+        {
+            let mut reader = BufReader::with_capacity(256 * 1024, old.try_clone()?);
+            let mut raw: Vec<u8> = Vec::new();
+            loop {
+                raw.clear();
+                let n = reader
+                    .by_ref()
+                    .take(MAX_LINE as u64 + 1)
+                    .read_until(b'\n', &mut raw)?;
+                if n == 0 {
+                    break;
+                }
+                consumed += n as u64;
+                let body_end = raw.len() - raw.ends_with(b"\n") as usize;
+                let body_end = body_end - raw[..body_end].ends_with(b"\r") as usize;
+                let gone = raw.len() <= MAX_LINE
+                    && std::str::from_utf8(&raw[..body_end]).is_ok_and(drop_line);
+                if gone {
+                    dropped += 1;
+                } else {
+                    kept.extend_from_slice(&raw);
+                }
+            }
+        }
+        if dropped == 0 {
+            return Ok(0);
+        }
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.vahta-{}.tmp", std::process::id()));
+        let done = (|| -> io::Result<bool> {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(&kept)?;
+            file.set_permissions(meta.permissions())?;
+            file.set_modified(before.1)?;
+            file.sync_all()?;
+            drop(file);
+            if stamp(path)? != before {
+                return Ok(false);
+            }
+            std::fs::rename(&tmp, path)?;
+            carry_over(&mut old, consumed, path);
+            #[cfg(unix)]
+            if let Ok(d) = File::open(dir) {
+                let _ = d.sync_all();
+            }
+            Ok(true)
+        })();
+        if !matches!(done, Ok(true)) {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        if done? {
+            return Ok(dropped);
+        }
+    }
+    Err(io::Error::other("the file kept changing"))
 }
 
 #[cfg(test)]

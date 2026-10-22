@@ -77,6 +77,7 @@ pub(crate) struct Answer {
 /// A request as the transport takes it.
 #[cfg_attr(not(feature = "http"), allow(dead_code))]
 struct Outgoing {
+    allow_private: bool,
     method: String,
     url: String,
     headers: Vec<(String, String)>,
@@ -106,7 +107,10 @@ fn transport(_: Outgoing) -> Result<Incoming, String> {
 fn transport(out: Outgoing) -> Result<Incoming, String> {
     let method = vahta_net::Method::parse(&out.method).ok_or("the method is not allowed")?;
     #[allow(unused_mut)]
-    let mut options = vahta_net::Options::default();
+    let mut options = vahta_net::Options {
+        allow_private: out.allow_private,
+        ..vahta_net::Options::default()
+    };
     if let Some(t) = out.timeout {
         options.total_timeout = t;
     }
@@ -199,6 +203,15 @@ pub(crate) fn host_allowed(rules: &[vahta_vault::HostRule], url: &Url) -> bool {
             || (r.subdomains && !ip && url.host.ends_with(&format!(".{}", r.host)));
         port_ok && host_ok
     })
+}
+
+/// Whether the rule that approves `url` lets its host resolve to a private
+/// address (`private:HOST`).
+fn private_allowed(rules: &[vahta_vault::HostRule], url: &Url) -> bool {
+    rules
+        .iter()
+        .filter(|r| host_allowed(std::slice::from_ref(r), url))
+        .all(|r| r.allows_private())
 }
 
 /// `host`, or `host:port` for a port that is not 443.
@@ -522,7 +535,13 @@ pub(crate) fn http(ctx: &Ctx<'_>, args: HttpArgs) -> Flow<Answer> {
         Some(id) => format!("session {id}"),
         None => "password".to_string(),
     };
+    // Private resolution only when every secret's rule says so.
+    let allow_private = declared.iter().all(|n| {
+        matches!(peek.bindings.iter().find(|b| &b.name == n).map(|b| &b.network),
+            Some(Network::Hosts(h)) if private_allowed(h, &target))
+    });
     let sent = transport(Outgoing {
+        allow_private,
         method: method.clone(),
         url: target.to_url_string(),
         headers: out_headers,

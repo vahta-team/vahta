@@ -459,6 +459,7 @@ pub(crate) fn scan(
                 start: c.start,
                 end: c.end,
                 label: c.label,
+                known: c.exact,
             })
             .collect(),
         reference,
@@ -971,6 +972,7 @@ mod tests {
             start,
             end,
             label: "\u{1b}[31mkind\nfake".to_string(),
+            known: false,
         };
         let cuts = checked_hook_cuts(&texts, vec![span(0, 1, 4), span(0, 4, 99), span(3, 0, 1)]);
         assert_eq!(cuts.len(), 1);

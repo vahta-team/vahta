@@ -26,8 +26,8 @@ around one. With no unlocked session only the detector's finds are removed.
 
 | Harness     | Where                                                         | Covered |
 |-------------|---------------------------------------------------------------|---------|
-| Claude Code | `$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<dir>/**.jsonl` | yes     |
-| Codex       | `$CODEX_HOME` or `~/.codex`, `sessions/` and `archived_sessions/`, `rollout-*.jsonl` | yes |
+| Claude Code | `$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<dir>/**.jsonl`, and `history.jsonl` | yes     |
+| Codex       | `$CODEX_HOME` or `~/.codex`, `sessions/` and `archived_sessions/`, `rollout-*.jsonl`, and `history.jsonl` | yes |
 | Cursor      | a SQLite database in its own data directory                   | no      |
 
 Claude names `<dir>` after the working directory it was started in, every
@@ -36,10 +36,31 @@ character that is not a letter or a digit written as `-`
 with a hash; those are only found with `--all`. Codex rollouts are matched to
 the project by the working directory recorded on their first line.
 
-Not covered: Cursor's chats; Claude's prompt history (`history.jsonl`) and the
-large tool results it may keep as separate files next to a session; Codex's
-`history.jsonl`. A value the person typed into a prompt can be in the history
-files.
+The two `history.jsonl` files keep every prompt the person sent, for the
+arrow-up recall. They belong to the whole account, not a project, so they are
+cleaned whatever the scope, with the same values and the same rewrite as a
+transcript. They are not held back for a session's end: a harness appends to
+them whenever a prompt is sent, so if one grew while being cleaned the pass is
+made again (a few times), and the file is only ever replaced whole.
+
+Not covered: Cursor's chats; the large tool results and the pasted-text files
+Claude may keep as separate files next to a session or its history.
+
+### A prompt that was blocked
+
+When the paste check (see [hooks.md](hooks.md)) holds a prompt because the person
+chose "save" or "do nothing", the message never reached the agent, but the
+harness may already have written it to its history. The daemon then removes the
+entries that hold it from both history files straight away: a line with a string
+equal to the message, or containing one of the secret values found in it. It looks
+again a few times over the next ten seconds, since the harness may write the
+entry after the hook has answered. The match is made in memory against the text
+the hook sent; the text is not logged, only a count (`history_forget`). A
+line that is not JSON is left alone, the rewrite goes through a temp file
+and a rename, and if the harness appended meanwhile the pass starts again.
+What it appends in the instant of the swap is copied over from the old file;
+only a line it is in the middle of writing at that very moment can be lost. "False alarm" (the person sent the message) leaves
+the history as it is.
 
 ### How a file is rewritten
 
@@ -67,14 +88,28 @@ later it cleans the marked files of that session. Codex has no end-of-session
 event in the hooks Vahta registers, so a deferred Codex file is cleaned by the
 next `vahta scrub --transcript` once it is quiet.
 
+The hook marks the session itself, with no command: when it cuts a secret out of
+a tool's output (or finds one it cannot cut, in Observe mode or for a tool the
+harness will not let it rewrite) it tells the daemon, which then cleans that
+session's transcript at its end whether or not a scrub ever found something
+while it ran. This needs the daemon to be running at that moment and the
+harness to give the hook a session id.
+
 The daemon forgets its marks when it restarts. A file is then judged by its
 modification time alone.
 
 ### Exposed secrets
 
-Every secret whose value is found in a transcript is written to
-`exposed.json` in the data directory: its name, its vault and the time, never
-the value or the file. `vahta list` and `vahta check` print
+Every secret whose value is found in a transcript is recorded in the machine's
+record of its vault (the file in the data directory that also pins the owner key
+and the highest generation seen): its name and the time, never the value or the
+file. The record is authenticated, and the marks are part of what is
+authenticated, so a mark an agent deletes or alters makes the vault's next unlock
+fail ("this machine's record of the vault failed its integrity check") instead of
+quietly forgetting the exposure. `vahta list` and `vahta check` read the marks
+without the vault key, so they cannot tell an edit; the unlock does. An
+`exposed.json` from an earlier build is moved into the record of each vault the
+first time that vault is unlocked, and deleted when it is empty. `vahta list` and `vahta check` print
 `exposed in a transcript - rotate it` with `vahta reset NAME` until the secret
 is reset or removed. In `vahta check` it is a warning and does not change the
 verdict.

@@ -1,0 +1,11 @@
+{
+  "event": "prompt",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "beforeSubmitPrompt",
+    "prompt": "revert 9fceb02d0ae598e95dc970b74767f19372d61af8 in my_very_long_snake_case_identifier_2",
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}

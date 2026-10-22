@@ -451,12 +451,27 @@ pub struct DirRule {
 
 /// A network destination. `host` is a lowercase DNS name or an IP literal;
 /// `subdomains` extends it to every name beneath it; `port` `None` is any port.
+/// `text` is what the person approved; it starts with [`PRIVATE_MARK`] when the
+/// rule lets the name resolve to a loopback, private or link-local address
+/// (the marker lives in the text so the signed format does not change).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRule {
     pub text: String,
     pub host: String,
     pub subdomains: bool,
     pub port: Option<u16>,
+}
+
+/// The prefix of a host rule that explicitly allows private resolution
+/// (`private:db.internal.example:5432`).
+pub const PRIVATE_MARK: &str = "private:";
+
+impl HostRule {
+    /// Whether the rule allows its name to resolve to a loopback, private,
+    /// link-local or unspecified address. Without it such an answer is refused.
+    pub fn allows_private(&self) -> bool {
+        self.text.starts_with(PRIVATE_MARK)
+    }
 }
 
 /// What a command may reach over the network.

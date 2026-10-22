@@ -20,7 +20,7 @@
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "Blocked: this would send a value Vahta holds to an MCP tool, which cannot be given a secret; leave it out (raw)."
+      "permissionDecisionReason": "Blocked: this would send the value of the secret ZETA (raw) to an MCP tool, which cannot be given a secret; leave it out. To use ZETA, run the command that needs it with `vahta run --secret ZETA -- ...`."
     },
     "systemMessage": "vahta blocked a call to the MCP tool mcp__github__create_issue: it would send the value of the secret ZETA (raw) to it."
   },
