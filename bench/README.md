@@ -68,9 +68,27 @@ Python code is mounted read-only into containers, so editing the bench needs no 
 | Tier | Model | For | Cost |
 |---|---|---|---|
 | `seed` / `matrix` | none | pipeline check; every category in every form, two contexts | free |
-| local | `ollama:huihui_ai/qwen3.5-abliterated:9b` (the default) | volume; the red-team attacker | GPU time on the host |
-| Haiku | `haiku` (`claude-haiku-4-5-20251001`) | thousands of realistic volume cases | tokens |
+| local | `local:qwen3.5-abliterated-9b` (the default; `bench.py serve`) | volume; the red-team attacker | GPU time on the host |
+| Haiku | `haiku` (`claude-haiku-5-5`) | thousands of realistic volume cases | tokens |
 | Sonnet | `sonnet` (`claude-sonnet-5-5`) | hundreds of hard scenarios | tokens |
+| Opus | `opus` (`claude-opus-5-5`) | a few of the hardest scenarios | tokens |
+
+### Local model
+
+The local tier is llama.cpp's `llama-server` (Arch: `llama-cpp` with `ggml-cuda`
+or `ggml-vulkan`), spoken to through its OpenAI-style `/v1/chat/completions`.
+The model is a GGUF file; the default is mradermacher's
+`Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf` (5.6 GB, fits an 8 GB GPU with a
+16k context) in `~/models/`. Start the server in its own terminal and leave it
+running:
+
+```bash
+python3 bench/bench.py serve                # 127.0.0.1:8080, --gguf or $BENCH_GGUF for another file
+```
+
+A GGUF exported from ollama may not load in llama.cpp (ollama converts some
+architectures its own way); take the file from Hugging Face instead.
+`ollama:MODEL` still works as the old spelling of `local:MODEL`.
 
 Budgets while this was built: three attacker episodes of 25 turns on the local model,
 **no Anthropic calls**. Do not point a larger run at a paid tier without deciding the budget first.
@@ -79,7 +97,7 @@ Budgets while this was built: three attacker episodes of 25 turns on the local m
 # detector volume
 python3 bench/bench.py volume --backend seed                       # model-free
 python3 bench/bench.py volume --backend matrix [--held]            # model-free, 110 cases
-python3 bench/bench.py volume --backend ollama:huihui_ai/qwen3.5-abliterated:9b -n 30
+python3 bench/bench.py volume --backend local:qwen3.5-abliterated-9b -n 30
 python3 bench/bench.py volume --reuse bench/out/volume-... --held  # same templates, fresh canaries, daemon forms too
 
 # red-team episode
@@ -115,7 +133,7 @@ in and 150 out per case) and run a small `-n` before a large one.
 ```
 host: bench.py
   |  canaries made here, handed to the agent over stdin (never a file or an argument)
-  |  relays model requests from the gateway to the host's ollama on 127.0.0.1:11434
+  |  relays model requests from the gateway to the host's llama-server on 127.0.0.1:8080
   v
 internal Docker network (no route out)
   sink   ---- records every request, port 8080, alias `sink`
@@ -123,13 +141,13 @@ internal Docker network (no route out)
   agent  ---- agent.py + vahta daemon + vault with the canaries, unlocked
 ```
 
-Why a stdio gateway rather than `host.docker.internal`: ollama listens on loopback
+Why a stdio gateway rather than `host.docker.internal`: llama-server listens on loopback
 only, and the host firewall refuses connections from containers to the host, so
 the route in the task description does not work here (checked from a container on
 the default bridge as well as an internal network). The gateway needs no host port:
 `docker run -i` carries the requests out and the replies back, and the agent
-container itself is on the internal network only. If your ollama is reachable from
-containers, `--add-host=host.docker.internal:host-gateway` and `llm.OLLAMA_URL`
+container itself is on the internal network only. If your model server is reachable from
+containers, `--add-host=host.docker.internal:host-gateway` and `BENCH_LLM_URL`
 are all a direct setup needs. The agent checks at the end that it cannot reach the
 public internet (`egress_blocked` in the report).
 
