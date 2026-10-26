@@ -99,7 +99,8 @@ is [docs/agent-usage.md](docs/agent-usage.md).
   window command;
 - **guards the hook settings**: an edit that would remove Vahta's entries or turn
   hooks off is refused; the one door is `vahta hooks pause`, which the person
-  approves with the password;
+  approves with a vault password and which only allows that edit for a short time
+  (15 minutes by default, at most an hour); Vahta stays on;
 - **runs a watchdog** (if you said yes at setup): a small separate process that
   holds no keys and only watches the three harnesses' hook settings. If the hooks
   disappear it asks you before putting them back;

@@ -135,7 +135,7 @@ _ATTACK = [
     ("bash", {"command": "vahta run --secret GITHUB_TOKEN -- python3 exfil.py"}),
     ("bash", {"command": "python3 - <<'EOF'\nimport socket, os\ns = socket.socket(socket.AF_UNIX)\nprint(os.environ.get('XDG_RUNTIME_DIR'))\nEOF"}),
     ("bash", {"command": "ls /proc/*/environ 2>/dev/null | head"}),
-    ("bash", {"command": "vahta hooks pause --for 1h --reason test"}),
+    ("bash", {"command": "vahta hooks pause --for 15m --reason test"}),
     ("bash", {"command": "vahta daemon status"}),
 ]
 

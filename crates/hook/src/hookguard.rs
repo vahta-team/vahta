@@ -18,7 +18,14 @@
 //! a command substitution is not followed. The real guard is the watchdog
 //! (`vahta _guard`), which notices the change afterwards and asks the person.
 //!
-//! The agent is told to ask the person with `vahta hooks pause`.
+//! The agent is told to ask the person with `vahta hooks pause`. While such a
+//! pause is running for the harness ([`edits_allowed`]) shell writes this guard
+//! cannot judge (`sed -i`, `tee`, a `>` redirect, `mv` or `cp` onto the file, a
+//! script that names it) are let through, since that is what the pause is for.
+//! An edit it can judge is still judged: one that removes our entries, leaves
+//! the file unreadable or adds `disableAllHooks` is refused, and so are `rm`,
+//! `truncate` and moving the file away. The watchdog also keeps watching. Every
+//! other check of the hook stays on.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +33,21 @@ use vahta_harness::{Event, Group, Manifest};
 use vahta_setup::Env;
 
 use crate::readguard::{self, Tok, is_assignment, normalise, resolved};
+
+/// Whether the person has let the agent change `harness`'s hook settings and
+/// the time has not run out (`pause.json` in Vahta's data directory, which
+/// only the daemon writes and the hook keeps agents out of). A pause of an
+/// older version (hooks taken out) does not count. Nothing readable is no.
+pub fn edits_allowed(harness: &str) -> bool {
+    let Ok(paths) = vahta_ipc::paths::Paths::from_env(None) else {
+        return false;
+    };
+    vahta_setup::guard::edits_allowed(
+        &vahta_setup::guard::read_pauses(&paths.data),
+        harness,
+        vahta_ipc::state::now(),
+    )
+}
 
 /// What was found: the file as written, and what the change would do.
 pub struct Tampering {
@@ -66,6 +88,8 @@ struct Target {
 }
 
 struct Watch {
+    /// The harness whose hook settings the person has let the agent change.
+    edits_for: Option<String>,
     manifests: Vec<Manifest>,
     env: Env,
     targets: Vec<Target>,
@@ -81,7 +105,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 impl Watch {
-    fn load() -> Option<Watch> {
+    fn load(harness: &str) -> Option<Watch> {
         let home = home_dir()?;
         let manifests: Vec<Manifest> = vahta_harness::HARNESSES
             .iter()
@@ -128,6 +152,7 @@ impl Watch {
             });
         }
         Some(Watch {
+            edits_for: edits_allowed(harness).then(|| harness.to_string()),
             manifests,
             env,
             targets,
@@ -147,6 +172,28 @@ impl Watch {
             }
         }
         readguard::resolve(given, cwd)
+    }
+
+    /// Whether a pause lets the agent write files of `kind` by a shell command
+    /// the guard cannot judge: the hook settings of the harness it was made
+    /// for, and nothing else (Vahta's own configuration and the administrator
+    /// policy stay guarded).
+    fn paused_for(&self, kind: Kind) -> bool {
+        let Some(h) = self.edits_for.as_deref() else {
+            return false;
+        };
+        match kind {
+            Kind::HookConfig(i) => self.manifests.get(i).is_some_and(|m| m.name == h),
+            Kind::ClaudeSettings => h == "claude",
+            Kind::CodexToml => h == "codex",
+            Kind::VahtaConfig | Kind::Managed => false,
+        }
+    }
+
+    /// What kind of watched file `path` is, if it is one and a shell command
+    /// that writes it is not let through by a pause.
+    fn kind_guarded(&self, path: &Path) -> Option<Kind> {
+        self.kind_of(path).filter(|k| !self.paused_for(*k))
     }
 
     /// What kind of watched file `path` is, if it is one.
@@ -436,7 +483,7 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
     let names_file = |text: &str| -> bool { names_watched_file(w, text) };
     for s in simple_commands(cmd) {
         for r in &s.redirects {
-            if w.kind_of(&w.expand(r, cwd)).is_some() {
+            if w.kind_guarded(&w.expand(r, cwd)).is_some() {
                 return Some(Tampering {
                     file: r.clone(),
                     what: "is a shell command that would write to a file that holds hooks".into(),
@@ -487,10 +534,16 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
             continue;
         }
         let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-        let check = |given: &str| -> Option<Kind> { w.kind_of(&w.expand(given, cwd)) };
+        let check = |given: &str| -> Option<Kind> { w.kind_guarded(&w.expand(given, cwd)) };
         if ANY_ARG.contains(&b.as_str()) {
-            for a in &paths {
-                if check(a).is_some() {
+            for (i, a) in paths.iter().enumerate() {
+                // Under a pause, `tee` onto the file and `mv` onto it (as the
+                // last argument) are the person's to allow; removing,
+                // truncating or moving it away is not.
+                let kind = w.kind_of(&w.expand(a, cwd));
+                let writes_it = b == "tee" || (b == "mv" && i + 1 == paths.len());
+                let let_through = writes_it && kind.is_some_and(|k| w.paused_for(k));
+                if kind.is_some() && !let_through {
                     return hit(a, "would change or remove a file that holds hooks");
                 }
                 if TAKES_DIR.contains(&b.as_str()) && w.above_watched(&w.expand(a, cwd)) {
@@ -523,7 +576,7 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
                 if tp.is_dir() {
                     for src in &sources {
                         if let Some(name) = Path::new(src).file_name()
-                            && w.kind_of(&tp.join(name)).is_some()
+                            && w.kind_guarded(&tp.join(name)).is_some()
                         {
                             return hit(src, "would overwrite a file that holds hooks");
                         }
@@ -572,7 +625,7 @@ fn names_watched_file(w: &Watch, lowered_text: &str) -> bool {
     let home = w.home.to_string_lossy().to_lowercase().replace('\\', "/");
     let text = lowered_text.replace('\\', "/");
     for t in &w.targets {
-        if t.kind == Kind::Managed {
+        if t.kind == Kind::Managed || w.paused_for(t.kind) {
             continue;
         }
         let abs = t.path.to_string_lossy().to_lowercase().replace('\\', "/");
@@ -613,7 +666,7 @@ fn mentions_a_marker(ev: &Event) -> bool {
 }
 
 /// The first thing in this tool call that would weaken Vahta's hooks.
-pub fn tampering(ev: &Event) -> Option<Tampering> {
+pub fn tampering(ev: &Event, harness: &str) -> Option<Tampering> {
     match ev.group {
         Some(Group::Write | Group::Shell) => {}
         _ => return None,
@@ -621,7 +674,7 @@ pub fn tampering(ev: &Event) -> Option<Tampering> {
     if !mentions_a_marker(ev) {
         return None;
     }
-    let w = Watch::load()?;
+    let w = Watch::load(harness)?;
     let cwd = ev.cwd.as_deref();
     if ev.group == Some(Group::Shell) {
         return shell_hit(&w, &ev.text, cwd, 0);
@@ -667,6 +720,7 @@ mod tests {
             }
         }
         Watch {
+            edits_for: None,
             manifests,
             env,
             targets,
@@ -730,5 +784,26 @@ mod tests {
         assert!(!turns_hooks_off("{\"disableAllHooks\": false}"));
         assert!(!turns_hooks_off("{\"permissions\": {\"allow\": []}}"));
         assert!(turns_hooks_off("{ disableAllHooks: true "));
+    }
+
+    #[test]
+    fn a_pause_frees_that_harness_settings_and_nothing_else() {
+        let mut w = watch(Path::new("/h"));
+        w.edits_for = Some("claude".to_string());
+        // Writes the guard cannot judge pass for Claude Code's files; the
+        // others are not let go, and neither is removing or truncating.
+        assert!(!hit(&w, "sed -i s/a/b/ ~/.claude/settings.json"));
+        assert!(!hit(&w, "jq . x > ~/.claude/settings.json"));
+        assert!(!hit(&w, "cat x | tee ~/.claude/settings.json"));
+        assert!(!hit(&w, "mv /tmp/x ~/.claude/settings.json"));
+        assert!(!hit(&w, "cp /tmp/x ~/.claude/settings.json"));
+        assert!(hit(&w, "rm ~/.claude/settings.json"));
+        assert!(hit(&w, "rm -rf ~/.claude"));
+        assert!(hit(&w, "truncate -s 0 ~/.claude/settings.json"));
+        assert!(hit(&w, "mv ~/.claude/settings.json /tmp/x"));
+        assert!(hit(&w, "rm ~/.cursor/hooks.json"));
+        assert!(hit(&w, "cp /tmp/x ~/.codex/hooks.json"));
+        w.edits_for = None;
+        assert!(hit(&w, "rm ~/.claude/settings.json"));
     }
 }

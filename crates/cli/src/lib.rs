@@ -132,7 +132,7 @@ commands:
   grant   let a member read a secret (`revoke` takes it back)
   share   make a package for a member, or send a secret to the owner
   join    install a package from the owner, or import a secret an editor sent
-  hooks   `hooks pause` turns Vahta's hooks off for a while (the person approves)
+  hooks   `hooks pause` lets an agent change the hook settings for a while (the person approves)
   output  `output allow REF`: ask to see what was cut from a tool's output
   scrub   `scrub --transcript`: take secrets out of your agent's transcript files
   init    create this project's vault

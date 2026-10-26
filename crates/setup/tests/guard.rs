@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use vahta_harness::{Manifest, manifest};
-use vahta_setup::guard::{self, Fix, Pause};
+use vahta_setup::guard::{self, Fix, Pause, PauseKind};
 use vahta_setup::{Action, Env, Os, commit, plan};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -231,6 +231,7 @@ fn a_paused_harness_is_not_watched_and_restore_puts_the_entries_back() {
         harness: "claude".into(),
         until: 200,
         reason: "r".into(),
+        kind: PauseKind::Off,
     };
     assert!(
         guard::check(
@@ -259,20 +260,68 @@ fn pauses_and_projects_round_trip_through_the_data_directory() {
         harness: "claude".into(),
         until: 5,
         reason: "why".into(),
+        kind: PauseKind::Edit,
     };
     guard::write_pauses(&t.data(), std::slice::from_ref(&p)).unwrap();
     assert_eq!(guard::read_pauses(&t.data()), vec![p.clone()]);
     assert!(guard::paused(std::slice::from_ref(&p), "claude", 4));
+    assert!(guard::edits_allowed(std::slice::from_ref(&p), "claude", 4));
+    assert!(!guard::edits_allowed(std::slice::from_ref(&p), "codex", 4));
+    assert!(!guard::edits_allowed(std::slice::from_ref(&p), "claude", 5));
     assert!(!guard::paused(&[p], "claude", 5));
+    // A pause with no kind (an older version's) means the hooks are out, and
+    // lets no edit through.
+    fs::write(
+        guard::pause_file(&t.data()),
+        r#"{"pauses":[{"harness":"claude","until":9,"reason":"old"}]}"#,
+    )
+    .unwrap();
+    let old = guard::read_pauses(&t.data());
+    assert_eq!(old[0].kind, PauseKind::Off);
+    assert!(guard::paused(&old, "claude", 4));
+    assert!(!guard::edits_allowed(&old, "claude", 4));
     guard::write_pauses(&t.data(), &[]).unwrap();
     assert!(!guard::pause_file(&t.data()).exists());
     fs::write(guard::pause_file(&t.data()), "not json").unwrap();
     assert!(guard::read_pauses(&t.data()).is_empty());
 
+    for name in ["a", "b"] {
+        let dir = t.0.join(name).join(".vahta");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("vault.vht"), b"v").unwrap();
+    }
     guard::note_project(&t.data(), &t.0.join("a"));
     guard::note_project(&t.data(), &t.0.join("a"));
     guard::note_project(&t.data(), &t.0.join("b"));
     assert_eq!(guard::read_projects(&t.data()).len(), 2);
+}
+
+#[test]
+fn a_project_whose_vault_is_gone_is_dropped_when_read_and_when_written() {
+    let t = Tree::new();
+    let vault = |name: &str| t.0.join(name).join(".vahta").join("vault.vht");
+    for name in ["a", "gone"] {
+        fs::create_dir_all(vault(name).parent().unwrap()).unwrap();
+        fs::write(vault(name), b"v").unwrap();
+    }
+    guard::note_project(&t.data(), &t.0.join("a"));
+    guard::note_project(&t.data(), &t.0.join("gone"));
+    assert_eq!(guard::read_projects(&t.data()).len(), 2);
+    fs::remove_file(vault("gone")).unwrap();
+    // Dropped when read, though the file still lists it ...
+    assert_eq!(guard::read_projects(&t.data()), vec![t.0.join("a")]);
+    assert!(
+        fs::read_to_string(t.data().join("projects.json"))
+            .unwrap()
+            .contains("gone")
+    );
+    // ... and gone from the file at the next write, even one that adds nothing.
+    guard::note_project(&t.data(), &t.0.join("a"));
+    assert!(
+        !fs::read_to_string(t.data().join("projects.json"))
+            .unwrap()
+            .contains("gone")
+    );
 }
 
 struct Recorder(std::cell::RefCell<Vec<String>>, bool);

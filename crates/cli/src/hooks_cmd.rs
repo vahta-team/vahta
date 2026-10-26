@@ -1,20 +1,22 @@
-//! `vahta hooks pause|resume|status`: the one way to turn Vahta's hooks off for
-//! a while.
+//! `vahta hooks pause|resume|status`: the one way for an agent to get a change
+//! to a harness's hook settings.
 //!
-//! An agent that needs a hook setting changed (the hook hook refuses it
-//! otherwise) runs `vahta hooks pause --for 1h --reason "..."`. The daemon
-//! opens a window that says what is being asked and the agent's reason, marked
-//! unverified, and needs the vault password. The hooks are then taken out of
-//! the harness configs, the pause is written to `pause.json` in Vahta's data
-//! directory (which the hook keeps agents out of), and the watchdog puts them
-//! back when the time is up (at most 8 hours). `resume` puts them back at once
+//! The hook guard refuses an agent's edit of the hook settings. An agent that
+//! must make one runs `vahta hooks pause --for 15m --reason "..."`. The daemon
+//! opens a window that says what is being allowed and for how long, the
+//! agent's reason (marked unverified) and whose vault password it wants. When
+//! the person agrees, the pause is written to `pause.json` in Vahta's data
+//! directory (which the hook keeps agents out of). Vahta's hooks stay in
+//! place and keep running: only the hook guard and the watchdog step aside for
+//! that harness until the time is up (at most 1 hour); then the watchdog looks
+//! again and asks the person about what it finds. `resume` ends a pause at once
 //! and needs no password: it only restores protection.
 
 use std::io::Write;
 
 use vahta_ipc::duration::{human, parse_secs};
 use vahta_ipc::protocol::ClientRequest;
-use vahta_setup::guard::{self, MAX_PAUSE_SECS};
+use vahta_setup::guard::{self, DEFAULT_PAUSE_SECS, MAX_PAUSE_SECS, PauseKind};
 
 use crate::daemon_cmd;
 use crate::{EXIT_CLEAN, EXIT_USAGE, Env};
@@ -24,24 +26,29 @@ usage: vahta hooks pause [--for DURATION] [--reason TEXT] [--harness NAME]...
        vahta hooks resume [--harness NAME]...
        vahta hooks status [--json]
 
-Turn Vahta's hooks off in the coding agents for a while, and back on.
+Let an agent change the hook settings of a coding agent for a while.
 
-  pause    take the hooks out for DURATION (default 1h, at most 8h). A window
-           shows the person the harnesses, the time and your reason (marked
-           unverified) and asks for the vault password. The hooks come back
-           by themselves when the time is up.
-  resume   put the hooks back now. No password.
-  status   say which hooks are paused and until when.
+  pause    allow changes to Vahta's hook settings for DURATION (default 15m,
+           at most 1h). A window shows the person the harnesses, the time and
+           your reason (marked unverified), and asks for the approval of a
+           vault it names. Vahta's hooks stay on and cannot be removed this
+           way: an edit that drops them or sets disableAllHooks is refused,
+           the watchdog puts them back at once if they go, and secrets,
+           protected files and the alarm are still watched. It applies to the
+           whole harness, not to one session.
+  resume   end a pause now. No password.
+  status   say which pauses are running and until when.
 
 options:
-  --for DURATION     how long (30m, 1h, 1h30m)
+  --for DURATION     how long (10m, 30m, 1h)
   --reason TEXT      why; shown to the person
   --harness NAME     claude, codex or cursor; repeat for several (default:
                      every harness that has Vahta's hooks)
   --json             machine-readable status
   -h, --help         show this help
 
-While the hooks are off, Vahta does not see what the agent does.
+A pause never removes Vahta's hooks. A change to Vahta's hook settings made
+without one is refused.
 ";
 
 pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
@@ -94,7 +101,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
     }
     match sub {
         Some("pause") => {
-            let secs = secs.unwrap_or(3600);
+            let secs = secs.unwrap_or(DEFAULT_PAUSE_SECS);
             if secs > MAX_PAUSE_SECS {
                 return usage_error(
                     stderr,
@@ -153,6 +160,10 @@ fn status(env: &Env, json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write)
                     "until": p.until,
                     "seconds_left": p.until - now,
                     "reason": p.reason,
+                    "allows": match p.kind {
+                        PauseKind::Edit => "hook_settings_edits",
+                        PauseKind::Off => "hooks_removed",
+                    },
                 })
             })
             .collect();
@@ -160,12 +171,16 @@ fn status(env: &Env, json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write)
         return EXIT_CLEAN;
     }
     if pauses.is_empty() {
-        let _ = writeln!(stdout, "no hooks are paused");
+        let _ = writeln!(stdout, "nothing is paused");
     }
     for p in &pauses {
+        let what = match p.kind {
+            PauseKind::Edit => "the agent may change the hook settings",
+            PauseKind::Off => "Vahta's hooks are out",
+        };
         let _ = writeln!(
             stdout,
-            "{}: paused, {} left{}",
+            "{}: paused, {what}, {} left{}",
             p.harness,
             human(p.until - now),
             if p.reason.is_empty() {

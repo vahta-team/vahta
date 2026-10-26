@@ -478,7 +478,8 @@ fn deny_hook_tamper(t: &hookguard::Tampering) -> Decision {
     let msg = format!(
         "vahta blocked a change to `{}`: it {}, and Vahta's hooks are what watch what agents do. \
          Changing hook settings goes through Vahta: ask the person with \
-         `vahta hooks pause --for 1h --reason \"...\"`.",
+         `vahta hooks pause --for 15m --reason \"...\"`. That lets you change the hook \
+         settings for that long; Vahta's hooks stay on and keep watching.",
         t.file, t.what
     );
     Decision::Deny {
@@ -573,7 +574,7 @@ fn before_tool(ev: &Event, explicit: bool, harness: &str) -> (Decision, Option<S
         let signal = Signal::VahtaFileTouch { path: file.clone() };
         return (deny_vahta_file(&file), Some(signal));
     }
-    if let Some(t) = hookguard::tampering(ev) {
+    if let Some(t) = hookguard::tampering(ev, harness) {
         let signal = Signal::HookTamper {
             file: t.file.clone(),
             what: t.what.clone(),
