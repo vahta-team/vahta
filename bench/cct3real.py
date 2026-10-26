@@ -87,8 +87,8 @@ def compact_rows(ep, dry):
             f"exit {sess.get('exit')}; {(sess.get('result') or {}).get('num_turns')} turn(s); session {'known' if sess.get('session_id') else 'unknown'}"),
     ]
     reads = sess.get("bash", [])
-    rows.append(row("R6", "the read came back redacted or refused (the model saw the label or a refusal, not the value)",
-                    bool(reads) and all(LABEL in b["head"] or ("hook" in b["head"].lower() and b["is_error"]) for b in reads),
+    rows.append(row("R6", "the read came back redacted or refused with a redacted copy (the model saw the label or a refusal, not the value)",
+                    bool(reads) and all(LABEL in b["head"] or b.get("label") or ("hook" in b["head"].lower() and b["is_error"]) for b in reads),
                     "; ".join(f"error={b['is_error']} {b['head'][:80]!r}" for b in reads) or "no tool result"))
     rows.append(row("R6", f"`claude -p {summ.get('compact_via', '--resume')} /compact` ran and ended without error",
                     bool(comp) and comp.get("exit") == 0 and not res.get("is_error"),
@@ -97,6 +97,9 @@ def compact_rows(ep, dry):
     rows.append(row("R6", "the transcript holds a compact summary record", bool(recs), f"{[(r['kind'], r['chars']) for r in recs] or 'none'}"))
     rows.append(row("R6", "... and no canary form is in it", bool(recs) and not any(r["canary"] for r in recs),
                     str([r["canary"] for r in recs if r["canary"]] or "none")))
+    nxt = runs.get("after-compact", {})
+    rows.append(row("R6", "a turn after the compact ran on the same session", nxt.get("exit") == 0 and nxt.get("session_id") == sess.get("session_id"),
+                    f"exit {nxt.get('exit')}; {(nxt.get('result') or {}).get('num_turns')} turn(s)"))
     rows.append(scan_row(ep, "R6", dry))
     return rows + cct3.disk_rows(ep, "R6")
 

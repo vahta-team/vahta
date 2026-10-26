@@ -136,6 +136,34 @@ the result still matters, use observe mode, or one rewriting hook per event.
 | Cursor | MCP tools only | `updated_mcp_tool_output`. Cursor has no rewrite for its own tools (Shell, Read): there a secret gets the old notice instead. |
 | Codex | Bash, apply_patch, MCP tools (the matcher) | `decision: "block"` with the cut output, then the message for the model, as the reason. |
 
+### Read of a file holding a secret (Claude Code)
+
+Claude Code remembers the files its Read tool returned. After `/compact` (or
+auto-compact) version 2.1.309 reads those files again from disk and adds them to
+the transcript as `attachment` records; no hook runs for that, and the next
+request to the model carries what the files hold now. Cutting a value out of
+the Read result is therefore not enough for a file that holds one.
+
+So the PreToolUse hook for Read looks at the file itself, the lines the call
+asks for (`offset`, `limit`; 2000 lines by default, as Read does). It cuts what
+the PostToolUse redaction would cut: the values Vahta holds, in every form it
+knows, and the secret-like keys the detector finds. If nothing is cut the call
+runs as before. If something is, the call is refused, and the reason holds a
+short line (the file holds a secret, with its name or kind; the copy has each
+value replaced by `***REDACTED(...)***`; Claude Code's Edit tool will not work
+on the file because it was not read; change it through `vahta` or ask the
+person) followed by the copy, numbered the way Read numbers lines. A refused
+call is not remembered as read, so nothing is restored after a compact. A copy
+over 64 KiB or 2000 lines gets a plain refusal, which suggests `offset` and
+`limit`. Images, PDF, notebooks, files with a NUL byte and files over 32 MiB are
+left to the other checks. In observe mode the Read is not refused.
+
+The session is marked for the transcript cleanup when this refusal happens,
+and when a session starts with the source `compact`. The PostToolUse
+redaction of Read stays as a second line for a file that changes between the
+two hooks. Cursor and Codex have no Read tool with a hook that can hand back a
+copy, so they are unchanged.
+
 ### What was checked, per tool
 
 Claude Code 2.1.286, live, with the real hooks and a mock model (no token):
@@ -149,7 +177,7 @@ back to the model.
 |---|---|
 | Bash (`cat`, a script) | redacted by the hook |
 | Bash under `vahta run` | already cut by `vahta run` itself; the hook sees nothing |
-| Read, Grep (content) | redacted by the hook |
+| Read, Grep (content) | redacted by the hook; for Read, see "Read of a file holding a secret" below |
 | MCP tool (stdio server) | redacted by the hook (`updatedMCPToolOutput`) |
 | Read, Grep, `cat` of a file holding an inline credential | refused before running (PreToolUse) |
 | Edit, Write | the result carries no file content in this version; not in the matcher |

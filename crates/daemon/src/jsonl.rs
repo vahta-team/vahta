@@ -658,6 +658,56 @@ mod tests {
     }
 
     #[test]
+    fn the_restored_file_and_the_request_blob_records_are_cleaned() {
+        let value = ["fake", "-restored-", "4455667"].concat();
+        let c = cleaner("TOKEN", &value);
+        let content = format!("     1\tpassword = {value}\n     2\tdone");
+        let attachment = serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "file",
+                "filename": "/work/app.conf",
+                "content": {"type": "text", "file": {
+                    "filePath": "/work/app.conf",
+                    "content": content,
+                    "numLines": 2, "startLine": 1, "totalLines": 2
+                }}
+            },
+            "rendered": [{"type": "text", "content": content}]
+        })
+        .to_string();
+        let (out, t) = run(&c, &attachment);
+        let out = out.unwrap();
+        assert_eq!(t.values, 2);
+        assert!(!out.contains(&value), "{out}");
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let file = &doc["attachment"]["content"]["file"];
+        assert!(
+            file["content"]
+                .as_str()
+                .unwrap()
+                .contains("REDACTED(TOKEN)")
+        );
+        assert!(
+            doc["rendered"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("REDACTED(TOKEN)")
+        );
+        assert_eq!(file["numLines"], 2);
+        let blob = serde_json::json!({
+            "type": "api-request-blob",
+            "blob": format!("{{\"messages\":[{{\"role\":\"user\",\"content\":\"{value}\"}}]}}")
+        })
+        .to_string();
+        let (out, t) = run(&c, &blob);
+        let out = out.unwrap();
+        assert_eq!(t.values, 1);
+        assert!(!out.contains(&value), "{out}");
+        assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
+    }
+
+    #[test]
     fn keys_and_unterminated_lines_and_crlf() {
         let value = ["fake", "-key-", "abcdef"].concat();
         let c = cleaner("K", &value);

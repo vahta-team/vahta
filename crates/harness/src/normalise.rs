@@ -17,6 +17,12 @@ pub struct Event {
     /// before_tool: the file a write tool is about, when the harness names it.
     pub path: Option<String>,
     pub content: Option<String>,
+    /// before_read: the first line (1-based) and the number of lines the call
+    /// asks for, when it gives them.
+    pub read_offset: Option<u64>,
+    pub read_limit: Option<u64>,
+    /// session_start: why the session began, as the harness says it.
+    pub source: Option<String>,
     pub cwd: Option<String>,
     /// The harness's id for the session, when the payload has one.
     pub session_id: Option<String>,
@@ -165,6 +171,15 @@ fn text_field(payload: &Value, paths: &Option<OneOrMany>) -> Option<String> {
     }
 }
 
+/// A whole number at `paths`, as an integer or as digits in a string.
+fn uint_field(payload: &Value, paths: &Option<OneOrMany>) -> Option<u64> {
+    match field(payload, paths)? {
+        Value::Int(digits) => digits.parse().ok(),
+        Value::Str(s) => strip(s).parse().ok(),
+        _ => None,
+    }
+}
+
 /// Python's `str(x or "")` for a tool name: falsy values are "no name", any
 /// other non-string is a name no manifest knows.
 fn tool_name(payload: &Value, spec: &EventSpec) -> String {
@@ -294,8 +309,11 @@ impl Manifest {
                 }
                 ev.path = text_field(payload, &spec.file_path);
                 ev.content = text_field(payload, &spec.content);
+                ev.read_offset = uint_field(payload, &spec.offset);
+                ev.read_limit = uint_field(payload, &spec.limit);
             }
-            Kind::SessionStart | Kind::SessionEnd => {}
+            Kind::SessionStart => ev.source = text_field(payload, &spec.source),
+            Kind::SessionEnd => {}
             Kind::Prompt => ev.text = text_field(payload, &spec.prompt)?,
             Kind::AfterTool => {
                 ev.tool = tool_name(payload, spec);

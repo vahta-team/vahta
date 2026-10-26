@@ -119,12 +119,17 @@ kind = "before_read"
 matcher = "Read|Grep"
 tool_name = "tool_name"
 file_path = ["tool_input.file_path", "tool_input.path"]
+# Read's own window onto the file, for the redacted copy in a refusal.
+offset = "tool_input.offset"
+limit = "tool_input.limit"
 cwd = "cwd"
 session_id = "session_id"
 
 [[events]]
 name = "SessionStart"
 kind = "session_start"
+# `compact` after /compact: Claude Code then restores the files it had read.
+source = "source"
 # Registered from v1 so that a later, outdated setup has a channel to say so.
 cwd = "cwd"
 session_id = "session_id"
