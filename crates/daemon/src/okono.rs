@@ -18,6 +18,10 @@
 //! at most 16 KiB. The daemon sends zero or more event lines (ignored) and then
 //! one final line, `ok` with the value (64 hex characters) or an error with a code. Closing the
 //! connection is how okono is told to cancel.
+//!
+//! okono runs on Linux only. Elsewhere the exchange answers `unsupported` and
+//! the wire code below is kept, compiled and unit-tested, but not called.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
