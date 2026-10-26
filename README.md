@@ -32,9 +32,10 @@ cd vahta
 scripts/install-local.sh
 ```
 
-This builds `vahta`, `vh` (the same program under a short name) and `vahta-hook`,
-and copies them into `~/.local/bin` (or `$XDG_BIN_HOME`; `--prefix DIR` picks
-another). Make sure that directory is on your `PATH`. `scripts/install-local.sh
+This builds `vahta` and `vahta-hook`, copies them into `~/.local/bin` (or
+`$XDG_BIN_HOME`; `--prefix DIR` picks another) with `vh`, the short name, as a
+link to `vahta`, and restarts a running daemon and hook watchdog on the new
+binary. Make sure that directory is on your `PATH`. `scripts/install-local.sh
 --uninstall` removes them again.
 
 Then register the hook with the coding agents on the machine:
