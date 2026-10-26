@@ -21,7 +21,7 @@ RUN cargo build --release --locked -p vahta-cli -p vahta-hook \
 # is a thin wrapper around a native binary, which is all the runtime image keeps:
 # the image needs no Node. Used only by the `claude-code` red-team mode.
 FROM node:22-bookworm-slim AS claude
-ARG CLAUDE_CODE_VERSION=2.1.286
+ARG CLAUDE_CODE_VERSION=2.1.309
 RUN npm install -g --no-audit --no-fund @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
     && mkdir /out \
     && cp "$(readlink -f /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe)" /out/claude \

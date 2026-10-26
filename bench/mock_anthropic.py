@@ -9,6 +9,10 @@ Environment:
   MOCK_LOG      where to append request records (default /out/mock.jsonl)
   MOCK_ECHO    if set: a request with no tools (WebFetch's helper call) is answered with the text of its
                 last user message, so a fetched page comes back as the tool's result
+  MOCK_CANARIES JSON {name: value} (cc-t3): a script input may hold @@NAME@@ (the value), @@NAME:b64@@ or
+                @@NAME:hex@@, and @@REF@@ (the reference in the newest refusal, for `vahta allow REF`)
+  MOCK_BODIES   if set: where to append, per request, what the model is shown besides its own turns:
+                {"system", "user"} (the system prompt and every user message, tool results included)
   MOCK_RESULTS  if set: where to append the tool_result blocks each request carries
                 (the newest user message only), as {"id", "is_error", "text"} lines.
                 This is what the model would have been shown.
@@ -17,14 +21,18 @@ It answers POST /v1/messages (streaming or not) and /v1/messages/count_tokens;
 every other path gets 404 (and is recorded, which shows what a client asks for).
 """
 
+import base64
 import http.server
 import json
 import os
+import re
 import time
 
 LOG = os.environ.get("MOCK_LOG", "/out/mock.jsonl")
 SCRIPT = json.loads(os.environ.get("MOCK_SCRIPT") or "[]")
 RESULTS = os.environ.get("MOCK_RESULTS")
+BODIES = os.environ.get("MOCK_BODIES")
+CANARIES = json.loads(os.environ.get("MOCK_CANARIES") or "{}")
 ECHO = bool(os.environ.get("MOCK_ECHO"))
 KEEP = ("cookie", "x-forwarded-for", "authorization", "x-api-key", "anthropic-beta", "anthropic-version", "user-agent", "content-type", "host")
 
@@ -46,14 +54,46 @@ def _text(content):
 
 def record_results(body):
     """Append the tool results of the newest user message (each arrives once as new)."""
-    msgs = body.get("messages", [])
-    if not RESULTS or not msgs or msgs[-1].get("role") != "user" or not isinstance(msgs[-1].get("content"), list):
+    # The newest user message, not the last message: Claude Code 2.1.309 may end
+    # a request with a turn of its own after the tool results.
+    users = [m for m in body.get("messages", []) if m.get("role") == "user"]
+    if not RESULTS or not users or not isinstance(users[-1].get("content"), list):
         return
     with open(RESULTS, "a") as f:
-        for b in msgs[-1]["content"]:
+        for b in users[-1]["content"]:
             if b.get("type") == "tool_result":
                 f.write(json.dumps({"id": b.get("tool_use_id"), "is_error": bool(b.get("is_error")),
                                     "text": _text(b.get("content"))}) + "\n")
+
+
+def record_bodies(body):
+    """What the model is shown: the system prompt and the user turns (prompts and tool results), not its own turns."""
+    if BODIES:
+        users = [m for m in body.get("messages", []) if m.get("role") == "user"]
+        with open(BODIES, "a") as f:
+            f.write(json.dumps({"system": body.get("system"), "user": users}) + "\n")
+
+
+def _fill_str(text, body):
+    """@@NAME@@ and friends in a scripted input (see MOCK_CANARIES)."""
+    def sub(m):
+        name, enc = m.group(1), m.group(2)
+        if name == "REF":
+            last = [t for t in re.findall(r"vahta allow (\S+)", _last_user_text(body))]
+            return last[-1] if last else "NOREF"
+        raw = CANARIES.get(name, "").encode()
+        return {None: raw.decode(), "b64": base64.b64encode(raw).decode(), "hex": raw.hex()}[enc]
+    return re.sub(r"@@([A-Z_0-9]+)(?::(b64|hex))?@@", sub, text)
+
+
+def _fill(v, body):
+    if isinstance(v, str):
+        return _fill_str(v, body)
+    if isinstance(v, dict):
+        return {k: _fill(x, body) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_fill(x, body) for x in v]
+    return v
 
 
 def _last_user_text(body):
@@ -71,7 +111,7 @@ def reply_blocks(body):
     done = sum(1 for b in _blocks(body.get("messages", [])) if b.get("type") == "tool_result")
     if done < len(SCRIPT):
         call = SCRIPT[done]
-        return [{"type": "tool_use", "id": f"toolu_mock{done:04d}", "name": call["name"], "input": call["input"]}], "tool_use"
+        return [{"type": "tool_use", "id": f"toolu_mock{done:04d}", "name": call["name"], "input": _fill(call["input"], body)}], "tool_use"
     return [{"type": "text", "text": "mock: finished"}], "end_turn"
 
 
@@ -99,6 +139,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command == "POST" and path == "/v1/messages":
             body = json.loads(raw or b"{}")
             record_results(body)
+            record_bodies(body)
             blocks, stop = reply_blocks(body)
             self._record(n, {"stream": bool(body.get("stream")), "model": body.get("model"),
                              "has_tools": bool(body.get("tools")), "reply": [b["type"] for b in blocks]})

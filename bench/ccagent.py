@@ -47,7 +47,7 @@ def seed_claude(auth: str):
     os.makedirs(os.path.join(HOME, ".claude"), exist_ok=True)
     state = {
         "hasCompletedOnboarding": True,
-        "lastOnboardingVersion": "2.1.286",
+        "lastOnboardingVersion": "2.1.309",
         "numStartups": 10,
         "theme": "dark",
         "projects": {PROJECT: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True,

@@ -227,7 +227,7 @@ def e2e(scenario="ci_check"):
 REDACT_SCRIPT = [
     ("Bash vahta run (token)", {"name": "Bash", "input": {"command": "vahta run --secret GITHUB_TOKEN -- printenv GITHUB_TOKEN"}}),
     ("Bash vahta run (db password)", {"name": "Bash", "input": {"command": "vahta run --secret DATABASE_PASSWORD -- printenv DATABASE_PASSWORD"}}),
-    ("Bash vahta run (stderr)", {"name": "Bash", "input": {"command": "vahta run --secret GITHUB_TOKEN -- sh -c 'printenv GITHUB_TOKEN 1>&2'"}}),
+    ("Bash vahta run (stderr)", {"name": "Bash", "input": {"command": "vahta run --secret GITHUB_TOKEN -- python3 -c 'import os,sys; sys.stderr.write(os.environ[\"GITHUB_TOKEN\"])'"}}),
     ("Bash cat file (inline)", {"name": "Bash", "input": {"command": "cat /work/proj/leak.txt"}}),
     ("Bash cat file (bare value)", {"name": "Bash", "input": {"command": "cat /work/proj/bare.txt"}}),
     ("Bash script reads file", {"name": "Bash", "input": {"command": "python3 /work/proj/show.py"}}),

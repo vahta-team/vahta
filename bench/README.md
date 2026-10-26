@@ -34,6 +34,7 @@ Python 3 standard library only; Docker for everything that touches Vahta.
 | `techniques.py` | Coarse classifier of tool calls into attack techniques (attacker mode) |
 | `ccagent.py`, `authproxy.py` | Real Claude Code in the container; the proxy that holds the credential so the container never does |
 | `cctest.py`, `mock_anthropic.py` | Checks for the Claude Code mode against a mock API, no credential needed |
+| `cct3.py`, `cct3agent.py` | `cc-t3`: the T3 live-check round against the mock (host: cases and verdicts; container: the stage) |
 | `sink.py`, `gw.py`, `curl.py` | The sink; the model gateway; a small `curl` for the slim image |
 | `hookcall.py`, `vaultsetup.py`, `llm.py` | Claude Code payloads to `vahta-hook`; vault and session setup in a container; model clients |
 | `docker/Dockerfile` | Builds Vahta from this checkout, then a slim runtime image |
@@ -255,7 +256,7 @@ probe samples the container for the (random, fake) credential. About 10 seconds,
 check: that the real API accepts what the proxy sends, that Claude Code makes no other request the allowlist refuses
 on a real login, and what Haiku does.
 
-`python3 bench/bench.py cc-redact` is the same container without the proxy checks: real Claude Code and hooks, a
+`python3 bench/bench.py cc-redact` (28 checks) is the same container without the proxy checks: real Claude Code and hooks, a
 mock model that issues one scripted tool call per turn (Bash, Read, Grep, an MCP tool from `mcp_leak.py`, Edit) on
 files and vault values holding canaries, and the mock records every `tool_result` Claude Code sends back
 (`mock/results.jsonl`, MOCK_RESULTS). The check is on what the model would be shown: no canary in any form, and the
@@ -263,6 +264,50 @@ redaction label present (or the call refused before running). Per-tool verdicts 
 `CC_REDACT_CAPTURE=1` the hooks run through `hooktee.py`, which copies each payload and answer to
 `agent/hook-capture.jsonl` (real tool_response shapes, for fixtures; holds canaries). Delete the run directory
 afterwards: the repository guard scans `bench/out`.
+
+### `cc-t3`: the live-check round against the mock
+
+```bash
+python3 bench/bench.py cc-t3                      # about 2 minutes; --only redact,mcp,paste,allow for part of it
+```
+
+Real Claude Code and real hooks and daemon in the bench container, a mock playing the model, no token and no
+network. It prints the Claude Code version, runs five containers and a PASS/FAIL row per check, and writes
+`bench/out/cctest-t3-*/report.json` (case, name, verdict, note: names and forms, never a value). The mock
+(`mock_anthropic.py`) gained `MOCK_BODIES` (what the model was shown per request: system prompt, user turns, tool
+results, not its own turns) and `MOCK_CANARIES` (a scripted input may hold `@@NAME@@`, `@@NAME:b64@@`, `@@NAME:hex@@`
+and `@@REF@@`, the reference in the last refusal, so a scripted agent can run `vahta allow REF`). The canaries reach
+the mock by environment name, as the token does, not on a command line.
+
+| Case | Episode | What is checked |
+|---|---|---|
+| 1 | `redact` (= `cc-redact`) | each tool's output is redacted or blocked; two stale scripts fixed (below) |
+| 2 | `mcp` | `vahta init --connector`, a connector holding a canary, `--harness claude --allow 'python3 /bench/mcp/fake_server.py'`; Claude Code's MCP config starts the server through `vahta run --connector`. The mock calls `env_echo` in raw, base64, hex, url, reversed, json and split encodings, and `dribble` (byte and split). No canary form in any result; one scripted connectors-password window, whose session `vahta sessions` shows as claude's own |
+| 3 | `mcpin` | the mock writes a connector key (raw, base64) and a project secret into an MCP `echo` input. Verdict per call: refused before running, redacted, or passed |
+| 4 | `paste` | `claude -p` with a prompt that carries a canary, window answered "Do nothing" (a detected key, then a held value) and "Save to vault as NAME"; the model never receives it; with "save" the next message carries the name and not the value |
+| 5 | all | after every episode, the container scans `~/.claude` (projects/*.jsonl, history.jsonl, the rest), `~/.claude.json` and the journal for every canary form, again for 20 s if something is there (the cleaner runs at SessionEnd), then tries `vahta scrub --transcript --all` |
+| 6 | `allow` | a QML-like false positive (built from pieces) is refused with a reference, `vahta allow REF` is answered "False alarm - let it through once", the unchanged retry passes, a second is refused; a real-looking key: answered "save as NAME", the agent gets the name only, the call stays refused |
+
+Every episode also checks the whole of `bodies.jsonl`: no canary in anything the model was shown.
+
+Notes on reading it:
+
+* The mock is a model that already knows a value (cases 3 and 6 put a canary into a tool input). Claude Code writes
+  that tool_use block to the transcript whether or not the hook refuses the call, so those episodes' disk row asks
+  that the canary sit only in the model's own tool_use blocks and that `vahta scrub` remove it. The `paste` episode
+  has no such excuse: its prompt reached the harness, not the model.
+* `claude -p` does not write `history.jsonl`; the history cleaner is only exercised by an interactive session.
+* A `split` MCP result (half in a notification, half in the result) passes the second half: documented in
+  docs/connectors.md, "What this does not protect against". The row says so.
+* The each-use secret `GITHUB_TOKEN` (a publishing token) opens a password window on every `vahta run`;
+  `cc-redact` moves it to category `ordinary` with `printenv` and `python3` (`vaultsetup.rebind`) and scripts the two
+  passwords it needs. The stderr case runs `python3 -c` without a shell, because `@shells` is always denied there.
+
+TODO, `--real`: the same cases with Claude Haiku instead of the mock (token through `vahta run`, as for
+`redteam --model claude-code`), plus what the mock cannot do: the `/compact` summary (does it keep a value the model saw?)
+and the auto-mode classifier (A7). The hook points: `cct3.episode()` runs one container with `run_episode_cc`; for a
+real run it would take the credential path of `redteam.run_episode_cc` (no `test_upstream`, no `mock_script`), and
+`cct3agent.py` would pass the case's prompt instead of "run the scripted checks". Nothing in `cc-t3` calls a real API.
 
 Not covered: Claude Code's own telemetry hosts (they fail on the closed network, and
 `DISABLE_TELEMETRY` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are set); the model's context is itself an

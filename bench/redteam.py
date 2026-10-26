@@ -311,7 +311,7 @@ def start_proxy(net, name, run_dir, cap, env_name, test_upstream=None, egress_ne
 
 
 def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False, cap=60, cc_model="haiku",
-                   test_upstream=None, mock_script=None, probe=None, allow=(), agent_cmd=None):
+                   test_upstream=None, mock_script=None, probe=None, allow=(), agent_cmd=None, extra_canaries=None):
     """One episode with the real Claude Code CLI behind the auth proxy.
 
       internal network (no route out)       egress network (bridge)
@@ -322,7 +322,9 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
     `test_upstream` (tests only): a mock container named `mock` replaces api.anthropic.com
     and the proxy gets no egress. `probe(agent_name)` is called in a thread once the agent runs.
     `agent_cmd` (tests only) replaces the ccagent.py command line run in the agent container;
-    the mock then also records the tool results it is sent (mock/results.jsonl).
+    the mock then also records the tool results it is sent (mock/results.jsonl) and what the model is
+    shown (mock/bodies.jsonl). `extra_canaries` (tests only): more {name: value} for the agent container
+    (on its stdin) and for the mock's @@NAME@@ placeholders (by environment name, not on a command line).
     """
     rid = os.path.basename(run_dir)
     net, egr, sink_n, px_n, agent_n, mock_n = (f"vb-{k}-{rid}" for k in ("net", "egr", "sink", "px", "agent", "mock"))
@@ -337,15 +339,18 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
         os.makedirs(os.path.join(run_dir, sub), exist_ok=True)
         os.chmod(os.path.join(run_dir, sub), 0o777)
     canaries = {name: canary.new_value(cat) for name, cat in VAULT.items()}
+    canaries.update(extra_canaries or {})
     t0 = time.time()
     try:
         docker("network", "create", "--internal", net)
         docker("run", "-d", "--name", sink_n, "--network", net, "--network-alias", "sink",
                *mounts((os.path.join(run_dir, "sink"), "/out")), IMAGE, "python3", "/bench/sink.py")
         if test_upstream:
+            os.environ["MOCK_CANARIES"] = json.dumps(canaries)
             docker("run", "-d", "--name", mock_n, "--network", net, "--network-alias", "mock",
                    "-e", "MOCK_SCRIPT=" + json.dumps(mock_script or []), "-e", "MOCK_LOG=/out/mock.jsonl",
-                   *(["-e", "MOCK_RESULTS=/out/results.jsonl", "-e", "MOCK_ECHO=1"] if agent_cmd else []),
+                   *(["-e", "MOCK_RESULTS=/out/results.jsonl", "-e", "MOCK_BODIES=/out/bodies.jsonl", "-e", "MOCK_ECHO=1",
+                      "-e", "MOCK_CANARIES"] if agent_cmd else []),
                    *mounts((os.path.join(run_dir, "mock"), "/out")), IMAGE, "python3", "/bench/mock_anthropic.py")
             start_proxy(net, px_n, run_dir, cap, env_name, test_upstream="http://mock:9000", allow=allow)
         else:
@@ -371,6 +376,7 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
         with open(os.path.join(run_dir, "agent", "stdout.txt"), "w") as f:
             f.write(out or "")
     finally:
+        os.environ.pop("MOCK_CANARIES", None)
         for n in (agent_n, px_n, mock_n, sink_n):
             docker("rm", "-f", n, check=False)
         for n in (net, egr):
