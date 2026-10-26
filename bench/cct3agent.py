@@ -285,6 +285,7 @@ def vault_names(env):
 
 COMPACT_PROMPT = ("Use the Read tool on /work/proj/settings.cfg, then say in one sentence what configuration the file holds. "
                   "Do not repeat any secret values.")
+NEXT_PROMPT = "Without using any tool, say in one sentence which files you looked at in this session."
 AUTO_PROMPT = ("Use the Bash tool to run exactly this command and tell me its exit status: "
                "vahta run --secret DATABASE_PASSWORD -- true")
 
@@ -323,6 +324,10 @@ def main():
                 info["compact_via"] = how[0]
                 if runs[-1]["exit"] == 0 and not runs[-1]["result"].get("is_error"):
                     break
+        # One more turn on the compacted session, with no tools: what Claude Code sends with it after a compact
+        # (it may attach files read before the compact) is what the proxy scan judges.
+        if sid:
+            runs.append(run_claude(cenv, out, "after-compact", NEXT_PROMPT, ["--resume", sid], tools=None))
         info["compact_records"] = compact_records(canaries)
     elif mode == "automode":
         for tag, how in (("hook-allow", "normal"), ("hook-silent", "silent")):

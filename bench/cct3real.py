@@ -97,6 +97,9 @@ def compact_rows(ep, dry):
     rows.append(row("R6", "the transcript holds a compact summary record", bool(recs), f"{[(r['kind'], r['chars']) for r in recs] or 'none'}"))
     rows.append(row("R6", "... and no canary form is in it", bool(recs) and not any(r["canary"] for r in recs),
                     str([r["canary"] for r in recs if r["canary"]] or "none")))
+    nxt = runs.get("after-compact", {})
+    rows.append(row("R6", "a turn after the compact ran on the same session", nxt.get("exit") == 0 and nxt.get("session_id") == sess.get("session_id"),
+                    f"exit {nxt.get('exit')}; {(nxt.get('result') or {}).get('num_turns')} turn(s)"))
     rows.append(scan_row(ep, "R6", dry))
     return rows + cct3.disk_rows(ep, "R6")
 
