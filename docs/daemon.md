@@ -930,7 +930,8 @@ does not open at all.
   answered.
 * The journal records `device_paired`, `device_extended`, `device_revoked`,
   `device_lost_rekey`, `device_unlock`, `device_approve`, `rekey`, `recover` and
-  `owner_key_change`,
+  `owner_key_change`, and `okono` (the connectors vault opened, or not, by okono,
+  with okono's error code),
   with the device's id and name, never a key, a password or a recovery key.
 
 ## Injection alarm
