@@ -67,9 +67,9 @@ def record_results(body):
 
 
 def record_bodies(body):
-    """What the model is shown: the system prompt and the user turns (prompts and tool results), not its own turns."""
+    """What the model is shown: the system prompt and every turn but its own (prompts, tool results, system turns)."""
     if BODIES:
-        users = [m for m in body.get("messages", []) if m.get("role") == "user"]
+        users = [m for m in body.get("messages", []) if m.get("role") != "assistant"]  # 2.1.309 sends hook context as role "system"
         with open(BODIES, "a") as f:
             f.write(json.dumps({"system": body.get("system"), "user": users}) + "\n")
 

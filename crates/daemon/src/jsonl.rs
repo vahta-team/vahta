@@ -632,6 +632,32 @@ mod tests {
     }
 
     #[test]
+    fn the_records_claude_code_writes_for_a_prompt_are_cleaned() {
+        let value = ["fake", "-prompt-", "9876543"].concat();
+        let c = cleaner("TOKEN", &value);
+        let queue = format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","content":"key {value} here"}}"#
+        );
+        let info = format!(
+            r#"{{"type":"system","subtype":"informational","content":"stopped: {value}\n"}}"#
+        );
+        for (line, field) in [(queue, "content"), (info, "content")] {
+            let (out, t) = run(&c, &line);
+            let out = out.unwrap();
+            assert_eq!(t.values, 1);
+            assert!(!out.contains(&value), "{out}");
+            let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert!(doc[field].as_str().unwrap().contains("REDACTED(TOKEN)"));
+        }
+        // A detector find is cut with no value held.
+        let key = ["sk-", "ant-", &"q".repeat(25)].concat();
+        let line = format!(r#"{{"type":"queue-operation","content":"{key}"}}"#);
+        let (out, t) = run(&cleaner("OTHER", "unrelated-value"), &line);
+        assert!(!out.unwrap().contains(&key));
+        assert_eq!(t.patterns, 1);
+    }
+
+    #[test]
     fn keys_and_unterminated_lines_and_crlf() {
         let value = ["fake", "-key-", "abcdef"].concat();
         let c = cleaner("K", &value);

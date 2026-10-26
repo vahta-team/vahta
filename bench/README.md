@@ -296,6 +296,10 @@ Notes on reading it:
   that tool_use block to the transcript whether or not the hook refuses the call, so those episodes' disk row asks
   that the canary sit only in the model's own tool_use blocks and that `vahta scrub` remove it. The `paste` episode
   has no such excuse: its prompt reached the harness, not the model.
+* To see what a hook printed and what Claude Code wrote, `touch bench/.hooklog` before a run (remove it after): the
+  hooks' stdout goes to `hook-stdout.log` and the transcripts to `tr-*.jsonl` in the episode's `agent/` folder. Local
+  only; the transcripts are the cleaned ones. Claude Code 2.1.309 sends a hook's `additionalContext` as a turn with the
+  role `system`, so `MOCK_BODIES` records every turn but the model's own.
 * `claude -p` does not write `history.jsonl`; the history cleaner is only exercised by an interactive session.
 * A `split` MCP result (half in a notification, half in the result) passes the second half: documented in
   docs/connectors.md, "What this does not protect against". The row says so.

@@ -142,6 +142,8 @@ def stage(mode, canaries, out):
     env = vaultsetup.setup(PROJECT, {k: v for k, v in canaries.items() if k in ("AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN",
                                                                                "STRIPE_API_KEY", "DATABASE_PASSWORD")})
     ccagent.seed_claude("oauth")
+    if os.path.exists("/bench/.hooklog"):  # debugging aid: what each hook printed, to /out/hook-stdout.log
+        wrap_hooks(out)
     info = {}
     if mode == "mcp":
         pw = setup_connector(canaries, "MCP_TOKEN")
@@ -157,6 +159,25 @@ def stage(mode, canaries, out):
     elif mode == "allow":
         info["extra"] = []
     return env, info
+
+
+def wrap_hooks(out):
+    """Bench only: every hook command also writes its stdout to /out/hook-stdout.log (tagged by event)."""
+    path = os.path.join(CLAUDE_DIR, "settings.json")
+    cfg = json.load(open(path))
+    for ev, blocks in cfg.get("hooks", {}).items():
+        for blk in blocks:
+            for h in blk.get("hooks", []):
+                h["command"] = f"sh -c '{h['command']} | tee -a {out}/hook-stdout.log'"
+    json.dump(cfg, open(path, "w"))
+
+
+def copy_transcripts(out):
+    """Bench only (with /bench/.hooklog): the transcripts left in HOME, for reading what Claude Code wrote."""
+    if os.path.exists("/bench/.hooklog"):
+        for d, _, ns in os.walk(os.path.join(CLAUDE_DIR, "projects")):
+            for n in ns:
+                shutil.copy(os.path.join(d, n), os.path.join(out, "tr-" + n))
 
 
 def fill_pw(answers, pw):
@@ -200,6 +221,7 @@ def main():
     journal = os.path.join(HOME, ".local/share/vahta/journal.jsonl")
     if os.path.exists(journal):  # events only (names, never values): for the host's checks
         summary["journal_kinds"] = sorted({json.loads(l).get("event", "?") for l in open(journal) if l.strip().startswith("{")})
+    copy_transcripts(out)
     for name, src in (("surface.log", os.path.join(HOME, "surface.log")),):
         if os.path.exists(src):
             shutil.copy(src, os.path.join(out, name))

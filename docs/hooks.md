@@ -240,9 +240,20 @@ hook never answers "allow" for a `vahta run` or `vahta http` by itself when the 
 does not answer: that reply comes only from the daemon's yes (see below), and without
 it the harness decides, asking you as it would for any command.
 
-A held or saved message may already be in the harness's prompt history. When you
-choose "save" or "do nothing" the daemon removes it from there too; see
-[transcripts.md](transcripts.md#a-prompt-that-was-blocked).
+A held or saved message may already be in the harness's prompt history and in its
+transcript. When you choose "save" or "do nothing" the daemon removes it from the
+history, and the hook marks the session so that its transcript is cleaned when it
+ends; see [transcripts.md](transcripts.md#a-prompt-that-was-blocked).
+
+**Where the note arrives (Claude Code).** Observed with Claude Code 2.1.309 in the
+bench (`bench.py cc-t3`, case 4): the hook prints `additionalContext` and
+`systemMessage` as the manifest says. Claude Code shows the `systemMessage` to the
+person, writes the context to the transcript as a `hook_additional_context`
+attachment, and sends it to the model as its own turn with the role `system`
+("UserPromptSubmit hook additional context: ..."), a `<system-reminder>`, next to the
+user turn, not inside it. A harness check that reads only `user` turns of the request
+does not see the note. No manifest change was needed;
+the earlier check missed it because it looked at `user` turns only.
 
 ## When the agent's own tool call is refused
 
