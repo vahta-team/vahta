@@ -633,7 +633,6 @@ fn entries_removed_during_an_edit_pause_are_put_back_before_it_ends() {
 fn an_older_pause_that_took_the_hooks_out_still_puts_them_back_when_it_ends() {
     let s = Sandbox::new();
     with_watchdog(&s);
-    fs::write(s.settings(), "{}\n").unwrap();
     // No `kind`: what the version before this one wrote.
     let until = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -645,6 +644,9 @@ fn an_older_pause_that_took_the_hooks_out_still_puts_them_back_when_it_ends() {
         format!(r#"{{"pauses":[{{"harness":"claude","until":{until},"reason":"old"}}]}}"#),
     )
     .unwrap();
+    // The pause is on record before the hooks go, as it was when that
+    // version took them out; the other order is a plain removal.
+    fs::write(s.settings(), "{}\n").unwrap();
     wait_until("the hooks to come back", 20, || {
         s.settings_text().contains("vahta-hook")
     });
