@@ -13,9 +13,10 @@
 //! * **Pauses** (`pause.json` in the data directory, which the hook already
 //!   keeps agents out of): a harness with an unexpired pause is not watched.
 //!   A pause of kind [`PauseKind::Edit`] (what `vahta hooks pause` makes) leaves
-//!   the hooks in place and only lets the agent change the hook settings, so
-//!   the hook's own guard steps aside too; when it runs out, the watcher looks
-//!   again and asks the person about what it finds. A pause of kind
+//!   the hooks in place and lets the agent change the hook settings (the hook
+//!   guard lets through shell writes it cannot judge); the watcher is not
+//!   quieted by it: entries removed or `disableAllHooks` set during the pause
+//!   are acted on at once. A pause of kind
 //!   [`PauseKind::Off`] (written by older versions, and by "Keep off") means the
 //!   hooks are out, and are put back when it runs out.
 //! * **Putting it back** ([`restore`]): the same plan and commit `vahta setup`
@@ -151,6 +152,15 @@ pub fn write_pauses(data: &Path, pauses: &[Pause]) -> io::Result<()> {
 /// Whether `harness` has a pause that has not run out at `now`.
 pub fn paused(pauses: &[Pause], harness: &str, now: u64) -> bool {
     pauses.iter().any(|p| p.harness == harness && p.until > now)
+}
+
+/// Whether `harness` may have no hooks at `now`: a pause of kind
+/// [`PauseKind::Off`] that has not run out. An edit pause does not count: the
+/// watcher keeps looking, and Vahta's entries going missing is acted on at once.
+pub fn hooks_out_allowed(pauses: &[Pause], harness: &str, now: u64) -> bool {
+    pauses
+        .iter()
+        .any(|p| p.harness == harness && p.kind == PauseKind::Off && p.until > now)
 }
 
 /// Whether the agent may change `harness`'s hook settings at `now`: a pause of
@@ -338,7 +348,7 @@ pub fn toml_disables_hooks(text: &str) -> bool {
 /// Look at every watched thing now. `expected` is the set of harnesses known
 /// to have our hooks: a harness found with them is added, and one that has
 /// lost them while in the set is tampering. A harness with an unexpired pause
-/// is skipped.
+/// whose hooks may be out (an `Off` pause) is skipped.
 pub fn check(
     ms: &[Manifest],
     env: &Env,
@@ -349,7 +359,7 @@ pub fn check(
 ) -> Vec<Tamper> {
     let mut out = Vec::new();
     for m in ms {
-        if paused(pauses, &m.name, now) {
+        if hooks_out_allowed(pauses, &m.name, now) {
             continue;
         }
         let Some(path) = super::config_path(m, env) else {

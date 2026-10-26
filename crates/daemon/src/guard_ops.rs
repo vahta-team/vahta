@@ -17,8 +17,9 @@
 //! their own terminal.
 //!
 //! `vahta hooks pause` does not turn Vahta off. It lets the agent change the
-//! hook settings of a harness for a while (the hook's guard and the watchdog
-//! step aside for that harness); every other check keeps running.
+//! hook settings of a harness for a while (the hook's guard lets through the
+//! shell writes it cannot judge); it cannot remove Vahta's hooks, the watchdog
+//! keeps watching, and every other check keeps running.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -292,12 +293,12 @@ pub(crate) fn hooks_pause(
         title,
         vec![
             format!(
-                "The agent may change Vahta's hook settings in {shown} for {}. Vahta keeps \
-                 watching everything else: secrets, files it protects, and the alarm.",
+                "The agent may change Vahta's hook settings in {shown} for {}; it cannot remove \
+                 Vahta's hooks. Vahta keeps watching everything else.",
                 human(secs)
             ),
-            "When the time is up Vahta looks at the settings again and asks you about \
-             anything that turned its hooks off."
+            "If its hooks are removed or switched off anyway, Vahta puts them back (after \
+             asking you)."
                 .to_string(),
         ],
     );
@@ -336,9 +337,10 @@ pub(crate) fn hooks_pause(
             return Err(reply);
         }
     }
-    // The hooks stay where they are; the pause only tells the hook's guard and
-    // the watchdog to step aside for these harnesses until `until`. A pause of
-    // an older version (the hooks taken out) is kept: it still puts them back.
+    // The hooks stay where they are; the pause only tells the hook's guard to
+    // let through the shell writes it cannot judge in these harnesses until
+    // `until`. The watchdog is not told to look away. A pause of an older
+    // version (the hooks taken out) is kept: it still puts them back.
     let until = now() + secs;
     let said = reason
         .as_deref()
@@ -376,10 +378,9 @@ pub(crate) fn hooks_pause(
     )));
     Ok(ClientReply::Done {
         message: format!(
-            "You may now change the hook settings of {shown} for {}. Vahta's hooks stay on and \
-             keep watching everything else; this does not turn anything off. When the time is up \
-             the settings are checked again, and the person is asked about anything that turned \
-             the hooks off.",
+            "You may now change the hook settings of {shown} for {}, as long as Vahta's hooks \
+             stay in them: removing them or setting disableAllHooks is still refused, and Vahta \
+             puts them back if they go. Nothing is turned off.",
             human(secs)
         ),
     })

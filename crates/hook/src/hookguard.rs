@@ -19,8 +19,13 @@
 //! (`vahta _guard`), which notices the change afterwards and asks the person.
 //!
 //! The agent is told to ask the person with `vahta hooks pause`. While such a
-//! pause is running for the harness ([`edits_allowed`]) this guard steps
-//! aside; every other check of the hook stays on.
+//! pause is running for the harness ([`edits_allowed`]) shell writes this guard
+//! cannot judge (`sed -i`, `tee`, a `>` redirect, `mv` or `cp` onto the file, a
+//! script that names it) are let through, since that is what the pause is for.
+//! An edit it can judge is still judged: one that removes our entries, leaves
+//! the file unreadable or adds `disableAllHooks` is refused, and so are `rm`,
+//! `truncate` and moving the file away. The watchdog also keeps watching. Every
+//! other check of the hook stays on.
 
 use std::path::{Path, PathBuf};
 
@@ -169,9 +174,10 @@ impl Watch {
         readguard::resolve(given, cwd)
     }
 
-    /// Whether a pause lets the agent change files of `kind`: the hook
-    /// settings of the harness it was made for, and nothing else (Vahta's own
-    /// configuration and the administrator policy stay guarded).
+    /// Whether a pause lets the agent write files of `kind` by a shell command
+    /// the guard cannot judge: the hook settings of the harness it was made
+    /// for, and nothing else (Vahta's own configuration and the administrator
+    /// policy stay guarded).
     fn paused_for(&self, kind: Kind) -> bool {
         let Some(h) = self.edits_for.as_deref() else {
             return false;
@@ -184,13 +190,14 @@ impl Watch {
         }
     }
 
-    /// What kind of watched file `path` is, if it is one and the agent may
-    /// not change it now.
-    fn kind_of(&self, path: &Path) -> Option<Kind> {
-        self.kind_of_any(path).filter(|k| !self.paused_for(*k))
+    /// What kind of watched file `path` is, if it is one and a shell command
+    /// that writes it is not let through by a pause.
+    fn kind_guarded(&self, path: &Path) -> Option<Kind> {
+        self.kind_of(path).filter(|k| !self.paused_for(*k))
     }
 
-    fn kind_of_any(&self, path: &Path) -> Option<Kind> {
+    /// What kind of watched file `path` is, if it is one.
+    fn kind_of(&self, path: &Path) -> Option<Kind> {
         let lexical = normalise(path);
         let real = resolved(&lexical);
         let same = |a: &Path, b: &Path| {
@@ -234,7 +241,7 @@ impl Watch {
         let real = resolved(&lexical);
         self.targets
             .iter()
-            .filter(|t| t.kind != Kind::Managed && !self.paused_for(t.kind))
+            .filter(|t| t.kind != Kind::Managed)
             .any(|t| {
                 let tp = normalise(&t.path);
                 let tr = resolved(&tp);
@@ -476,7 +483,7 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
     let names_file = |text: &str| -> bool { names_watched_file(w, text) };
     for s in simple_commands(cmd) {
         for r in &s.redirects {
-            if w.kind_of(&w.expand(r, cwd)).is_some() {
+            if w.kind_guarded(&w.expand(r, cwd)).is_some() {
                 return Some(Tampering {
                     file: r.clone(),
                     what: "is a shell command that would write to a file that holds hooks".into(),
@@ -527,10 +534,16 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
             continue;
         }
         let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-        let check = |given: &str| -> Option<Kind> { w.kind_of(&w.expand(given, cwd)) };
+        let check = |given: &str| -> Option<Kind> { w.kind_guarded(&w.expand(given, cwd)) };
         if ANY_ARG.contains(&b.as_str()) {
-            for a in &paths {
-                if check(a).is_some() {
+            for (i, a) in paths.iter().enumerate() {
+                // Under a pause, `tee` onto the file and `mv` onto it (as the
+                // last argument) are the person's to allow; removing,
+                // truncating or moving it away is not.
+                let kind = w.kind_of(&w.expand(a, cwd));
+                let writes_it = b == "tee" || (b == "mv" && i + 1 == paths.len());
+                let let_through = writes_it && kind.is_some_and(|k| w.paused_for(k));
+                if kind.is_some() && !let_through {
                     return hit(a, "would change or remove a file that holds hooks");
                 }
                 if TAKES_DIR.contains(&b.as_str()) && w.above_watched(&w.expand(a, cwd)) {
@@ -563,7 +576,7 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
                 if tp.is_dir() {
                     for src in &sources {
                         if let Some(name) = Path::new(src).file_name()
-                            && w.kind_of(&tp.join(name)).is_some()
+                            && w.kind_guarded(&tp.join(name)).is_some()
                         {
                             return hit(src, "would overwrite a file that holds hooks");
                         }
@@ -777,9 +790,17 @@ mod tests {
     fn a_pause_frees_that_harness_settings_and_nothing_else() {
         let mut w = watch(Path::new("/h"));
         w.edits_for = Some("claude".to_string());
-        // Claude Code's files are the person's to let go; the others are not.
-        assert!(!hit(&w, "rm ~/.claude/settings.json"));
-        assert!(!hit(&w, "rm -rf ~/.claude"));
+        // Writes the guard cannot judge pass for Claude Code's files; the
+        // others are not let go, and neither is removing or truncating.
+        assert!(!hit(&w, "sed -i s/a/b/ ~/.claude/settings.json"));
+        assert!(!hit(&w, "jq . x > ~/.claude/settings.json"));
+        assert!(!hit(&w, "cat x | tee ~/.claude/settings.json"));
+        assert!(!hit(&w, "mv /tmp/x ~/.claude/settings.json"));
+        assert!(!hit(&w, "cp /tmp/x ~/.claude/settings.json"));
+        assert!(hit(&w, "rm ~/.claude/settings.json"));
+        assert!(hit(&w, "rm -rf ~/.claude"));
+        assert!(hit(&w, "truncate -s 0 ~/.claude/settings.json"));
+        assert!(hit(&w, "mv ~/.claude/settings.json /tmp/x"));
         assert!(hit(&w, "rm ~/.cursor/hooks.json"));
         assert!(hit(&w, "cp /tmp/x ~/.codex/hooks.json"));
         w.edits_for = None;

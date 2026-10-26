@@ -1046,15 +1046,23 @@ one door, and it is narrow. It does **not** turn Vahta off: the hooks stay in
 place and keep running, and the secret detector, the read guard, the alarm and
 redaction keep working. It only lets the agent change the hook settings of the
 named harnesses (default: every harness that has Vahta's hooks) for DURATION
-(default 15 minutes, at most 1 hour): during that time the hook guard above steps
-aside for those harnesses, and so does the watchdog. Vahta's own `config.toml` and
-the administrator-policy paths stay guarded. The pause is for the whole harness,
+(default 15 minutes, at most 1 hour). During that time the hook guard above lets
+through, for those harnesses, the shell writes it cannot judge: `sed -i`, `tee`, a
+`>` redirect (`jq ... > file`), `mv` or `cp` onto the file, a `python -c` that names
+it. It still judges what it can: an Edit, MultiEdit, Write or `apply_patch` that
+would remove Vahta's entries, leave the file unreadable or add `disableAllHooks` is
+refused, and so are `rm`, `truncate` and moving the file away. **The pause is not a
+way to turn Vahta off**: the watchdog is not quieted by it, so if Vahta's entries
+disappear or `disableAllHooks` appears during the pause it acts at once (asks the
+person; with no answer it restores), as without a pause. Only "the file changed but
+our entries are intact" is quiet. Vahta's own `config.toml` and the
+administrator-policy paths stay guarded. The pause is for the whole harness,
 not for one session: the harness's session id is not something the `vahta`
 command can know reliably, so it is not used.
 
 A window tells the person plainly what is being allowed (*The agent may change
-Vahta's hook settings in Claude Code for 15m. Vahta keeps watching everything
-else.*), shows the agent's reason marked unverified, and names the vault whose
+Vahta's hook settings in Claude Code for 15m; it cannot remove Vahta's hooks.
+Vahta keeps watching everything else.*), shows the agent's reason marked unverified, and names the vault whose
 password it wants (the project path, `~` for the home directory).
 
 **Whose password.** The candidates are the vault of the caller's project first,
@@ -1070,22 +1078,23 @@ so every wrong try would cost seconds per vault and the number of vaults would b
 visible in the delay. A password that does not fit says which vault it was tried
 against and names the others (*that was not the password of the vault of ~/x
 (three tries) ... Other vaults that could approve: ~/y*), so a wrong vault never
-reads as a wrong password. The watchdog's questions (*Keep off*, *Turn off
+reads as a wrong password. The window asks the way the chosen vault is set to be
+unlocked (`vahta config unlock`: the password, or a linked phone first). The watchdog's questions (*Keep off*, *Turn off
 protection*) use the same step. With no vault known there is no password, so the
 request is refused (exit 3) and the person is told to run `vahta setup --uninstall`
 or `vahta setup --guard off` in their own terminal.
 
 On approval `pause.json` is written to the data directory (which the hook keeps
-agents out of) with `"kind": "edit"`. The hook reads it on each tool call. When the
-time is up the watchdog looks at the settings again and, if Vahta's hooks were
-removed or turned off, asks the person as usual. `vahta hooks resume` ends a pause
+agents out of) with `"kind": "edit"`. The hook reads it on each tool call. The
+approval is whatever the chosen vault's unlock preference allows (the password in
+the window, or a linked phone), as for any other question. `vahta hooks resume` ends a pause
 now and needs no password. `vahta hooks status` lists the pauses and what each
 allows. Journal: `hooks_paused` (result `ok`; the reason says which harnesses, for
 how long, and the agent's reason), `hooks_resumed`.
 
 A pause with no `kind` was written by an earlier version (or by *Keep off*): the
 hooks were taken out. It is still honoured safely, never left open: the hook guard
-does not step aside for it, and when it ends the watchdog (or the daemon, when no
+does not let edits through for it, and when it ends the watchdog (or the daemon, when no
 watchdog runs) puts the hooks back and journals `hooks_restored`.
 
 ### 3. `vahta _guard`: the watchdog
@@ -1104,8 +1113,9 @@ them (the set is remembered in `guard-state.json`), when the hook program they
 point to is gone, when `disableAllHooks` is `true` in a Claude Code settings file,
 or when `[features] hooks = false` appears in Codex's `config.toml`. It does *not*
 call it tampering when an entry merely differs from what this vahta would write, or
-points to another `vahta-hook` that exists. A harness with an unexpired pause is
-not watched; when the pause ends it is looked at again.
+points to another `vahta-hook` that exists. A harness whose hooks were taken out
+by a pause of the older kind is not watched until that pause ends; an edit pause
+does not quiet the watchdog.
 
 On tampering it asks the daemon (starting it if need be), whose window says what
 was found and offers **Restore**, **Keep off for 1 h (password)** and **Turn off

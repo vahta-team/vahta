@@ -14,7 +14,7 @@
     "hook_event_name": "PreToolUse",
     "tool_name": "Bash",
     "tool_input": {
-      "command": "rm ~/.claude/settings.json"
+      "command": "sed -i '/vahta-hook/d' ~/.claude/settings.json"
     },
     "cwd": "{{TMP}}/proj"
   },

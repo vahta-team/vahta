@@ -30,11 +30,12 @@ Let an agent change the hook settings of a coding agent for a while.
 
   pause    allow changes to Vahta's hook settings for DURATION (default 15m,
            at most 1h). A window shows the person the harnesses, the time and
-           your reason (marked unverified), and asks for the password of a
-           vault it names. Vahta's hooks stay on: secrets, protected files and
-           the alarm are still watched, and the pause ends by itself, after
-           which the settings are checked again. It applies to the whole
-           harness, not to one session.
+           your reason (marked unverified), and asks for the approval of a
+           vault it names. Vahta's hooks stay on and cannot be removed this
+           way: an edit that drops them or sets disableAllHooks is refused,
+           the watchdog puts them back at once if they go, and secrets,
+           protected files and the alarm are still watched. It applies to the
+           whole harness, not to one session.
   resume   end a pause now. No password.
   status   say which pauses are running and until when.
 

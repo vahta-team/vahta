@@ -215,7 +215,7 @@ fn pause_lets_the_agent_edit_the_hook_settings_and_leaves_the_hooks_in_place() {
     let said = text(&out.stdout);
     assert!(
         said.contains("change the hook settings of Claude Code for 30m")
-            && said.contains("does not turn anything off"),
+            && said.contains("Nothing is turned off"),
         "{said}"
     );
     // Nothing was taken out.
@@ -233,6 +233,7 @@ fn pause_lets_the_agent_edit_the_hook_settings_and_leaves_the_hooks_in_place() {
     let panel = ask["panel"].to_string();
     assert!(
         panel.contains("may change Vahta's hook settings in Claude Code for 30m")
+            && panel.contains("cannot remove Vahta's hooks")
             && panel.contains("keeps watching everything else"),
         "{panel}"
     );
@@ -575,31 +576,56 @@ fn restore_is_chosen_and_disable_all_hooks_is_cleared() {
 
 #[cfg(unix)]
 #[test]
-fn an_edit_pause_that_ends_leaves_the_watchdog_to_ask_about_what_was_removed() {
+fn during_an_edit_pause_the_watchdog_is_quiet_about_edits_that_keep_our_entries() {
     let s = Sandbox::new();
     s.with_vault();
     with_watchdog(&s);
     s.script(&[&format!(r#"{{"secret":"{PW}"}}"#)]);
     let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    // During the pause the agent changes the settings; the watchdog says nothing.
-    fs::write(s.settings(), "{\"model\": \"opus\"}\n").unwrap();
+    let before = s.settings_text();
+    assert!(before.contains("vahta-hook"));
+    // A new setting next to our entries: nothing to ask about.
+    let edited = before.replacen('{', "{\"model\": \"opus\", ", 1);
+    fs::write(s.settings(), &edited).unwrap();
     std::thread::sleep(Duration::from_millis(800));
     assert!(s.window_log().iter().all(|e| e["ask"] != "choose"));
-    assert!(!s.settings_text().contains("vahta-hook"));
-    // The time is up (made so by rewriting the pause): the watchdog looks
-    // again, asks, and with no answer puts the hooks back.
+    assert_eq!(s.settings_text(), edited);
+}
+
+#[cfg(unix)]
+#[test]
+fn entries_removed_during_an_edit_pause_are_put_back_before_it_ends() {
+    let s = Sandbox::new();
+    s.with_vault();
+    with_watchdog(&s);
+    s.script(&[&format!(r#"{{"secret":"{PW}"}}"#)]);
+    let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The agent drops Vahta's entries; the pause has minutes to run.
     s.script(&[r#"{"noanswer":true}"#]);
-    fs::write(
-        s.root.join("data/pause.json"),
-        r#"{"pauses":[{"harness":"claude","until":1,"reason":"test","kind":"edit"}]}"#,
-    )
-    .unwrap();
+    fs::write(s.settings(), "{\"model\": \"opus\"}\n").unwrap();
     wait_until("the hooks to be put back", 20, || {
         s.settings_text().contains("vahta-hook")
     });
     assert!(s.window_log().iter().any(|e| e["ask"] == "choose"));
     assert!(s.settings_text().contains("opus"));
+    assert!(
+        s.root.join("data/pause.json").is_file(),
+        "the pause runs on"
+    );
+
+    // Same for `disableAllHooks`.
+    s.script(&[r#"{"choose":0}"#]);
+    let with = s.settings_text();
+    fs::write(
+        s.settings(),
+        with.replacen('{', "{\"disableAllHooks\": true, ", 1),
+    )
+    .unwrap();
+    wait_until("disableAllHooks to be cleared", 20, || {
+        !s.settings_text().contains("disableAllHooks")
+    });
 }
 
 #[cfg(unix)]

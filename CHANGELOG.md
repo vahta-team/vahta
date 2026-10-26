@@ -12,9 +12,11 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 - **`vahta hooks pause` is narrow** (protocol 19). It no longer takes the hooks out
   of the harness config. It lets the agent change that harness's hook settings for
-  15 minutes by default (at most 1 hour, was 8 hours); the hook guard and the
-  watchdog step aside, the secret detector and the other checks keep running, and
-  the watchdog looks again when the time is up. The window says what is allowed and
+  15 minutes by default (at most 1 hour, was 8 hours); the hook guard lets
+  through shell writes it cannot judge (`sed -i`, `tee`, a redirect), while an edit
+  that removes Vahta's entries or sets `disableAllHooks`, `rm` and `truncate` are
+  still refused, and the watchdog keeps watching and restores removed entries at
+  once. The secret detector and the other checks keep running. The window says what is allowed and
   for how long. A pause written by an older version still puts the hooks back when
   it ends. The detector's refusal no longer points to the pause.
 - **Approvals name the vault.** The window for a pause or the watchdog's questions
