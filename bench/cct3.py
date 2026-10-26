@@ -13,8 +13,7 @@ Real Claude Code + real Vahta hooks + a real daemon in the bench container, with
   6  `vahta allow`: a false positive let through once; a real secret saved by name
 
 `report.json` (bench/out/cctest-t3-*/) holds names, forms and verdicts, never a value.
-A `--real` variant (the same cases with Haiku instead of the mock; /compact and the auto-mode classifier) is a
-TODO: see README, "cc-t3".
+`--real` (cct3real.py: /compact and the auto-mode classifier with Haiku; `--real --dry` against the mock): see README, "cc-t3 --real".
 """
 
 import json

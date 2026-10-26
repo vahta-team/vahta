@@ -16,7 +16,11 @@ What it does:
   * stops forwarding after a hard cap on requests (default 60, per proxy run) with 429;
   * forwards only to https://api.anthropic.com (`--test-upstream` exists for tests
     against a mock and is refused unless `--allow-test-upstream` is also given);
-  * logs METHOD PATH STATUS and a counter, never a header, a query or a body.
+  * logs METHOD PATH STATUS and a counter, never a header, a query or a body;
+  * tests only, `--scan FILE` with the canaries in the environment variable PROXY_SCAN ({name: value}, by
+    `docker run -e`): each forwarded request body is searched for the canaries in every form, and one line
+    per request goes to FILE: the number, the path, the size, and the names and forms found. No body and no
+    value is kept.
 
 The credential kind follows the environment: CLAUDE_CODE_OAUTH_TOKEN (a Claude
 subscription token from `claude setup-token`) is sent as `Authorization: Bearer`
@@ -49,8 +53,9 @@ DROP = {"authorization", "x-api-key", "proxy-authorization", "cookie", "host", "
 
 
 class State:
-    def __init__(self, cap, upstream, oauth, apikey, logfile):
+    def __init__(self, cap, upstream, oauth, apikey, logfile, scan=None, canaries=None):
         self.cap, self.upstream, self.oauth, self.apikey = cap, upstream, oauth, apikey
+        self.scan, self.canaries = scan, canaries or {}
         self.forwarded = 0
         self.lock = threading.Lock()
         self.logfile = logfile
@@ -61,6 +66,22 @@ class State:
                 return False
             self.forwarded += 1
             return True
+
+    def scan_body(self, path, body):
+        """Names and forms of the canaries in a request body (the raw text and the decoded JSON strings)."""
+        import canary
+
+        text, model = body.decode("utf-8", "replace"), None
+        try:
+            doc = json.loads(body)
+            text += "\n" + json.dumps(doc, ensure_ascii=False)
+            model = doc.get("model") if isinstance(doc, dict) else None
+        except ValueError:
+            pass
+        found = {n: f for n, v in self.canaries.items() if (f := canary.forms_in(text, v))}
+        with self.lock:
+            with open(self.scan, "a") as f:
+                f.write(json.dumps({"n": self.forwarded, "path": path, "model": model, "bytes": len(body), "found": found}) + "\n")
 
     def log(self, method, path, status, note=""):
         line = f"{time.strftime('%H:%M:%S')} {method} {path} {status} forwarded={self.forwarded}/{self.cap}{(' ' + note) if note else ''}"
@@ -108,6 +129,8 @@ def make_handler(state: State):
             body = self.rfile.read(n) if n else b""
             if not state.take():
                 return self._refuse(429, "authproxy: request cap for this run reached", path)
+            if state.scan:
+                state.scan_body(path, body)
             headers = {k: v for k, v in self.headers.items() if k.lower() not in DROP}
             headers.update(credential_headers(state, self.headers.get("anthropic-beta")))
             headers["accept-encoding"] = "identity"
@@ -155,6 +178,7 @@ def main():
                     help="also forward this exact method and path (after a first run showed Claude Code needs it)")
     ap.add_argument("--test-upstream", help="http://HOST:PORT of a mock; needs --allow-test-upstream")
     ap.add_argument("--allow-test-upstream", action="store_true")
+    ap.add_argument("--scan", help="tests only: search request bodies for the canaries in $PROXY_SCAN; write names and forms here")
     a = ap.parse_args()
     oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or None
     apikey = os.environ.get("ANTHROPIC_API_KEY") or None
@@ -173,7 +197,8 @@ def main():
         if method not in ("GET", "POST", "HEAD") or not path.startswith("/v1/") or "?" in path or ".." in path:
             sys.exit(f"authproxy: --allow takes 'GET|POST|HEAD /v1/...', not {rule!r}")
         ALLOWED.add((method, path))
-    state = State(a.cap, upstream, oauth, apikey, a.log)
+    canaries = json.loads(os.environ.get("PROXY_SCAN") or "{}") if a.scan else {}
+    state = State(a.cap, upstream, oauth, apikey, a.log, a.scan, canaries)
     print(f"authproxy: listening on :{a.port}; credential kind: {kind}; cap {a.cap}; upstream {upstream[1]}", flush=True)
     http.server.ThreadingHTTPServer(("0.0.0.0", a.port), make_handler(state)).serve_forever()
 
