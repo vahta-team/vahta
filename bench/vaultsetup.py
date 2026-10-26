@@ -16,6 +16,7 @@ import subprocess
 
 K = "sec" + "ret"  # the key of a password answer in the surface script
 HOME = os.path.expanduser("~")
+PASSWORD = None  # the vault password of this run (set by setup); a test may script it into a later window
 SCRIPT = os.path.join(HOME, "surface.jsonl")
 
 
@@ -65,7 +66,8 @@ def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2, bin
     with open(os.path.join(cfg, "config.toml"), "w") as f:
         f.write(f'alarm = "{alarm}"\nidle_minutes = 600\n')
     env = surface_env()
-    pw = secrets.token_urlsafe(12)
+    global PASSWORD
+    pw = PASSWORD = secrets.token_urlsafe(12)
     _script({K: pw}, {"ack": True})
     _vahta(env, project, "init")
     for name, value in canaries.items():
@@ -104,3 +106,18 @@ def setup(project: str, canaries: dict, alarm: str = "warn", hours: int = 2, bin
             del clean[k]
     return clean
 
+
+
+def rescript(*answers, noanswers=40):
+    """Replace what is left of the scripted surface with `answers`, then windows nobody answers."""
+    open(SCRIPT, "w").close()
+    _script(*answers, *[{"noanswer": True}] * noanswers)
+
+
+def rebind(project: str, name: str, *args):
+    """The owner changes a secret's rules (a category change asks twice: a choice, then the password).
+    Used where a test needs a command the category's own defaults would never let run."""
+    open(SCRIPT, "w").close()
+    _script({"choose": 0}, {K: PASSWORD}, {"choose": 0})
+    _vahta(surface_env(), project, "bind", name, *args, "--reason", "bench: owner changes the rules")
+    rescript()

@@ -9,6 +9,7 @@ the scripted tools read hold them, which is the point of the test.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -51,6 +52,11 @@ def main():
     with open(leakval, "w") as f:
         f.write("deploy notes: " + " ".join(lines[1:3]) + "\n")
     env = vaultsetup.setup(PROJECT, canaries)
+    # GITHUB_TOKEN is a publishing token: every run opens a password window, and its category never lets a
+    # shell or python3 run. The owner moves it to `ordinary` with printenv and python3 (the second one writes
+    # to stderr without a shell), and the two runs below each get their password.
+    vaultsetup.rebind(PROJECT, "GITHUB_TOKEN", "--category", "ordinary", "--allow", "printenv", "--allow", "python3")
+    vaultsetup.rescript({vaultsetup.K: vaultsetup.PASSWORD}, {vaultsetup.K: vaultsetup.PASSWORD})
     rc, _ = ccagent.seed_claude("oauth")
     settings = os.path.join(HOME, ".claude", "settings.json")
     with open(settings) as f:
@@ -78,6 +84,8 @@ def main():
                                text=True, timeout=300)
     finally:
         srv.terminate()
+        if os.path.exists(os.path.join(HOME, "surface.log")):  # which windows the daemon opened
+            shutil.copy(os.path.join(HOME, "surface.log"), os.path.join(out, "surface.log"))
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump({"exit": r.returncode, "stderr_tail": r.stderr[-500:], "hooks_installed": ccagent.hooks_installed(),
                    "setup_rc": rc}, f, indent=2)
