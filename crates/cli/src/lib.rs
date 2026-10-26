@@ -462,6 +462,14 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("http") => http_cmd::run(&args[1..], env, stdout, stderr),
         Some("delegate") => run_cmd::run_delegate(&args[1..], env, stdout, stderr),
         Some("unlock") => session_cmds::run_unlock(&args[1..], env, stdout, stderr),
+        Some("unlock-method") => {
+            let _ = write!(
+                stderr,
+                "vahta unlock-method: error: only the connectors vault has one; add --connector\n\n{}",
+                connector_cmd::UNLOCK_METHOD_USAGE
+            );
+            EXIT_USAGE
+        }
         Some("config") => config_cmd::run(&args[1..], env, stdout, stderr),
         Some("devices") => devices_cmd::run(&args[1..], env, stdout, stderr),
         Some("recover") => devices_cmd::run_recover(&args[1..], env, stdout, stderr),

@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 20;
+pub const PROTOCOL: u32 = 21;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -855,6 +855,15 @@ pub enum ConnectorCmd {
     },
     Remove {
         name: String,
+    },
+    /// Give the vault an unlock method besides the password (`method` is
+    /// `okono`): the person types the password, then the method is asked once.
+    UnlockMethodAdd {
+        method: String,
+    },
+    /// Take such a method away (the person types the password).
+    UnlockMethodRemove {
+        method: String,
     },
     /// Propose the rules and the harnesses of a secret (the person approves).
     Bind {

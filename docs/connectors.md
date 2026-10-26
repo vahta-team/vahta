@@ -16,7 +16,7 @@ working directory, never serves an ordinary `vahta run`, and `--connector`
 never uses a project's vault.
 
 You set it up yourself, in your own terminal. An agent cannot: the hook refuses
-`vahta init|add|bind|remove|unlock|run --connector` from an agent's Bash tool,
+`vahta init|add|bind|remove|unlock|unlock-method|run --connector` from an agent's Bash tool,
 and reading the vault directory is refused like any other Vahta file.
 
 ## Set up
@@ -163,6 +163,117 @@ restart Claude Code); in Codex restart the session; in Cursor reload the MCP
 server in its settings. You are asked again then.
 
 `vahta unlock --connector` no longer exists; it prints this flow and exits.
+
+## Unlock with okono (Linux)
+
+okono is a separate root service that checks your face
+through the webcam (a match, a head turn to show it is live, and an Enter on
+its own confirmation card) and then gives the calling program a stable value of
+its own, computed in the TPM. Vahta can wrap the connectors vault's key under a
+key made from that value, so the first MCP server of a harness process starts
+after you look at the camera instead of typing the password.
+
+It is a convenience, not strong authentication. A face check is weaker than a
+password (okono's own threat model says what it does and does not stop), so the
+password is never removed, never skipped silently, and always the fallback. It
+is for the connectors vault only; project vaults do not offer it.
+
+### Enrol
+
+```sh
+vahta unlock-method add okono --connector
+```
+
+A window asks for the connectors password. Then okono is asked once: look at the
+camera and press Enter on okono's card. The vault key is wrapped into a new slot
+(kind 3, `okono`; its parameters are only the app, the label `vault:<vault id>`
+and the version, no secret). The vault file format does not change; an older
+build ignores the slot and still opens the vault with the password.
+`vahta list --connector` and `vahta check --connector` show `unlock: password,
+okono`. Take it away with `vahta unlock-method remove okono --connector` (the
+password, in a window). A re-key of the vault drops the slot: enrol again.
+
+### What happens at a launch
+
+When a harness process with no session starts its first server, and the vault
+has an okono slot, **the daemon** (never the `vahta` client and never an agent)
+asks okono. On success the session opens as it always does and no window
+appears. On any failure the password window opens at once, as it would have
+without okono: okono not installed or its socket missing, a refusal (`denied`,
+`locked_out`, ...), a value that does not open the slot, a malformed reply, or
+no answer within 120 seconds for the whole exchange. The journal records an
+`okono` event with the result and okono's error code (never a value or okono's
+message text). Concurrent launches of one harness process share one request, as
+they share one window. If the harness gives up on the server while okono waits,
+the daemon closes its connection, which okono takes as a cancel, and nothing
+runs. Everything else is unchanged: the session belongs to the harness process
+and ends with it. `vahta config unlock password` puts the password first and
+okono is not asked.
+
+### Allow Vahta in okono
+
+okono answers only programs listed in its `apps.toml`, matched by user and by
+the path of the executable that connected. The caller is Vahta's daemon, which
+is the same `vahta` binary run as `vahta daemon`, so one entry covers it. Once,
+as root:
+
+```sh
+pkexec /usr/local/bin/okono allow vahta /path/to/vahta --user USER --title "Vahta"
+```
+
+The path must be the one the daemon runs from, and it must stay the same across
+upgrades (replace the file in place; an installer that moves the binary needs
+the command again). Without the entry okono answers `not_allowed` and Vahta
+falls back to the password.
+
+**Residual risk.** okono checks the path of the executable, not its content. If
+Vahta is installed somewhere the user can write (`~/.local/bin`), any process
+running as you can replace the binary, and after your face and Enter the
+replacement would receive the value; okono's card shows the same path. A
+replaced `vahta` already defeats Vahta in general, the password included, so
+this is not new, but a root-owned path such as `/usr/local/bin/vahta` closes it
+and is the better place when okono is used.
+
+### Contract with okono
+
+What Vahta's daemon sends and accepts (all of it in `crates/daemon/src/okono.rs`).
+Socket `/run/okono/okono.sock` (no other path in a shipped build). One request
+per connection; JSON lines, every line has `"v":1`, no line over 16 KiB.
+
+Request:
+
+```json
+{"v":1,"op":"secret","app":"vahta","label":"vault:<32 hex of the vault id>","version":1,"display":"connectors vault key"}
+```
+
+Before the final line okono may send any number of event lines,
+`{"v":1,"event":{...}}` (`busy`, `card`, `look`, `turn`, `turn_progress`,
+`attempt`, `done` and others); events, known or not, are ignored. Then exactly
+one final line.
+
+Success:
+
+```json
+{"v":1,"ok":true,"result":{"kind":"secret","hex":"<64 hex characters = 32 bytes>"}}
+```
+
+`kind` must be `secret` and `hex` exactly 64 hex characters; anything else is a
+failure. The value must be stable for `(app, label, version)`. Vahta derives the
+key as HKDF-SHA256(ikm = value, salt = vault id, info = `vahta-okono-kek-v1`).
+
+Error:
+
+```json
+{"v":1,"ok":false,"error":{"code":"denied","message":"..."}}
+```
+
+Codes okono sends: `not_allowed`, `denied`, `no_confirmer`, `no_tpm`,
+`not_enrolled`, `locked_out`, `camera`, `bad_request`, `internal`. Vahta treats
+every code, and any code it does not know, as a failure that sends the person
+to the password window; only a short lower-case code reaches the journal.
+
+Closing the connection before the final line is a cancel. If okono closes it
+without a final line, Vahta sees `closed` and falls back.
 
 ## When Vahta tells you something
 

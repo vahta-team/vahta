@@ -40,6 +40,38 @@ pub fn connector_parent_alias() -> Option<String> {
     }
 }
 
+/// In a test build, the socket a test's fake okono listens on
+/// (`VAHTA_TEST_OKONO_SOCKET`). The shipped build asks `/run/okono/okono.sock`
+/// and nothing else.
+pub(crate) fn okono_socket() -> Option<std::path::PathBuf> {
+    #[cfg(feature = "test-surface")]
+    {
+        std::env::var_os("VAHTA_TEST_OKONO_SOCKET")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
+/// In a test build, how long the okono exchange may take
+/// (`VAHTA_TEST_OKONO_TIMEOUT_MS`); the shipped build gives it 60 seconds.
+pub(crate) fn okono_timeout() -> Option<std::time::Duration> {
+    #[cfg(feature = "test-surface")]
+    {
+        std::env::var("VAHTA_TEST_OKONO_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+    }
+    #[cfg(not(feature = "test-surface"))]
+    {
+        None
+    }
+}
+
 /// Where desktop notifications go instead of the screen. `None` in the shipped
 /// build: they are shown. In a test build they are never shown: they are
 /// appended, one line each, to the file `VAHTA_TEST_NOTIFY_LOG` names, or

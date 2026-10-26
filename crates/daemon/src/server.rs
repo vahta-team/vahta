@@ -142,6 +142,8 @@ pub(crate) struct Shared {
     pub(crate) notices: Mutex<crate::notify::Limiter>,
     /// The ways to unlock a vault.
     pub(crate) unlockers: vahta_auth::Registry,
+    /// How the connectors vault's okono slot is asked (`okono.rs`).
+    pub(crate) okono: crate::okono::Okono,
     /// How devices are reached.
     pub(crate) links: Box<dyn vahta_auth::DeviceLinks>,
     started: Instant,
@@ -319,7 +321,12 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         connector_refusals: Mutex::new(Vec::new()),
         gates: crate::gate::Gates::default(),
         notices: Mutex::new(crate::notify::Limiter::default()),
-        unlockers: vahta_auth::Registry::standard(),
+        unlockers: vahta_auth::Registry::standard_with(vec![Box::new(
+            crate::okono::OkonoUnlocker {
+                okono: crate::okono::Okono::standard(),
+            },
+        )]),
+        okono: crate::okono::Okono::standard(),
         links,
         started: Instant::now(),
         stop: AtomicBool::new(false),

@@ -22,7 +22,7 @@
 //!   and then start with none. Another process has no session of its own and
 //!   gets its own window; a session never passes between processes. It ends
 //!   with the process (or `vahta lock --all`, `sessions kill`, a reboot);
-//! * the password is all that opens it, so a harness that gives a server about
+//! * the password always opens it (on Linux okono may, first: `okono.rs`), so a harness that gives a server about
 //!   30 seconds to start gets its window immediately. If the client goes away
 //!   the window is withdrawn and nothing runs; if the person cancels or the
 //!   password is wrong the server exits at once with a line on stderr that
@@ -98,6 +98,8 @@ pub(crate) fn handle(ctx: &Ctx<'_>, cmd: ConnectorCmd) -> Handled {
             },
         ),
         ConnectorCmd::Remove { name } => crate::ops::remove(&c, "", &name),
+        ConnectorCmd::UnlockMethodAdd { method } => unlock_method(&c, &method, true),
+        ConnectorCmd::UnlockMethodRemove { method } => unlock_method(&c, &method, false),
         ConnectorCmd::Bind {
             name,
             harnesses,
@@ -510,30 +512,41 @@ fn open_session(
         names.sort();
         names
     };
-    let who = format!(
-        "{} (pid {})",
-        crate::notify::harness_title(harness.kind),
-        harness.id.pid
-    );
-    let title = "Unlock MCP servers";
-    let mut window = ctx.window(title)?;
-    let mut lines = lines_for(project, vault_path);
-    lines.push(format!("{who} wants its MCP servers: {}", names.join(", ")));
-    lines.push(format!(
-        "Lasts: until {who} exits, or `vahta lock --all`. Another process asks for itself."
-    ));
-    lines.push(
-        "Allows: the servers of these connectors to be started by that process with no window, \
-         each by its own command. Not revealing, copying or changing anything."
-            .to_string(),
-    );
-    lines.push("Enter the connectors password to allow it, or cancel.".to_string());
-    let panel = ctx.panel(title, lines);
-    let action = Action::Unlock {
-        names: names.clone(),
-        duration_secs: None,
+    let mut window = None;
+    let mut vault = match open_with_okono(ctx, vault_path, peek, harness, &names) {
+        Some(vault) => vault,
+        None => {
+            if ctx.gone.is_gone() {
+                return Err(cancelled());
+            }
+            let who = format!(
+                "{} (pid {})",
+                crate::notify::harness_title(harness.kind),
+                harness.id.pid
+            );
+            let title = "Unlock MCP servers";
+            let mut w = ctx.window(title)?;
+            let mut lines = lines_for(project, vault_path);
+            lines.push(format!("{who} wants its MCP servers: {}", names.join(", ")));
+            lines.push(format!(
+                "Lasts: until {who} exits, or `vahta lock --all`. Another process asks for itself."
+            ));
+            lines.push(
+                "Allows: the servers of these connectors to be started by that process with no \
+                 window, each by its own command. Not revealing, copying or changing anything."
+                    .to_string(),
+            );
+            lines.push("Enter the connectors password to allow it, or cancel.".to_string());
+            let panel = ctx.panel(title, lines);
+            let action = Action::Unlock {
+                names: names.clone(),
+                duration_secs: None,
+            };
+            let vault = crate::ops::unlock_as(ctx, w.as_mut(), vault_path, &panel, action)?;
+            window = Some(w);
+            vault
+        }
     };
-    let mut vault = crate::ops::unlock_as(ctx, window.as_mut(), vault_path, &panel, action)?;
     if vault.upgrade_pending() {
         vault.save(vault_path, ctx.store()).map_err(from_vault)?;
     }
@@ -607,8 +620,153 @@ fn open_session(
                 )),
             ),
     );
-    window.close(Some("MCP servers unlocked. This window can be closed."));
+    if let Some(window) = window {
+        window.close(Some("MCP servers unlocked. This window can be closed."));
+    }
     Ok((id, names, false))
+}
+
+/// The connectors vault opened with its okono slot, for the session of
+/// `harness`. `None` sends the caller to the password window: no okono slot,
+/// the unlock setting puts the password first, or okono did not give a value
+/// that opens the slot (the journal says which, by okono's code; never the
+/// value). Blocks while the person is checked, and stops at once, closing
+/// okono's connection, when the client goes away.
+fn open_with_okono(
+    ctx: &Ctx<'_>,
+    vault_path: &Path,
+    peek: &Peek,
+    harness: &Harness,
+    names: &[String],
+) -> Option<Vault> {
+    crate::okono::slot_of(peek)?;
+    let (pref, _, _) = crate::authn::unlock_pref(ctx.shared, &peek.vault_id);
+    if pref == vahta_auth::UnlockPref::Password {
+        return None;
+    }
+    let entry = Entry::new("okono").vault(&peek.vault_id).names(names);
+    let who = format!("{} pid {}", harness.kind, harness.id.pid);
+    match crate::okono::open_vault(
+        &ctx.shared.okono,
+        vault_path,
+        peek,
+        ctx.store(),
+        ctx.gone.cancel(),
+    ) {
+        Ok(vault) => {
+            ctx.journal(entry.result("ok", Some(&format!("{who}; connectors vault opened"))));
+            Some(vault)
+        }
+        Err(f) => {
+            let result = if f.cancelled() { "cancelled" } else { "failed" };
+            ctx.journal(entry.result(
+                result,
+                Some(&format!("{who}; {f}; the password window follows")),
+            ));
+            None
+        }
+    }
+}
+
+/// `vahta unlock-method add|remove okono --connector`: the person types the
+/// password; adding then asks okono once (the person looks at the camera and
+/// confirms on okono's card) and wraps the vault key under what it gives.
+fn unlock_method(ctx: &Ctx<'_>, method: &str, add: bool) -> Flow<ClientReply> {
+    if method != "okono" {
+        return Err(refused(
+            RefusalKind::NothingToDo,
+            "the unlock method besides the password is okono",
+        ));
+    }
+    if !cfg!(target_os = "linux") {
+        return Err(error(
+            "okono is only available on Linux; nothing was changed",
+        ));
+    }
+    let (project, vault_path) = find(ctx)?;
+    let peek = Vault::peek(&vault_path).map_err(from_vault)?;
+    let have = peek
+        .slots
+        .iter()
+        .find(|s| s.info.kind == vahta_vault::SLOT_OKONO)
+        .map(|s| s.info.slot_id);
+    match (add, have) {
+        (true, Some(_)) => {
+            return Err(refused(
+                RefusalKind::Exists,
+                "okono is already an unlock method of the connectors vault",
+            ));
+        }
+        (false, None) => {
+            return Err(refused(
+                RefusalKind::NothingToDo,
+                "okono is not an unlock method of the connectors vault",
+            ));
+        }
+        _ => {}
+    }
+    let title = if add {
+        "Add okono to the connectors vault"
+    } else {
+        "Remove okono from the connectors vault"
+    };
+    let mut window = ctx.window(title)?;
+    let mut lines = lines_for(&project, &vault_path);
+    lines.push(
+        if add {
+            "okono, a face check on this machine, will open this vault for a harness process, with \
+         the password still working. It is a convenience, not strong authentication."
+        } else {
+            "okono will no longer open this vault; the password stays."
+        }
+        .to_string(),
+    );
+    let panel = ctx.panel(title, lines);
+    let action = Action::Devices {
+        what: format!("{} okono", if add { "add" } else { "remove" }),
+    };
+    let mut vault =
+        crate::ops::unlock_expecting(ctx, window.as_mut(), &vault_path, &panel, action, &peek)?;
+    let id = vault.vault_id();
+    if add {
+        window.close(Some(
+            "Password accepted. Look at the camera and press Enter on okono's card.",
+        ));
+        ctx.gone.watch();
+        if let Err(f) = crate::okono::enroll(&mut vault, &ctx.shared.okono, ctx.gone.cancel()) {
+            ctx.journal(Entry::new("okono").vault(&id).result(
+                "failed",
+                Some(&format!("enrolment: {f}; nothing was changed")),
+            ));
+            return Err(if f.cancelled() {
+                cancelled()
+            } else {
+                error(format!(
+                    "okono gave no value ({f}); nothing was changed. See docs/connectors.md"
+                ))
+            });
+        }
+    } else if let Some(slot_id) = have {
+        vault.remove_slot(&slot_id).map_err(from_vault)?;
+        window.close(Some("okono removed. The password opens the vault."));
+    }
+    vault.save(&vault_path, ctx.store()).map_err(from_vault)?;
+    ctx.journal(Entry::new("okono").vault(&id).result(
+        "ok",
+        Some(if add {
+            "enrolled in the connectors vault"
+        } else {
+            "removed from the connectors vault"
+        }),
+    ));
+    Ok(ClientReply::Done {
+        message: if add {
+            "okono now opens the connectors vault for a harness process; the password still works"
+        } else {
+            "okono removed; the password opens the connectors vault"
+        }
+        .to_string(),
+    })
 }
 
 // --- run -----------------------------------------------------------------------------

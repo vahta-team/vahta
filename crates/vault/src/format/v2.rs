@@ -57,6 +57,9 @@ pub const SLOT_RECOVERY: u16 = 1;
 /// A paired device: the vault key wrapped under an ECDH-derived key (see
 /// `vahta-auth`). Opaque to this crate, which treats it as any other slot.
 pub const SLOT_DEVICE: u16 = 2;
+/// The vault key wrapped under a key derived from okono's per-program value
+/// (see `vahta-auth`). Opaque to this crate, like a device slot.
+pub const SLOT_OKONO: u16 = 3;
 
 /// The slot crypto version written today.
 pub const SLOT_VERSION: u16 = 2;

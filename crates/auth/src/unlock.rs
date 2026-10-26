@@ -345,6 +345,18 @@ impl Registry {
         ])
     }
 
+    /// [`Registry::standard`] and more kinds the caller supplies (okono, which
+    /// needs the daemon's socket).
+    pub fn standard_with(extra: Vec<Box<dyn Unlocker>>) -> Registry {
+        let mut all: Vec<Box<dyn Unlocker>> = vec![
+            Box::new(PasswordUnlocker),
+            Box::new(RecoveryUnlocker),
+            Box::new(DeviceUnlocker),
+        ];
+        all.extend(extra);
+        Registry::with(all)
+    }
+
     pub fn with(mut unlockers: Vec<Box<dyn Unlocker>>) -> Registry {
         unlockers.sort_by_key(|u| u.priority());
         Registry { unlockers }
