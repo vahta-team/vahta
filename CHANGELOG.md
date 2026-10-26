@@ -27,6 +27,10 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Added
 
+- **okono as an unlocker of the connectors vault** (Linux; [docs/connectors.md](docs/connectors.md)):
+  `vahta unlock-method add|remove okono --connector`. A new slot kind (3) in the existing
+  slot table, no format change. The daemon asks okono first and falls back to the password
+  window on any failure. IPC protocol 19.
 - **Transcript scrub** ([docs/transcripts.md](docs/transcripts.md)): `vahta scrub
   --transcript [--all]` takes the values the daemon holds (every encoded form, and
   inside JSON text) and likely secrets out of Claude Code and Codex transcript files,

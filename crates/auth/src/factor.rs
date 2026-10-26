@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 /// phone and passed its biometric check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Factor {
+    /// Someone is at the machine and says yes: the window's yes, or okono's
+    /// face check. It does not say who they are beyond that, and a face can be
+    /// shown to a camera, so it is the weakest factor and opens nothing that
+    /// needs `Knowledge`.
     Presence,
     Knowledge,
     PossessionBiometric,

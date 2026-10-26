@@ -424,6 +424,7 @@ const KNOWN: &[&str] = &[
     "sleep_lock",
     "lock_on_sleep",
     "device_unlock",
+    "okono",
     "device_approve",
     "device_paired",
     "device_revoked",

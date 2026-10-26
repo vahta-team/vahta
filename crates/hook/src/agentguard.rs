@@ -30,7 +30,15 @@ use crate::readguard::{Tok, WRAPPERS, is_assignment, tokenize};
 const FORBIDDEN: &[&str] = &["reveal", "copy", "_surface", "journal"];
 
 /// Subcommands that are refused when they carry `--connector`.
-const CONNECTOR_FORBIDDEN: &[&str] = &["init", "add", "bind", "remove", "unlock", "run"];
+const CONNECTOR_FORBIDDEN: &[&str] = &[
+    "init",
+    "add",
+    "bind",
+    "remove",
+    "unlock",
+    "run",
+    "unlock-method",
+];
 
 /// Shells whose `-c` argument is a command line of its own.
 const SHELLS: &[&str] = &[
@@ -183,7 +191,15 @@ mod tests {
 
     #[test]
     fn the_connectors_vault_commands_are_for_the_person() {
-        for sub in ["init", "add", "bind", "remove", "unlock", "run"] {
+        for sub in [
+            "init",
+            "add",
+            "bind",
+            "remove",
+            "unlock",
+            "run",
+            "unlock-method",
+        ] {
             for cmd in [
                 format!("vahta {sub} --connector"),
                 format!("vh {sub} --connector NAME"),

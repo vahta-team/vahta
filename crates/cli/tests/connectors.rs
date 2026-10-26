@@ -81,7 +81,9 @@ impl Sandbox {
             .env("VAHTA_TEST_SURFACE_LOG", self.root.join("surface.log"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
-            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1");
+            .env("VAHTA_TEST_RELAY_CONNECT", "127.0.0.1")
+            .env("VAHTA_TEST_OKONO_SOCKET", self.root.join("okono.sock"))
+            .env("VAHTA_TEST_OKONO_TIMEOUT_MS", "3000");
         if self.alarm_on {
             cmd.env_remove("VAHTA_TEST_MUTE_REFUSAL_ALARM");
         } else {
@@ -1136,4 +1138,415 @@ fn a_burst_of_refused_launches_notifies_through_the_alarms_score() {
         "{notes:?}"
     );
     assert!(s.journal().contains("refusal_burst"));
+}
+
+// --- okono as an unlocker ---------------------------------------------------------
+
+/// A stand-in for okonod: a Unix socket that speaks the protocol Vahta expects
+/// (one request per connection, JSON lines) and answers as its `Mode` says.
+#[cfg(target_os = "linux")]
+mod okono {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// What the fake does with a request: after `delay_ms` it sends `lines`
+    /// and closes. No lines and a long delay is a daemon that never answers.
+    #[derive(Clone, Default)]
+    pub struct Mode {
+        pub lines: Vec<Vec<u8>>,
+        pub delay_ms: u64,
+    }
+
+    #[derive(Default)]
+    pub struct Fake {
+        pub mode: Mutex<Mode>,
+        pub requests: Mutex<Vec<String>>,
+        pub connections: AtomicUsize,
+        /// Connections the client closed before the fake had answered.
+        pub cancelled: AtomicUsize,
+    }
+
+    /// The 32 bytes okono "derives", made at run time.
+    pub fn bytes(salt: u8) -> Vec<u8> {
+        (0u8..32)
+            .map(|i| i.wrapping_mul(7).wrapping_add(salt))
+            .collect()
+    }
+
+    pub fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    pub fn ok_line(bytes: &[u8]) -> Vec<u8> {
+        format!(
+            r#"{{"v":1,"ok":true,"result":{{"kind":"secret","hex":"{}"}}}}"#,
+            hex(bytes)
+        )
+        .into_bytes()
+    }
+
+    pub fn error_line(code: &str) -> Vec<u8> {
+        format!(r#"{{"v":1,"ok":false,"error":{{"code":"{code}","message":"words okono shows"}}}}"#)
+            .into_bytes()
+    }
+
+    /// An answer: some events okono may send, an event Vahta has never heard
+    /// of, and the value.
+    pub fn answer(bytes: &[u8]) -> Mode {
+        Mode {
+            lines: vec![
+                br#"{"v":1,"event":{"type":"card"}}"#.to_vec(),
+                br#"{"v":1,"event":{"type":"attempt","n":2,"of":3}}"#.to_vec(),
+                br#"{"v":1,"event":{"type":"from_the_future","x":[1,2]}}"#.to_vec(),
+                ok_line(bytes),
+            ],
+            delay_ms: 0,
+        }
+    }
+
+    pub fn refusing(code: &str) -> Mode {
+        Mode {
+            lines: vec![error_line(code)],
+            delay_ms: 0,
+        }
+    }
+
+    pub fn silent(ms: u64) -> Mode {
+        Mode {
+            lines: vec![],
+            delay_ms: ms,
+        }
+    }
+
+    /// Wait `ms` or until the client closes; true when it closed.
+    fn client_closed(stream: &mut UnixStream, ms: u64) -> bool {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+        let end = Instant::now() + Duration::from_millis(ms);
+        let mut buf = [0u8; 64];
+        while Instant::now() < end {
+            match stream.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        false
+    }
+
+    pub fn serve(socket: &Path, mode: Mode) -> Arc<Fake> {
+        let fake = Arc::new(Fake {
+            mode: Mutex::new(mode),
+            ..Fake::default()
+        });
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).expect("bind the fake okono");
+        let shared = fake.clone();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut stream) = conn else { continue };
+                let fake = shared.clone();
+                std::thread::spawn(move || {
+                    fake.connections.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while stream.read(&mut byte).map(|n| n == 1).unwrap_or(false) {
+                        if byte[0] == b'\n' {
+                            break;
+                        }
+                        request.push(byte[0]);
+                    }
+                    fake.requests
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&request).into_owned());
+                    let mode = fake.mode.lock().unwrap().clone();
+                    if mode.delay_ms > 0 && client_closed(&mut stream, mode.delay_ms) {
+                        fake.cancelled.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
+                    for mut line in mode.lines {
+                        line.push(b'\n');
+                        if stream.write_all(&line).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        fake
+    }
+}
+
+#[cfg(target_os = "linux")]
+use okono::{Fake, Mode};
+
+#[cfg(target_os = "linux")]
+impl Sandbox {
+    fn okono_socket(&self) -> PathBuf {
+        self.root.join("okono.sock")
+    }
+
+    /// `vahta unlock-method add|remove okono --connector`, the password typed.
+    fn unlock_method(&self, verb: &str) -> Output {
+        self.script(&[PW_ANSWER]);
+        self.vahta(&self.root, &["unlock-method", verb, "okono", "--connector"])
+    }
+
+    /// A connectors vault with okono enrolled, and the fake that answered.
+    fn with_okono() -> (Sandbox, std::sync::Arc<Fake>) {
+        let s = Sandbox::with_connector(true);
+        let fake = okono::serve(&s.okono_socket(), okono::answer(&okono::bytes(3)));
+        let out = s.unlock_method("add");
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        (s, fake)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn asked(fake: &Fake) -> usize {
+    fake.connections.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn okono_is_enrolled_by_the_password_then_opens_the_session_with_no_window() {
+    let (s, fake) = Sandbox::with_okono();
+    assert_eq!(asked(&fake), 1, "enrolment asks okono once");
+    let request: Value = serde_json::from_str(&fake.requests.lock().unwrap()[0]).unwrap();
+    assert_eq!(request["v"], 1);
+    assert_eq!(request["op"], "secret");
+    assert_eq!(request["app"], "vahta");
+    assert_eq!(request["version"], 1);
+    let label = request["label"].as_str().unwrap();
+    assert!(
+        label.starts_with("vault:") && label.len() == 6 + 32,
+        "{label}"
+    );
+    assert!(request["display"].as_str().unwrap().len() <= 120);
+
+    let listed = text(&s.vahta(&s.root, &["list", "--connector"]).stdout);
+    assert!(listed.contains("unlock: password, okono"), "{listed}");
+    let checked = text(&s.vahta(&s.root, &["check", "--connector", "--json"]).stdout);
+    assert!(checked.contains("\"okono\""), "{checked}");
+
+    let windows = s.passwords();
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.passwords(), windows, "no password window");
+    assert_eq!(asked(&fake), 2);
+    assert_eq!(s.sessions().len(), 1);
+    let journal = s.journal();
+    assert!(journal.contains("\"event\":\"okono\""), "{journal}");
+    assert!(
+        !journal.contains(&okono::hex(&okono::bytes(3))),
+        "{journal}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn removing_okono_goes_back_to_the_password_window() {
+    let (s, fake) = Sandbox::with_okono();
+    let out = s.unlock_method("remove");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listed = text(&s.vahta(&s.root, &["list", "--connector"]).stdout);
+    assert!(listed.contains("unlock: password\n"), "{listed}");
+    let windows = s.passwords();
+    s.unlock();
+    assert_eq!(s.passwords(), windows + 1);
+    assert_eq!(asked(&fake), 1, "okono is not asked any more");
+    // And it cannot be removed twice, or added to a vault that has it.
+    let again = s.unlock_method("remove");
+    assert_ne!(again.status.code(), Some(0));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_enrolment_is_refused() {
+    let (s, _fake) = Sandbox::with_okono();
+    let out = s.unlock_method("add");
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).contains("already"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unlock_method_is_for_the_connectors_vault_only() {
+    let s = Sandbox::new(true);
+    let out = s.vahta(&s.root, &["unlock-method", "add", "okono"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).contains("--connector"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn okono_that_fails_in_any_way_sends_the_person_to_the_password_window() {
+    let cases: Vec<(&str, Mode, &str)> = vec![
+        ("denied", okono::refusing("denied"), "denied"),
+        ("locked out", okono::refusing("locked_out"), "locked_out"),
+        (
+            "an odd code",
+            okono::refusing("Not A Code, with words"),
+            "unknown",
+        ),
+        (
+            "a different value",
+            okono::answer(&okono::bytes(99)),
+            "wrong_value",
+        ),
+        (
+            "not json",
+            Mode {
+                lines: vec![b"this is not json".to_vec()],
+                delay_ms: 0,
+            },
+            "malformed",
+        ),
+        (
+            "a line over 16 KiB",
+            Mode {
+                lines: vec![vec![b'x'; 20_000]],
+                delay_ms: 0,
+            },
+            "too_long",
+        ),
+        (
+            "a value of the wrong length",
+            Mode {
+                lines: vec![okono::ok_line(&okono::bytes(3)[..31])],
+                delay_ms: 0,
+            },
+            "malformed",
+        ),
+        (
+            "base64 where hex is wanted",
+            Mode {
+                lines: vec![
+                    br#"{"v":1,"ok":true,"result":{"kind":"secret","value":"AAAA"}}"#.to_vec(),
+                ],
+                delay_ms: 0,
+            },
+            "malformed",
+        ),
+        (
+            "another protocol version",
+            Mode {
+                lines: vec![br#"{"v":2,"ok":true}"#.to_vec()],
+                delay_ms: 0,
+            },
+            "malformed",
+        ),
+        ("a connection dropped at once", Mode::default(), "closed"),
+    ];
+    let (s, fake) = Sandbox::with_okono();
+    for (what, mode, code) in cases {
+        *fake.mode.lock().unwrap() = mode;
+        let windows = s.passwords();
+        s.script(&[PW_ANSWER]);
+        let out = s.run_connector(KEY, &["printenv", KEY]);
+        assert_eq!(out.status.code(), Some(0), "{what}: {}", text(&out.stderr));
+        assert_eq!(s.passwords(), windows + 1, "{what}: the password window");
+        let journal = s.journal();
+        assert!(
+            journal.contains(&format!("{code}; the password window follows")),
+            "{what}: {journal}"
+        );
+        assert!(!journal.contains("words okono shows"), "{what}");
+        // End this harness's session so the next case asks again.
+        let _ = s.vahta(&s.root, &["lock", "--connector", "--all"]);
+        let _ = s.vahta(&s.root, &["lock", "--all"]);
+        wait_until("the session to end", 5, || s.sessions().is_empty());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn okono_that_is_not_there_falls_back_to_the_password() {
+    let (s, _fake) = Sandbox::with_okono();
+    fs::remove_file(s.okono_socket()).unwrap();
+    let windows = s.passwords();
+    s.unlock();
+    assert_eq!(s.passwords(), windows + 1);
+    assert!(
+        s.journal()
+            .contains("no_socket; the password window follows")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn okono_that_is_too_slow_is_given_up_on_and_its_connection_closed() {
+    let (s, fake) = Sandbox::with_okono();
+    *fake.mode.lock().unwrap() = okono::silent(30_000);
+    let windows = s.passwords();
+    let started = std::time::Instant::now();
+    s.unlock();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(s.passwords(), windows + 1);
+    assert!(s.journal().contains("timeout; the password window follows"));
+    wait_until("okono to see the connection closed", 5, || {
+        fake.cancelled.load(Ordering::SeqCst) == 1
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_client_that_goes_away_while_okono_looks_closes_okonos_connection() {
+    let (s, fake) = Sandbox::with_okono();
+    *fake.mode.lock().unwrap() = okono::silent(30_000);
+    let windows = s.passwords();
+    let mut client = s.spawn_launch(&["printenv", KEY]);
+    wait_until("the okono request", 10, || asked(&fake) == 2);
+    client.kill().unwrap();
+    let _ = client.wait();
+    wait_until("okono to see the cancel", 5, || {
+        fake.cancelled.load(Ordering::SeqCst) == 1
+    });
+    wait_until("the journal to say so", 5, || {
+        s.journal().contains("went away before the command started")
+    });
+    let journal = s.journal();
+    assert!(journal.contains("\"result\":\"cancelled\""), "{journal}");
+    assert!(!journal.contains("\"result\":\"started\""), "{journal}");
+    assert_eq!(s.passwords(), windows, "no password window was opened");
+    assert!(s.sessions().is_empty());
+    // The turn is free: the next launch uses okono again.
+    *fake.mode.lock().unwrap() = okono::answer(&okono::bytes(3));
+    let out = s.run_connector(KEY, &["printenv", KEY]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(s.passwords(), windows);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn launches_of_one_harness_process_share_one_okono_request() {
+    let (s, fake) = Sandbox::with_okono();
+    let mut slow = okono::answer(&okono::bytes(3));
+    slow.delay_ms = 800;
+    *fake.mode.lock().unwrap() = slow;
+    let windows = s.passwords();
+    let kids: Vec<_> = (0..3).map(|_| s.spawn_launch(&["printenv", KEY])).collect();
+    for kid in kids {
+        let out = kid.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+    assert_eq!(
+        asked(&fake),
+        2,
+        "enrolment and one request for three launches"
+    );
+    assert_eq!(s.passwords(), windows);
+    assert_eq!(s.sessions().len(), 1);
 }

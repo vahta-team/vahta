@@ -166,6 +166,14 @@ pub fn hkdf(ikm: &[u8], info: &[u8]) -> Zeroizing<[u8; KEY_LEN]> {
     out
 }
 
+/// [`hkdf`] with a salt, for key material that comes from outside and is bound
+/// to one vault by `salt`.
+pub fn hkdf_salted(salt: &[u8], ikm: &[u8], info: &[u8]) -> Zeroizing<[u8; KEY_LEN]> {
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    let _ = Hkdf::<Sha256>::new(Some(salt), ikm).expand(info, &mut *out);
+    out
+}
+
 /// XChaCha20-Poly1305 under `key` with a fresh random nonce.
 pub fn seal(
     key: &[u8; KEY_LEN],

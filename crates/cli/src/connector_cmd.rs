@@ -26,8 +26,29 @@ use crate::daemon_cmd;
 use crate::{EXIT_CLEAN, EXIT_DAEMON, EXIT_FAILED, EXIT_USAGE, Env};
 
 const COMMANDS: &[&str] = &[
-    "init", "add", "list", "check", "bind", "unlock", "run", "remove",
+    "init",
+    "add",
+    "list",
+    "check",
+    "bind",
+    "unlock",
+    "run",
+    "remove",
+    "unlock-method",
 ];
+
+pub const UNLOCK_METHOD_USAGE: &str = "\
+usage: vahta unlock-method add okono --connector [--json]
+       vahta unlock-method remove okono --connector [--json]
+
+Let okono (a face check on this machine, Linux) open the connectors vault for a
+harness process, besides the password. `add` asks for the connectors password
+in a window, then asks okono once: look at the camera and press Enter on
+okono's card. `remove` takes it away (the password, in a window).
+
+The password always works: if okono is missing, refuses or is slow, the
+password window opens at once. See docs/connectors.md, \"Unlock with okono\".
+";
 
 pub const INIT_USAGE: &str = "\
 usage: vahta init --connector [--json]
@@ -200,6 +221,7 @@ fn usage_of(command: &str) -> &'static str {
         "bind" => BIND_USAGE,
         "unlock" => UNLOCK_USAGE,
         "run" => RUN_USAGE,
+        "unlock-method" => UNLOCK_METHOD_USAGE,
         "list" => LIST_USAGE,
         "check" => CHECK_USAGE,
         _ => REMOVE_USAGE,
@@ -324,6 +346,15 @@ fn request_of(command: &str, mut p: Args) -> Result<ConnectorCmd, String> {
     };
     let path = std::env::var_os("PATH").map(|v| v.to_string_lossy().into_owned());
     match command {
+        "unlock-method" => match p.positional.as_slice() {
+            [verb, method] if verb == "add" => Ok(ConnectorCmd::UnlockMethodAdd {
+                method: method.clone(),
+            }),
+            [verb, method] if verb == "remove" => Ok(ConnectorCmd::UnlockMethodRemove {
+                method: method.clone(),
+            }),
+            _ => Err("expected `add okono` or `remove okono`".to_string()),
+        },
         "init" => {
             if !p.positional.is_empty() {
                 return Err("unexpected argument".to_string());
@@ -495,6 +526,7 @@ fn list(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> 
         let doc = json!({
             "vault": path.display().to_string(),
             "secrets": secrets,
+            "unlock_methods": unlock_methods(&peek),
             "refusals": refusals,
         });
         let _ = writeln!(
@@ -520,10 +552,25 @@ fn list(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> 
             );
         }
     }
+    let _ = writeln!(stdout, "unlock: {}", unlock_methods(&peek).join(", "));
     for line in refusal_lines(&refusals) {
         let _ = writeln!(stdout, "{line}");
     }
     EXIT_CLEAN
+}
+
+/// The ways into the vault, from the slots (no password): the password, and
+/// okono when it is enrolled.
+fn unlock_methods(peek: &Peek) -> Vec<&'static str> {
+    let mut methods = vec!["password"];
+    if peek
+        .slots
+        .iter()
+        .any(|s| s.info.kind == vahta_vault::SLOT_OKONO)
+    {
+        methods.push("okono");
+    }
+    methods
 }
 
 fn check(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
@@ -568,6 +615,7 @@ fn check(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) ->
         let doc = json!({
             "ok": problems.is_empty(),
             "vault": path.display().to_string(),
+            "unlock_methods": unlock_methods(&peek),
             "problems": problems,
         });
         let _ = writeln!(
@@ -576,7 +624,12 @@ fn check(p: &Args, env: &Env, stdout: &mut dyn Write, stderr: &mut dyn Write) ->
             serde_json::to_string_pretty(&doc).unwrap_or_default()
         );
     } else if problems.is_empty() {
-        let _ = writeln!(stdout, "Vault: {}\nOK", path.display());
+        let _ = writeln!(
+            stdout,
+            "Vault: {}\nUnlock: {}\nOK",
+            path.display(),
+            unlock_methods(&peek).join(", ")
+        );
     } else {
         let _ = writeln!(stderr, "Vault: {}", path.display());
         for pr in &problems {
