@@ -127,6 +127,9 @@ pub(crate) struct Shared {
     pub(crate) remembered: Mutex<crate::input_ops::Remembered>,
     /// Saved pastes the agent is to be told to propose rules for.
     pub(crate) pending_bind: Mutex<crate::input_ops::PendingBind>,
+    /// Tool calls the detector refused and the person has been asked to let
+    /// through (see `allow_ops.rs`).
+    pub(crate) refusals: Mutex<crate::allow_ops::Refusals>,
     /// One prompt window at a time, and how often (see `input_ops.rs`).
     pub(crate) prompt_gate: crate::input_ops::Gate,
     /// What agents have tried, weighed (see `alarm.rs`).
@@ -292,6 +295,12 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
             io::Error::other("the system random generator failed"),
         )
     })?;
+    let refusals = crate::allow_ops::Refusals::new().ok_or_else(|| {
+        ServerError::Io(
+            "draw a key",
+            io::Error::other("the system random generator failed"),
+        )
+    })?;
     let shared = Arc::new(Shared {
         options,
         journal,
@@ -304,6 +313,7 @@ pub fn run(mut options: Options) -> Result<(), ServerError> {
         marks: Mutex::new(crate::transcript::Marks::default()),
         remembered: Mutex::new(remembered),
         pending_bind: Mutex::default(),
+        refusals: Mutex::new(refusals),
         prompt_gate: Default::default(),
         alarm: crate::alarm::Alarm::default(),
         connector_refusals: Mutex::new(Vec::new()),
@@ -930,6 +940,39 @@ fn client_loop(shared: &Arc<Shared>, stream: &mut Stream, peer: &vahta_os::Peer)
             } => (
                 crate::report::tool_check(shared, &ctx, session.as_deref(), &text)
                     .unwrap_or_else(|r| r),
+                false,
+            ),
+            ClientRequest::ToolRefuse {
+                session,
+                harness,
+                cwd,
+                tool,
+                path,
+                text,
+                category,
+                rule,
+                description,
+                peek,
+            } => (
+                crate::allow_ops::tool_refuse(
+                    &ctx,
+                    crate::allow_ops::Refused {
+                        session: session.as_deref(),
+                        harness: &harness,
+                        cwd: &cwd,
+                        tool: &tool,
+                        path: path.as_deref(),
+                        text: &text,
+                        category: &category,
+                        rule: &rule,
+                        description: &description,
+                        peek,
+                    },
+                ),
+                false,
+            ),
+            ClientRequest::ToolAllow { reference, reason } => (
+                crate::allow_ops::allow(&ctx, &reference, reason).unwrap_or_else(|r| r),
                 false,
             ),
             ClientRequest::CheckInput {

@@ -37,6 +37,7 @@ value. It needs no daemon.
                       refused     anything Vahta refused
                       run         runs and requests with a secret
                       session     sessions opening, ending, locking
+                      allow       an agent asking to let a refused tool call through
                       connector   the connectors vault, its sessions and launches
                       notified    desktop notifications that were sent
                       vault       changes to a vault and its secrets
@@ -53,6 +54,7 @@ const KINDS: &[&str] = &[
     "refused",
     "run",
     "session",
+    "allow",
     "connector",
     "notified",
     "vault",
@@ -250,6 +252,7 @@ impl Line {
                     | "sleep_lock"
                     | "lock_on_sleep"
             ),
+            "allow" => matches!(e, "tool_allow" | "tool_allow_used"),
             "vault" => matches!(
                 e,
                 "init"
@@ -337,6 +340,13 @@ impl Line {
                 "desktop notification sent: {reason_word}{with}",
                 reason_word = notice_words(&result_or(&self.result, &reason))
             ),
+            "tool_allow" => format!(
+                "an agent asked to let a refused tool call through{with}: {result}{}",
+                tail(&reason)
+            ),
+            "tool_allow_used" => {
+                format!("a tool call you allowed once went through{}", tail(&reason))
+            }
             "hook_report" => format!("the hook stopped an agent: {result}{}", tail(&reason)),
             "hook_tamper" | "hook_tamper_kept" => {
                 format!("hook settings changed: {result}{}", tail(&reason))

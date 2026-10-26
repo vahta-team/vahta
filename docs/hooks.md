@@ -244,6 +244,57 @@ A held or saved message may already be in the harness's prompt history. When you
 choose "save" or "do nothing" the daemon removes it from there too; see
 [transcripts.md](transcripts.md#a-prompt-that-was-blocked).
 
+## When the agent's own tool call is refused
+
+The detector also looks at what the agent is about to do: a Bash command, a
+write or an edit, an `apply_patch`, an MCP tool's input. When it finds a secret it
+refuses the call and the agent is told the category ("an Anthropic-style API
+key"), never the rule. Most of the time that is right. Sometimes it is a false
+alarm (a QML property named like a password, a test fixture), and the agent
+should not have to ask you to switch the hooks off.
+
+While the daemon runs, the refusal carries a short reference, and the agent can
+ask you about that one call: `vahta allow REF --reason "why it is not a secret"`.
+The reference is kept in the daemon's memory for 10 minutes, for the agent whose
+hook made it. A window shows what was refused (the tool, the file or the start of
+the command with the find hidden, the rule and what it looks for), what matched,
+and the agent's reason, marked as unverified. A vendor-format key is shown as its
+kind, its length and four characters at each end; a value found only because of the
+name it was assigned to, when the detector is unsure it is a secret at all (a
+`password = identifier`), is shown whole, so you can see what it saw. Three ways out:
+
+- **False alarm, let it through once**: that exact call may be retried, unchanged,
+  within five minutes, in the same agent session and project. The retry is let
+  through and uses the allowance up; a second try, or any change to the call (one
+  character), is refused again and gets a new reference. The daemon keeps only a
+  keyed hash of the call (HMAC-SHA256 under a key drawn at start), the session and
+  the project; the found values stay in memory, never on disk and never in the
+  journal.
+- **It is a secret: save to the project vault as NAME** (offered when the project has
+  a vault and the detector knows where the secret is): the value is stored with the
+  same name, tier and password steps as for a pasted prompt, and the question *Have
+  the agent propose rules now?* follows. The agent is told only the name, to use it
+  with `vahta run --secret NAME -- ...`, and, if you said yes, to propose rules and run
+  `vahta bind NAME`. The call itself stays refused.
+- **Refuse**: the agent is told you refused.
+
+No answer in 100 seconds is a refusal. Windows are rationed like the prompt check's:
+one at a time, at most four a minute for one agent; past that the request is held,
+journaled as suspicious and counted for the injection alarm. Every request weighs a
+little with the alarm, together with the refusals that led to it.
+
+A value the detector found because it was hidden (base64, hex, `%XX`, pieces joined
+by the shell) is refused with no reference: that looks like an injected instruction,
+not a false alarm. A call too large to send whole to the daemon (160 KiB) has no
+reference either, and with no daemon running the agent gets the old text, with no
+reference: category, and "use `vahta run`".
+
+The journal gets `tool_allow` (the request and your answer: `allowed_once`,
+`allowed_once_vendor_format` for a letting-through of a vendor-format match, `saved_*`,
+`refused`, `no_answer`, `busy`, `rate_limited`) and `tool_allow_used` (the retry that
+went through). They carry names and kinds, never a value or any of the command;
+`vahta journal --kind allow` lists them.
+
 ## Running unattended: when the hook says "allow"
 
 An agent harness stops a `vahta run` call to ask the person (Claude Code's

@@ -43,7 +43,7 @@ use crate::surface::sanitize_label;
 
 /// How long the window waits for the person. The hook gives up later (it is
 /// told 120 s by its harness), so the daemon's "held" arrives first.
-pub const ASK_WAIT: Duration = Duration::from_secs(100);
+pub(crate) const ASK_WAIT: Duration = Duration::from_secs(100);
 /// How long the question "should the agent propose rules?" waits after a save.
 /// No answer is "not now".
 const BIND_WAIT: Duration = Duration::from_secs(20);
@@ -57,11 +57,11 @@ const SHOW_ENDS_FROM: usize = 16;
 /// How long a second `PromptAsk` waits for the open window to close.
 const WAIT_FOR_OPEN: Duration = Duration::from_secs(3);
 /// Windows one requesting process tree may open in [`PER`].
-const MAX_WINDOWS: usize = 4;
+pub(crate) const MAX_WINDOWS: usize = 4;
 const PER: Duration = Duration::from_secs(60);
 /// How much a refused request weighs for the injection alarm, of its threshold:
 /// two in a minute raise it. A person pasting secrets does not do that.
-const ALARM_SHARE: f64 = 0.5;
+pub(crate) const ALARM_SHARE: f64 = 0.5;
 
 /// One prompt window at a time, and a few per minute per requester. A request
 /// can come from any local process, so a flood must not bury the person in
@@ -90,7 +90,7 @@ impl Drop for Permit<'_> {
     }
 }
 
-enum Admit<'a> {
+pub(crate) enum Admit<'a> {
     Go(Permit<'a>),
     /// Another window stayed open.
     Busy,
@@ -99,7 +99,7 @@ enum Admit<'a> {
 }
 
 impl Gate {
-    fn admit(&self, key: &str) -> Admit<'_> {
+    pub(crate) fn admit(&self, key: &str) -> Admit<'_> {
         let Ok(mut s) = self.state.lock() else {
             return Admit::Busy;
         };
@@ -220,6 +220,38 @@ impl PendingBind {
     }
 }
 
+/// After a save: ask the person whether the agent should propose rules for
+/// the new secret now. No answer is "not now".
+pub(crate) fn offer_bind(
+    window: &mut dyn crate::surface::Window,
+    ctx: &Ctx<'_>,
+    name: &str,
+    not_done: &str,
+) -> bool {
+    let panel = ctx.panel(
+        &format!("Saved {name}"),
+        vec![
+            format!("{name} is in the project vault. {not_done}"),
+            "Nothing limits what may use it yet: it needs rules (which programs, which \
+             hosts)."
+                .to_string(),
+        ],
+    );
+    let options = vec![
+        "Have the agent propose rules now".to_string(),
+        "Not now".to_string(),
+    ];
+    matches!(
+        window.choose_within(
+            &panel,
+            "Should the agent propose rules for it?",
+            &options,
+            BIND_WAIT,
+        ),
+        Ok(Some(0))
+    )
+}
+
 /// `CheckInput`: the names of the held values `text` carries, and, for a text
 /// that carries none, the secrets waiting for the agent to be told to propose
 /// rules for them.
@@ -257,7 +289,7 @@ struct Found {
 
 /// What a window shows of a value: its ends, when it is long enough that its
 /// ends tell little.
-fn ends_of(value: &str) -> Option<String> {
+pub(crate) fn ends_of(value: &str) -> Option<String> {
     let chars: Vec<char> = value.chars().collect();
     if chars.len() < SHOW_ENDS_FROM {
         return None;
@@ -269,7 +301,7 @@ fn ends_of(value: &str) -> Option<String> {
 
 /// A name for the vault that the kind of secret suggests: `OpenAI-style key`
 /// is `OPENAI_KEY`, `an Anthropic-style API key` is `ANTHROPIC_API_KEY`.
-fn suggested_name(kind: &str, taken: &dyn Fn(&str) -> bool) -> String {
+pub(crate) fn suggested_name(kind: &str, taken: &dyn Fn(&str) -> bool) -> String {
     const NOISE: [&str; 7] = ["a", "an", "style", "assignment", "flag", "value", "the"];
     let words: Vec<String> = kind
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
@@ -585,32 +617,8 @@ pub(crate) fn prompt_ask(
                     forget(&found);
                     // The agent cannot propose rules for a secret it has not been
                     // told about; the person decides whether it is told to.
-                    let bind = {
-                        let panel = ctx.panel(
-                            &format!("Saved {name}"),
-                            vec![
-                                format!(
-                                    "{name} is in the project vault. Your message was not sent."
-                                ),
-                                "Nothing limits what may use it yet: it needs rules (which \
-                                 programs, which hosts)."
-                                    .to_string(),
-                            ],
-                        );
-                        let options = vec![
-                            "Have the agent propose rules now".to_string(),
-                            "Not now".to_string(),
-                        ];
-                        matches!(
-                            window.choose_within(
-                                &panel,
-                                "Should the agent propose rules for it?",
-                                &options,
-                                BIND_WAIT,
-                            ),
-                            Ok(Some(0))
-                        )
-                    };
+                    let bind =
+                        offer_bind(window.as_mut(), ctx, &name, "Your message was not sent.");
                     if bind
                         && let Some(project) =
                             vahta_vault::project::Project::find(std::path::Path::new(cwd))

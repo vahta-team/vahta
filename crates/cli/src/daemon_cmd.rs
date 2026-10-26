@@ -410,6 +410,7 @@ pub fn report(
         | ClientReply::Transcripts(_)
         | ClientReply::OutputReleased { .. }
         | ClientReply::ToolDeny { .. }
+        | ClientReply::ToolRefusal { .. }
         | ClientReply::InputNames { .. }
         | ClientReply::PromptAnswer { .. }
         | ClientReply::Allowed {}
@@ -441,6 +442,9 @@ fn refusal_text(why: RefusalKind) -> &'static str {
         RefusalKind::Stale => "changed since this session was opened; unlock again",
         RefusalKind::NoSession => "no session to narrow; run `vahta unlock` first",
         RefusalKind::UnknownOutput => "no output kept under that reference for this agent",
+        RefusalKind::UnknownToolCall => {
+            "no refused tool call kept under that reference for this agent"
+        }
         RefusalKind::CommandNotAllowed => "this command is not allowed to use this secret",
         RefusalKind::NoRules => "no approved rules yet; propose them with `vahta bind`",
         RefusalKind::HostNotAllowed => "not approved for this host",

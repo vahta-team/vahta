@@ -238,6 +238,60 @@ pub fn tool_check(session: Option<String>, cwd: &str, text: &str) -> Option<Held
     None
 }
 
+/// What the daemon says about a call the hook's detector refused.
+pub enum Refusal {
+    /// The person let exactly this call through once: it goes on.
+    Pass,
+    /// Kept under this reference; the agent may ask the person about it.
+    Kept(String),
+    /// No daemon of this version answered in time, or it kept nothing.
+    Unkept,
+}
+
+/// A call the detector refused, as the hook describes it to the daemon.
+pub struct Refused<'a> {
+    pub harness: &'a str,
+    pub session: Option<String>,
+    pub cwd: &'a str,
+    pub tool: &'a str,
+    pub path: Option<&'a str>,
+    pub text: &'a str,
+    pub category: &'a str,
+    pub rule: &'a str,
+    pub description: &'a str,
+    /// Only look for an allowance, keep nothing (the second event of a call).
+    pub peek: bool,
+}
+
+/// Tell a running daemon what the detector refused: it answers whether the
+/// person let this very call through once, and otherwise keeps it under a
+/// short reference. A call too large to send whole is not kept.
+pub fn refuse(r: Refused<'_>) -> Refusal {
+    if r.text.len() > MAX_PROMPT {
+        return Refusal::Unkept;
+    }
+    let request = ClientRequest::ToolRefuse {
+        session: r.session,
+        harness: r.harness.to_string(),
+        cwd: r.cwd.to_string(),
+        tool: r.tool.to_string(),
+        path: r.path.map(str::to_string),
+        text: r.text.to_string(),
+        category: r.category.to_string(),
+        rule: r.rule.to_string(),
+        description: r.description.to_string(),
+        peek: r.peek,
+    };
+    match ask(request) {
+        Some(ClientReply::ToolRefusal { pass: true, .. }) => Refusal::Pass,
+        Some(ClientReply::ToolRefusal {
+            reference: Some(reference),
+            ..
+        }) => Refusal::Kept(reference),
+        _ => Refusal::Unkept,
+    }
+}
+
 /// How long the hook waits for the person to answer the window of a prompt
 /// with a secret in it: a little under the 120 s the harness allows the hook
 /// (the daemon's own wait is shorter still). `VAHTA_HOOK_PROMPT_WAIT_MS` can
