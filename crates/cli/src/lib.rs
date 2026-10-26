@@ -9,7 +9,7 @@
 //! owner: `vahta daemon` (see `daemon_cmd.rs`), `init`, `add`, `reset`,
 //! `remove`, `import`, `reveal` and `copy` (`vault_ops.rs`), `unlock`, `lock` and
 //! `sessions` (`session_cmds.rs`), `run` and `delegate` (`run_cmd.rs`),
-//! `output allow` (`output_cmd.rs`), and the
+//! `output allow` (`output_cmd.rs`), `allow` (`allow_cmd.rs`), and the
 //! hidden `_surface`, the prompt window the daemon opens (`surface_cmd.rs`).
 //! These commands take no secret and no password as an argument: the person
 //! types them in the window. `vahta scan [PATH]` is the project path of `ka scan`, and
@@ -33,6 +33,7 @@
 //! Prints names, paths and counts. Never a secret value: the scanner does not
 //! hold one.
 
+mod allow_cmd;
 mod autostart;
 mod bind_cmd;
 mod config_cmd;
@@ -134,6 +135,7 @@ commands:
   join    install a package from the owner, or import a secret an editor sent
   hooks   `hooks pause` lets an agent change the hook settings for a while (the person approves)
   output  `output allow REF`: ask to see what was cut from a tool's output
+  allow   `allow REF`: ask the person about a tool call Vahta refused
   scrub   `scrub --transcript`: take secrets out of your agent's transcript files
   init    create this project's vault
   add     store a new secret (typed in a window, never on the command line)
@@ -473,6 +475,7 @@ pub fn run(args: &[String], env: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         Some("share") => members_cmd::run_share(&args[1..], env, stdout, stderr),
         Some("join") => members_cmd::run_join(&args[1..], env, stdout, stderr),
         Some("output") => output_cmd::run(&args[1..], env, stdout, stderr),
+        Some("allow") => allow_cmd::run(&args[1..], env, stdout, stderr),
         Some("scrub") => scrub_cmd::run(&args[1..], env, stdout, stderr),
         // The prompt window, started by the daemon; not listed in the help.
         Some("_surface") => surface_cmd::run(&args[1..]),

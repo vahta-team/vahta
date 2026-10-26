@@ -13,6 +13,7 @@
 
 mod add_rules;
 mod alarm;
+mod allow_ops;
 mod anchor;
 mod authn;
 mod bind_ops;

@@ -788,6 +788,7 @@ pub(crate) fn forbids(ctx: &Ctx<'_>, request: &ClientRequest) -> Option<ClientRe
             | TranscriptNote { .. }
             | HookReport { .. }
             | ToolCheck { .. }
+            | ToolRefuse { .. }
             | CheckInput { .. }
             | PromptAsk { .. }
             | CheckRun { .. }

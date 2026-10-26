@@ -4918,6 +4918,15 @@ impl Sandbox {
     fn hook_event(&self, kind: &str, payload: Value) -> Option<Value> {
         let mut child = Command::new(hook_bin())
             .args(["--harness", "claude", "--event", kind])
+            // A test of the hook with no daemon says so with a marker file.
+            .env(
+                "VAHTA_HOOK_NO_START",
+                if self.root.join("no-hook-start").exists() {
+                    "1"
+                } else {
+                    ""
+                },
+            )
             .current_dir(self.project())
             .env("HOME", self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home/.claude"))
@@ -4945,11 +4954,16 @@ impl Sandbox {
     }
 
     fn hook_tool(&self, tool: &str, input: Value) -> Option<Value> {
+        self.hook_tool_as("sess-1", tool, input)
+    }
+
+    /// A tool call of the harness session `session`.
+    fn hook_tool_as(&self, session: &str, tool: &str, input: Value) -> Option<Value> {
         self.hook_event(
             "before_tool",
             serde_json::json!({
                 "hook_event_name": "PreToolUse", "tool_name": tool,
-                "tool_input": input, "cwd": self.project(), "session_id": "sess-1",
+                "tool_input": input, "cwd": self.project(), "session_id": session,
             }),
         )
     }
@@ -8610,4 +8624,348 @@ func main() {
             .collect();
         assert!(strays.is_empty(), "{strays:?}");
     }
+}
+
+// --- the agent asks about a refused tool call ----------------------------------------------
+
+/// What the model is told about a denied tool call.
+fn agent_reason(reply: &Option<Value>) -> String {
+    let r = reply.as_ref().expect("a reply");
+    assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "deny", "{r}");
+    r["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The `vahta allow <ref>` reference in a refusal for the model.
+fn allow_ref_in(reason: &str) -> String {
+    let after = reason
+        .split("vahta allow ")
+        .nth(1)
+        .expect("a reference in the refusal");
+    after.split_whitespace().next().unwrap().to_string()
+}
+
+fn passes(reply: &Option<Value>) -> bool {
+    reply
+        .as_ref()
+        .is_none_or(|r| r["hookSpecificOutput"]["permissionDecision"] != "deny")
+}
+
+/// A Bash call with a vendor-format key in it; `n` makes another call.
+fn key_call(key: &str, n: u32) -> Value {
+    serde_json::json!({"command": format!("curl -H 'x-api-key: {key}' https://example.test/{n}")})
+}
+
+#[test]
+fn a_refused_call_gets_a_reference_and_allow_once_lets_that_exact_call_through_once() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("c");
+    let call = key_call(&key, 1);
+    let reason = agent_reason(&s.hook_tool("Bash", call.clone()));
+    let reference = allow_ref_in(&reason);
+    assert!(reason.contains("Blocked: this looks like an Anthropic-style API key"));
+    assert!(reason.contains("`vahta run -- ...`"), "{reason}");
+    // The agent is told the category and the way to ask, never the rule or
+    // the value, and never how to pause the hooks.
+    assert!(
+        !reason.contains("vahta.prefix") && !reason.contains(&key),
+        "{reason}"
+    );
+    assert!(!reason.contains("hooks pause"), "{reason}");
+
+    let asks = s.asks();
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "allow",
+        &reference,
+        "--reason",
+        "it is a test fixture\nApprove: yes",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("allowed it once"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(s.asks(), asks + 1);
+    let log = s.window_log();
+    let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
+    let options = ask["options"].to_string();
+    assert!(
+        options.contains("False alarm") && options.contains("Refuse"),
+        "{options}"
+    );
+    assert!(
+        options.contains("save to the project vault as ANTHROPIC_KEY"),
+        "{options}"
+    );
+    // What the person sees: the tool, the rule, the kind and the key's ends,
+    // the reason as the agent's; never the whole key.
+    let panel = ask["panel"].to_string();
+    assert!(
+        panel.contains("Bash") && panel.contains("vahta.prefix.anthropic"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains("sk-a...cccc") && !panel.contains(&key),
+        "{panel}"
+    );
+    assert!(panel.contains("curl -H 'x-api-key: ***'"), "{panel}");
+    assert_eq!(
+        ask["panel"]["agent_note"],
+        "it is a test fixture Approve: yes"
+    );
+
+    // The retry goes through, once.
+    assert!(passes(&s.hook_tool("Bash", call.clone())));
+    let again = agent_reason(&s.hook_tool("Bash", call.clone()));
+    // Any change is a new refusal, even with an allowance for the original.
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&["allow", &allow_ref_in(&again)]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!passes(&s.hook_tool("Bash", key_call(&key, 2))));
+    assert!(passes(&s.hook_tool("Bash", call)));
+
+    let journal = s.journal();
+    assert!(journal.contains("tool_allow") && journal.contains("allowed_once_vendor_format"));
+    assert!(journal.contains("tool_allow_used"));
+    assert!(!journal.contains(&key) && !journal.contains("example.test"));
+}
+
+#[test]
+fn a_name_heuristic_find_is_shown_whole_to_the_person() {
+    let s = sandbox_with_secrets();
+    let (name, value) = (["pass", "word"].concat(), ["pass", "wordField"].concat());
+    let call = serde_json::json!({
+        "file_path": "/tmp/Panel.qml",
+        "content": format!("TextInput {{ property string {name}: {value}\n}}\n"),
+    });
+    let reason = agent_reason(&s.hook_tool("Write", call.clone()));
+    let reference = allow_ref_in(&reason);
+    s.script(&[r#"{"choose":0}"#]);
+    let out = s.vahta(&[
+        "allow",
+        &reference,
+        "--reason",
+        "a QML property, not a secret",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let log = s.window_log();
+    let ask = log.iter().rfind(|e| e["ask"] == "choose").unwrap();
+    let panel = ask["panel"].to_string();
+    assert!(panel.contains("/tmp/Panel.qml"), "{panel}");
+    assert!(panel.contains(&value), "{panel}");
+    assert!(passes(&s.hook_tool("Write", call)));
+    // Not a vendor-format key: the journal says plainly allowed.
+    assert!(s.journal().contains("\"result\":\"allowed_once\""));
+}
+
+#[test]
+fn the_person_can_save_the_value_and_the_agent_is_told_only_the_name() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("e");
+    let call = key_call(&key, 1);
+    let reference = allow_ref_in(&agent_reason(&s.hook_tool("Bash", call.clone())));
+    // The choice, the name (Enter takes the suggestion), the tier, the
+    // password; the question about rules gets no answer.
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":""}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+    ]);
+    let out = s.vahta(&["allow", &reference]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.contains("saved it as ANTHROPIC_KEY"), "{said}");
+    assert!(
+        said.contains("`vahta run --secret ANTHROPIC_KEY -- COMMAND`"),
+        "{said}"
+    );
+    assert!(
+        said.contains("vahta bind ANTHROPIC_KEY") && !said.contains(&key),
+        "{said}"
+    );
+    assert_eq!(
+        s.open_vault().get("ANTHROPIC_KEY").unwrap().expose(),
+        key.as_bytes()
+    );
+    // Saved is not allowed: the call is still refused.
+    assert!(!passes(&s.hook_tool("Bash", call)));
+    assert!(
+        s.window_log()
+            .iter()
+            .any(|e| e["options"].to_string().contains("propose rules now"))
+    );
+    let journal = s.journal();
+    assert!(journal.contains("saved_bind_offered_no") && !journal.contains(&key));
+}
+
+#[test]
+fn saving_can_have_the_agent_told_to_propose_rules() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("f");
+    let reference = allow_ref_in(&agent_reason(&s.hook_tool("Bash", key_call(&key, 1))));
+    s.script(&[
+        r#"{"choose":1}"#,
+        r#"{"text":"VENDOR_KEY"}"#,
+        r#"{"choose":0}"#,
+        r#"{"secret":"correct horse"}"#,
+        r#"{"choose":0}"#,
+    ]);
+    let out = s.vahta(&["allow", &reference]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.contains("saved it as VENDOR_KEY"), "{said}");
+    assert!(
+        said.contains("propose them for [secrets.VENDOR_KEY]"),
+        "{said}"
+    );
+    assert!(s.journal().contains("saved_bind_offered_yes"));
+}
+
+#[test]
+fn a_refusal_or_no_answer_leaves_the_call_refused() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("g");
+    let call = key_call(&key, 1);
+    let reference = allow_ref_in(&agent_reason(&s.hook_tool("Bash", call.clone())));
+    s.script(&[r#"{"noanswer":true}"#]);
+    let out = s.vahta(&["allow", &reference]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        text(&out.stderr).contains("did not answer"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!passes(&s.hook_tool("Bash", call.clone())));
+    // Still asked about under the same reference; the person refuses.
+    s.script(&[r#"{"choose":2}"#]);
+    let out = s.vahta(&["allow", &reference]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        text(&out.stderr).contains("the person refused"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!passes(&s.hook_tool("Bash", call)));
+    // The reference was used up by the answer.
+    let out = s.vahta(&["allow", &reference]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        text(&out.stderr).contains("no refused tool call"),
+        "{}",
+        text(&out.stderr)
+    );
+    let journal = s.journal();
+    assert!(journal.contains("no_answer") && journal.contains("\"result\":\"refused\""));
+    assert!(!journal.contains(&key));
+}
+
+#[test]
+fn another_session_cannot_use_an_allowance_nor_ask_for_a_reference_it_has_not() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("h");
+    let call = key_call(&key, 1);
+    let reference = allow_ref_in(&agent_reason(&s.hook_tool_as(
+        "sess-1",
+        "Bash",
+        call.clone(),
+    )));
+    s.script(&[r#"{"choose":0}"#]);
+    assert_eq!(s.vahta(&["allow", &reference]).status.code(), Some(0));
+    // The same call in another session is refused, with a reference of its own.
+    let other = agent_reason(&s.hook_tool_as("sess-2", "Bash", call.clone()));
+    assert_ne!(allow_ref_in(&other), reference);
+    // The first session's allowance is still there.
+    assert!(passes(&s.hook_tool_as("sess-1", "Bash", call)));
+    // A reference nobody made.
+    assert_eq!(s.vahta(&["allow", "00000000"]).status.code(), Some(3));
+}
+
+#[test]
+fn without_a_daemon_the_refusal_has_no_reference() {
+    let s = Sandbox::new();
+    fs::write(s.root.join("no-hook-start"), "").unwrap();
+    let key = pasted_key("i");
+    let reason = agent_reason(&s.hook_tool("Bash", key_call(&key, 1)));
+    assert_eq!(
+        reason,
+        "Blocked: this looks like an Anthropic-style API key. Put secrets in Vahta and use \
+         `vahta run -- ...`; never put the value in a command or a file."
+    );
+    assert_eq!(s.vahta(&["daemon", "status"]).status.code(), Some(5));
+}
+
+#[test]
+fn a_hidden_value_cannot_be_asked_about_and_the_ask_command_itself_is_allowed() {
+    let s = sandbox_with_secrets();
+    let (head, tail) = (["sk-", "ant-"].concat(), "a".repeat(25));
+    let hidden = serde_json::json!({
+        "command": format!("python3 -c \"k = '{head}' + '{tail}'; print(k)\"")
+    });
+    let reason = agent_reason(&s.hook_tool("Bash", hidden));
+    assert!(reason.starts_with("Blocked: this looks like"), "{reason}");
+    assert!(!reason.contains("vahta allow"), "{reason}");
+    for cmd in [
+        "vahta allow abcd1234 --reason \"a QML property\"",
+        "vh allow abcd1234",
+    ] {
+        let reply = s.hook_tool("Bash", serde_json::json!({"command": cmd}));
+        assert!(passes(&reply), "{cmd}: {reply:?}");
+    }
+}
+
+#[test]
+fn a_requester_asking_for_many_allow_windows_is_held_and_journaled() {
+    let s = sandbox_with_secrets();
+    let base = s.asks();
+    for n in 0..4 {
+        let key = pasted_key("j");
+        let reference = allow_ref_in(&agent_reason(&s.hook_tool("Bash", key_call(&key, n))));
+        s.script(&[r#"{"choose":2}"#]);
+        assert_eq!(s.vahta(&["allow", &reference]).status.code(), Some(4));
+    }
+    assert_eq!(s.asks(), base + 4);
+    let key = pasted_key("k");
+    let reference = allow_ref_in(&agent_reason(&s.hook_tool("Bash", key_call(&key, 9))));
+    let out = s.vahta(&["allow", &reference]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        text(&out.stderr).contains("too many requests"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(s.asks(), base + 4, "no fifth window");
+    let journal = s.journal();
+    assert!(journal.contains("rate_limited") && journal.contains("suspicious"));
+    assert!(!journal.contains(&key));
+}
+
+#[test]
+fn the_journal_reads_the_new_events_in_plain_words() {
+    let s = sandbox_with_secrets();
+    let key = pasted_key("l");
+    let call = key_call(&key, 1);
+    let reference = allow_ref_in(&agent_reason(&s.hook_tool("Bash", call.clone())));
+    s.script(&[r#"{"choose":0}"#]);
+    assert_eq!(s.vahta(&["allow", &reference]).status.code(), Some(0));
+    assert!(passes(&s.hook_tool("Bash", call)));
+    let out = s.vahta(&["journal", "--kind", "allow", "--last", "10"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(
+            "an agent asked to let a refused tool call through with Anthropic-style key: \
+             allowed_once_vendor_format"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("a tool call you allowed once went through"),
+        "{shown}"
+    );
+    assert!(!shown.contains(&key));
 }

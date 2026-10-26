@@ -212,6 +212,7 @@ impl ClientRequest {
             CheckRun { .. }
             | CheckHttp { .. }
             | ToolCheck { .. }
+            | ToolRefuse { .. }
             | CheckInput { .. }
             | PromptAsk { .. }
             | OutputScan { .. }
@@ -593,6 +594,37 @@ pub enum ClientRequest {
     /// output kept under `reference`. Only the agent whose hook made the
     /// reference may ask. `reason` is the agent's, shown as unverified.
     OutputAllow {
+        reference: String,
+        reason: Option<String>,
+    },
+    /// The hook refused a tool call because its detector found a secret, and
+    /// asks the daemon to keep the refusal so the agent can ask the person
+    /// about it (`vahta allow REF`). The reply is `ToolRefusal`: `pass` when
+    /// the person already let exactly this call through once (the allowance is
+    /// used up by this answer, unless `peek`), else a short `reference`, or
+    /// none when the daemon would not keep it. `text` is the agent's and
+    /// travels only to the daemon, which keeps the found spans in memory and
+    /// never journals any of it. `category`, `rule` and `description` are the
+    /// detector's, for the person's window. `peek`: only look for an allowance
+    /// (the second hook event of one call), keep nothing.
+    ToolRefuse {
+        session: Option<String>,
+        harness: String,
+        cwd: String,
+        tool: String,
+        path: Option<String>,
+        text: String,
+        category: String,
+        rule: String,
+        description: String,
+        #[serde(default)]
+        peek: bool,
+    },
+    /// The agent asks the person to let the tool call kept under `reference`
+    /// through once, or to store its secret. Only the agent whose hook made
+    /// the reference may ask. `reason` is the agent's, shown as unverified.
+    /// Answers `Done`; a refusal or silence is `Cancelled`.
+    ToolAllow {
         reference: String,
         reason: Option<String>,
     },
@@ -1165,6 +1197,9 @@ pub enum RefusalKind {
     /// No tool output is kept under that reference for this agent: it was
     /// never there, its time ran out, or another agent's hook made it.
     UnknownOutput,
+    /// No refused tool call is kept under that reference for this agent: it
+    /// was never there, its time ran out, or another agent's hook made it.
+    UnknownToolCall,
     /// The secret has approved command rules and this command is not allowed by
     /// them (or is denied by them).
     CommandNotAllowed,
@@ -1296,6 +1331,11 @@ pub enum ClientReply {
         names: Vec<String>,
         #[serde(default)]
         bind: Vec<String>,
+    },
+    /// The answer to a [`ClientRequest::ToolRefuse`].
+    ToolRefusal {
+        pass: bool,
+        reference: Option<String>,
     },
     /// The answer to a [`ClientRequest::PromptAsk`].
     PromptAnswer {

@@ -76,6 +76,17 @@ what it must leave to the person. The mechanics are in [daemon.md](daemon.md).
 8. If the hook cut something out of a tool's output that is needed,
    `vahta output allow REF --reason "..."` asks the person to show it
    ([hooks.md](hooks.md)).
+9. If the hook refused your tool call as a secret ("Blocked: this looks like ...")
+   and the message gives a reference, decide first: if it is a secret, put it in
+   Vahta and use `vahta run -- ...`. If it is not (a name that only looks like a
+   password, a fixture), ask the person about that one call:
+   `vahta allow REF --reason "why it is not a secret"`. Exit 0 says either
+   "allowed once": retry the same call, unchanged, within five minutes; any
+   change is checked again; or that the person saved the value as NAME: use
+   `vahta run --secret NAME -- ...`. Exit 4 is a refusal or no answer: change the call,
+   do not ask again. Do not encode or split the value to get past the hook, and do
+   not ask the person to switch the hooks off for this
+   ([hooks.md](hooks.md#when-the-agents-own-tool-call-is-refused)).
 
 ## A secret reached the transcript
 

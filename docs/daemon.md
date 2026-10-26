@@ -35,7 +35,7 @@ nothing was done.
 | `vahta unlock [--vault DIR] [--secret NAME]... [--for DURATION] [--label TEXT]` | Open a **session** (below). With `--vault`, a session for another project's vault, bound to the pair ([Using a vault from another project](#using-a-vault-from-another-project)). | yes |
 | `vahta lock [--all\|--connector]` | End this project's sessions, or all of them, or only the connectors session. | no |
 | `vahta sessions [--json]` / `vahta sessions kill ID` | List sessions, or end one and everything below it. | no |
-| `vahta journal [--last N] [--since DURATION] [--secret NAME] [--kind KIND]... [--json]` | What Vahta did lately, in plain words, oldest first, in UTC. Reads `journal.jsonl` itself (no daemon needed). `!` marks a suspicious line. Kinds: `suspicious`, `refused`, `run`, `session`, `connector`, `notified`, `vault`, `device`, `daemon`. For the person only: the hook refuses it from an agent, because it would show the agent which of its actions were noticed. | no |
+| `vahta journal [--last N] [--since DURATION] [--secret NAME] [--kind KIND]... [--json]` | What Vahta did lately, in plain words, oldest first, in UTC. Reads `journal.jsonl` itself (no daemon needed). `!` marks a suspicious line. Kinds: `suspicious`, `refused`, `run`, `session`, `allow`, `connector`, `notified`, `vault`, `device`, `daemon`. For the person only: the hook refuses it from an agent, because it would show the agent which of its actions were noticed. | no |
 | `vahta run [--vault DIR] [--secret NAME]... [--as NAME=VAR]... [--ask [--reason TEXT]] -- COMMAND` | Run a command with secrets in its environment. A secret with command rules only goes to commands they allow; `--ask` asks the person about one they do not. | only without a session |
 | `vahta http [--vault DIR] --secret NAME [-H 'Name: {NAME}']... [--query K={NAME}]... [-X METHOD] [-d TEXT\|@FILE] [--json] URL` | One HTTPS request made by the daemon, with the secret put in a header or query value; only to hosts the secret is bound to (below). | only without a session |
 | `vahta bind [NAME] [--allow RULE]... [--deny RULE]... [--from PROJECT]... [--no-from] [--clear] [--reason TEXT]` | Propose which commands may use a secret (and which other projects may use it), or approve the rules in `vahta.toml`. The person approves in the window. | yes |
@@ -43,6 +43,7 @@ nothing was done.
 | `vahta delegate --secret NAME... [--for DURATION] -- COMMAND` | Give a sub-agent a narrower session. | no |
 | `vahta delegate --role ROLE [--secret NAME]... [--for DURATION] -- COMMAND` | The same, limited to an approved agent role: only what the role allows, inside each secret's rules; the deadline is the shortest of `--for`, the role's `for` and the parent's. | no |
 | `vahta role [NAME] [--remove] [--reason TEXT]` | Propose the `[roles.NAME]` of `vahta.toml` (or remove one). Refused with no window when wider than a secret's rules; otherwise the person approves it once. See [agent-usage.md](agent-usage.md#proposing-a-role-for-a-task). | yes |
+| `vahta allow REF [--reason TEXT]` | Ask the person about one tool call the hook's detector refused: let it through once, save the value in the project's vault, or refuse (see [hooks.md](hooks.md#when-the-agents-own-tool-call-is-refused)). | no |
 | `vahta output allow REF [--reason TEXT]` | Ask the person to show the agent what the hook cut out of a tool's output (see [hooks.md](hooks.md)). | only without a session |
 | `vahta list [--vault DIR]`, `vahta check [--vault DIR]` | Names, kinds, tiers, classes and whether rules are approved; compare with `vahta.toml`. | no (they read the signed name index) |
 | `vahta devices` | List the phones paired with this vault: name, id, when paired, when their access ends, when last used, and which unlock method is current. | no |
@@ -459,7 +460,7 @@ the daemon checks each of them itself.
    the injection alarm at once. The command runs in the verified directory. A
    process whose directory cannot be read (it exited, or the system hides it)
    is refused too. Exceptions: the hook's own messages (`CheckRun`,
-   `CheckHttp`, `ToolCheck`, `OutputScan`, `HookReport`) keep the claimed `cwd`,
+   `CheckHttp`, `ToolCheck`, `ToolRefuse`, `OutputScan`, `HookReport`) keep the claimed `cwd`,
    because the hook is not the shell whose directory it reports and they only
    answer a question or feed the journal. **Windows** has no working-directory
    read yet: there the claim is believed, as before, and use of a vault from

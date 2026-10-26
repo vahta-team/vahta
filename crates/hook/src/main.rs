@@ -67,12 +67,20 @@ fn parse_args() -> Option<Args> {
 }
 
 /// What the agent is told when a secret-shaped value is in its tool call: the
-/// category and the fix, never the rule.
-fn agent_blocked(category: &str) -> String {
-    format!(
-        "Blocked: this looks like {category}. Put secrets in Vahta and use `vahta run -- ...`; \
-         never put the value in a command or a file."
-    )
+/// category and the fix, never the rule. With a reference (a daemon kept the
+/// refusal), also how to ask the person about this one call.
+fn agent_blocked(category: &str, reference: Option<&str>) -> String {
+    match reference {
+        Some(r) => format!(
+            "Blocked: this looks like {category}. If this is not a secret, or to store it, ask \
+             the person: `vahta allow {r} --reason \"<why>\"`; otherwise put secrets in Vahta \
+             and use `vahta run -- ...`; never put the value in a command or a file."
+        ),
+        None => format!(
+            "Blocked: this looks like {category}. Put secrets in Vahta and use \
+             `vahta run -- ...`; never put the value in a command or a file."
+        ),
+    }
 }
 
 /// What the person is told: the rule, what it looks for, and, if the value was
@@ -104,8 +112,12 @@ fn ipc_evasion(how: vahta_detect::Evasion) -> Evasion {
 
 /// A secret-shaped value in a tool call: refused, or in observe mode (the
 /// person's `hook_tool`, or the rule's own `mode`) let through and reported.
-/// A hidden value is refused either way.
-fn tool_secret(ev: &Event) -> (Decision, Option<Signal>) {
+/// A hidden value is refused either way, and the agent cannot ask the person
+/// about it. Any other refusal is told to a running daemon, which keeps it for
+/// `vahta allow REF` and says whether the person already let this very call
+/// through once (then it goes on). `peek`: the second event of one call, which
+/// only looks for that.
+fn tool_secret(ev: &Event, harness: &str, peek: bool) -> (Decision, Option<Signal>) {
     let detection = vahta_detect::detect(&ev.text);
     if let Some(why) = detection.truncated {
         // The rules did not run in full: the journal should say so.
@@ -133,9 +145,30 @@ fn tool_secret(ev: &Event) -> (Decision, Option<Signal>) {
         };
         return (Decision::Allow, Some(signal));
     }
+    let reference = if f.evasion.is_none() {
+        let refusal = daemon::refuse(daemon::Refused {
+            harness,
+            session: ev.session_id.clone(),
+            cwd: ev.cwd.as_deref().unwrap_or_default(),
+            tool: &ev.tool,
+            path: ev.path.as_deref(),
+            text: &ev.text,
+            category: &category,
+            rule: &rule,
+            description: &f.description,
+            peek,
+        });
+        match refusal {
+            daemon::Refusal::Pass => return (Decision::Allow, None),
+            daemon::Refusal::Kept(r) => Some(r),
+            daemon::Refusal::Unkept => None,
+        }
+    } else {
+        None
+    };
     let deny = Decision::Deny {
         user_message: user_blocked(&f),
-        agent_message: agent_blocked(&category),
+        agent_message: agent_blocked(&category, reference.as_deref()),
     };
     let signal = Signal::Blocked {
         category,
@@ -558,7 +591,12 @@ fn deny_read(file: &str, kind: &str) -> Decision {
 
 /// A tool call about to run. `explicit` says whether this harness can be told
 /// "allow" out loud for this event.
-fn before_tool(ev: &Event, explicit: bool, harness: &str) -> (Decision, Option<Signal>) {
+fn before_tool(
+    ev: &Event,
+    explicit: bool,
+    harness: &str,
+    peek: bool,
+) -> (Decision, Option<Signal>) {
     // Commands for the person only, then Vahta's own files: both are
     // refused whatever else is in the call, and the answer names the
     // command or the path, not the text.
@@ -581,7 +619,7 @@ fn before_tool(ev: &Event, explicit: bool, harness: &str) -> (Decision, Option<S
         };
         return (deny_hook_tamper(&t), Some(signal));
     }
-    let (by_text, text_signal) = tool_secret(ev);
+    let (by_text, text_signal) = tool_secret(ev, harness, peek);
     if by_text != Decision::Allow {
         return (by_text, text_signal);
     }
@@ -667,7 +705,12 @@ fn allow_or_approve(ev: &Event, explicit: bool) -> Decision {
 /// of something an agent tried is evidence for its alarm.
 fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
     match args.kind {
-        Kind::BeforeTool => before_tool(ev, m.can_allow_explicit(Kind::BeforeTool), &args.harness),
+        Kind::BeforeTool => before_tool(
+            ev,
+            m.can_allow_explicit(Kind::BeforeTool),
+            &args.harness,
+            false,
+        ),
         // Codex asks the hook when it is about to ask the person. The same
         // judgement as before the call; the only thing worth saying is an
         // allow, and the refusals were already made (and reported) there.
@@ -676,6 +719,7 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
                 ev,
                 m.can_allow_explicit(Kind::PermissionRequest),
                 &args.harness,
+                true,
             );
             (decision, None)
         }
