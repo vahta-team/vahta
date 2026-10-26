@@ -8220,6 +8220,93 @@ fn the_hook_marks_a_session_whose_output_it_cut_and_the_end_of_the_session_clean
     assert!(fs::read_to_string(&unmarked).unwrap().contains(&one));
 }
 
+/// What Claude Code writes for a prompt: a queue record and an informational
+/// system record carry the raw text, besides the usual `user` message.
+fn held_prompt_records(text: &str) -> Vec<String> {
+    vec![
+        serde_json::json!({"type":"queue-operation","operation":"enqueue",
+            "timestamp":"2026-10-26T10:00:00Z","sessionId":"s","content":text})
+        .to_string(),
+        serde_json::json!({"type":"system","subtype":"informational","level":"info",
+            "content":format!("Operation stopped by hook: {text}")})
+        .to_string(),
+        serde_json::json!({"type":"user","message":{"content":"a clean line"}}).to_string(),
+    ]
+}
+
+#[test]
+fn a_held_prompt_and_a_refused_call_mark_their_session_for_the_cleanup_at_its_end() {
+    let s = sandbox_with_secrets();
+    s.unlock_session();
+    let folder = s.claude_project_folder();
+    let (held_id, refused_id, known_id, quiet_id) = (
+        "held-prompt-0001",
+        "refused-call-0002",
+        "known-value-0003",
+        "untouched-0004",
+    );
+    let key = pasted_key("h");
+    let one = ["fake", "-one"].concat();
+    let path = |id: &str| folder.join(format!("{id}.jsonl"));
+    for (id, value) in [
+        (held_id, &key),
+        (refused_id, &key),
+        (known_id, &one),
+        (quiet_id, &key),
+    ] {
+        let mut lines = held_prompt_records(value);
+        lines.push(
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use",
+                "name":"Write","input":{"content":value}}]}})
+            .to_string(),
+        );
+        s.transcript(&path(id), &lines, 0);
+        s.hook_session_event("session_start", "SessionStart", id);
+    }
+
+    // The window is answered "Do nothing": the message is held.
+    s.script(&[r#"{"choose":2}"#]);
+    let held = s.hook_event(
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": format!("here: {key}"),
+            "cwd": s.project(), "session_id": held_id}),
+    );
+    blocked_reason(&held);
+    // Calls refused for a detected key, and for a value the vault holds.
+    denied_with(&s.hook_tool_as(
+        refused_id,
+        "Write",
+        serde_json::json!({"file_path": "a.txt", "content": key}),
+    ));
+    // The hit rings the alarm; the person ignores it.
+    s.script(&[r#"{"choose":1}"#]);
+    let said = denied_with(&s.hook_tool_as(
+        known_id,
+        "Write",
+        serde_json::json!({"file_path": "/tmp/x.txt", "content": format!("k={one}\n")}),
+    ));
+    assert!(said.contains("ZETA"), "{said}");
+
+    for id in [held_id, refused_id, known_id, quiet_id] {
+        s.hook_session_event("session_end", "SessionEnd", id);
+    }
+    for (id, value) in [(held_id, &key), (refused_id, &key), (known_id, &one)] {
+        wait_until(&format!("{id} to be cleaned"), 15, || {
+            !fs::read_to_string(path(id))
+                .unwrap_or_default()
+                .contains(value.as_str())
+        });
+        let left = fs::read_to_string(path(id)).unwrap();
+        assert!(left.contains("REDACTED("), "{left}");
+        assert!(left.contains("a clean line"), "{left}");
+        left.lines()
+            .for_each(|l| assert!(serde_json::from_str::<Value>(l).is_ok(), "{l}"));
+    }
+    // A session nothing was held in is not touched.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(fs::read_to_string(path(quiet_id)).unwrap().contains(&key));
+}
+
 #[test]
 fn scrub_needs_the_flag_and_all_covers_other_projects() {
     let s = sandbox_with_secrets();

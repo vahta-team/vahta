@@ -589,6 +589,15 @@ fn deny_read(file: &str, kind: &str) -> Decision {
     }
 }
 
+/// Mark the event's session for the transcript cleanup at its end.
+fn mark_dirty(ev: &Event, harness: &str) {
+    daemon::session_dirty(
+        ev.session_id.clone(),
+        harness,
+        ev.cwd.clone().unwrap_or_default(),
+    );
+}
+
 /// A tool call about to run. `explicit` says whether this harness can be told
 /// "allow" out loud for this event.
 fn before_tool(
@@ -621,6 +630,11 @@ fn before_tool(
     }
     let (by_text, text_signal) = tool_secret(ev, harness, peek);
     if by_text != Decision::Allow {
+        // The harness writes the refused call, secret and all, into its
+        // transcript: marked for the cleanup at the session's end.
+        if matches!(text_signal, Some(Signal::Blocked { .. })) {
+            mark_dirty(ev, harness);
+        }
         return (by_text, text_signal);
     }
     // A value Vahta holds for this agent, written any way. The daemon
@@ -631,6 +645,7 @@ fn before_tool(
         ev.cwd.as_deref().unwrap_or_default(),
         &ev.text,
     ) {
+        mark_dirty(ev, harness);
         return (deny_known_value(&held, ev), None);
     }
     if ev.group != Some(vahta_harness::Group::Shell) {
@@ -978,8 +993,12 @@ fn run() -> Option<vahta_harness::Output> {
     // A secret cut out of an output (or one that reached the transcript): the
     // transcript is marked for the cleanup at the session's end, by the hook
     // itself, so the agent need not run anything.
-    if args.kind == Kind::AfterTool
-        && matches!(decision, Decision::Redact { .. } | Decision::Notice { .. })
+    // A prompt the hook held was still written by the harness (its queue and
+    // log records), so it is marked too.
+    let held_prompt = args.kind == Kind::Prompt && matches!(decision, Decision::Deny { .. });
+    if (args.kind == Kind::AfterTool
+        && matches!(decision, Decision::Redact { .. } | Decision::Notice { .. }))
+        || held_prompt
     {
         daemon::session_dirty(
             event.session_id.clone(),

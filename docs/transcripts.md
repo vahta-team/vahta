@@ -49,18 +49,39 @@ Claude may keep as separate files next to a session or its history.
 ### A prompt that was blocked
 
 When the paste check (see [hooks.md](hooks.md)) holds a prompt because the person
-chose "save" or "do nothing", the message never reached the agent, but the
-harness may already have written it to its history. The daemon then removes the
-entries that hold it from both history files straight away: a line with a string
-equal to the message, or containing one of the secret values found in it. It looks
-again a few times over the next ten seconds, since the harness may write the
-entry after the hook has answered. The match is made in memory against the text
-the hook sent; the text is not logged, only a count (`history_forget`). A
-line that is not JSON is left alone, the rewrite goes through a temp file
-and a rename, and if the harness appended meanwhile the pass starts again.
-What it appends in the instant of the swap is copied over from the old file;
-only a line it is in the middle of writing at that very moment can be lost. "False alarm" (the person sent the message) leaves
-the history as it is.
+chose "save" or "do nothing" (or nobody answered, or no window could be shown), the
+message never reached the agent, but the harness has already written it down in two
+places.
+
+**History.** The daemon removes the entries that hold it from both history files
+straight away: a line with a string equal to the message, or containing one of the
+secret values found in it. It looks again a few times over the next ten seconds,
+since the harness may write the entry after the hook has answered. The match is made
+in memory against the text the hook sent; the text is not logged, only a count
+(`history_forget`). A line that is not JSON is left alone, the rewrite goes through a
+temp file and a rename, and if the harness appended meanwhile the pass starts again.
+What it appends in the instant of the swap is copied over from the old file; only a
+line it is in the middle of writing at that very moment can be lost. "False alarm"
+(the person sent the message) leaves the history as it is. Claude Code's `-p` mode
+writes no `history.jsonl`; only an interactive session does.
+
+**The session's transcript.** Claude Code also puts the held text into the session's
+`.jsonl`: a `queue-operation` record (`content`) and a `system` record with
+`subtype` `informational` (`content`, "UserPromptSubmit operation blocked by hook ...
+Original prompt: ..."). The hook marks the session whenever it holds a prompt, the same
+mark it sets when it cuts a tool's output, and the transcript is cleaned when the
+session ends (see [A running session](#a-running-session)). The cleaner reads every
+string of every record, so these fields need no special case: held values are
+replaced by `***REDACTED(NAME)***` and detector finds by `***REDACTED(kind)***`.
+In the bench the text was still there 20 seconds after Claude Code exited before the
+mark, and gone after it.
+
+The same mark is set when the hook refuses a tool call because its input held a
+detected secret or the value of a secret Vahta holds: Claude Code writes the refused
+`tool_use` block into the transcript whether or not the call runs, so it is cleaned
+at the end of the session, with no `vahta scrub` by hand. A refusal for another
+reason (a command for the person only, one of Vahta's own files, hook tampering)
+does not mark it.
 
 ### How a file is rewritten
 
@@ -90,7 +111,8 @@ next `vahta scrub --transcript` once it is quiet.
 
 The hook marks the session itself, with no command: when it cuts a secret out of
 a tool's output (or finds one it cannot cut, in Observe mode or for a tool the
-harness will not let it rewrite) it tells the daemon, which then cleans that
+harness will not let it rewrite), holds a prompt, or refuses a tool call that carried
+a secret, it tells the daemon, which then cleans that
 session's transcript at its end whether or not a scrub ever found something
 while it ran. This needs the daemon to be running at that moment and the
 harness to give the hook a session id.
