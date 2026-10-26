@@ -282,7 +282,7 @@ def credential_env():
     return None
 
 
-def start_proxy(net, name, run_dir, cap, env_name, test_upstream=None, egress_net=None, allow=()):
+def start_proxy(net, name, run_dir, cap, env_name, test_upstream=None, egress_net=None, allow=(), scan=False):
     """The auth proxy container: on the internal network (alias `authproxy`) and, unless it
     talks to a test mock, on a network with egress. The credential reaches it only as
     `-e NAME` (docker reads the value from this process's environment; it is not on any
@@ -295,11 +295,15 @@ def start_proxy(net, name, run_dir, cap, env_name, test_upstream=None, egress_ne
            "--memory", "256m", "--pids-limit", "64", *mounts((pdir, "/out"))]
     if env_name:
         cmd += ["-e", env_name]  # by name: inherit
+    if scan:
+        cmd += ["-e", "PROXY_SCAN"]  # the canaries ({name: value}), by name as well
     cmd += [IMAGE, "python3", "/bench/authproxy.py", "--port", str(PROXY_PORT), "--cap", str(cap)]
     if test_upstream:
         cmd += ["--test-upstream", test_upstream, "--allow-test-upstream"]
     for rule in allow:
         cmd += ["--allow", rule]
+    if scan:
+        cmd += ["--scan", "/out/scan.jsonl"]
     docker(*cmd)
     if egress_net:
         docker("network", "connect", egress_net, name)
@@ -311,7 +315,8 @@ def start_proxy(net, name, run_dir, cap, env_name, test_upstream=None, egress_ne
 
 
 def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False, cap=60, cc_model="haiku",
-                   test_upstream=None, mock_script=None, probe=None, allow=(), agent_cmd=None, extra_canaries=None):
+                   test_upstream=None, mock_script=None, probe=None, allow=(), agent_cmd=None, extra_canaries=None,
+                   scan_bodies=False):
     """One episode with the real Claude Code CLI behind the auth proxy.
 
       internal network (no route out)       egress network (bridge)
@@ -325,6 +330,8 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
     the mock then also records the tool results it is sent (mock/results.jsonl) and what the model is
     shown (mock/bodies.jsonl). `extra_canaries` (tests only): more {name: value} for the agent container
     (on its stdin) and for the mock's @@NAME@@ placeholders (by environment name, not on a command line).
+    `scan_bodies` (tests only): the proxy searches every request body for the canaries and writes names and
+    forms (never a body or a value) to proxy/scan.jsonl; works against the mock and the real API alike.
     """
     rid = os.path.basename(run_dir)
     net, egr, sink_n, px_n, agent_n, mock_n = (f"vb-{k}-{rid}" for k in ("net", "egr", "sink", "px", "agent", "mock"))
@@ -341,6 +348,8 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
     canaries = {name: canary.new_value(cat) for name, cat in VAULT.items()}
     canaries.update(extra_canaries or {})
     t0 = time.time()
+    if scan_bodies:
+        os.environ["PROXY_SCAN"] = json.dumps(canaries)
     try:
         docker("network", "create", "--internal", net)
         docker("run", "-d", "--name", sink_n, "--network", net, "--network-alias", "sink",
@@ -352,10 +361,10 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
                    *(["-e", "MOCK_RESULTS=/out/results.jsonl", "-e", "MOCK_BODIES=/out/bodies.jsonl", "-e", "MOCK_ECHO=1",
                       "-e", "MOCK_CANARIES"] if agent_cmd else []),
                    *mounts((os.path.join(run_dir, "mock"), "/out")), IMAGE, "python3", "/bench/mock_anthropic.py")
-            start_proxy(net, px_n, run_dir, cap, env_name, test_upstream="http://mock:9000", allow=allow)
+            start_proxy(net, px_n, run_dir, cap, env_name, test_upstream="http://mock:9000", allow=allow, scan=scan_bodies)
         else:
             docker("network", "create", egr)
-            start_proxy(net, px_n, run_dir, cap, env_name, egress_net=egr, allow=allow)
+            start_proxy(net, px_n, run_dir, cap, env_name, egress_net=egr, allow=allow, scan=scan_bodies)
         cmd = agent_cmd or (f"python3 /bench/ccagent.py --scenario {scenario} --max-turns {max_turns} --alarm {alarm} "
                f"--bind {int(bind)} --auth {kind} --cc-model {shlex.quote(cc_model)} --timeout {timeout - 60} --out /out")
         agent = subprocess.Popen(
@@ -377,6 +386,7 @@ def run_episode_cc(run_dir, scenario, max_turns, alarm, timeout=1500, bind=False
             f.write(out or "")
     finally:
         os.environ.pop("MOCK_CANARIES", None)
+        os.environ.pop("PROXY_SCAN", None)
         for n in (agent_n, px_n, mock_n, sink_n):
             docker("rm", "-f", n, check=False)
         for n in (net, egr):

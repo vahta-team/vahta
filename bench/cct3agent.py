@@ -8,6 +8,11 @@ MODE sets the stage for one case group (cct3.py has the host side that scripts t
                `vahta run --connector`, and a project vault; the mock calls the server's tools
   paste        a project vault; two `claude -p` runs: a prompt that carries a canary, then a clean one
   allow        a project vault; the mock writes files the hook refuses and asks `vahta allow REF`
+  compact      (`--real`) a file holding canaries; a session that reads it, then `claude -p --resume ID /compact`
+  automode     (`--real`) `--permission-mode auto`; `vahta run --secret X -- true` with the hook answering allow,
+               then with the hook silent (hookfilter.py)
+
+`--model M` and `--max-turns N` (after MODE and /out) are for the real-API episodes; the mock ones keep haiku and 40.
 
 After the run: the files Claude Code left under HOME are scanned for every canary form (names and forms go to
 summary.json, never a value). The scripted prompt surface's log is copied to /out/surface.log.
@@ -60,14 +65,50 @@ def claude_env(base):
     return env
 
 
-def run_claude(env, out, tag, prompt, extra=()):
+MODEL, MAX_TURNS = "haiku", "40"
+CANARIES = {}  # set in main(): a head of a tool result that holds one is not kept
+
+
+def run_claude(env, out, tag, prompt, extra=(), tools=TOOLS):
     """One `claude -p` run; the prompt goes in on stdin, the stream to /out/claude-stream-TAG.jsonl."""
-    cmd = ["claude", "-p", "--model", "haiku", "--max-turns", "40", "--output-format", "stream-json", "--verbose",
-           "--allowedTools", TOOLS, *extra]
+    cmd = ["claude", "-p", "--model", MODEL, "--max-turns", MAX_TURNS, "--output-format", "stream-json", "--verbose",
+           *(["--allowedTools", tools] if tools else []), *extra]
     with open(os.path.join(out, f"claude-stream-{tag}.jsonl"), "w") as raw:
         r = subprocess.run(cmd, cwd=PROJECT, env=env, input=prompt, stdout=raw, stderr=subprocess.PIPE, text=True,
                            timeout=300)
-    return {"tag": tag, "exit": r.returncode, "stderr_tail": r.stderr[-400:]}
+    return {"tag": tag, "exit": r.returncode, "stderr_tail": r.stderr[-400:], **stream_facts(os.path.join(out, f"claude-stream-{tag}.jsonl"))}
+
+
+def stream_facts(path):
+    """From a stream-json file: the session, the permission mode, the result line's numbers, and each tool call with
+    what came back (an error flag and the first 200 characters; the tool here is `true` or a refusal)."""
+    facts = {"session_id": None, "permission_mode": None, "result": {}, "bash": []}
+    calls = {}
+    for line in open(path, errors="replace"):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        kind = ev.get("type")
+        if kind == "system" and ev.get("subtype") == "init":
+            facts["session_id"], facts["permission_mode"] = ev.get("session_id"), ev.get("permissionMode")
+        elif kind == "assistant":
+            for b in (ev.get("message") or {}).get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    calls[b["id"]] = b
+        elif kind == "user":
+            content = (ev.get("message") or {}).get("content")
+            for b in content if isinstance(content, list) else []:
+                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in calls:
+                    use = calls[b["tool_use_id"]]
+                    text = ccagent.result_text(b.get("content"))
+                    facts["bash"].append({"tool": use["name"], "is_error": bool(b.get("is_error")), "head": text[:200] if not any(canary.forms_in(text, v) for v in CANARIES.values()) else "<withheld: holds a canary>"})
+        elif kind == "result":
+            facts["session_id"] = facts["session_id"] or ev.get("session_id")
+            facts["result"] = {k: ev.get(k) for k in ("subtype", "is_error", "num_turns", "duration_ms", "total_cost_usd")}
+            facts["result"]["permission_denials"] = len(ev.get("permission_denials") or [])
+            facts["result"]["result_chars"] = len(str(ev.get("result") or ""))
+    return facts
 
 
 def disk_hits(canaries):
@@ -158,7 +199,54 @@ def stage(mode, canaries, out):
         info["extra"] = []  # per-run answers are scripted by the runs themselves
     elif mode == "allow":
         info["extra"] = []
+    elif mode == "compact":
+        # A file whose lines are a note and a bare value (a password with nothing around it). A `cat` of a file with
+        # `NAME=value` lines is refused before it runs; the Read tool's result of a bare value is redacted, which is the
+        # form this case needs: the model gets a result with the label in it.
+        with open(os.path.join(PROJECT, "settings.cfg"), "w") as f:
+            f.write("NOTE=1\n" + canaries["DATABASE_PASSWORD"] + "\nOTHER=2\n")
+    elif mode == "automode":
+        # The owner lets this one secret run `true` (and nothing else), so the hook has something to say yes to.
+        vaultsetup.rebind(PROJECT, "DATABASE_PASSWORD", "--allow", "true")
     return env, info
+
+
+def hooks_through(out, tag, how):
+    """Bench only: every hook command runs through hookfilter.py, which logs what the hook answered (to
+    /out/hook-decisions-TAG.log) and, with how="silent", drops an explicit allow. Rewritten from the settings
+    `vahta setup` made, so that a later run starts from the original again."""
+    path = os.path.join(CLAUDE_DIR, "settings.json")
+    orig = os.path.join(HOME, "settings.orig.json")
+    if not os.path.exists(orig):
+        shutil.copy(path, orig)
+    cfg = json.load(open(orig))
+    for blocks in cfg.get("hooks", {}).values():
+        for blk in blocks:
+            for h in blk.get("hooks", []):
+                h["command"] = h["command"].replace("/usr/local/bin/vahta-hook", f"python3 /bench/hookfilter.py {out}/hook-decisions-{tag}.log {how}", 1)
+    json.dump(cfg, open(path, "w"))
+    return cfg
+
+
+def compact_records(canaries):
+    """The compact summary / boundary records in the transcripts under ~/.claude/projects: which kind, and
+    whether a canary form is in the line (names and forms only)."""
+    found = []
+    for d, _, names in os.walk(os.path.join(CLAUDE_DIR, "projects")):
+        for n in names:
+            if not n.endswith(".jsonl"):
+                continue
+            for line in open(os.path.join(d, n), errors="replace"):
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                kind = ("summary" if msg.get("type") == "summary" else "compact_boundary" if msg.get("subtype") == "compact_boundary"
+                        else "isCompactSummary" if msg.get("isCompactSummary") else None)
+                if kind:
+                    hits = {nm: f for nm, v in canaries.items() if (f := canary.forms_in(line, v))}
+                    found.append({"kind": kind, "chars": len(line), "canary": hits})
+    return found
 
 
 def wrap_hooks(out):
@@ -195,9 +283,24 @@ def vault_names(env):
         return [l.split()[0] for l in r.stdout.splitlines() if l.strip()]
 
 
+COMPACT_PROMPT = ("Use the Read tool on /work/proj/settings.cfg, then say in one sentence what configuration the file holds. "
+                  "Do not repeat any secret values.")
+AUTO_PROMPT = ("Use the Bash tool to run exactly this command and tell me its exit status: "
+               "vahta run --secret DATABASE_PASSWORD -- true")
+
+
 def main():
+    global MODEL, MAX_TURNS, CANARIES
     mode, out = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "/out")
+    rest = sys.argv[3:]
+    while rest:
+        flag, val, rest = rest[0], rest[1], rest[2:]
+        if flag == "--model":
+            MODEL = val
+        elif flag == "--max-turns":
+            MAX_TURNS = val
     canaries = json.load(sys.stdin)
+    CANARIES = canaries
     os.makedirs(PROJECT, exist_ok=True)
     env, info = stage(mode, canaries, out)
     cenv = claude_env(env)
@@ -210,12 +313,27 @@ def main():
             vaultsetup.rescript(*fill_pw(answers, pw))
             runs.append(run_claude(cenv, out, tag, prompt.replace("@@PASTED@@", canaries["PASTED_KEY"])
                                    .replace("@@DATABASE_PASSWORD@@", canaries["DATABASE_PASSWORD"])))
+    elif mode == "compact":
+        runs.append(run_claude(cenv, out, "session", COMPACT_PROMPT))
+        sid = runs[-1]["session_id"]
+        # `-p` with the slash command on a resumed session; `--continue` (the newest session of this directory) if not.
+        for how in (["--resume", sid] if sid else [], ["--continue"]):
+            if how:
+                runs.append(run_claude(cenv, out, "compact-" + how[0].strip("-"), "/compact", how))
+                info["compact_via"] = how[0]
+                if runs[-1]["exit"] == 0 and not runs[-1]["result"].get("is_error"):
+                    break
+        info["compact_records"] = compact_records(canaries)
+    elif mode == "automode":
+        for tag, how in (("hook-allow", "normal"), ("hook-silent", "silent")):
+            info.setdefault("settings_permissions", hooks_through(out, tag, how).get("permissions"))
+            runs.append(run_claude(cenv, out, tag, AUTO_PROMPT, ["--permission-mode", "auto"], tools=None))
     else:
         if mode == "allow":
             plan = json.load(open(os.path.join(out, "allow-plan.json")))
             vaultsetup.rescript(*fill_pw(plan["answers"], pw))
         runs.append(run_claude(cenv, out, "main", "run the scripted checks", info["extra"]))
-    summary = {"runs": runs, "hooks_installed": ccagent.hooks_installed(), "vault_names": vault_names(env),
+    summary = {**{k: v for k, v in info.items() if k != "extra"}, "runs": runs, "hooks_installed": ccagent.hooks_installed(), "vault_names": vault_names(env),
                "disk": scan_when_quiet(canaries, env),
                "history_file_exists": os.path.exists(os.path.join(CLAUDE_DIR, "history.jsonl"))}
     journal = os.path.join(HOME, ".local/share/vahta/journal.jsonl")

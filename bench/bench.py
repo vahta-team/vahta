@@ -9,6 +9,7 @@
   bench.py cc-selftest                    the Claude Code mode against a mock API: proxy checks and an end-to-end run
   bench.py cc-redact                      real Claude Code + real hooks: is a canary redacted in each tool's result? (mock, no token)
   bench.py cc-t3 [--only redact,mcp,paste,allow]   the T3 live-check round against the mock: redaction, MCP via connectors, paste, disk, vahta allow
+  bench.py cc-t3 --real [--dry]           /compact and the auto-mode classifier with real Claude Code (--dry: the mock, no token)
   bench.py mkregress RUN_DIR              make the regression set from a volume run
   bench.py report RUN_DIR                 print a volume run's report again
 """
@@ -126,9 +127,16 @@ def cmd_cc_redact(a):
 
 
 def cmd_cc_t3(a):
+    only = set(a.only.split(",")) if a.only else None
+    if a.dry and not a.real:
+        sys.exit("--dry belongs to --real: it runs the real-mode episodes against the mock")
+    if a.real:
+        import cct3real
+
+        sys.exit(cct3real.main(a.dry, only, a.cc_model, a.proxy_cap))
     import cct3
 
-    sys.exit(cct3.main(set(a.only.split(",")) if a.only else None))
+    sys.exit(cct3.main(only))
 
 
 DEFAULT_GGUF = os.path.expanduser("~/models/huihui-qwen3.5-9b-abliterated.Q4_K_M.gguf")
@@ -191,7 +199,12 @@ def main():
     sub.add_parser("cc-selftest", help="Claude Code mode: proxy + e2e against a mock, no credential").set_defaults(f=cmd_cc_selftest)
     sub.add_parser("cc-redact", help="Claude Code: what the model is shown from each tool, against a mock, no credential").set_defaults(f=cmd_cc_redact)
     p = sub.add_parser("cc-t3", help="Claude Code: the T3 round (redaction, MCP via connectors, paste, disk, vahta allow) against a mock")
-    p.add_argument("--only", help="comma-separated: redact, mcp, paste, allow")
+    p.add_argument("--only", help="comma-separated: redact, mcp, paste, allow (with --real: compact, automode)")
+    p.add_argument("--real", action="store_true", help="the real API: /compact and the auto-mode classifier, two episodes, ~10 model turns; "
+                   "needs CLAUDE_CODE_OAUTH_TOKEN (run it under `vahta run --secret`)")
+    p.add_argument("--dry", action="store_true", help="with --real: the mock instead of the API and a fake token; no credential needed")
+    p.add_argument("--cc-model", default="haiku", help="--real only: the --model alias or id")
+    p.add_argument("--proxy-cap", type=int, default=60, help="--real only: requests the auth proxy forwards per episode")
     p.set_defaults(f=cmd_cc_t3)
     p = sub.add_parser("redteam")
     p.add_argument("--model", default=redteam.DEFAULT_MODEL,
