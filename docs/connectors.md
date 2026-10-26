@@ -226,6 +226,16 @@ upgrades (replace the file in place; an installer that moves the binary needs
 the command again). Without the entry okono answers `not_allowed` and Vahta
 falls back to the password.
 
+**After an upgrade, restart the daemon** (`vahta daemon restart`). A running daemon whose file was replaced has an executable that no
+longer exists on disk, and okono refuses it (`not_allowed`) until it restarts;
+until then you get the password window.
+
+**When the okono slot stops opening.** The value okono gives depends on the key
+in the TPM, the app and the label, not on your face: enrolling your face again
+changes nothing. A new TPM key (okono's key file removed, the TPM cleared) gives
+other values, or okono answers `no_tpm`; either way Vahta falls back to the
+password, and you remove and add the okono method again.
+
 **Residual risk.** okono checks the path of the executable, not its content. If
 Vahta is installed somewhere the user can write (`~/.local/bin`), any process
 running as you can replace the binary, and after your face and Enter the
