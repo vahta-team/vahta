@@ -1,0 +1,14 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "apply_patch",
+    "tool_input": {
+      "command": "*** Add File: Lock.qml\n+import QtQuick\n+Item {\n+    id: root\n+    property string pending{{WORD_PW}}: \"\"\n+    property bool authenticating{{WORD_PW}}: false\n+    readonly property string placeholderText: \"Enter {{WORD_PW}}\"\n+    function submit{{WORD_PW}}(value) { pending{{WORD_PW}} = value }\n+    onAccepted: {\n+        if (!lockRequested || authenticating{{WORD_PW}} || {{WORD_PW_LC}}.length === 0) return\n+        pending{{WORD_PW}} = {{WORD_PW_LC}}\n        pending{{WORD_PW}} = {{WORD_PW}}\n+        root.{{WORD_PW_LC}} = field.text\n+        if (submitted.length > 0) root.submit{{WORD_PW}}(submitted)\n+    }\n+}"
+    },
+    "cwd": "/work/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}

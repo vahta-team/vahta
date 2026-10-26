@@ -322,6 +322,10 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         .replace("{{SECRET_ANTHROPIC}}", &secret_anthropic())
         .replace("{{SECRET_AWS}}", &secret_aws())
         .replace("{{SECRET_PW}}", &secret_pw())
+        // The word itself, for fixtures about code that names a password
+        // without holding one (a QML lock screen).
+        .replace("{{WORD_PW}}", &["Pass", "word"].concat())
+        .replace("{{WORD_PW_LC}}", &["pass", "word"].concat())
         .replace("{{FAKE_RANDOM}}", &fake_random())
         .replace("{{SECRET_GITHUB}}", &secret_github())
         // The same values, hidden: base64 and hex of an assignment, a vendor
