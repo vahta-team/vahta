@@ -409,12 +409,17 @@ fn run_fixture(harness: &str, path: &PathBuf) -> Result<(), String> {
         }
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    child
+    // A hook that is switched off exits without reading its input, so the
+    // write can race its exit: a broken pipe is that, and the exit is judged.
+    match child
         .stdin
         .take()
         .ok_or("no stdin")?
         .write_all(stdin.as_bytes())
-        .map_err(|e| e.to_string())?;
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.to_string()),
+        _ => {}
+    }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
 
     let want_stdout = match &fx["stdout"] {
