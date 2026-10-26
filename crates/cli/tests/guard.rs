@@ -147,6 +147,19 @@ impl Sandbox {
     }
 }
 
+impl Sandbox {
+    /// A vault in `root/<name>`, a directory that is not the project, so that
+    /// the daemon has seen a vault that is not the caller's.
+    fn other_vault(&self, name: &str, password: &str) -> PathBuf {
+        let dir = self.root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        self.script(&[&format!(r#"{{"secret":"{password}"}}"#), r#"{"ack":true}"#]);
+        let out = self.command(&dir).arg("init").output().expect("run vahta");
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        dir
+    }
+}
+
 impl Drop for Sandbox {
     fn drop(&mut self) {
         // The watchdog first, so it cannot put anything back or ask anyone
@@ -185,7 +198,7 @@ fn wait_until(what: &str, secs: u64, mut done: impl FnMut() -> bool) {
 // --- pause and resume ----------------------------------------------------------------------------------
 
 #[test]
-fn pause_takes_the_hooks_out_and_resume_puts_them_back() {
+fn pause_lets_the_agent_edit_the_hook_settings_and_leaves_the_hooks_in_place() {
     let s = Sandbox::new();
     s.install();
     s.with_vault();
@@ -199,15 +212,19 @@ fn pause_takes_the_hooks_out_and_resume_puts_them_back() {
         "edit my settings",
     ]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
     assert!(
-        text(&out.stdout).contains("off in Claude Code for 30m"),
-        "{}",
-        text(&out.stdout)
+        said.contains("change the hook settings of Claude Code for 30m")
+            && said.contains("does not turn anything off"),
+        "{said}"
     );
-    assert!(!s.settings_text().contains("vahta-hook"));
-    assert!(s.root.join("data/pause.json").is_file());
+    // Nothing was taken out.
+    assert!(s.settings_text().contains("vahta-hook"));
+    let pause = fs::read_to_string(s.root.join("data/pause.json")).unwrap();
+    assert!(pause.contains(r#""kind": "edit""#), "{pause}");
 
-    // What the person saw: the reason (unverified), the harness and the time.
+    // What the person saw: what is allowed and for how long, the reason
+    // (unverified) and whose password.
     let log = s.window_log();
     let ask = log
         .iter()
@@ -215,28 +232,118 @@ fn pause_takes_the_hooks_out_and_resume_puts_them_back() {
         .expect("a password window");
     let panel = ask["panel"].to_string();
     assert!(
-        panel.contains("Claude Code") && panel.contains("30m"),
+        panel.contains("may change Vahta's hook settings in Claude Code for 30m")
+            && panel.contains("keeps watching everything else"),
         "{panel}"
     );
     assert!(panel.contains("edit my settings"), "{panel}");
     assert!(
-        panel.contains("does not see what the agent does"),
+        panel.contains("password of the vault of") && panel.contains("project"),
         "{panel}"
     );
 
     let status = text(&s.vahta(&["hooks", "status"]).stdout);
-    assert!(status.contains("claude: paused"), "{status}");
+    assert!(
+        status.contains("claude: paused, the agent may change the hook settings"),
+        "{status}"
+    );
+    let json = text(&s.vahta(&["hooks", "status", "--json"]).stdout);
+    assert!(json.contains("hook_settings_edits"), "{json}");
 
     let out = s.vahta(&["hooks", "resume"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(s.settings_text().contains("vahta-hook"));
     assert!(!s.root.join("data/pause.json").exists());
-    assert!(text(&s.vahta(&["hooks", "status"]).stdout).contains("no hooks are paused"));
+    assert!(text(&s.vahta(&["hooks", "status"]).stdout).contains("nothing is paused"));
     let journal = s.journal();
     assert!(
         journal.contains("hooks_paused") && journal.contains("hooks_resumed"),
         "{journal}"
     );
+}
+
+#[test]
+fn pause_from_a_project_with_no_vault_asks_for_the_persons_vault_and_names_it() {
+    let s = Sandbox::new();
+    s.install();
+    // The person's vault is elsewhere; the caller's project (`project`) has none.
+    s.other_vault("ai-tools", PW);
+    s.script(&[&format!(r#"{{"secret":"{PW}"}}"#)]);
+    let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let log = s.window_log();
+    let ask = log
+        .iter()
+        .rfind(|e| e["ask"] == "password")
+        .expect("a password window");
+    let panel = ask["panel"].to_string();
+    assert!(
+        panel.contains("password of the vault of") && panel.contains("ai-tools"),
+        "{panel}"
+    );
+}
+
+#[test]
+fn a_known_project_whose_vault_is_gone_is_not_offered() {
+    let s = Sandbox::new();
+    s.install();
+    let gone = s.other_vault("leftover", "not the password");
+    s.other_vault("ai-tools", PW);
+    fs::remove_dir_all(gone.join(".vahta")).unwrap();
+    // One vault left, so no choice is put; a stale entry would add one and
+    // swallow the password below.
+    s.script(&[&format!(r#"{{"secret":"{PW}"}}"#)]);
+    let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let log = s.window_log();
+    assert!(log.iter().all(|e| e["ask"] != "choose"), "{log:?}");
+    let projects = fs::read_to_string(s.root.join("data/projects.json")).unwrap_or_default();
+    assert!(!projects.contains("leftover"), "{projects}");
+}
+
+#[test]
+fn with_several_vaults_the_person_picks_whose_password_to_type() {
+    let s = Sandbox::new();
+    s.install();
+    s.other_vault("first", "first password");
+    s.other_vault("second", PW);
+    s.script(&["{\"choose\":1}", &format!(r#"{{"secret":"{PW}"}}"#)]);
+    let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let log = s.window_log();
+    let pick = log.iter().find(|e| e["ask"] == "choose").expect("a choice");
+    let shown = pick.to_string();
+    assert!(
+        shown.contains("first") && shown.contains("second"),
+        "{shown}"
+    );
+    let ask = log.iter().rfind(|e| e["ask"] == "password").unwrap();
+    assert!(ask["panel"].to_string().contains("second"), "{ask}");
+}
+
+#[test]
+fn the_wrong_vault_is_not_reported_as_a_wrong_password() {
+    let s = Sandbox::new();
+    s.install();
+    s.other_vault("first", "first password");
+    s.other_vault("second", "second password");
+    s.script(&[
+        "{\"choose\":0}",
+        r#"{"secret":"x"}"#,
+        r#"{"secret":"y"}"#,
+        r#"{"secret":"z"}"#,
+    ]);
+    let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
+    assert_ne!(out.status.code(), Some(0));
+    let e = text(&out.stderr);
+    assert!(
+        e.contains("not the password of the vault of")
+            && e.contains("first")
+            && e.contains("Other vaults that could approve")
+            && e.contains("second"),
+        "{e}"
+    );
+    assert!(!s.root.join("data/pause.json").exists());
 }
 
 #[test]
@@ -254,7 +361,7 @@ fn pause_needs_the_password_when_a_vault_is_known_and_a_cancel_changes_nothing()
     s.script(&[r#"{"secret":"nope"}"#, &format!(r#"{{"secret":"{PW}"}}"#)]);
     let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(!s.settings_text().contains("vahta-hook"));
+    assert!(s.root.join("data/pause.json").is_file());
     assert!(s.window_log().iter().any(|e| e["ask"] == "password"));
 }
 
@@ -274,13 +381,13 @@ fn pause_with_no_vault_known_is_refused_and_points_to_the_terminal() {
 }
 
 #[test]
-fn a_pause_over_eight_hours_is_refused_before_any_window() {
+fn a_pause_over_an_hour_is_refused_before_any_window() {
     let s = Sandbox::new();
     s.install();
-    let out = s.vahta(&["hooks", "pause", "--for", "9h"]);
+    let out = s.vahta(&["hooks", "pause", "--for", "2h"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(
-        text(&out.stderr).contains("at most 8h"),
+        text(&out.stderr).contains("at most 1h"),
         "{}",
         text(&out.stderr)
     );
@@ -464,6 +571,61 @@ fn restore_is_chosen_and_disable_all_hooks_is_cleared() {
     });
     assert!(s.settings_text().contains("vahta-hook"));
     wait_until("the journal", 5, || s.journal().contains("hook_restored"));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_edit_pause_that_ends_leaves_the_watchdog_to_ask_about_what_was_removed() {
+    let s = Sandbox::new();
+    s.with_vault();
+    with_watchdog(&s);
+    s.script(&[&format!(r#"{{"secret":"{PW}"}}"#)]);
+    let out = s.vahta(&["hooks", "pause", "--for", "10m"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // During the pause the agent changes the settings; the watchdog says nothing.
+    fs::write(s.settings(), "{\"model\": \"opus\"}\n").unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(s.window_log().iter().all(|e| e["ask"] != "choose"));
+    assert!(!s.settings_text().contains("vahta-hook"));
+    // The time is up (made so by rewriting the pause): the watchdog looks
+    // again, asks, and with no answer puts the hooks back.
+    s.script(&[r#"{"noanswer":true}"#]);
+    fs::write(
+        s.root.join("data/pause.json"),
+        r#"{"pauses":[{"harness":"claude","until":1,"reason":"test","kind":"edit"}]}"#,
+    )
+    .unwrap();
+    wait_until("the hooks to be put back", 20, || {
+        s.settings_text().contains("vahta-hook")
+    });
+    assert!(s.window_log().iter().any(|e| e["ask"] == "choose"));
+    assert!(s.settings_text().contains("opus"));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_older_pause_that_took_the_hooks_out_still_puts_them_back_when_it_ends() {
+    let s = Sandbox::new();
+    with_watchdog(&s);
+    fs::write(s.settings(), "{}\n").unwrap();
+    // No `kind`: what the version before this one wrote.
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 2;
+    fs::write(
+        s.root.join("data/pause.json"),
+        format!(r#"{{"pauses":[{{"harness":"claude","until":{until},"reason":"old"}}]}}"#),
+    )
+    .unwrap();
+    wait_until("the hooks to come back", 20, || {
+        s.settings_text().contains("vahta-hook")
+    });
+    wait_until("the pause to be dropped", 5, || {
+        !s.root.join("data/pause.json").exists()
+    });
+    assert!(s.window_log().iter().all(|e| e["ask"] != "choose"));
 }
 
 #[cfg(unix)]

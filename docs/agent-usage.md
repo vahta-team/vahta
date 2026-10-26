@@ -243,8 +243,10 @@ The person can also open a role session for you with
 - Run `vahta reveal`, `vahta copy` or `vahta _surface`. The hook refuses them: a
   window can be captured and the clipboard can be read.
 - Read, edit, copy or redirect into `.vahta/` or Vahta's data directory, or edit
-  a harness's hook settings. To pause the hook, ask with `vahta hooks pause
-  --for 1h --reason "..."`.
+  a harness's hook settings. To change a hook setting, ask the person with
+  `vahta hooks pause --for 15m --reason "..."`: it allows that edit for 15
+  minutes (at most 1 hour) and nothing else; Vahta's hooks stay on. Do not use it
+  to get past a refusal of a secret: that refusal has its own way out.
 - Run `vahta init` expecting it to complete: it needs the person at the window.
 - Encode or split a secret-shaped value to get it past the hook. That is read as
   an injection signal, and several of them lock the sessions.

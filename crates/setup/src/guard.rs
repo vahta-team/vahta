@@ -12,6 +12,12 @@
 //!   and neither is a hook path that points to another vahta-hook that exists.
 //! * **Pauses** (`pause.json` in the data directory, which the hook already
 //!   keeps agents out of): a harness with an unexpired pause is not watched.
+//!   A pause of kind [`PauseKind::Edit`] (what `vahta hooks pause` makes) leaves
+//!   the hooks in place and only lets the agent change the hook settings, so
+//!   the hook's own guard steps aside too; when it runs out, the watcher looks
+//!   again and asks the person about what it finds. A pause of kind
+//!   [`PauseKind::Off`] (written by older versions, and by "Keep off") means the
+//!   hooks are out, and are put back when it runs out.
 //! * **Putting it back** ([`restore`]): the same plan and commit `vahta setup`
 //!   uses, so the backup and the atomic write are reused.
 //! * **Login autostart** ([`autostart`]): the unit, plist or registry value,
@@ -33,7 +39,10 @@ use super::{
 };
 
 /// The longest a pause may last.
-pub const MAX_PAUSE_SECS: u64 = 8 * 3600;
+pub const MAX_PAUSE_SECS: u64 = 3600;
+
+/// How long a pause lasts when none is asked for.
+pub const DEFAULT_PAUSE_SECS: u64 = 15 * 60;
 
 /// The most project roots remembered for the watcher.
 const MAX_PROJECTS: usize = 200;
@@ -56,13 +65,26 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     result
 }
 
-/// One pause: `harness` is not watched, and its hooks may be absent, until
-/// `until` (seconds since the Unix epoch).
+/// What a pause allows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PauseKind {
+    /// The hooks are out of the config; they are put back when it ends. What
+    /// older versions of `vahta hooks pause` wrote, and "Keep off". A pause
+    /// with no `kind` in the file is this one.
+    #[default]
+    Off,
+    /// The hooks stay; the agent may change the hook settings.
+    Edit,
+}
+
+/// One pause: `harness` is not watched until `until` (seconds since the Unix
+/// epoch), and per `kind` its hooks are absent or its settings may be edited.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pause {
     pub harness: String,
     pub until: u64,
     pub reason: String,
+    pub kind: PauseKind,
 }
 
 pub fn pause_file(data: &Path) -> PathBuf {
@@ -91,6 +113,10 @@ pub fn read_pauses(data: &Path) -> Vec<Pause> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                kind: match p.get("kind").and_then(Value::as_str) {
+                    Some("edit") => PauseKind::Edit,
+                    _ => PauseKind::Off,
+                },
             })
         })
         .collect()
@@ -111,6 +137,9 @@ pub fn write_pauses(data: &Path, pauses: &[Pause]) -> io::Result<()> {
             o.insert("harness".into(), p.harness.clone().into());
             o.insert("until".into(), p.until.into());
             o.insert("reason".into(), p.reason.clone().into());
+            if p.kind == PauseKind::Edit {
+                o.insert("kind".into(), "edit".into());
+            }
             Value::Object(o)
         })
         .collect();
@@ -122,6 +151,14 @@ pub fn write_pauses(data: &Path, pauses: &[Pause]) -> io::Result<()> {
 /// Whether `harness` has a pause that has not run out at `now`.
 pub fn paused(pauses: &[Pause], harness: &str, now: u64) -> bool {
     pauses.iter().any(|p| p.harness == harness && p.until > now)
+}
+
+/// Whether the agent may change `harness`'s hook settings at `now`: a pause of
+/// kind [`PauseKind::Edit`] that has not run out. The hook's own guard asks.
+pub fn edits_allowed(pauses: &[Pause], harness: &str, now: u64) -> bool {
+    pauses
+        .iter()
+        .any(|p| p.harness == harness && p.kind == PauseKind::Edit && p.until > now)
 }
 
 /// The harnesses whose hooks were set up, as the watcher last saw.
@@ -150,9 +187,12 @@ pub fn write_expected(data: &Path, expected: &BTreeSet<String>) -> io::Result<()
     write_atomic(&data.join("guard-state.json"), &render(doc))
 }
 
-/// Project roots the daemon has seen (`run` and `unlock`), whose Claude Code
-/// settings the watcher also reads.
-pub fn read_projects(data: &Path) -> Vec<PathBuf> {
+/// Where a project's vault file is, by the layout of `.vahta/`.
+fn project_vault(root: &Path) -> PathBuf {
+    root.join(".vahta").join("vault.vht")
+}
+
+fn read_project_list(data: &Path) -> Vec<PathBuf> {
     let Ok(text) = fs::read_to_string(data.join("projects.json")) else {
         return Vec::new();
     };
@@ -165,15 +205,26 @@ pub fn read_projects(data: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// Remember a project root. Cheap when it is already there.
+/// Project roots the daemon has seen (`run` and `unlock`), whose Claude Code
+/// settings the watcher also reads. A root whose vault file is gone (a test
+/// project, a deleted checkout) is not one any more.
+pub fn read_projects(data: &Path) -> Vec<PathBuf> {
+    let mut roots = read_project_list(data);
+    roots.retain(|r| project_vault(r).is_file());
+    roots
+}
+
+/// Remember a project root, and forget the roots whose vault is gone. Cheap
+/// when nothing changes.
 pub fn note_project(data: &Path, root: &Path) {
     let mut roots = read_projects(data);
-    if roots.iter().any(|r| r == root) {
+    if !roots.iter().any(|r| r == root) {
+        roots.push(root.to_path_buf());
+        if roots.len() > MAX_PROJECTS {
+            roots.remove(0);
+        }
+    } else if roots.len() == read_project_list(data).len() {
         return;
-    }
-    roots.push(root.to_path_buf());
-    if roots.len() > MAX_PROJECTS {
-        roots.remove(0);
     }
     let items: Vec<Value> = roots
         .iter()

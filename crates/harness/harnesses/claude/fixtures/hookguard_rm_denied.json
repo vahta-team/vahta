@@ -20,9 +20,9 @@
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "vahta blocked a change to `~/.claude/settings.json`: it is a `rm` command that would change or remove a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+      "permissionDecisionReason": "vahta blocked a change to `~/.claude/settings.json`: it is a `rm` command that would change or remove a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 15m --reason \"...\"`. That lets you change the hook settings for that long; Vahta's hooks stay on and keep watching."
     },
-    "systemMessage": "vahta blocked a change to `~/.claude/settings.json`: it is a `rm` command that would change or remove a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+    "systemMessage": "vahta blocked a change to `~/.claude/settings.json`: it is a `rm` command that would change or remove a file that holds hooks, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 15m --reason \"...\"`. That lets you change the hook settings for that long; Vahta's hooks stay on and keep watching."
   },
   "exit": 0,
   "spool": [

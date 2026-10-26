@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 /// Bumped when a message changes shape. A daemon and a client that disagree do
 /// not talk past the hello.
-pub const PROTOCOL: u32 = 18;
+pub const PROTOCOL: u32 = 19;
 
 /// The largest frame, in either direction.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -682,10 +682,11 @@ pub enum ClientRequest {
         #[serde(default)]
         vault: Option<String>,
     },
-    /// `vahta hooks pause`: take Vahta's hook entries out of these harnesses
-    /// (all that have them, when empty) for `secs` (at most 8 hours). A window
-    /// asks the person, with the password; `reason` is the caller's, shown as
-    /// unverified. The watchdog puts the entries back when the time is up.
+    /// `vahta hooks pause`: let the agent change the hook settings of these
+    /// harnesses (all that have Vahta's hooks, when empty) for `secs` (at most
+    /// 1 hour). The hooks stay in place and keep running. A window asks the
+    /// person, with the password of a vault it names; `reason` is the caller's,
+    /// shown as unverified. (Protocol 19: before, this took the entries out.)
     HooksPause {
         cwd: String,
         harnesses: Vec<String>,

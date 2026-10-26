@@ -7,9 +7,18 @@
 //! vaults and the prompt surface are. It asks; the daemon answers with the
 //! person's choice; the watchdog acts on the files.
 //!
-//! A password here is a vault's: the vault of the caller's project, else of a
-//! project the daemon has seen. With no vault known there is no password to
-//! ask, and nothing here can be approved: the person uses their own terminal.
+//! A password here is a vault's, and the window says whose. The candidates are
+//! the vault of the caller's project first, then every other vault the daemon
+//! has seen whose file still exists (at most [`MAX_VAULTS`]). With more than
+//! one, the person picks the vault in the window and types its password:
+//! trying a typed password against each candidate would cost one Argon2id
+//! (1 GiB, four passes: seconds) per vault per try. With no vault known there
+//! is no password to ask, and nothing here can be approved: the person uses
+//! their own terminal.
+//!
+//! `vahta hooks pause` does not turn Vahta off. It lets the agent change the
+//! hook settings of a harness for a while (the hook's guard and the watchdog
+//! step aside for that harness); every other check keeps running.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,14 +28,14 @@ use vahta_harness::Manifest;
 use vahta_ipc::config::{Config, Guard};
 use vahta_ipc::duration::human;
 use vahta_ipc::protocol::{ClientReply, GuardChoice, GuardEvent, Panel, RefusalKind, Signal};
-use vahta_setup::guard::{self, MAX_PAUSE_SECS, Pause};
+use vahta_setup::guard::{self, MAX_PAUSE_SECS, Pause, PauseKind};
 use vahta_vault::project::Project;
 
 use crate::journal::Entry;
-use crate::ops::{Ctx, Flow, error, refused, unlock_as};
+use crate::ops::{Ctx, Flow, cancelled, error, from_surface, refused, unlock_as};
 use crate::server::Shared;
 use crate::surface::{Window, sanitize_label};
-use vahta_auth::Action;
+use vahta_auth::{Action, AuthError};
 
 /// How long the person has to answer the watchdog's question before the hooks
 /// are put back on their own.
@@ -69,24 +78,53 @@ pub(crate) fn note_project(ctx: &Ctx<'_>, root: &Path) {
     guard::note_project(&ctx.shared.options.paths.data, root);
 }
 
-/// A vault whose password can approve: the caller's project, else a project
-/// seen before.
-fn approving_vault(shared: &Shared, cwd: Option<&str>) -> Option<PathBuf> {
+/// The most vaults offered in the approval window; the rest are not asked.
+pub(crate) const MAX_VAULTS: usize = 8;
+
+/// The vaults whose password can approve: the caller's project first (when it
+/// has one), then the projects seen before, whose vault file must exist. The
+/// bool says whether the first is the caller's own.
+fn approving_vaults(shared: &Shared, cwd: Option<&str>) -> (Vec<PathBuf>, bool) {
     let own = cwd
         .and_then(|c| Project::find(Path::new(c)))
         .map(|p| p.vault_path())
         .filter(|v| v.is_file());
-    own.or_else(|| {
-        guard::read_projects(&shared.options.paths.data)
-            .into_iter()
-            .map(|r| Project { root: r }.vault_path())
-            .find(|v| v.is_file())
-    })
+    let has_own = own.is_some();
+    let mut out: Vec<PathBuf> = own.into_iter().collect();
+    for root in guard::read_projects(&shared.options.paths.data) {
+        let v = Project { root }.vault_path();
+        if v.is_file() && !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out.truncate(MAX_VAULTS);
+    (out, has_own)
 }
 
-/// Ask for the password of an approving vault in `window`. There is no plain
-/// yes: with no vault known nothing can approve, and the answer is a refusal
-/// that points the person to their own terminal. `Ok(true)` is approval.
+/// A path as the person reads it: the home directory is `~`.
+fn tilde(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_deref().filter(|h| !h.as_os_str().is_empty()) {
+        Some(h) => match path.strip_prefix(h) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    }
+}
+
+/// The project a vault file belongs to, as shown.
+fn vault_label(vault: &Path) -> String {
+    clean(&tilde(
+        vault.parent().and_then(Path::parent).unwrap_or(vault),
+    ))
+}
+
+/// Ask for the password of an approving vault in `window`, after saying
+/// whose it is. There is no plain yes: with no vault known nothing can
+/// approve, and the answer is a refusal that points the person to their own
+/// terminal. `Ok(true)` is approval.
 fn approve(
     ctx: &Ctx<'_>,
     window: &mut dyn Window,
@@ -94,13 +132,74 @@ fn approve(
     cwd: Option<&str>,
     action: Action,
 ) -> Flow<bool> {
-    match approving_vault(ctx.shared, cwd) {
-        Some(vault) => {
-            // The password only approves; the vault is not changed.
-            drop(unlock_as(ctx, window, &vault, panel, action)?);
+    let (vaults, has_own) = approving_vaults(ctx.shared, cwd);
+    let labels: Vec<String> = vaults.iter().map(|v| vault_label(v)).collect();
+    let picked = match vaults.len() {
+        0 => return Err(no_vault()),
+        1 => 0,
+        _ => {
+            // Which password is for the person to say; guessing would cost a
+            // key derivation per vault.
+            let options: Vec<String> = labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    if has_own && i == 0 {
+                        format!("{l} (this project)")
+                    } else {
+                        l.clone()
+                    }
+                })
+                .collect();
+            let mut shown = panel.clone();
+            shown
+                .lines
+                .push("Approving takes the password of one of your vaults.".to_string());
+            let asked = window.choose_within(
+                &shown,
+                "Whose vault password will you type?",
+                &options,
+                ASK_WAIT,
+            );
+            match asked {
+                Ok(Some(i)) if i < vaults.len() => i,
+                Ok(_) => return Err(cancelled()),
+                Err(e) => return Err(from_surface(e)),
+            }
+        }
+    };
+    let which = &labels[picked];
+    let mut shown = panel.clone();
+    shown
+        .lines
+        .push(format!("Type the password of the vault of {which}."));
+    // The password only approves; the vault is not changed.
+    match unlock_as(ctx, window, &vaults[picked], &shown, action) {
+        Ok(opened) => {
+            drop(opened);
             Ok(true)
         }
-        None => Err(no_vault()),
+        // Not "your password is wrong": it may be the wrong vault.
+        Err(ClientReply::Error { message }) if message == AuthError::TooManyTries.to_string() => {
+            let others: Vec<&str> = labels
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != picked)
+                .map(|(_, l)| l.as_str())
+                .collect();
+            let mut text = format!(
+                "that was not the password of the vault of {which} (three tries); nothing was \
+                 changed"
+            );
+            if !others.is_empty() {
+                text.push_str(&format!(
+                    ". Other vaults that could approve: {}",
+                    others.join(", ")
+                ));
+            }
+            Err(error(text))
+        }
+        Err(other) => Err(other),
     }
 }
 
@@ -188,16 +287,18 @@ pub(crate) fn hooks_pause(
     }
     let names: Vec<String> = chosen.iter().map(|m| m.name.clone()).collect();
     let shown = titles(&ms, &names);
-    let title = "Turn Vahta's hooks off for a while";
+    let title = "Let the agent change Vahta's hook settings";
     let mut panel = ctx.panel(
         title,
         vec![
-            format!("Harnesses: {shown}"),
-            format!("For: {}", human(secs)),
-            "While paused, Vahta does not see what the agent does: secrets in commands and \
-             files are not caught, and its own files are not protected."
+            format!(
+                "The agent may change Vahta's hook settings in {shown} for {}. Vahta keeps \
+                 watching everything else: secrets, files it protects, and the alarm.",
+                human(secs)
+            ),
+            "When the time is up Vahta looks at the settings again and asks you about \
+             anything that turned its hooks off."
                 .to_string(),
-            "The hooks come back by themselves when the time is up.".to_string(),
         ],
     );
     panel.agent_note = reason.as_deref().and_then(sanitize_label);
@@ -208,7 +309,7 @@ pub(crate) fn hooks_pause(
                 .result(result, Some(why)),
         );
     };
-    if approving_vault(ctx.shared, Some(cwd)).is_none() {
+    if approving_vaults(ctx.shared, Some(cwd)).0.is_empty() {
         record("refused", "no vault, so no password to approve it");
         return Err(no_vault());
     }
@@ -226,7 +327,7 @@ pub(crate) fn hooks_pause(
             record("declined", "the person said no");
             window.close(None);
             return Err(ClientReply::Cancelled {
-                message: "the person did not agree; the hooks stay on".to_string(),
+                message: "the person did not agree; the hook settings stay guarded".to_string(),
             });
         }
         Err(reply) => {
@@ -235,20 +336,22 @@ pub(crate) fn hooks_pause(
             return Err(reply);
         }
     }
-    // The pause is on record before the entries go, so the watchdog never
-    // sees entries missing without a pause to explain it.
+    // The hooks stay where they are; the pause only tells the hook's guard and
+    // the watchdog to step aside for these harnesses until `until`. A pause of
+    // an older version (the hooks taken out) is kept: it still puts them back.
     let until = now() + secs;
     let said = reason
         .as_deref()
         .and_then(sanitize_label)
         .unwrap_or_default();
     let mut pauses = guard::read_pauses(&ctx.shared.options.paths.data);
-    pauses.retain(|p| !names.contains(&p.harness));
+    pauses.retain(|p| !(names.contains(&p.harness) && p.kind == PauseKind::Edit));
     for n in &names {
         pauses.push(Pause {
             harness: n.clone(),
             until,
             reason: said.clone(),
+            kind: PauseKind::Edit,
         });
     }
     if let Err(e) = guard::write_pauses(&ctx.shared.options.paths.data, &pauses) {
@@ -258,36 +361,28 @@ pub(crate) fn hooks_pause(
             "cannot write the pause: {e}; nothing was changed"
         )));
     }
-    let mut problems = Vec::new();
-    for m in &chosen {
-        if let Err(e) = guard::remove_entries(m, &env) {
-            problems.push(format!("{}: {e}", m.title));
-        }
-    }
     let why = if said.is_empty() {
-        format!("{shown} for {}", human(secs))
+        format!("{shown} for {}, hook settings may be changed", human(secs))
     } else {
-        format!("{shown} for {}; the agent's reason: {said}", human(secs))
+        format!(
+            "{shown} for {}, hook settings may be changed; the agent's reason: {said}",
+            human(secs)
+        )
     };
-    if problems.is_empty() {
-        record("ok", &why);
-        window.close(Some(&format!("Hooks off for {}.", human(secs))));
-        Ok(ClientReply::Done {
-            message: format!(
-                "Vahta's hooks are off in {shown} for {}; they come back by themselves, or with \
-                 `vahta hooks resume`. Claude Code and Cursor pick the change up at once; start \
-                 a new Codex session.",
-                human(secs)
-            ),
-        })
-    } else {
-        record("partial", &problems.join("; "));
-        window.close(None);
-        Err(error(format!(
-            "the hooks could not all be taken out: {}",
-            problems.join("; ")
-        )))
-    }
+    record("ok", &why);
+    window.close(Some(&format!(
+        "Hook settings may change for {}.",
+        human(secs)
+    )));
+    Ok(ClientReply::Done {
+        message: format!(
+            "You may now change the hook settings of {shown} for {}. Vahta's hooks stay on and \
+             keep watching everything else; this does not turn anything off. When the time is up \
+             the settings are checked again, and the person is asked about anything that turned \
+             the hooks off.",
+            human(secs)
+        ),
+    })
 }
 
 pub(crate) fn hooks_resume(ctx: &Ctx<'_>, harnesses: &[String]) -> Flow<ClientReply> {
@@ -306,7 +401,7 @@ pub(crate) fn hooks_resume(ctx: &Ctx<'_>, harnesses: &[String]) -> Flow<ClientRe
     };
     if names.is_empty() {
         return Ok(ClientReply::Done {
-            message: "no hooks are paused".to_string(),
+            message: "nothing is paused".to_string(),
         });
     }
     let mut back = Vec::new();
@@ -334,7 +429,7 @@ pub(crate) fn hooks_resume(ctx: &Ctx<'_>, harnesses: &[String]) -> Flow<ClientRe
                 .result("ok", Some(&shown)),
         );
         Ok(ClientReply::Done {
-            message: format!("Vahta's hooks are back in {shown}"),
+            message: format!("the pause is over in {shown}; Vahta's hooks are in place"),
         })
     } else {
         ctx.journal(
@@ -381,7 +476,7 @@ pub(crate) fn guard_ask(
         );
         return Ok(restore);
     };
-    let can_approve = approving_vault(ctx.shared, None).is_some();
+    let can_approve = !approving_vaults(ctx.shared, None).0.is_empty();
     let mut panel = Panel {
         title: title.to_string(),
         lines: vec![
@@ -417,6 +512,7 @@ pub(crate) fn guard_ask(
                     harness: h.clone(),
                     until: now() + KEEP_OFF_SECS,
                     reason: format!("kept off after a change to {f}"),
+                    kind: PauseKind::Off,
                 });
                 let _ = guard::write_pauses(&ctx.shared.options.paths.data, &pauses);
                 ctx.journal(Entry::new("hook_tamper_kept").result(
@@ -541,7 +637,8 @@ fn end_expired_pauses(shared: &Shared) {
     }
     let Some(env) = setup_env(shared) else { return };
     let ms = manifests();
-    for p in &done {
+    // An edit pause took nothing out; only the older kind has hooks to put back.
+    for p in done.iter().filter(|p| p.kind == PauseKind::Off) {
         if let Some(m) = ms.iter().find(|m| m.name == p.harness) {
             let result = guard::add_entries(m, &env);
             shared.journal.record(match result {
@@ -560,5 +657,5 @@ pub(crate) fn pause_pending(shared: &Shared) -> bool {
     !consent(shared)
         && guard::read_pauses(&shared.options.paths.data)
             .iter()
-            .any(|p| p.until > now())
+            .any(|p| p.kind == PauseKind::Off && p.until > now())
 }

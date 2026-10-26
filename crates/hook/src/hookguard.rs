@@ -18,7 +18,9 @@
 //! a command substitution is not followed. The real guard is the watchdog
 //! (`vahta _guard`), which notices the change afterwards and asks the person.
 //!
-//! The agent is told to ask the person with `vahta hooks pause`.
+//! The agent is told to ask the person with `vahta hooks pause`. While such a
+//! pause is running for the harness ([`edits_allowed`]) this guard steps
+//! aside; every other check of the hook stays on.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +28,21 @@ use vahta_harness::{Event, Group, Manifest};
 use vahta_setup::Env;
 
 use crate::readguard::{self, Tok, is_assignment, normalise, resolved};
+
+/// Whether the person has let the agent change `harness`'s hook settings and
+/// the time has not run out (`pause.json` in Vahta's data directory, which
+/// only the daemon writes and the hook keeps agents out of). A pause of an
+/// older version (hooks taken out) does not count. Nothing readable is no.
+pub fn edits_allowed(harness: &str) -> bool {
+    let Ok(paths) = vahta_ipc::paths::Paths::from_env(None) else {
+        return false;
+    };
+    vahta_setup::guard::edits_allowed(
+        &vahta_setup::guard::read_pauses(&paths.data),
+        harness,
+        vahta_ipc::state::now(),
+    )
+}
 
 /// What was found: the file as written, and what the change would do.
 pub struct Tampering {
@@ -66,6 +83,8 @@ struct Target {
 }
 
 struct Watch {
+    /// The harness whose hook settings the person has let the agent change.
+    edits_for: Option<String>,
     manifests: Vec<Manifest>,
     env: Env,
     targets: Vec<Target>,
@@ -81,7 +100,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 impl Watch {
-    fn load() -> Option<Watch> {
+    fn load(harness: &str) -> Option<Watch> {
         let home = home_dir()?;
         let manifests: Vec<Manifest> = vahta_harness::HARNESSES
             .iter()
@@ -128,6 +147,7 @@ impl Watch {
             });
         }
         Some(Watch {
+            edits_for: edits_allowed(harness).then(|| harness.to_string()),
             manifests,
             env,
             targets,
@@ -149,8 +169,28 @@ impl Watch {
         readguard::resolve(given, cwd)
     }
 
-    /// What kind of watched file `path` is, if it is one.
+    /// Whether a pause lets the agent change files of `kind`: the hook
+    /// settings of the harness it was made for, and nothing else (Vahta's own
+    /// configuration and the administrator policy stay guarded).
+    fn paused_for(&self, kind: Kind) -> bool {
+        let Some(h) = self.edits_for.as_deref() else {
+            return false;
+        };
+        match kind {
+            Kind::HookConfig(i) => self.manifests.get(i).is_some_and(|m| m.name == h),
+            Kind::ClaudeSettings => h == "claude",
+            Kind::CodexToml => h == "codex",
+            Kind::VahtaConfig | Kind::Managed => false,
+        }
+    }
+
+    /// What kind of watched file `path` is, if it is one and the agent may
+    /// not change it now.
     fn kind_of(&self, path: &Path) -> Option<Kind> {
+        self.kind_of_any(path).filter(|k| !self.paused_for(*k))
+    }
+
+    fn kind_of_any(&self, path: &Path) -> Option<Kind> {
         let lexical = normalise(path);
         let real = resolved(&lexical);
         let same = |a: &Path, b: &Path| {
@@ -194,7 +234,7 @@ impl Watch {
         let real = resolved(&lexical);
         self.targets
             .iter()
-            .filter(|t| t.kind != Kind::Managed)
+            .filter(|t| t.kind != Kind::Managed && !self.paused_for(t.kind))
             .any(|t| {
                 let tp = normalise(&t.path);
                 let tr = resolved(&tp);
@@ -572,7 +612,7 @@ fn names_watched_file(w: &Watch, lowered_text: &str) -> bool {
     let home = w.home.to_string_lossy().to_lowercase().replace('\\', "/");
     let text = lowered_text.replace('\\', "/");
     for t in &w.targets {
-        if t.kind == Kind::Managed {
+        if t.kind == Kind::Managed || w.paused_for(t.kind) {
             continue;
         }
         let abs = t.path.to_string_lossy().to_lowercase().replace('\\', "/");
@@ -613,7 +653,7 @@ fn mentions_a_marker(ev: &Event) -> bool {
 }
 
 /// The first thing in this tool call that would weaken Vahta's hooks.
-pub fn tampering(ev: &Event) -> Option<Tampering> {
+pub fn tampering(ev: &Event, harness: &str) -> Option<Tampering> {
     match ev.group {
         Some(Group::Write | Group::Shell) => {}
         _ => return None,
@@ -621,7 +661,7 @@ pub fn tampering(ev: &Event) -> Option<Tampering> {
     if !mentions_a_marker(ev) {
         return None;
     }
-    let w = Watch::load()?;
+    let w = Watch::load(harness)?;
     let cwd = ev.cwd.as_deref();
     if ev.group == Some(Group::Shell) {
         return shell_hit(&w, &ev.text, cwd, 0);
@@ -667,6 +707,7 @@ mod tests {
             }
         }
         Watch {
+            edits_for: None,
             manifests,
             env,
             targets,
@@ -730,5 +771,18 @@ mod tests {
         assert!(!turns_hooks_off("{\"disableAllHooks\": false}"));
         assert!(!turns_hooks_off("{\"permissions\": {\"allow\": []}}"));
         assert!(turns_hooks_off("{ disableAllHooks: true "));
+    }
+
+    #[test]
+    fn a_pause_frees_that_harness_settings_and_nothing_else() {
+        let mut w = watch(Path::new("/h"));
+        w.edits_for = Some("claude".to_string());
+        // Claude Code's files are the person's to let go; the others are not.
+        assert!(!hit(&w, "rm ~/.claude/settings.json"));
+        assert!(!hit(&w, "rm -rf ~/.claude"));
+        assert!(hit(&w, "rm ~/.cursor/hooks.json"));
+        assert!(hit(&w, "cp /tmp/x ~/.codex/hooks.json"));
+        w.edits_for = None;
+        assert!(hit(&w, "rm ~/.claude/settings.json"));
     }
 }

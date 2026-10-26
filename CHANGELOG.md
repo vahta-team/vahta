@@ -8,6 +8,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Vahta is a Rust rewrite of key-amnesia. It is not published to any registry yet;
 it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
+### Changed
+
+- **`vahta hooks pause` is narrow** (protocol 19). It no longer takes the hooks out
+  of the harness config. It lets the agent change that harness's hook settings for
+  15 minutes by default (at most 1 hour, was 8 hours); the hook guard and the
+  watchdog step aside, the secret detector and the other checks keep running, and
+  the watchdog looks again when the time is up. The window says what is allowed and
+  for how long. A pause written by an older version still puts the hooks back when
+  it ends. The detector's refusal no longer points to the pause.
+- **Approvals name the vault.** The window for a pause or the watchdog's questions
+  says whose vault password it wants, and with several vaults known the person picks
+  one (no more silently taking the first one in `projects.json`). A password that
+  does not fit says which vault was tried. `projects.json` drops projects whose
+  vault file is gone.
+
 ### Added
 
 - **Transcript scrub** ([docs/transcripts.md](docs/transcripts.md)): `vahta scrub

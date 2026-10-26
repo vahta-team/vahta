@@ -30,7 +30,7 @@ use vahta_ipc::config::{Config, Guard};
 use vahta_ipc::paths::Paths;
 use vahta_ipc::protocol::{ClientReply, ClientRequest, GuardChoice, GuardEvent, Signal};
 use vahta_ipc::spool::{self, SpoolLine};
-use vahta_setup::guard::{self, Tamper};
+use vahta_setup::guard::{self, PauseKind, Tamper};
 
 use crate::autostart::{self, SystemRunner};
 use crate::daemon_cmd;
@@ -177,11 +177,13 @@ pub fn run(env: &Env, stderr: &mut dyn Write) -> i32 {
             _ => {}
         }
         let now = unix_now();
-        // A pause that has run out: the hooks come back.
+        // A pause that has run out. One that took the hooks out (an older
+        // version's, or "Keep off") puts them back; an edit pause took
+        // nothing out, and the look below finds and asks about what changed.
         let mut pauses = guard::read_pauses(&paths.data);
         let (over, still): (Vec<_>, Vec<_>) = pauses.drain(..).partition(|p| p.until <= now);
         if !over.is_empty() {
-            for p in &over {
+            for p in over.iter().filter(|p| p.kind == PauseKind::Off) {
                 if let Some(m) = ms.iter().find(|m| m.name == p.harness) {
                     let file = vahta_setup::config_path(m, &setup)
                         .map(|f| f.display().to_string())

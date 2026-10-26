@@ -21,8 +21,8 @@
   },
   "stdout": {
     "permission": "deny",
-    "user_message": "vahta blocked a change to `{{TMP}}/home/.cursor/hooks.json`: it would remove Vahta's hook entries, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`.",
-    "agent_message": "vahta blocked a change to `{{TMP}}/home/.cursor/hooks.json`: it would remove Vahta's hook entries, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 1h --reason \"...\"`."
+    "user_message": "vahta blocked a change to `{{TMP}}/home/.cursor/hooks.json`: it would remove Vahta's hook entries, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 15m --reason \"...\"`. That lets you change the hook settings for that long; Vahta's hooks stay on and keep watching.",
+    "agent_message": "vahta blocked a change to `{{TMP}}/home/.cursor/hooks.json`: it would remove Vahta's hook entries, and Vahta's hooks are what watch what agents do. Changing hook settings goes through Vahta: ask the person with `vahta hooks pause --for 15m --reason \"...\"`. That lets you change the hook settings for that long; Vahta's hooks stay on and keep watching."
   },
   "exit": 0,
   "spool": [
