@@ -15,6 +15,7 @@ mod agentguard;
 mod autostart;
 mod daemon;
 mod hookguard;
+mod readcopy;
 mod readguard;
 mod redact;
 mod runallow;
@@ -750,7 +751,7 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
             }
             match readguard::secret_kind_in(file, ev.cwd.as_deref(), ev.content.as_deref()) {
                 Some(kind) => (deny_read(file, &kind), Some(read_signal(&kind))),
-                None => (Decision::Allow, None),
+                None => (read_copy(ev, file, &args.harness), None),
             }
         }
         // The person typed the prompt: a refusal there is not the agent's doing.
@@ -760,6 +761,73 @@ fn decide(m: &Manifest, args: &Args, ev: &Event) -> (Decision, Option<Signal>) {
         // Nothing to say; `run` tells the daemon.
         Kind::SessionEnd => (Decision::Allow, None),
     }
+}
+
+/// Claude Code's Read of a file that holds a secret the reader checks did not
+/// stop: refused, with a redacted copy in the refusal (see `readcopy`), so the
+/// harness never records the file as read and cannot restore it after a
+/// compact. Another tool, or a file with nothing to cut, is let through; the
+/// after-tool redaction stays as the second line. Not in observe mode, where
+/// the person chose not to change what the model sees.
+fn read_copy(ev: &Event, file: &str, harness: &str) -> Decision {
+    if !ev.tool.eq_ignore_ascii_case("read")
+        || daemon::hook_output() == vahta_ipc::config::HookOutput::Observe
+    {
+        return Decision::Allow;
+    }
+    let outcome = readcopy::check(file, ev.cwd.as_deref(), ev.read_offset, ev.read_limit);
+    let cuts = match &outcome {
+        readcopy::Outcome::Clean => return Decision::Allow,
+        readcopy::Outcome::Copy { cuts, .. } | readcopy::Outcome::TooBig { cuts } => cuts,
+    };
+    // The harness writes the call into its transcript, and the restore record
+    // may have been written before: marked for the cleanup.
+    mark_dirty(ev, harness);
+    let file = safe_path(file);
+    let labels = redact::labels(cuts);
+    let known = redact::known_names(cuts);
+    let how = if known.is_empty() {
+        "to use a secret, run the command that needs it with `vahta run`".to_string()
+    } else {
+        use_clause(&known)
+    };
+    let user_message = format!(
+        "vahta refused Claude's Read of `{file}`: it holds {labels}. The model got a redacted \
+         copy instead."
+    );
+    let agent_message = match outcome {
+        readcopy::Outcome::Copy {
+            copy,
+            first,
+            last,
+            total,
+            ..
+        } => format!(
+            "vahta: `{file}` holds a secret ({labels}). This Read was refused so the file is not \
+             remembered as read; the copy below (lines {first}-{last} of {total}) has each value \
+             replaced with ***REDACTED(...)***. Claude Code's Edit tool will not work on this \
+             file because it was not read; change it through `vahta`, or ask the person. {how}.\n\n\
+             {copy}"
+        ),
+        _ => format!(
+            "vahta blocked reading `{file}`: it holds a secret ({labels}) and a redacted copy \
+             would be over 64 KiB or 2000 lines. Read a smaller part with offset and limit, or \
+             ask the person. Claude Code's Edit tool will not work on this file because it was \
+             not read; change it through `vahta`, or ask the person. {how}."
+        ),
+    };
+    Decision::Deny {
+        user_message,
+        agent_message,
+    }
+}
+
+/// A path as it can be put in a sentence between backticks.
+fn safe_path(p: &str) -> String {
+    p.chars()
+        .filter(|c| !c.is_control() && *c != '`')
+        .take(256)
+        .collect()
 }
 
 /// Reading a file that holds credentials, as the daemon hears it.
@@ -996,8 +1064,12 @@ fn run() -> Option<vahta_harness::Output> {
     // A prompt the hook held was still written by the harness (its queue and
     // log records), so it is marked too.
     let held_prompt = args.kind == Kind::Prompt && matches!(decision, Decision::Deny { .. });
-    if (args.kind == Kind::AfterTool
-        && matches!(decision, Decision::Redact { .. } | Decision::Notice { .. }))
+    // After a compact Claude Code reads the files it remembers back from disk
+    // and writes them into the transcript, with no hook in between.
+    let compacted = args.kind == Kind::SessionStart && event.source.as_deref() == Some("compact");
+    if compacted
+        || (args.kind == Kind::AfterTool
+            && matches!(decision, Decision::Redact { .. } | Decision::Notice { .. }))
         || held_prompt
     {
         daemon::session_dirty(

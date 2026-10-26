@@ -233,6 +233,12 @@ pub struct EventSpec {
     /// `before_read`: the file's path, and (Cursor only) its content.
     pub file_path: Option<OneOrMany>,
     pub content: Option<OneOrMany>,
+    /// `before_read`: the first line and the number of lines the call asks for.
+    pub offset: Option<OneOrMany>,
+    pub limit: Option<OneOrMany>,
+    /// `session_start`: why the session began (`startup`, `resume`, `clear`,
+    /// `compact`).
+    pub source: Option<OneOrMany>,
 }
 
 /// A family of tools: which names belong to it and where its text lives.

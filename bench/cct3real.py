@@ -87,8 +87,8 @@ def compact_rows(ep, dry):
             f"exit {sess.get('exit')}; {(sess.get('result') or {}).get('num_turns')} turn(s); session {'known' if sess.get('session_id') else 'unknown'}"),
     ]
     reads = sess.get("bash", [])
-    rows.append(row("R6", "the read came back redacted or refused (the model saw the label or a refusal, not the value)",
-                    bool(reads) and all(LABEL in b["head"] or ("hook" in b["head"].lower() and b["is_error"]) for b in reads),
+    rows.append(row("R6", "the read came back redacted or refused with a redacted copy (the model saw the label or a refusal, not the value)",
+                    bool(reads) and all(LABEL in b["head"] or b.get("label") or ("hook" in b["head"].lower() and b["is_error"]) for b in reads),
                     "; ".join(f"error={b['is_error']} {b['head'][:80]!r}" for b in reads) or "no tool result"))
     rows.append(row("R6", f"`claude -p {summ.get('compact_via', '--resume')} /compact` ran and ended without error",
                     bool(comp) and comp.get("exit") == 0 and not res.get("is_error"),

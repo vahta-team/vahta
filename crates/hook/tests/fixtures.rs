@@ -140,6 +140,15 @@ impl FakeDaemon {
             })
             .unwrap_or_default();
         let prompt = script["prompt"].as_str().unwrap_or("").to_string();
+        // `"scan": {"NAME": "value"}`: it finds those values in an output.
+        let scan: Vec<(String, String)> = script["scan"]
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
         let asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let prompts: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let log = asked.clone();
@@ -147,6 +156,7 @@ impl FakeDaemon {
         std::thread::spawn(move || {
             while let Ok(mut stream) = listener.accept() {
                 let (log, version) = (log.clone(), version.clone());
+                let scan = scan.clone();
                 let (known, bind, prompt, prompt_log) = (
                     known.clone(),
                     bind.clone(),
@@ -227,6 +237,27 @@ impl FakeDaemon {
                                 },
                                 None => ClientReply::Ok {},
                             },
+                            ClientRequest::OutputScan { texts, .. } => {
+                                let mut spans = Vec::new();
+                                for (i, t) in texts.iter().enumerate() {
+                                    for (name, value) in &scan {
+                                        for (at, _) in t.match_indices(value.as_str()) {
+                                            spans.push(vahta_ipc::protocol::OutputSpan {
+                                                text: i,
+                                                start: at,
+                                                end: at + value.len(),
+                                                label: name.clone(),
+                                                known: true,
+                                            });
+                                        }
+                                    }
+                                }
+                                spans.sort_by_key(|s| (s.text, s.start));
+                                ClientReply::OutputSpans {
+                                    spans,
+                                    reference: None,
+                                }
+                            }
                             ClientRequest::PromptAsk {
                                 harness,
                                 cwd,

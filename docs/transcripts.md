@@ -187,6 +187,24 @@ run) and from the hooks documentation as quoted in the harness manifest.
 redacted by the hook, then search the session's `.jsonl` and any files under
 the session folder for the canary.
 
+## Files restored after a `/compact`
+
+Claude Code 2.1.309 remembers the files its Read tool returned. After `/compact`
+it reads them again from disk and writes an `attachment` record per file
+(`attachment.content.file.content` and `rendered[].content` hold the text) into
+the transcript; no hook runs, and the next request to the model carries it. It
+also writes `api-request-blob` records holding the text of requests. The cleaner
+reads every string of every record, so both are cleaned like the rest; a unit
+test builds one of each shape.
+
+To keep a value out of the restored file, the hook refuses a Read of a file
+that holds a secret and hands the model a redacted copy in the refusal (see
+[hooks](hooks.md#read-of-a-file-holding-a-secret-claude-code)); a refused call
+is not remembered. The session is marked for the cleanup on that refusal and
+when `SessionStart` arrives with the source `compact`, since a file read before
+Vahta was set up, or a value added to the vault later, can still be in the
+restore.
+
 ## What a `/compact` summary may retain
 
 `/compact` (and auto-compact) asks the model to write a summary of the

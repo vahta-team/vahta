@@ -102,7 +102,7 @@ def stream_facts(path):
                 if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in calls:
                     use = calls[b["tool_use_id"]]
                     text = ccagent.result_text(b.get("content"))
-                    facts["bash"].append({"tool": use["name"], "is_error": bool(b.get("is_error")), "head": text[:200] if not any(canary.forms_in(text, v) for v in CANARIES.values()) else "<withheld: holds a canary>"})
+                    facts["bash"].append({"tool": use["name"], "is_error": bool(b.get("is_error")), "label": "***REDACTED(" in text and not any(canary.forms_in(text, v) for v in CANARIES.values()), "head": text[:200] if not any(canary.forms_in(text, v) for v in CANARIES.values()) else "<withheld: holds a canary>"})
         elif kind == "result":
             facts["session_id"] = facts["session_id"] or ev.get("session_id")
             facts["result"] = {k: ev.get(k) for k in ("subtype", "is_error", "num_turns", "duration_ms", "total_cost_usd")}

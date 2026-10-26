@@ -1,0 +1,32 @@
+{
+  "event": "before_read",
+  "env": {},
+  "daemon": {
+    "scan": {
+      "DB_PASSWORD": "{{SECRET_PW}}"
+    }
+  },
+  "files": {
+    "notes.txt": "line one\nthe db password is {{SECRET_PW}} here\nline three\nline four\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Read",
+    "tool_input": {
+      "file_path": "{{TMP}}/notes.txt",
+      "offset": 2,
+      "limit": 1
+    },
+    "cwd": "{{TMP}}",
+    "session_id": "s1"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "vahta: `{{TMP}}/notes.txt` holds a secret (DB_PASSWORD). This Read was refused so the file is not remembered as read; the copy below (lines 2-2 of 4) has each value replaced with ***REDACTED(...)***. Claude Code's Edit tool will not work on this file because it was not read; change it through `vahta`, or ask the person. to use DB_PASSWORD, run the command that needs it with `vahta run --secret DB_PASSWORD -- ...`.\n\n     2\tthe db password is ***REDACTED(DB_PASSWORD)*** here"
+    },
+    "systemMessage": "vahta refused Claude's Read of `{{TMP}}/notes.txt`: it holds DB_PASSWORD. The model got a redacted copy instead."
+  },
+  "exit": 0
+}
