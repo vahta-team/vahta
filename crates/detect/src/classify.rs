@@ -305,6 +305,42 @@ pub fn is_function_call(value: &str) -> bool {
     !chars[i + 1..chars.len() - 1].contains(&b'\n')
 }
 
+/// A bare identifier or member expression (`root.field`, `list.length,`):
+/// code naming a value, not holding one. Lower-case first, no digit, and
+/// ASCII, so `hunter2Abc` and `Hunter-Two` are not taken for it. Trailing
+/// `; , ) ] }` belong to the surrounding code. The answer says whether a `.`
+/// was seen; a bare camelCase word is as likely to be a passphrase as a
+/// variable, which is for the caller to weigh.
+pub fn code_reference(value: &str) -> Option<bool> {
+    let b = value.trim_end_matches([';', ',', ')', ']', '}']).as_bytes();
+    if b.first().is_none_or(|c| !c.is_ascii_lowercase()) {
+        return None;
+    }
+    let mut i = ident_len(b, 0);
+    let mut dotted = false;
+    while i < b.len() && b[i] == b'.' {
+        let n = ident_len(b, i + 1);
+        if n == 0 {
+            return None;
+        }
+        dotted = true;
+        i += 1 + n;
+    }
+    (i == b.len() && !b.iter().any(u8::is_ascii_digit)).then_some(dotted)
+}
+
+/// An identifier or member expression, in any case and without a digit, that
+/// ends in `keyword` itself (`Password` for `password`, `pendingToken` for
+/// `token`): the name of a thing, written where a value would go.
+pub fn names_word(value: &str, keyword: &str) -> bool {
+    let v = value.trim_end_matches([';', ',', ')', ']', '}']);
+    !keyword.is_empty()
+        && v.bytes()
+            .all(|c| c.is_ascii_alphabetic() || matches!(c, b'_' | b'.'))
+        && v.len() >= keyword.len()
+        && v.as_bytes()[v.len() - keyword.len()..].eq_ignore_ascii_case(keyword.as_bytes())
+}
+
 /// `^ident\[.+\]$` — a subscripted type. Named weakening 2.
 pub fn is_type_annotation(value: &str) -> bool {
     let chars = value.as_bytes();

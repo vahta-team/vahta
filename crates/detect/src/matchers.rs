@@ -757,6 +757,16 @@ fn match_optional_sep_pair<U: Unit>(
     match_literal_ci(chars, after_sep, tail)
 }
 
+/// A spelled-out `\n`, `\r`, `\t`, `\"` or `\'` at `at`: a line break or quote
+/// written inside a string of source code (a Python string holding a file, a
+/// JSON body). It ends a value as the character it spells would.
+fn is_text_escape<U: Unit>(chars: &[U], at: usize) -> bool {
+    chars[at].ch() == '\\'
+        && chars
+            .get(at + 1)
+            .is_some_and(|c| matches!(c.ch(), 'n' | 'r' | 't' | '"' | '\''))
+}
+
 /// The parsed tail of an assignment: `nq2`, `q`, `value`, `q2`.
 struct AssignTail {
     nq2: Option<char>,
@@ -806,6 +816,7 @@ fn match_assign_tail<U: Unit>(chars: &[U], at: usize) -> Option<AssignTail> {
         && !is_space(chars[i].ch())
         && chars[i].ch() != '\''
         && chars[i].ch() != '"'
+        && !is_text_escape(chars, i)
     {
         i += 1;
     }
@@ -910,6 +921,20 @@ fn assignments_in<U: Unit>(chars: &[U]) -> Vec<(String, String, (usize, usize))>
             && tail.q2 != Some(q)
         {
             continue;
+        }
+
+        // An unquoted identifier or member expression on the right is code
+        // naming a value (`x = root.field`). A dotted one always is; a bare
+        // one only after a spaced `=`/`:` (`a = b`), since a shell word with
+        // no space before the `=`, or a YAML scalar, can be the value itself.
+        if tail.q.is_none() {
+            let spaced = kw_end < chars.len() && is_space(chars[kw_end].ch());
+            let keyword = collect_string(&chars[kw_start..kw_end]);
+            if crate::classify::code_reference(&tail.value).is_some_and(|dotted| dotted || spaced)
+                || (spaced && crate::classify::names_word(&tail.value, &keyword))
+            {
+                continue;
+            }
         }
 
         let name = collect_string(&chars[i..kw_end]);
