@@ -20,8 +20,9 @@ usage() {
 usage: install-local.sh [--prefix DIR] [--no-setup]
        install-local.sh [--prefix DIR] --uninstall [--force]
 
-Build vahta, vh (the short name of vahta) and vahta-hook from this checkout
-and install them.
+Build vahta and vahta-hook from this checkout and install them, with vh (the
+short name) as a link to vahta. Then restart a running daemon and hook watchdog on
+the new binary (open sessions end).
 
 options:
   --prefix DIR   install into DIR (default: ${XDG_BIN_HOME:-$HOME/.local/bin});
@@ -151,10 +152,20 @@ install_one() {
   echo "installed $prefix/$name"
 }
 
+# vh is a link to vahta, not a copy: a process started as vh then runs the
+# vahta file, which is what okono's allowlist and the guard's unit name.
+link_vh() {
+  local tmp="$prefix/.vh.$$"
+  rm -f -- "$tmp"
+  ln -s vahta "$tmp"
+  mv -f -- "$tmp" "$prefix/vh"
+  echo "linked $prefix/vh -> vahta"
+}
+
 # The hook first: a vahta that is newer than its hook is the worse way round.
 install_one vahta-hook
 install_one vahta
-install_one vh
+link_vh
 
 echo
 echo "smoke checks..."
@@ -183,3 +194,33 @@ else
   echo
   echo "skipped setup (--no-setup). Run \`$prefix/vahta setup --refresh\` to repoint existing harnesses."
 fi
+
+# A running daemon or watchdog keeps the old file open (a deleted file, to
+# okono and to anyone reading /proc). Restart both on the new one; a daemon
+# restart ends the open sessions, as any protocol change would.
+echo
+echo "restarting Vahta's processes on the new binary..."
+# Only one that runs: `status` starts nothing and says "not running" when
+# there is none. Anything else, an older daemon included, is restarted.
+case "$("$prefix/vahta" daemon status 2>&1)" in
+  "not running"*) echo "daemon: not running" ;;
+  *) "$prefix/vahta" daemon restart \
+    || echo "warning: the daemon did not restart; run \`vahta daemon restart\`" ;;
+esac
+case "$(uname -s)" in
+  Linux)
+    # Only the watchdog this prefix runs: the unit is per user, not per HOME.
+    if command -v systemctl >/dev/null 2>&1 \
+      && systemctl --user is-active --quiet vahta-guard.service 2>/dev/null \
+      && systemctl --user show -p ExecStart --value vahta-guard.service 2>/dev/null \
+        | grep -qF -- "path=$prefix/"; then
+      systemctl --user restart vahta-guard.service && echo "hook watchdog: restarted"
+    fi
+    ;;
+  Darwin)
+    if launchctl list dev.vahta.guard >/dev/null 2>&1 \
+      && grep -qF -- "<string>$prefix/" "$HOME/Library/LaunchAgents/dev.vahta.guard.plist" 2>/dev/null; then
+      launchctl kickstart -k "gui/$(id -u)/dev.vahta.guard" && echo "hook watchdog: restarted"
+    fi
+    ;;
+esac
