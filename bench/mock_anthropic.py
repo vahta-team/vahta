@@ -54,11 +54,13 @@ def _text(content):
 
 def record_results(body):
     """Append the tool results of the newest user message (each arrives once as new)."""
-    msgs = body.get("messages", [])
-    if not RESULTS or not msgs or msgs[-1].get("role") != "user" or not isinstance(msgs[-1].get("content"), list):
+    # The newest user message, not the last message: Claude Code 2.1.309 may end
+    # a request with a turn of its own after the tool results.
+    users = [m for m in body.get("messages", []) if m.get("role") == "user"]
+    if not RESULTS or not users or not isinstance(users[-1].get("content"), list):
         return
     with open(RESULTS, "a") as f:
-        for b in msgs[-1]["content"]:
+        for b in users[-1]["content"]:
             if b.get("type") == "tool_result":
                 f.write(json.dumps({"id": b.get("tool_use_id"), "is_error": bool(b.get("is_error")),
                                     "text": _text(b.get("content"))}) + "\n")
