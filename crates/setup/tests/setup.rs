@@ -778,8 +778,10 @@ fn a_windows_install_with_backslashes_is_outdated_and_rewritten_with_slashes() {
     let text = fs::read_to_string(&path).unwrap();
     let slashed = env.hook.to_string_lossy().replace('\\', "/");
     // Quoted or not, as `quote_word` decides: a temp dir may hold a `~`.
+    // As it appears inside the JSON string, where a `"` is escaped.
     let word = quote_word(&env.hook.to_string_lossy(), Os::Windows);
-    assert!(text.contains(&format!("{word} --harness claude")), "{text}");
+    let in_json = serde_json::to_string(&format!("{word} --harness claude")).unwrap();
+    assert!(text.contains(&in_json[1..in_json.len() - 1]), "{text}");
 
     // What an earlier setup wrote: the same path with backslashes, which Git
     // Bash turns into `C:Users…` and never runs.
