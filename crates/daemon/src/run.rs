@@ -146,7 +146,9 @@ fn end_command(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = Command::new("taskkill")
+        let mut taskkill = Command::new("taskkill");
+        vahta_os::hide_console_window(&mut taskkill);
+        let _ = taskkill
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -228,6 +230,9 @@ pub(crate) fn execute(
         use std::os::unix::process::CommandExt;
         command.arg0(&argv[0]).process_group(0);
     }
+    // The daemon has no console: without this, Windows opens a window for
+    // every command it runs.
+    vahta_os::hide_console_window(&mut command);
     // Named hosts get a relay (Linux); otherwise the namespace has no way out.
     let mut host_sockets = None;
     let isolated = isolate_network
