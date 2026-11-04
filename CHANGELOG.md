@@ -178,6 +178,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   every `permissions.deny`/`allow` rule is also written as `PowerShell(...)`. An
   install from setup 6 shows as outdated; `vahta setup --claude` (or `--refresh`)
   brings it up to date.
+- **No terminal window per `vahta run` on Windows.** The daemon has no console, and
+  Windows gives a console program started by such a process a new, visible one: each
+  command `vahta run` started, the `taskkill` that ends it and the clipboard tools
+  opened a terminal window (a Windows Terminal tab when it is the default terminal)
+  that stayed after the program exited. They now start with `CREATE_NO_WINDOW`
+  (`vahta_os::hide_console_window`); their pipes are unchanged, and the password
+  window still opens as before.
 - **The agent is told which secret was blocked.** When a value Vahta holds is refused in a
   command, a file write, an MCP argument or a prompt, or cut from a tool's output, the
   message for the agent now names the secret (and, for input, how the value was written)
