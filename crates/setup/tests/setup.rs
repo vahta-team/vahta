@@ -777,10 +777,9 @@ fn a_windows_install_with_backslashes_is_outdated_and_rewritten_with_slashes() {
     let path = config_in(&t, "claude");
     let text = fs::read_to_string(&path).unwrap();
     let slashed = env.hook.to_string_lossy().replace('\\', "/");
-    assert!(
-        text.contains(&format!("{slashed} --harness claude")),
-        "{text}"
-    );
+    // Quoted or not, as `quote_word` decides: a temp dir may hold a `~`.
+    let word = quote_word(&env.hook.to_string_lossy(), Os::Windows);
+    assert!(text.contains(&format!("{word} --harness claude")), "{text}");
 
     // What an earlier setup wrote: the same path with backslashes, which Git
     // Bash turns into `C:Users…` and never runs.
