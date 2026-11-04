@@ -170,6 +170,14 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **Claude Code's PowerShell tool reaches the hook** (setup 7). On Windows Claude Code
+  runs shell commands through its PowerShell tool as well as Bash, and neither tool
+  matcher `vahta setup` wrote named it: no PowerShell call was checked before it ran
+  and none of its output was redacted, although the hook already treats `powershell`
+  as a shell. The `PreToolUse` and `PostToolUse` matchers now include `PowerShell`, and
+  every `permissions.deny`/`allow` rule is also written as `PowerShell(...)`. An
+  install from setup 6 shows as outdated; `vahta setup --claude` (or `--refresh`)
+  brings it up to date.
 - **The agent is told which secret was blocked.** When a value Vahta holds is refused in a
   command, a file write, an MCP argument or a prompt, or cut from a tool's output, the
   message for the agent now names the secret (and, for input, how the value was written)
