@@ -195,6 +195,22 @@ pub fn detach_session() {
     sys::detach_session();
 }
 
+/// Make this process's standard streams its own console's.
+///
+/// For the prompt window on Windows. It is started with a new console, but it
+/// inherits the daemon's standard handles, and the daemon, detached from every
+/// console, has the null device there: what the window printed went nowhere
+/// (only the password prompt, which writes to the console itself, showed) and
+/// its first read from standard input was the end of input. Each standard
+/// handle that is missing or the null device is replaced with the console's
+/// (`CONIN$`, `CONOUT$`); a pipe or a console already there is left as it is,
+/// so a test that drives the window through pipes is unaffected. Nothing to do
+/// elsewhere: a terminal hands its own streams to what it runs.
+pub fn use_own_console() {
+    #[cfg(windows)]
+    sys::use_own_console();
+}
+
 /// The platform cannot cut a child off from the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unsupported;
