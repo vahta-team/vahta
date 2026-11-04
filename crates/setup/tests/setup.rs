@@ -729,14 +729,23 @@ fn the_hook_path_is_quoted_when_it_needs_it() {
         quote_word("/o'k/vahta-hook", Os::Linux),
         "'/o'\\''k/vahta-hook'"
     );
+    // Windows: `/`, since Claude Code runs hooks through Git Bash there and an
+    // unquoted backslash path loses its separators.
     assert_eq!(
         quote_word("C:\\Vahta\\vahta-hook.exe", Os::Windows),
-        "C:\\Vahta\\vahta-hook.exe"
+        "C:/Vahta/vahta-hook.exe"
     );
     assert_eq!(
         quote_word("C:\\Program Files\\v\\vahta-hook.exe", Os::Windows),
-        "\"C:\\Program Files\\v\\vahta-hook.exe\""
+        "\"C:/Program Files/v/vahta-hook.exe\""
     );
+    assert!(is_ours(
+        &format!(
+            "{} --a",
+            quote_word("C:\\Program Files\\v\\vahta-hook.exe", Os::Windows)
+        ),
+        Os::Windows
+    ));
     // And what we quote, we recognise and a status check can find again.
     let cmd = format!(
         "{} --harness claude",
@@ -752,6 +761,46 @@ fn the_hook_path_is_quoted_when_it_needs_it() {
     let s = inspect(&m("claude"), &env);
     assert_eq!(s.state, State::Current);
     assert!(s.problems.is_empty());
+}
+
+#[test]
+fn a_windows_install_with_backslashes_is_outdated_and_rewritten_with_slashes() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.os = Os::Windows;
+    env.hook = t.write("bin/vahta-hook.exe", "");
+    let mf = m("claude");
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    let s = inspect(&mf, &env);
+    assert_eq!(s.state, State::Current);
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    let path = config_in(&t, "claude");
+    let text = fs::read_to_string(&path).unwrap();
+    let slashed = env.hook.to_string_lossy().replace('\\', "/");
+    assert!(
+        text.contains(&format!("{slashed} --harness claude")),
+        "{text}"
+    );
+
+    // What an earlier setup wrote: the same path with backslashes, which Git
+    // Bash turns into `C:Users…` and never runs.
+    let back = slashed.replace('/', "\\");
+    let in_json = serde_json::to_string(&back).unwrap();
+    let old = text.replace(&slashed, &in_json[1..in_json.len() - 1]);
+    assert_ne!(old, text);
+    fs::write(&path, &old).unwrap();
+    let s = inspect(&mf, &env);
+    assert_eq!(s.state, State::Outdated);
+    assert!(
+        !s.problems
+            .iter()
+            .any(|p| matches!(p, HookProblem::Elsewhere(_))),
+        "the same program, written differently: {:?}",
+        s.problems
+    );
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(inspect(&mf, &env).state, State::Current);
 }
 
 #[test]
