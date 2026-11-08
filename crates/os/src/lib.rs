@@ -26,6 +26,7 @@
 use std::io;
 use std::process::Command;
 
+pub mod defaults;
 pub mod ipc;
 mod stdin;
 

@@ -186,9 +186,10 @@ impl LocalStore {
         LocalStore { root: root.into() }
     }
 
-    /// `<platform data dir>/vahta`, or `None` where there is no such directory.
+    /// The default data directory (see `vahta_os::defaults`), or `None` where
+    /// there is no such directory.
     pub fn platform_default() -> Option<LocalStore> {
-        dirs::data_dir().map(|d| LocalStore::new(d.join("vahta")))
+        vahta_os::defaults::default_data_dir().map(LocalStore::new)
     }
 
     pub fn root(&self) -> &Path {

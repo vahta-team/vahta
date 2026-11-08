@@ -22,7 +22,7 @@ argon2 = { version = "0.5", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
 crypto_box = { version = "0.9", features = ["seal"] }
 crypto_secretbox = "0.1"
-dirs = "6"
+vahta-os = { path = "../os" }
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 hkdf = "0.12"
 hmac = "0.12"

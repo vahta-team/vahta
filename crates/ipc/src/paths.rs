@@ -101,10 +101,10 @@ impl Paths {
     ) -> Result<Paths, PathError> {
         let data = data
             .or_else(|| nonempty(var("VAHTA_DATA_DIR")))
-            .or_else(|| dirs::data_dir().map(|d| d.join("vahta")))
+            .or_else(vahta_os::defaults::default_data_dir)
             .ok_or(PathError::NoBase("its data"))?;
         let config = nonempty(var("VAHTA_CONFIG_DIR"))
-            .or_else(|| dirs::config_dir().map(|d| d.join("vahta")))
+            .or_else(vahta_os::defaults::default_config_dir)
             .ok_or(PathError::NoBase("its configuration"))?;
         let runtime = match nonempty(var("VAHTA_RUNTIME_DIR")) {
             Some(d) => d,
@@ -253,6 +253,15 @@ mod tests {
         assert_eq!(p.lock_file(), PathBuf::from("/r/daemon.lock"));
         assert_eq!(p.journal_file(), PathBuf::from("/d/journal.jsonl"));
         assert_eq!(p.config_file(), PathBuf::from("/c/config.toml"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_defaults_are_outside_appdata() {
+        let home = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+        let p = Paths::resolve(vars(&[("VAHTA_RUNTIME_DIR", "/r")]), None).unwrap();
+        assert_eq!(p.data, home.join(".local").join("share").join("vahta"));
+        assert_eq!(p.config, home.join(".config").join("vahta"));
     }
 
     #[test]
