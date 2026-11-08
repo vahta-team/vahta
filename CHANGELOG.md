@@ -177,6 +177,29 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   all accept, and an earlier install with backslashes shows as outdated, so `vahta setup`
   rewrites it.
 
+- **The password window shows everything on Windows.** The window is started with
+  a console of its own but inherited the daemon's standard streams, the null device:
+  only the password prompt (written to the console directly) showed, and the panel
+  (what is asked, by whom, the agent's note) and the recovery key of `vahta init` went
+  nowhere. Its first read of standard input was the end of input, so `init` ended as
+  cancelled after the password was typed twice and made no vault. The window now
+  puts its own console (`CONIN$`, `CONOUT$`) in place of a standard stream that is
+  missing or the null device (`vahta_os::use_own_console`); pipes are kept.
+- **Claude Code's PowerShell tool reaches the hook** (setup 7). On Windows Claude Code
+  runs shell commands through its PowerShell tool as well as Bash, and neither tool
+  matcher `vahta setup` wrote named it: no PowerShell call was checked before it ran
+  and none of its output was redacted, although the hook already treats `powershell`
+  as a shell. The `PreToolUse` and `PostToolUse` matchers now include `PowerShell`, and
+  every `permissions.deny`/`allow` rule is also written as `PowerShell(...)`. An
+  install from setup 6 shows as outdated; `vahta setup --claude` (or `--refresh`)
+  brings it up to date.
+- **No terminal window per `vahta run` on Windows.** The daemon has no console, and
+  Windows gives a console program started by such a process a new, visible one: each
+  command `vahta run` started, the `taskkill` that ends it and the clipboard tools
+  opened a terminal window (a Windows Terminal tab when it is the default terminal)
+  that stayed after the program exited. They now start with `CREATE_NO_WINDOW`
+  (`vahta_os::hide_console_window`); their pipes are unchanged, and the password
+  window still opens as before.
 - **The agent is told which secret was blocked.** When a value Vahta holds is refused in a
   command, a file write, an MCP argument or a prompt, or cut from a tool's output, the
   message for the agent now names the secret (and, for input, how the value was written)
