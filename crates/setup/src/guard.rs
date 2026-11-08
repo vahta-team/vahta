@@ -146,7 +146,7 @@ pub fn write_pauses(data: &Path, pauses: &[Pause]) -> io::Result<()> {
         .collect();
     let mut doc = Map::new();
     doc.insert("pauses".into(), Value::Array(items));
-    write_atomic(&pause_file(data), &render(doc))
+    write_atomic(&pause_file(data), &render(doc, None))
 }
 
 /// Whether `harness` has a pause that has not run out at `now`.
@@ -194,7 +194,7 @@ pub fn write_expected(data: &Path, expected: &BTreeSet<String>) -> io::Result<()
         "expected".into(),
         Value::Array(expected.iter().map(|s| Value::String(s.clone())).collect()),
     );
-    write_atomic(&data.join("guard-state.json"), &render(doc))
+    write_atomic(&data.join("guard-state.json"), &render(doc, None))
 }
 
 /// Where a project's vault file is, by the layout of `.vahta/`.
@@ -488,7 +488,7 @@ pub fn restore(ms: &[Manifest], env: &Env, t: &Tamper) -> Result<(), String> {
                 .ok_or("the file is gone")?;
             let mut doc = parse(Some(&text)).map_err(|e| e.to_string())?;
             doc.shift_remove("disableAllHooks");
-            write(render(doc))
+            write(render(doc, Some(&text)))
         }
         Fix::CodexHooksOn => {
             let text = read_config(&t.file)
