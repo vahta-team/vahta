@@ -67,8 +67,10 @@ pub fn seen_answering(paths: &Paths) {
 /// one answers in time. `hook` is this hook binary's path.
 pub fn ensure(paths: &Paths, hook: &Path) -> bool {
     // For tests of the hook alone, which must start nothing: setting it can only
-    // keep the hook from starting a daemon, never make it start one.
-    if std::env::var_os("VAHTA_HOOK_NO_START").is_some_and(|v| !v.is_empty()) {
+    // keep the hook from starting a daemon, never make it start one. Unit tests
+    // need no variable: their binary lies next to a real `vahta`, and on Windows
+    // a daemon started from one outlives the test run.
+    if cfg!(test) || std::env::var_os("VAHTA_HOOK_NO_START").is_some_and(|v| !v.is_empty()) {
         return false;
     }
     let Some(vahta) = sibling(hook) else {
