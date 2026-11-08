@@ -170,6 +170,14 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **The password window shows everything on Windows.** The window is started with
+  a console of its own but inherited the daemon's standard streams, the null device:
+  only the password prompt (written to the console directly) showed, and the panel
+  (what is asked, by whom, the agent's note) and the recovery key of `vahta init` went
+  nowhere. Its first read of standard input was the end of input, so `init` ended as
+  cancelled after the password was typed twice and made no vault. The window now
+  puts its own console (`CONIN$`, `CONOUT$`) in place of a standard stream that is
+  missing or the null device (`vahta_os::use_own_console`); pipes are kept.
 - **Claude Code's PowerShell tool reaches the hook** (setup 7). On Windows Claude Code
   runs shell commands through its PowerShell tool as well as Bash, and neither tool
   matcher `vahta setup` wrote named it: no PowerShell call was checked before it ran
