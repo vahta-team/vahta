@@ -259,7 +259,7 @@ fn print_table(statuses: &[Status], stdout: &mut dyn Write) {
                 s.inspect
                     .config_path
                     .as_ref()
-                    .map_or("-".into(), |p| p.display().to_string()),
+                    .map_or("-".into(), |p| vahta_setup::display_path(p)),
             ]
         })
         .collect();
@@ -471,8 +471,9 @@ pub fn run(args: &[String], cli: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
         match vahta_setup::plan_placed(m, env, action, placement) {
             Ok(p) => plans.push((m, p)),
             Err(e) => {
-                let file = vahta_setup::config_path(m, env)
-                    .map_or(String::new(), |p| format!(" {}", p.display()));
+                let file = vahta_setup::config_path(m, env).map_or(String::new(), |p| {
+                    format!(" {}", vahta_setup::display_path(&p))
+                });
                 let _ = writeln!(
                     stderr,
                     "vahta setup: {}:{file} {e}; nothing was written",
@@ -501,7 +502,7 @@ pub fn run(args: &[String], cli: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
     }
     let mut failed = false;
     for (m, p) in &plans {
-        let path = p.path.display();
+        let path = vahta_setup::display_path(&p.path);
         let Some(after) = &p.after else {
             let _ = match action {
                 Action::Install => writeln!(
@@ -529,7 +530,7 @@ pub fn run(args: &[String], cli: &Env, stdout: &mut dyn Write, stderr: &mut dyn 
                     Action::Uninstall => "removed our hooks from".to_string(),
                 };
                 let kept = backup.map_or(String::new(), |b| {
-                    format!(" (old file kept as {})", b.display())
+                    format!(" (old file kept as {})", vahta_setup::display_path(&b))
                 });
                 let _ = writeln!(stdout, "{}: {verb} {path}{kept}", m.title);
                 if let (Action::Install, Some(n)) = (action, &m.setup_notice) {
@@ -791,7 +792,7 @@ fn managed(
     }
     let mut failed = false;
     for p in &plans {
-        let path = p.path.display();
+        let path = vahta_setup::display_path(&p.path);
         if p.current {
             let _ = writeln!(stdout, "{}: already current ({path})", p.title);
             continue;

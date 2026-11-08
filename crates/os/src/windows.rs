@@ -24,7 +24,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleTitleW,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -210,6 +210,16 @@ pub(crate) fn harden_process() -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "no process hardening is applied on Windows",
     ))
+}
+
+pub(crate) fn set_console_title(title: &str) {
+    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call;
+    // the call only reads it. A process with no console makes it fail, which
+    // is ignored: the title is cosmetic.
+    unsafe {
+        SetConsoleTitleW(wide.as_ptr());
+    }
 }
 
 pub(crate) fn isolate_network(_cmd: &mut Command) -> Result<(), crate::Unsupported> {

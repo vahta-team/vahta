@@ -820,7 +820,10 @@ fn the_diff_shows_a_change_and_nothing_for_none() {
         "{\n  \"a\": 1\n}\n",
     );
     assert!(
-        d.contains("--- /h/.claude/settings.json") && d.contains("+  \"a\": 1"),
+        d.contains(&format!(
+            "--- {}",
+            vahta_setup::display_path(Path::new("/h/.claude/settings.json"))
+        )) && d.contains("+  \"a\": 1"),
         "{d}"
     );
     let d = vahta_setup::unified_diff(Path::new("/h/x.json"), None, "{}\n");

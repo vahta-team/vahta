@@ -877,9 +877,21 @@ pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
     result.map(|()| backup)
 }
 
+/// A path as shown to the person: on Windows with `\` throughout, where a
+/// config path built from a `~/.x/y` template would print as `C:\Users\x/.x/y`.
+/// For display only; the stored and compared paths are not touched.
+pub fn display_path(path: &Path) -> String {
+    let shown = path.display().to_string();
+    if cfg!(windows) {
+        shown.replace('/', "\\")
+    } else {
+        shown
+    }
+}
+
 /// A unified diff of one file's change, for `--dry-run`.
 pub fn unified_diff(path: &Path, before: Option<&str>, after: &str) -> String {
-    let shown = path.display().to_string();
+    let shown = display_path(path);
     let old = if before.is_some() {
         shown.clone()
     } else {

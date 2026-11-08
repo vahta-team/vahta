@@ -195,6 +195,16 @@ pub fn detach_session() {
     sys::detach_session();
 }
 
+/// Set the title of this process's console window. Windows only (elsewhere the
+/// terminal emulator owns the title, and this does nothing). Without it a window
+/// opened for a prompt is titled with the path of the program.
+pub fn set_console_title(title: &str) {
+    #[cfg(windows)]
+    sys::set_console_title(title);
+    #[cfg(not(windows))]
+    let _ = title;
+}
+
 /// The platform cannot cut a child off from the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unsupported;
