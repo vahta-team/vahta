@@ -16,7 +16,21 @@
       "Bash(vahta scrub --transcript --json)",
       "Bash(vh scrub --transcript)",
       "Bash(vh scrub --transcript --all)",
-      "Bash(vh scrub --transcript --json)"
+      "Bash(vh scrub --transcript --json)",
+      "PowerShell(vahta list)",
+      "PowerShell(vahta list --json)",
+      "PowerShell(vahta check)",
+      "PowerShell(vahta check --json)",
+      "PowerShell(vh list)",
+      "PowerShell(vh list --json)",
+      "PowerShell(vh check)",
+      "PowerShell(vh check --json)",
+      "PowerShell(vahta scrub --transcript)",
+      "PowerShell(vahta scrub --transcript --all)",
+      "PowerShell(vahta scrub --transcript --json)",
+      "PowerShell(vh scrub --transcript)",
+      "PowerShell(vh scrub --transcript --all)",
+      "PowerShell(vh scrub --transcript --json)"
     ],
     "deny": [
       "Bash(vahta reveal:*)",
@@ -24,7 +38,13 @@
       "Bash(vahta _surface:*)",
       "Bash(vh reveal:*)",
       "Bash(vh copy:*)",
-      "Bash(vh _surface:*)"
+      "Bash(vh _surface:*)",
+      "PowerShell(vahta reveal:*)",
+      "PowerShell(vahta copy:*)",
+      "PowerShell(vahta _surface:*)",
+      "PowerShell(vh reveal:*)",
+      "PowerShell(vh copy:*)",
+      "PowerShell(vh _surface:*)"
     ]
   },
   "hooks": {
@@ -48,11 +68,11 @@
         ]
       },
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+        "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 6"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_tool --setup 7"
           }
         ]
       },
@@ -61,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 6"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event before_read --setup 7"
           }
         ]
       }
@@ -77,11 +97,11 @@
         ]
       },
       {
-        "matcher": "Bash|Read|Grep|Glob|WebFetch|mcp__.*",
+        "matcher": "Bash|PowerShell|Read|Grep|Glob|WebFetch|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 6"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event after_tool --setup 7"
           }
         ]
       }
@@ -101,7 +121,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 6"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_start --setup 7"
           }
         ]
       }
@@ -111,7 +131,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_end --setup 6"
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event session_end --setup 7"
           }
         ]
       }
@@ -121,7 +141,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 6",
+            "command": "/opt/vahta/bin/vahta-hook --harness claude --event prompt --setup 7",
             "timeout": 120
           }
         ]
