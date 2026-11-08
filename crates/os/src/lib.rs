@@ -295,6 +295,25 @@ pub fn network_isolation_available() -> bool {
     *AVAILABLE.get_or_init(sys::network_isolation_available)
 }
 
+/// Let `cmd` start without a console window of its own.
+///
+/// The daemon is detached from every console (see [`spawn_detached`]). On
+/// Windows a console program started by a process without a console is given a
+/// new, visible one: every `vahta run` would open a terminal window (a tab, when
+/// Windows Terminal is the default terminal), and it stays after the program
+/// ends. `CREATE_NO_WINDOW` gives it a console nobody sees; its pipes are
+/// unchanged. Elsewhere there is nothing to do.
+pub fn hide_console_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 /// Start `cmd` so that it keeps running after this process and its terminal
 /// are gone: no standard streams, its own session or process group, no console
 /// window. Returns once it has been started, not when it ends.
