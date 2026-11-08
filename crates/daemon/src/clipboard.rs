@@ -139,7 +139,10 @@ fn wl_copy_knows_sensitive(wl_copy: &std::path::Path) -> bool {
 }
 
 fn feed(command: &[PathBuf], input: &[u8]) -> std::io::Result<()> {
-    let mut child = Command::new(&command[0])
+    let mut cmd = Command::new(&command[0]);
+    // `clip` is a console program and the daemon has none (Windows).
+    vahta_os::hide_console_window(&mut cmd);
+    let mut child = cmd
         .args(&command[1..])
         .stdin(Stdio::piped())
         // The tools fork into the background and keep their output open; a
@@ -165,7 +168,10 @@ impl Tool {
 
     /// The current content, wiped when dropped.
     pub fn get(&self) -> std::io::Result<Zeroizing<Vec<u8>>> {
-        let mut child = Command::new(&self.paste[0])
+        let mut cmd = Command::new(&self.paste[0]);
+        // PowerShell is a console program and the daemon has none (Windows).
+        vahta_os::hide_console_window(&mut cmd);
+        let mut child = cmd
             .args(&self.paste[1..])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

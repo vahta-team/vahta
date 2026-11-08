@@ -196,6 +196,22 @@ pub fn detach_session() {
     sys::detach_session();
 }
 
+/// Make this process's standard streams its own console's.
+///
+/// For the prompt window on Windows. It is started with a new console, but it
+/// inherits the daemon's standard handles, and the daemon, detached from every
+/// console, has the null device there: what the window printed went nowhere
+/// (only the password prompt, which writes to the console itself, showed) and
+/// its first read from standard input was the end of input. Each standard
+/// handle that is missing or the null device is replaced with the console's
+/// (`CONIN$`, `CONOUT$`); a pipe or a console already there is left as it is,
+/// so a test that drives the window through pipes is unaffected. Nothing to do
+/// elsewhere: a terminal hands its own streams to what it runs.
+pub fn use_own_console() {
+    #[cfg(windows)]
+    sys::use_own_console();
+}
+
 /// The platform cannot cut a child off from the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unsupported;
@@ -278,6 +294,25 @@ pub fn hidden_by_isolation(path: &std::path::Path) -> bool {
 pub fn network_isolation_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(sys::network_isolation_available)
+}
+
+/// Let `cmd` start without a console window of its own.
+///
+/// The daemon is detached from every console (see [`spawn_detached`]). On
+/// Windows a console program started by a process without a console is given a
+/// new, visible one: every `vahta run` would open a terminal window (a tab, when
+/// Windows Terminal is the default terminal), and it stays after the program
+/// ends. `CREATE_NO_WINDOW` gives it a console nobody sees; its pipes are
+/// unchanged. Elsewhere there is nothing to do.
+pub fn hide_console_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 /// Start `cmd` so that it keeps running after this process and its terminal
