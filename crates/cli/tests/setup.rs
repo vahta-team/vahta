@@ -141,8 +141,9 @@ fn install_dry_run_status_and_uninstall() {
 
     let out = s.vahta(&["setup", "--claude"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    // As it appears inside the JSON string: Windows backslashes are escaped.
-    let hook = s.hook().display().to_string().replace('\\', "\\\\");
+    // As written: with `/` on Windows, which Git Bash (Claude Code's hook shell
+    // there) keeps intact.
+    let hook = s.hook().display().to_string().replace('\\', "/");
     assert!(s.read(CLAUDE).contains(&format!(
         "{hook} --harness claude --event before_tool --setup {}",
         claude_setup_version()
@@ -386,9 +387,9 @@ fn refresh_repoints_a_hook_path_that_points_elsewhere() {
     let other = s.0.join("elsewhere");
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("vahta-hook"), "#!/bin/sh\n").unwrap();
-    // As the paths appear inside the JSON: backslashes are escaped on Windows.
+    // As the paths are written: with `/` on Windows (see `quote_word`).
     let in_json = |p: &std::path::Path| {
-        let quoted = serde_json::to_string(&p.display().to_string()).unwrap();
+        let quoted = serde_json::to_string(&p.display().to_string().replace('\\', "/")).unwrap();
         quoted[1..quoted.len() - 1].to_string()
     };
     let (here, there) = (in_json(&s.hook()), in_json(&other.join("vahta-hook")));

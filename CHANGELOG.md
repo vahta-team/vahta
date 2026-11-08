@@ -170,6 +170,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **Vahta's hooks run on Windows.** Claude Code runs hook commands through Git Bash there, and
+  an unquoted `C:\Users\…\vahta-hook.exe` lost its backslashes on the way (`C:Users…`):
+  the hook never ran and every tool call went through unchecked, without an error anyone
+  would see. `vahta setup` now writes the path with `/`, which Git Bash, cmd and PowerShell
+  all accept, and an earlier install with backslashes shows as outdated, so `vahta setup`
+  rewrites it.
+
 - **The password window shows everything on Windows.** The window is started with
   a console of its own but inherited the daemon's standard streams, the null device:
   only the password prompt (written to the console directly) showed, and the panel
