@@ -59,8 +59,9 @@ try {
     if (Test-Path -LiteralPath $Prefix) {
         Get-ChildItem -LiteralPath $Prefix -Filter '*.old' -File -ErrorAction SilentlyContinue |
             ForEach-Object {
-                try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop }
-                catch { Write-Host "warning: $($_.FullName) is still in use; it stays for the next run" }
+                $file = $_.FullName
+                try { Remove-Item -LiteralPath $file -Force -ErrorAction Stop }
+                catch { Write-Host "warning: $file is still in use; it stays for the next run" }
             }
     }
 
