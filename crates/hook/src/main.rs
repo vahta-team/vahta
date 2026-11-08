@@ -20,6 +20,7 @@ mod readguard;
 mod redact;
 mod runallow;
 mod strict;
+mod winshell;
 
 use std::io::{Read, Write};
 
