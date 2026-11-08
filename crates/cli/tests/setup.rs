@@ -54,6 +54,11 @@ impl Sandbox {
             .env_clear()
             .env("HOME", self.home())
             .env("USERPROFILE", self.home())
+            // Windows finds the home folder through the system, not these
+            // variables: without the next three the run would use the real one.
+            .env("VAHTA_DATA_DIR", self.0.join("data"))
+            .env("VAHTA_RUNTIME_DIR", self.0.join("run"))
+            .env("VAHTA_CONFIG_DIR", self.0.join("config"))
             .env("PATH", self.0.join("path"))
             .output()
             .expect("run vahta")
