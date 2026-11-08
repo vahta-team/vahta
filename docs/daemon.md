@@ -415,7 +415,12 @@ In this order, for each secret in the run; the first that does not pass refuses:
 Rules for programs: a rule is **one string**, the program then any leading
 arguments (`git push` matches `git push origin`, not `git pull`); no quoting and
 no patterns; a bare name is looked up in the caller's `PATH`; a name with a slash
-is relative to the **project root**; `@group` is for `deny` only. **Allow matches
+is relative to the **project root**; `@group` is for `deny` only. A rule that
+starts with an absolute Windows path (`C:\...`, `C:/...` or `\\server\...`) may
+have spaces in the program: the program ends at the first word that ends in `.exe`,
+`.cmd`, `.bat` or `.com`, so `C:\Program Files\Git\usr\bin\printenv.exe -0` runs
+`printenv.exe` with `-0`. Without such a word, the first word is the program, as
+for any rule. **Allow matches
 the file, not the name**: the program is resolved when you approve and again at
 run time, following symlinks, and the daemon starts the resolved path.
 

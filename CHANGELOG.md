@@ -170,6 +170,12 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **A program under `C:\Program Files` can be allowed.** A rule such as
+  `--allow "C:\Program Files\Git\usr\bin\printenv.exe"` failed with "cannot find the
+  program of the rule", because the rule was split at every space and quotes are
+  refused. A rule that starts with an absolute Windows path now takes the shortest
+  prefix ending in `.exe`, `.cmd`, `.bat` or `.com` as its program and the rest as
+  arguments; spaces in the path are kept as written. Any other rule reads as before.
 - **The agent is told which secret was blocked.** When a value Vahta holds is refused in a
   command, a file write, an MCP argument or a prompt, or cut from a tool's output, the
   message for the agent now names the secret (and, for input, how the value was written)

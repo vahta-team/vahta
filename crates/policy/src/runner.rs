@@ -41,7 +41,7 @@ impl Runner {
     /// The runner a rule's first word names: what the person typed, since the
     /// resolved path of `npx` is often a script with another name.
     fn of(rule: &ApprovedRule) -> Option<Runner> {
-        let first = rule.text.split_whitespace().next()?;
+        let first = vahta_vault::rules::program_word(&rule.text);
         let file = first.rsplit(['/', '\\']).next().unwrap_or(first);
         match normalize_program_name(file).as_str() {
             "npx" => Some(Runner::Npx),

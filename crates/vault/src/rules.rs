@@ -191,6 +191,18 @@ fn relative_word(word: &str, roots: &[&Path]) -> String {
 }
 
 fn relative_words(text: &str, roots: &[&Path]) -> String {
+    // A program path with a space in it stays as written in the text: the
+    // `$PROJECT` form would read back as a program and an argument. Its place
+    // is stored relative in `program`.
+    let (program, rest) = split_program(text);
+    if program.contains(' ') {
+        let mut out = program.to_string();
+        for w in rest.split(' ').filter(|w| !w.is_empty()) {
+            out.push(' ');
+            out.push_str(&relative_word(w, roots));
+        }
+        return out;
+    }
     text.split(' ')
         .map(|w| relative_word(w, roots))
         .collect::<Vec<_>>()
@@ -374,6 +386,46 @@ pub struct ParsedRule {
 
 const MAX_RULE_LEN: usize = 512;
 
+/// Whether `text` starts with an absolute Windows path: `X:\`, `X:/` or a
+/// UNC `\\`. Pure text, so the same on every OS.
+fn starts_with_windows_path(text: &str) -> bool {
+    let b = text.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        || text.starts_with(r"\\")
+}
+
+/// A rule's text (no leading space) as its program word and the rest. The
+/// program is the first word, except that a text starting with an absolute
+/// Windows path takes the shortest prefix that ends, at a word boundary, in
+/// `.exe`, `.cmd`, `.bat` or `.com` (any case), so `C:\Program Files\a.exe -x`
+/// has the program `C:\Program Files\a.exe`. With no such prefix it is the
+/// first word. The rest keeps its leading space.
+pub fn split_program(text: &str) -> (&str, &str) {
+    if starts_with_windows_path(text) {
+        let b = text.as_bytes();
+        for end in 1..=b.len() {
+            let boundary = end == b.len() || b[end].is_ascii_whitespace();
+            if !boundary || end <= 4 {
+                continue;
+            }
+            let tail = &b[end - 4..end];
+            if [b".exe", b".cmd", b".bat", b".com"]
+                .iter()
+                .any(|e| tail.eq_ignore_ascii_case(*e))
+            {
+                return text.split_at(end);
+            }
+        }
+    }
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    text.split_at(end)
+}
+
+/// The program word of a stored or shown rule text, as [`parse_rule`] reads it.
+pub fn program_word(text: &str) -> &str {
+    split_program(text.trim_start()).0
+}
+
 /// Parse one rule. `allow` is whether it is an `allow` rule (a group there is
 /// refused). The error is a short sentence for the person.
 pub fn parse_rule(text: &str, allow: bool) -> Result<ParsedRule, String> {
@@ -395,9 +447,8 @@ pub fn parse_rule(text: &str, allow: bool) -> Result<ParsedRule, String> {
             "rule `{shown}` has a quote; quoting is not supported, split it into plain words"
         ));
     }
-    let mut words = shown.split_whitespace();
-    let first = words.next().unwrap_or_default();
-    let args: Vec<String> = words.map(str::to_string).collect();
+    let (first, rest) = split_program(shown);
+    let args: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
     let program = if first.starts_with('@') {
         if allow {
             return Err(format!(
@@ -419,8 +470,15 @@ pub fn parse_rule(text: &str, allow: bool) -> Result<ParsedRule, String> {
     } else {
         ProgramSpec::Bare(first.to_string())
     };
+    // The program is kept exactly as written (a path may hold two spaces in a
+    // row); only the arguments are normalised.
+    let mut text = first.to_string();
+    for a in &args {
+        text.push(' ');
+        text.push_str(a);
+    }
     Ok(ParsedRule {
-        text: shown.split_whitespace().collect::<Vec<_>>().join(" "),
+        text,
         program,
         args,
     })
@@ -646,6 +704,159 @@ mod tests {
         ] {
             assert!(parse_host(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_windows_program_path_may_hold_spaces() {
+        let r = parse_rule(r"C:\Program Files\a.exe --x", true).unwrap();
+        assert_eq!(
+            r.program,
+            ProgramSpec::Path(r"C:\Program Files\a.exe".into())
+        );
+        assert_eq!(r.args, vec!["--x"]);
+        assert_eq!(r.text, r"C:\Program Files\a.exe --x");
+        // Every extension, any case, `/` as well, a UNC path, no arguments.
+        for (rule, prog) in [
+            (r"C:\Program Files\Git\usr\bin\printenv.exe", None),
+            (r"c:/Program Files/Tool/RUN.CMD", None),
+            (r"D:\My Tools\x.Bat", None),
+            (r"E:\A B\c.com", None),
+            (r"\\srv\my share\t.exe", None),
+            (
+                r"C:\Program Files\a.exe b.exe",
+                Some(r"C:\Program Files\a.exe"),
+            ),
+        ] {
+            let r = parse_rule(rule, true).unwrap();
+            assert_eq!(
+                r.program,
+                ProgramSpec::Path(prog.unwrap_or(rule).to_string()),
+                "{rule}"
+            );
+            assert_eq!(r.text, rule);
+        }
+        // Spaces inside the path survive exactly; the arguments are normalised.
+        let r = parse_rule(r"  C:\Program  Files\a.exe    --x   y ", true).unwrap();
+        assert_eq!(
+            r.program,
+            ProgramSpec::Path(r"C:\Program  Files\a.exe".into())
+        );
+        assert_eq!(r.args, vec!["--x", "y"]);
+        assert_eq!(r.text, r"C:\Program  Files\a.exe --x y");
+        // An extension that is not at a word boundary is not the end.
+        let r = parse_rule(r"C:\Program Files\a.exe2\b.exe", true).unwrap();
+        assert_eq!(
+            r.program,
+            ProgramSpec::Path(r"C:\Program Files\a.exe2\b.exe".into())
+        );
+        let r = parse_rule(r"C:\Program Files\a.exe2 b.exe", true).unwrap();
+        assert_eq!(
+            r.program,
+            ProgramSpec::Path(r"C:\Program Files\a.exe2 b.exe".into())
+        );
+        // Quotes stay refused.
+        assert!(parse_rule(r#""C:\Program Files\a.exe""#, true).is_err());
+    }
+
+    #[test]
+    fn a_windows_path_without_a_program_extension_reads_as_before() {
+        let r = parse_rule(r"C:\Program Files\tool --x", true).unwrap();
+        assert_eq!(r.program, ProgramSpec::Path(r"C:\Program".into()));
+        assert_eq!(r.args, vec![r"Files\tool", "--x"]);
+        assert_eq!(r.text, r"C:\Program Files\tool --x");
+        let r = parse_rule(r"C:\tools\a.exe x", true).unwrap();
+        assert_eq!(r.program, ProgramSpec::Path(r"C:\tools\a.exe".into()));
+        // Other paths and names are untouched, spaces or not.
+        let r = parse_rule("/opt/my tools/a.exe -x", true).unwrap();
+        assert_eq!(r.program, ProgramSpec::Path("/opt/my".into()));
+        assert_eq!(r.args, vec!["tools/a.exe", "-x"]);
+        let r = parse_rule("tool.exe a.exe", true).unwrap();
+        assert_eq!(r.program, ProgramSpec::Bare("tool.exe".into()));
+        // A Windows path later in the rule is an argument.
+        let r = parse_rule(r"sh C:\Program Files\a.exe", true).unwrap();
+        assert_eq!(r.program, ProgramSpec::Bare("sh".into()));
+        assert_eq!(r.args, vec![r"C:\Program", r"Files\a.exe"]);
+    }
+
+    #[test]
+    fn a_spaced_windows_path_round_trips() {
+        // The stored text reads back as the same rule.
+        for rule in [
+            r"C:\Program Files\a.exe --x",
+            r"C:\Program  Files\a.EXE",
+            r"\\srv\my share\t.cmd y",
+        ] {
+            let r = parse_rule(rule, true).unwrap();
+            let again = parse_rule(&r.text, true).unwrap();
+            assert_eq!(r, again, "{rule}");
+            let denied = r.to_deny();
+            assert_eq!(parse_rule(&denied.text, false).unwrap(), r);
+            assert_eq!(program_word(&r.text), program_word(rule));
+        }
+        let r = parse_rule(r"C:\Program Files\Git\usr\bin\printenv.exe -0", true).unwrap();
+        assert_eq!(
+            program_word(&r.text),
+            r"C:\Program Files\Git\usr\bin\printenv.exe"
+        );
+        assert_eq!(program_word("git push"), "git");
+        assert_eq!(program_word(""), "");
+    }
+
+    #[test]
+    fn a_spaced_windows_path_matches_as_a_path() {
+        // The place comparison already ignores case and `/` against `\`.
+        let r = parse_rule(r"C:/program files/Git/USR/bin/Printenv.EXE", true).unwrap();
+        let ProgramSpec::Path(p) = r.program else {
+            panic!("a path")
+        };
+        assert!(same_place_for(
+            &p,
+            r"C:\Program Files\Git\usr\bin\printenv.exe",
+            true
+        ));
+        // Not a longer or shorter place.
+        assert!(!same_place_for(
+            &p,
+            r"C:\Program\Files\Git\usr\bin\printenv.exe",
+            true
+        ));
+        assert!(!same_place_for(&p, r"C:\Program Files\Git\usr\bin", true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_spaced_program_stays_whole_in_the_text_when_stored_relative() {
+        let root = Path::new(r"C:\Users\me\My Project");
+        let mut rules = RuleSet {
+            allow: vec![
+                parse_rule(r"C:\Users\me\My Project\bin\t.exe --x", true)
+                    .unwrap()
+                    .to_allow(r"C:\Users\me\My Project\bin\t.exe".into()),
+            ],
+            ..RuleSet::default()
+        };
+        relativize(&mut rules, &[root]);
+        let a = &rules.allow[0];
+        assert_eq!(a.program, Program::Path("$PROJECT/bin/t.exe".into()));
+        assert_eq!(a.args, vec!["--x"]);
+        assert_eq!(a.text, r"C:\Users\me\My Project\bin\t.exe --x");
+        assert_eq!(
+            parse_rule(&a.text, true).unwrap().program,
+            ProgramSpec::Path(r"C:\Users\me\My Project\bin\t.exe".into())
+        );
+    }
+
+    #[test]
+    fn deny_reduces_a_spaced_windows_path_to_its_name() {
+        let r = parse_rule(r"C:\Program Files\Git\usr\bin\Curl.EXE -s", false)
+            .unwrap()
+            .to_deny();
+        assert_eq!(r.program, Program::Name("curl".into()));
+        assert_eq!(r.args, vec!["-s"]);
+        let r = parse_rule(r"C:/Program Files/PowerShell/7/pwsh.exe", false)
+            .unwrap()
+            .to_deny();
+        assert_eq!(r.program, Program::Name("pwsh".into()));
     }
 
     #[test]
