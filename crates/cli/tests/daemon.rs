@@ -25,6 +25,8 @@ use vahta_ipc::protocol::{
     ClientReply, ClientRequest, Hello, HelloKind, HelloReply, PROTOCOL, read_frame, write_frame,
 };
 
+mod common;
+
 static NEXT: AtomicU32 = AtomicU32::new(0);
 const PW: &[u8] = b"correct horse";
 
@@ -354,17 +356,44 @@ fn connector(s: &Sandbox, start: bool) -> Connector {
     }
 }
 
+/// A daemon process a test started itself. It is killed when the guard drops,
+/// also when the test panics first: the sandbox's `daemon stop` cannot reach a
+/// daemon of another version, and on Windows nothing else ends it (on Unix the
+/// process group dies with the test).
+struct DaemonChild(std::process::Child);
+
+impl std::ops::Deref for DaemonChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DaemonChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Start a daemon that reports `version`, as an old daemon would, and keep its
 /// process so a test can see it go.
-fn start_old_daemon(s: &Sandbox, version: &str) -> std::process::Child {
-    let child = s
-        .command(&s.project())
-        .env("VAHTA_TEST_DAEMON_VERSION", version)
-        .args(["daemon", "run"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+fn start_old_daemon(s: &Sandbox, version: &str) -> DaemonChild {
+    let child = DaemonChild(
+        s.command(&s.project())
+            .env("VAHTA_TEST_DAEMON_VERSION", version)
+            .args(["daemon", "run"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let c = connector(s, false);
     wait_until("the old daemon", 10, || {
         c.connect_running().ok().flatten().is_some()
@@ -1214,6 +1243,9 @@ fn sandbox_with_secrets_in(s: Sandbox) -> Sandbox {
 
 #[test]
 fn reset_remove_and_tier_name_the_open_sessions_that_hold_the_old_value() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     s.script(&[r#"{"secret":"correct horse"}"#]);
     let out = s.vahta(&["unlock", "--label", "deploy the site"]);
@@ -5351,6 +5383,9 @@ fn reference_in(message: &str) -> String {
 
 #[test]
 fn the_hook_cuts_a_session_value_by_name_and_keeps_the_original() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     s.script(&[r#"{"secret":"correct horse"}"#]);
     assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
@@ -5381,6 +5416,9 @@ fn the_hook_cuts_a_session_value_by_name_and_keeps_the_original() {
 
 #[test]
 fn the_hook_cuts_the_values_of_a_run_that_had_no_session() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     // Each-use: a run with the password, no session anywhere.
     s.script(&[r#"{"secret":"correct horse"}"#]);
@@ -5415,6 +5453,9 @@ fn without_a_daemon_the_hook_cuts_what_the_detector_finds_and_says_so() {
 /// lets those values through from then on.
 #[test]
 fn output_allow_inside_a_session_is_a_choice_and_releases_the_values() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     s.script(&[r#"{"secret":"correct horse"}"#]);
     assert_eq!(s.vahta(&["unlock"]).status.code(), Some(0));
@@ -5480,6 +5521,9 @@ fn output_allow_inside_a_session_is_a_choice_and_releases_the_values() {
 
 #[test]
 fn output_allow_without_a_session_asks_for_the_password() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     s.script(&[r#"{"secret":"correct horse"}"#]);
     let out = s.vahta(&["run", "--secret", "ALPHA", "--", "true"]);
@@ -5704,6 +5748,9 @@ fn observe_mode_changes_nothing_and_the_daemon_journals_it() {
 /// except the one printout the person agreed to.
 #[test]
 fn no_value_leaks_through_output_redaction() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     let key = ["sk-", "ant-", &"d".repeat(25)].concat();
     let values = ["fake-one", "fake-two", "fake-three", key.as_str()];
@@ -6257,6 +6304,9 @@ fn the_hook_refuses_a_held_value_in_a_command_and_names_the_secret_and_the_form(
 
 #[test]
 fn the_encoded_forms_of_a_run_value_are_cut_from_output_and_nothing_leaks() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let s = sandbox_with_secrets();
     s.unlock_session();
     let out = s.vahta(&["run", "--secret", "ZETA", "--", "printenv", "ZETA"]);
