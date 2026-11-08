@@ -338,6 +338,11 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
 pub fn run(args: &[String]) -> i32 {
     // The tab would otherwise be titled with the path of vahta.exe.
     vahta_os::set_console_title("Vahta");
+    let console = Console::new();
+    if !console.plain {
+        // Windows: the window's console, not the daemon's null device.
+        vahta_os::use_own_console();
+    }
     let (ticket, addr) = match credentials(args) {
         Ok(c) => c,
         Err(msg) => {
@@ -367,7 +372,6 @@ pub fn run(args: &[String]) -> i32 {
             return EXIT_DAEMON;
         }
     }
-    let console = Console::new();
     let requests = match watch(&stream) {
         Some(r) => r,
         None => return EXIT_DAEMON,

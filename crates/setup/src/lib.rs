@@ -188,11 +188,17 @@ pub fn detect(m: &Manifest, env: &Env) -> Detection {
 // --- our command line ------------------------------------------------------------
 
 /// Quote one path for a command line, only when it needs it.
+///
+/// On Windows the separators become `/`: Claude Code runs hook commands
+/// through Git Bash there, where an unquoted `C:\Users\…\vahta-hook.exe` loses
+/// its backslashes and the hook silently never runs. `C:/…` works in Git Bash,
+/// cmd and PowerShell alike.
 pub fn quote_word(path: &str, os: Os) -> String {
     if os == Os::Windows {
-        let plain = |c: char| c.is_ascii_alphanumeric() || "_./\\:@+=,-".contains(c);
+        let path = path.replace('\\', "/");
+        let plain = |c: char| c.is_ascii_alphanumeric() || "_./:@+=,-".contains(c);
         if path.chars().all(plain) {
-            path.to_string()
+            path
         } else {
             format!("\"{path}\"")
         }
@@ -1031,13 +1037,24 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
     let mut got: Vec<Entry> = have.iter().map(|(e, _)| args_only(e)).collect();
     want.sort();
     got.sort();
-    let state = if want == got && deny_present(&mut doc, m) {
+    // A Windows path written with backslashes never runs (see `quote_word`):
+    // such an install is outdated, and `vahta setup` rewrites it.
+    let backslashed = env.os == Os::Windows && have.iter().any(|(_, w)| w.contains('\\'));
+    let state = if want == got && !backslashed && deny_present(&mut doc, m) {
         State::Current
     } else {
         State::Outdated
     };
 
     let mut problems = Vec::new();
+    let same_path = |a: &str, b: &str| {
+        if env.os == Os::Windows {
+            a.replace('\\', "/")
+                .eq_ignore_ascii_case(&b.replace('\\', "/"))
+        } else {
+            a == b
+        }
+    };
     let here = env.hook.to_string_lossy();
     for (_, word) in &have {
         let missing = HookProblem::Missing(word.clone());
@@ -1045,7 +1062,7 @@ pub fn inspect(m: &Manifest, env: &Env) -> Inspect {
         if !Path::new(word).exists() && !problems.contains(&missing) {
             problems.push(missing);
         }
-        if word.as_str() != here && !problems.contains(&elsewhere) {
+        if !same_path(word, &here) && !problems.contains(&elsewhere) {
             problems.push(elsewhere);
         }
     }

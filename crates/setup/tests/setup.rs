@@ -514,7 +514,7 @@ fn a_claude_v2_install_without_webfetch_is_outdated_and_upgrades_cleanly() {
     assert_eq!(inspect(&mf, &env).state, State::Current);
     let path = config_in(&t, "claude");
     let now = fs::read_to_string(&path).unwrap();
-    assert!(now.contains("Bash|Read|Grep|Glob|WebFetch|mcp__.*"));
+    assert!(now.contains("Bash|PowerShell|Read|Grep|Glob|WebFetch|mcp__.*"));
     // What v2 wrote: the old matcher, no allow rules, and --setup 2.
     let v2 = claude_before_allow(&now, 2).replace("Glob|WebFetch|mcp__", "Glob|mcp__");
     assert_ne!(v2, now);
@@ -528,6 +528,73 @@ fn a_claude_v2_install_without_webfetch_is_outdated_and_upgrades_cleanly() {
         after.matches("vahta-hook").count(),
         now.matches("vahta-hook").count(),
         "no duplicate entries after the upgrade"
+    );
+}
+
+/// What setup 6 wrote: the tool matchers and the rules without the PowerShell
+/// tool, so no PowerShell call of Claude Code on Windows reached the hook.
+#[test]
+fn a_claude_v6_install_without_powershell_is_outdated_and_upgrades_cleanly() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.hook = t.write("bin/vahta-hook", "");
+    let mf = m("claude");
+    assert!(
+        mf.setup_version >= 7,
+        "v7 added the PowerShell tool to the matchers and the rules"
+    );
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    let path = config_in(&t, "claude");
+    let now = fs::read_to_string(&path).unwrap();
+    let doc = json(&now);
+    for event in ["PreToolUse", "PostToolUse"] {
+        let first = doc["hooks"][event][0]["matcher"].as_str().unwrap();
+        assert!(
+            first.split('|').any(|tool| tool == "PowerShell"),
+            "{event}: {first}"
+        );
+    }
+    for (key, rule) in [
+        ("deny", "PowerShell(vahta reveal:*)"),
+        ("deny", "PowerShell(vh copy:*)"),
+        ("allow", "PowerShell(vahta list)"),
+    ] {
+        assert!(
+            doc["permissions"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == rule),
+            "{key} lacks {rule}"
+        );
+    }
+    let mut v6: Value = json(&now);
+    for list in ["allow", "deny"] {
+        v6["permissions"][list]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| !r.as_str().unwrap().starts_with("PowerShell("));
+    }
+    let v6 = serde_json::to_string_pretty(&v6)
+        .unwrap()
+        .replace("Bash|PowerShell|", "Bash|")
+        .replace(&format!("--setup {}", mf.setup_version), "--setup 6");
+    assert!(!v6.contains("PowerShell"));
+    fs::write(&path, &v6).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Outdated);
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(inspect(&mf, &env).state, State::Current);
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(after.contains("Bash|PowerShell|Write") && after.contains("Bash|PowerShell|Read"));
+    assert_eq!(
+        after.matches("vahta-hook").count(),
+        now.matches("vahta-hook").count(),
+        "no duplicate entries after the upgrade"
+    );
+    assert_eq!(
+        after.matches("\"PowerShell(vahta reveal:*)\"").count(),
+        1,
+        "no duplicate rules after the upgrade"
     );
 }
 
@@ -787,14 +854,23 @@ fn the_hook_path_is_quoted_when_it_needs_it() {
         quote_word("/o'k/vahta-hook", Os::Linux),
         "'/o'\\''k/vahta-hook'"
     );
+    // Windows: `/`, since Claude Code runs hooks through Git Bash there and an
+    // unquoted backslash path loses its separators.
     assert_eq!(
         quote_word("C:\\Vahta\\vahta-hook.exe", Os::Windows),
-        "C:\\Vahta\\vahta-hook.exe"
+        "C:/Vahta/vahta-hook.exe"
     );
     assert_eq!(
         quote_word("C:\\Program Files\\v\\vahta-hook.exe", Os::Windows),
-        "\"C:\\Program Files\\v\\vahta-hook.exe\""
+        "\"C:/Program Files/v/vahta-hook.exe\""
     );
+    assert!(is_ours(
+        &format!(
+            "{} --a",
+            quote_word("C:\\Program Files\\v\\vahta-hook.exe", Os::Windows)
+        ),
+        Os::Windows
+    ));
     // And what we quote, we recognise and a status check can find again.
     let cmd = format!(
         "{} --harness claude",
@@ -810,6 +886,47 @@ fn the_hook_path_is_quoted_when_it_needs_it() {
     let s = inspect(&m("claude"), &env);
     assert_eq!(s.state, State::Current);
     assert!(s.problems.is_empty());
+}
+
+#[test]
+fn a_windows_install_with_backslashes_is_outdated_and_rewritten_with_slashes() {
+    let t = Tree::new();
+    let mut env = t.env();
+    env.os = Os::Windows;
+    env.hook = t.write("bin/vahta-hook.exe", "");
+    let mf = m("claude");
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    let s = inspect(&mf, &env);
+    assert_eq!(s.state, State::Current);
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    let path = config_in(&t, "claude");
+    let text = fs::read_to_string(&path).unwrap();
+    let slashed = env.hook.to_string_lossy().replace('\\', "/");
+    // Quoted or not, as `quote_word` decides: a temp dir may hold a `~`.
+    // As it appears inside the JSON string, where a `"` is escaped.
+    let word = quote_word(&env.hook.to_string_lossy(), Os::Windows);
+    let in_json = serde_json::to_string(&format!("{word} --harness claude")).unwrap();
+    assert!(text.contains(&in_json[1..in_json.len() - 1]), "{text}");
+
+    // What an earlier setup wrote: the same path with backslashes, which Git
+    // Bash turns into `C:Users…` and never runs.
+    let back = slashed.replace('/', "\\");
+    let in_json = serde_json::to_string(&back).unwrap();
+    let old = text.replace(&slashed, &in_json[1..in_json.len() - 1]);
+    assert_ne!(old, text);
+    fs::write(&path, &old).unwrap();
+    let s = inspect(&mf, &env);
+    assert_eq!(s.state, State::Outdated);
+    assert!(
+        !s.problems
+            .iter()
+            .any(|p| matches!(p, HookProblem::Elsewhere(_))),
+        "the same program, written differently: {:?}",
+        s.problems
+    );
+    commit(&plan(&mf, &env, Action::Install).unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(inspect(&mf, &env).state, State::Current);
 }
 
 #[test]

@@ -23,8 +23,10 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, FILE_TYPE_UNKNOWN, GetFileType};
 use windows_sys::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleTitleW,
+    GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE,
+    STD_OUTPUT_HANDLE, SetConsoleTitleW, SetStdHandle,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -260,6 +262,54 @@ pub(crate) fn network_isolation_available() -> bool {
 }
 
 pub(crate) fn detach_session() {}
+
+/// Whether a standard handle is of no use for talking to the person: missing,
+/// or a character device that is not a console (the null device).
+fn std_handle_is_dead(which: STD_HANDLE) -> bool {
+    // SAFETY: no pointers; returns a handle we do not own, or null or
+    // INVALID_HANDLE_VALUE.
+    let handle = unsafe { GetStdHandle(which) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return true;
+    }
+    // SAFETY: a handle value, only queried.
+    match unsafe { GetFileType(handle) } {
+        FILE_TYPE_UNKNOWN => true,
+        FILE_TYPE_CHAR => {
+            let mut mode = 0u32;
+            // SAFETY: a handle value and a live u32 for the mode. A console
+            // answers; the null device, also a character device, does not.
+            unsafe { GetConsoleMode(handle, &mut mode) == 0 }
+        }
+        // A pipe or a file: someone set it on purpose.
+        _ => false,
+    }
+}
+
+pub(crate) fn use_own_console() {
+    let open = |name: &str| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+    };
+    for (which, name) in [
+        (STD_INPUT_HANDLE, "CONIN$"),
+        (STD_OUTPUT_HANDLE, "CONOUT$"),
+        (STD_ERROR_HANDLE, "CONOUT$"),
+    ] {
+        if !std_handle_is_dead(which) {
+            continue;
+        }
+        // No console to open (none attached): leave the handle as it was.
+        let Ok(file) = open(name) else { continue };
+        // The handle stays open for the life of the process, as a standard
+        // handle does; Rust's standard streams look it up on every use.
+        let raw = std::os::windows::io::IntoRawHandle::into_raw_handle(file) as HANDLE;
+        // SAFETY: `raw` is a valid handle this process owns and never closes.
+        unsafe { SetStdHandle(which, raw) };
+    }
+}
 
 pub(crate) fn detach_command(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
