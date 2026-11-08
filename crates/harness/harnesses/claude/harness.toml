@@ -10,7 +10,11 @@ title = "Claude Code"
 # 5: the prompt hook may wait for the person: timeout 120 s on UserPromptSubmit.
 # 6: the SessionEnd hook (the daemon cleans the transcript it marked), and
 #    permissions.allow for `vahta scrub --transcript`.
-setup_version = 6
+# 7: the PowerShell tool. On Windows Claude Code runs shell commands through
+#    its PowerShell tool as well as Bash; neither matcher named it, so no
+#    PowerShell call reached the hook. Both tool matchers and the deny/allow
+#    rules now cover it.
+setup_version = 7
 
 # When a payload names no tool at all, scan it like a write: the old Python
 # hook did, and "over-cover rather than miss" is the rule for a guard.
@@ -26,7 +30,8 @@ shape = "grouped"
 # Claude Code enforces permissions.deny itself, before any hook runs, and a
 # deny beats any allow. The hook refuses these commands too (and catches
 # spellings a prefix rule cannot: full paths, `bash -c`, `env`); this is the
-# second layer. `vh` is the short name of `vahta`.
+# second layer. `vh` is the short name of `vahta`. Each rule is written for both
+# shell tools: Bash, and PowerShell (Claude Code's shell tool on Windows).
 [config.deny]
 key = "permissions.deny"
 rules = [
@@ -36,6 +41,12 @@ rules = [
   "Bash(vh reveal:*)",
   "Bash(vh copy:*)",
   "Bash(vh _surface:*)",
+  "PowerShell(vahta reveal:*)",
+  "PowerShell(vahta copy:*)",
+  "PowerShell(vahta _surface:*)",
+  "PowerShell(vh reveal:*)",
+  "PowerShell(vh copy:*)",
+  "PowerShell(vh _surface:*)",
 ]
 
 # Exact allow rules for the two commands that only read: `vahta list` and
@@ -66,6 +77,21 @@ rules = [
   "Bash(vh scrub --transcript)",
   "Bash(vh scrub --transcript --all)",
   "Bash(vh scrub --transcript --json)",
+  # The same, for the PowerShell tool.
+  "PowerShell(vahta list)",
+  "PowerShell(vahta list --json)",
+  "PowerShell(vahta check)",
+  "PowerShell(vahta check --json)",
+  "PowerShell(vh list)",
+  "PowerShell(vh list --json)",
+  "PowerShell(vh check)",
+  "PowerShell(vh check --json)",
+  "PowerShell(vahta scrub --transcript)",
+  "PowerShell(vahta scrub --transcript --all)",
+  "PowerShell(vahta scrub --transcript --json)",
+  "PowerShell(vh scrub --transcript)",
+  "PowerShell(vh scrub --transcript --all)",
+  "PowerShell(vh scrub --transcript --json)",
 ]
 
 # User scope only in v1. Hooks live under the "hooks" key of settings.json.
@@ -100,7 +126,7 @@ name = "PreToolUse"
 kind = "before_tool"
 # Shell and write tools, plus every MCP tool (named mcp__<server>__<tool>).
 # MCP is in the matcher because a credential can ride in any MCP argument.
-matcher = "Bash|Write|Edit|MultiEdit|mcp__.*"
+matcher = "Bash|PowerShell|Write|Edit|MultiEdit|mcp__.*"
 tool_name = "tool_name"
 tool_input = "tool_input"
 # The file Write and Edit are about; the hook refuses Vahta's own files.
@@ -164,7 +190,7 @@ kind = "after_tool"
 # Claude sends the result as `tool_response` (a string or a structured object
 # such as {stdout, stderr}); `tool_output` is accepted too. All strings in it
 # are scanned.
-matcher = "Bash|Read|Grep|Glob|WebFetch|mcp__.*"
+matcher = "Bash|PowerShell|Read|Grep|Glob|WebFetch|mcp__.*"
 tool_name = "tool_name"
 tool_output = ["tool_response", "tool_output"]
 cwd = "cwd"
