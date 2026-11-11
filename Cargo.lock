@@ -1914,7 +1914,6 @@ dependencies = [
 name = "vahta-ipc"
 version = "0.0.0"
 dependencies = [
- "dirs",
  "serde",
  "serde_json",
  "tempfile",
@@ -1967,6 +1966,7 @@ dependencies = [
 name = "vahta-os"
 version = "0.0.0"
 dependencies = [
+ "dirs",
  "libc",
  "rustix",
  "windows-sys 0.61.2",
@@ -2020,7 +2020,6 @@ dependencies = [
  "chacha20poly1305",
  "crypto_box",
  "crypto_secretbox",
- "dirs",
  "ed25519-dalek",
  "hkdf",
  "hmac",
@@ -2034,6 +2033,7 @@ dependencies = [
  "toml",
  "toml_edit 0.22.27",
  "vahta-json",
+ "vahta-os",
  "vahta-vault",
  "zeroize",
 ]

@@ -176,6 +176,13 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   refused. A rule that starts with an absolute Windows path now takes the shortest
   prefix ending in `.exe`, `.cmd`, `.bat` or `.com` as its program and the rest as
   arguments; spaces in the path are kept as written. Any other rule reads as before.
+- **On Windows, Vahta's data no longer depends on which app started the process.** Claude
+  Desktop and Codex are MSIX packages, and everything they start sees writes to `%APPDATA%`
+  redirected into the package, so a terminal and an agent saw two different journals, project
+  lists and "unlocked on this machine" states, and uninstalling the app deleted them. The
+  data now lives in `%USERPROFILE%\.local\share\vahta` and the configuration in
+  `%USERPROFILE%\.config\vahta`, one place for every process, and the hook protects both.
+  `VAHTA_DATA_DIR` and `VAHTA_CONFIG_DIR` still override; Linux and macOS are unchanged.
 - **The hook understands PowerShell and `cmd`, not only Unix programs.** On Windows (and in
   Codex, which runs `pwsh` but reports the tool as `Bash`) `Get-Content`, `type`, `gc`,
   `Select-String`, `Get-ChildItem`, `[IO.File]::ReadAllBytes(...)`, `Copy-Item`, `Move-Item`,
