@@ -176,6 +176,20 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
   refused. A rule that starts with an absolute Windows path now takes the shortest
   prefix ending in `.exe`, `.cmd`, `.bat` or `.com` as its program and the rest as
   arguments; spaces in the path are kept as written. Any other rule reads as before.
+- **The hook understands PowerShell and `cmd`, not only Unix programs.** On Windows (and in
+  Codex, which runs `pwsh` but reports the tool as `Bash`) `Get-Content`, `type`, `gc`,
+  `Select-String`, `Get-ChildItem`, `[IO.File]::ReadAllBytes(...)`, `Copy-Item`, `Move-Item`,
+  `Rename-Item`, `Remove-Item`, `Set-Content`, `Add-Content`, `Clear-Content`, `Out-File`,
+  `New-Item`, `cmd /c type|copy|move|del|ren` and the like were not seen, so Vahta's own files
+  (anything in `.vahta`, the data directory) could be read, copied or deleted and a hook
+  settings file overwritten with `Set-Content` while `rm` was refused. They are now judged
+  like their Unix twins, in any shell command on any OS: names, aliases and `-Parameter`
+  names (abbreviated too) in any case, `powershell -Command`, `pwsh -c`, `cmd /c` and `iex`
+  followed, `\` read as a path separator (`cat .vahta\vault.bin`), and `~`, `$HOME`,
+  `$env:APPDATA`, `$env:USERPROFILE`, `%APPDATA%` and `%USERPROFILE%` expanded. Values that
+  are not files (`Set-Content notes.txt ".vahta"`) are not taken for files. Like `ls` on Unix,
+  `ls` (and `Get-Item`) stay allowed; paths built from variables and `-EncodedCommand` are
+  not followed.
 - **Vahta's hooks run on Windows.** Claude Code runs hook commands through Git Bash there, and
   an unquoted `C:\Users\…\vahta-hook.exe` lost its backslashes on the way (`C:Users…`):
   the hook never ran and every tool call went through unchecked, without an error anyone

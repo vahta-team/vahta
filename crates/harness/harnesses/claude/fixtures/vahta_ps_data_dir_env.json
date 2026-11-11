@@ -1,0 +1,25 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "data/journal.jsonl": "{}\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "Get-Content $env:VAHTA_DATA_DIR\\journal.jsonl"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": "vahta blocked access to `$env:VAHTA_DATA_DIR\\journal.jsonl`: it is part of Vahta's own files (a vault, its lock or backups, or Vahta's local store and journal). Do not read, change, move or delete it; use the `vahta` commands, which keep values out of the transcript."
+    },
+    "systemMessage": "vahta blocked access to `$env:VAHTA_DATA_DIR\\journal.jsonl`: it is part of Vahta's own files (a vault, its lock or backups, or Vahta's local store and journal). Do not read, change, move or delete it; use the `vahta` commands, which keep values out of the transcript."
+  },
+  "exit": 0
+}
