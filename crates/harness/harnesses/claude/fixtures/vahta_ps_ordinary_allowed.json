@@ -1,0 +1,20 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/.vahta/vault.vht": "not a real vault\n",
+    "proj/vahta.toml": "[secrets.A]\n",
+    "proj/README.md": "# hello\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "Get-Content README.md; Set-Content notes.txt \"text\"; Copy-Item README.md copy.md; Remove-Item -Recurse build; dir src"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}

@@ -1,0 +1,19 @@
+{
+  "event": "before_tool",
+  "env": {},
+  "files": {
+    "proj/.vahta/vault.vht": "not a real vault\n",
+    "proj/vahta.toml": "[secrets.A]\n",
+    "proj/src/main.rs": "fn main() {}\n"
+  },
+  "stdin": {
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "Set-Content notes.txt \".vahta\"; Write-Host \"Get-Content .vahta\\vault.vht\"; Select-String -Pattern \".vahta\" src\\main.rs"
+    },
+    "cwd": "{{TMP}}/proj"
+  },
+  "stdout": null,
+  "exit": 0
+}
