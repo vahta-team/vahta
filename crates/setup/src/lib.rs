@@ -389,9 +389,22 @@ fn parse(text: Option<&str>) -> Result<Map<String, Value>, Refusal> {
     }
 }
 
-fn render(doc: Map<String, Value>) -> String {
+/// Whether `text` uses CRLF line ends: its first line break is one.
+fn uses_crlf(text: &str) -> bool {
+    text.find('\n').is_some_and(|i| text[..i].ends_with('\r'))
+}
+
+/// The document as text, ending in a line break. Written with the line ends of
+/// `before`, the file as it was (CRLF stays CRLF, so a file saved on Windows
+/// does not turn into a whole-file diff); a new file gets `\n`.
+fn render(doc: Map<String, Value>, before: Option<&str>) -> String {
     let mut s = serde_json::to_string_pretty(&Value::Object(doc)).unwrap_or_default();
     s.push('\n');
+    if before.is_some_and(uses_crlf) {
+        // Line breaks inside a JSON string are escaped, so every `\n` here is
+        // a line end of the layout.
+        s = s.replace('\n', "\r\n");
+    }
     s
 }
 
@@ -734,7 +747,7 @@ pub fn install_text_placed(
             }
         }
     }
-    Ok(render(doc))
+    Ok(render(doc, before))
 }
 
 /// The config text after removing our entries; `None` when none were there.
@@ -754,7 +767,7 @@ pub fn uninstall_text(before: &str, m: &Manifest, os: Os) -> Result<Option<Strin
             doc.shift_remove("hooks");
         }
     }
-    Ok(Some(render(doc)))
+    Ok(Some(render(doc, Some(before))))
 }
 
 /// The document an install into an empty config writes, with `{hook}` standing
@@ -870,9 +883,21 @@ pub fn commit(plan: &Plan) -> io::Result<Option<PathBuf>> {
     result.map(|()| backup)
 }
 
+/// A path as shown to the person: on Windows with `\` throughout, where a
+/// config path built from a `~/.x/y` template would print as `C:\Users\x/.x/y`.
+/// For display only; the stored and compared paths are not touched.
+pub fn display_path(path: &Path) -> String {
+    let shown = path.display().to_string();
+    if cfg!(windows) {
+        shown.replace('/', "\\")
+    } else {
+        shown
+    }
+}
+
 /// A unified diff of one file's change, for `--dry-run`.
 pub fn unified_diff(path: &Path, before: Option<&str>, after: &str) -> String {
-    let shown = path.display().to_string();
+    let shown = display_path(path);
     let old = if before.is_some() {
         shown.clone()
     } else {

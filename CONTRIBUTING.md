@@ -12,7 +12,8 @@ cd vahta
 cargo build --workspace
 ```
 
-`scripts/install-local.sh` builds and installs the binaries for daily use.
+`scripts/install-local.sh` builds and installs the binaries for daily use
+(`scripts\install-local.ps1` on Windows).
 
 ## Checks
 

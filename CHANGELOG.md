@@ -170,6 +170,11 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **Windows polish.** `vahta setup` keeps a settings file's CRLF line endings instead
+  of rewriting the whole file as LF, and prints Windows paths with `\` throughout. The
+  password and alarm windows are titled "Vahta" rather than the path of `vahta.exe`.
+  `scripts\install-local.ps1` installs the binaries on Windows (it stops a running
+  daemon first, since Windows will not replace a file in use).
 - **On Windows, Vahta's data no longer depends on which app started the process.** Claude
   Desktop and Codex are MSIX packages, and everything they start sees writes to `%APPDATA%`
   redirected into the package, so a terminal and an agent saw two different journals, project

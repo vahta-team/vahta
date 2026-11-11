@@ -38,6 +38,11 @@ link to `vahta`, and restarts a running daemon and hook watchdog on the new
 binary. Make sure that directory is on your `PATH`. `scripts/install-local.sh
 --uninstall` removes them again.
 
+On Windows, run `scripts\install-local.ps1` from PowerShell instead. It installs
+`vahta.exe`, `vh.exe` (a copy) and `vahta-hook.exe` into `%USERPROFILE%\.local\bin`,
+stops a running daemon first (Windows will not replace a file in use), and adds
+the folder to your user `PATH` if it is not there yet.
+
 Then register the hook with the coding agents on the machine:
 
 ```bash

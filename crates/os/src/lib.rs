@@ -196,6 +196,16 @@ pub fn detach_session() {
     sys::detach_session();
 }
 
+/// Set the title of this process's console window. Windows only (elsewhere the
+/// terminal emulator owns the title, and this does nothing). Without it a window
+/// opened for a prompt is titled with the path of the program.
+pub fn set_console_title(title: &str) {
+    #[cfg(windows)]
+    sys::set_console_title(title);
+    #[cfg(not(windows))]
+    let _ = title;
+}
+
 /// Make this process's standard streams its own console's.
 ///
 /// For the prompt window on Windows. It is started with a new console, but it

@@ -336,6 +336,8 @@ fn answer_for(console: &Console, request: &SurfaceRequest) -> Option<SurfaceAnsw
 }
 
 pub fn run(args: &[String]) -> i32 {
+    // The tab would otherwise be titled with the path of vahta.exe.
+    vahta_os::set_console_title("Vahta");
     let console = Console::new();
     if !console.plain {
         // Windows: the window's console, not the daemon's null device.

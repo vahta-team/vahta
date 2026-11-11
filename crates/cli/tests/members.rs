@@ -14,6 +14,8 @@ use serde_json::Value;
 use vahta_vault::store::LocalStore;
 use vahta_vault::{Vault, member};
 
+mod common;
+
 static NEXT: AtomicU32 = AtomicU32::new(0);
 const OWNER_PW: &str = "correct horse";
 const MEMBER_PW: &str = "member passphrase";
@@ -266,6 +268,9 @@ fn owner() -> Person {
 
 #[test]
 fn the_whole_path_from_the_owner_to_a_member_running_a_command() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let o = owner();
     let m = Person::new();
     let (key, words) = m.make_identity();
@@ -443,6 +448,9 @@ fn a_directory_with_a_vault_of_its_own_is_not_overwritten_by_a_join() {
 
 #[test]
 fn an_expired_membership_is_refused() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let o = owner();
     let m = Person::new();
     let (key, words) = m.make_identity();
@@ -770,6 +778,9 @@ fn share_warns_about_places_outside_the_project_by_secret_name() {
 
 #[test]
 fn a_member_opens_a_session_that_never_outlasts_the_membership() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let o = owner();
     let m = Person::new();
     let (key, digits) = m.make_identity();
@@ -816,6 +827,9 @@ fn a_member_opens_a_session_that_never_outlasts_the_membership() {
 
 #[test]
 fn after_the_owner_re_keys_a_member_follows_the_chain_when_the_digits_are_confirmed() {
+    if common::skip_without_unix_tools() {
+        return;
+    }
     let o = owner();
     let m = Person::new();
     let (key, digits) = m.make_identity();

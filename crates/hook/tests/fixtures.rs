@@ -568,8 +568,13 @@ fn manifests_parse() {
 /// Run the hook on a raw stdin string; returns stdout.
 fn run_raw(harness: &str, event: &str, stdin: &str) -> String {
     use std::io::Write;
+    // A refusal is reported, and with no daemon it is spooled: not in the real data directory.
+    let tmp = Tmp::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_vahta-hook"))
         .env("VAHTA_HOOK_NO_START", "1")
+        .env("VAHTA_RUNTIME_DIR", tmp.0.join("run"))
+        .env("VAHTA_DATA_DIR", tmp.0.join("data"))
+        .env("VAHTA_CONFIG_DIR", tmp.0.join("config"))
         .args(["--harness", harness, "--event", event])
         .env_remove("VAHTA_HOOK_DISABLE")
         .stdin(std::process::Stdio::piped())

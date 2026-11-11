@@ -154,6 +154,64 @@ fn two_installs_are_byte_identical() {
 }
 
 #[test]
+fn a_crlf_file_stays_crlf_and_a_new_or_lf_file_stays_lf() {
+    for h in HARNESSES {
+        let lf = read_fixture(h, "foreign.before.json");
+        assert!(!lf.contains('\r'), "{h}: the fixture is LF");
+        let crlf = lf.replace('\n', "\r\n");
+
+        // Same document, same layout, only the line ends differ.
+        let installed = install(h, Some(&crlf)).unwrap();
+        assert_eq!(
+            installed.replace("\r\n", "\n"),
+            install(h, Some(&lf)).unwrap(),
+            "{h}"
+        );
+        assert!(installed.ends_with("\r\n"), "{h}");
+        assert!(
+            !installed.replace("\r\n", "").contains('\n'),
+            "{h}: a lone LF"
+        );
+        assert_eq!(
+            install(h, Some(&installed)).unwrap(),
+            installed,
+            "{h}: stable"
+        );
+
+        // Uninstalling keeps them too, and gives the original back.
+        let back = uninstall_text(&installed, &m(h), Os::Linux)
+            .unwrap()
+            .unwrap();
+        assert!(!back.replace("\r\n", "").contains('\n'), "{h}: a lone LF");
+        assert_eq!(json(&back), json(&lf), "{h}");
+
+        // LF stays LF; a new file is LF.
+        let lf_out = install(h, Some(&lf)).unwrap();
+        assert!(!lf_out.contains('\r'), "{h}");
+        assert!(!install(h, None).unwrap().contains('\r'), "{h}");
+    }
+}
+
+#[test]
+fn a_crlf_config_on_disk_is_planned_as_a_small_diff() {
+    let t = Tree::new();
+    let lf = read_fixture("claude", "foreign.before.json");
+    let crlf = lf.replace('\n', "\r\n");
+    let path = t.write("home/.claude/settings.json", &crlf);
+    let p = plan(&m("claude"), &t.env(), Action::Install).unwrap();
+    let after = p.after.clone().expect("a change");
+    assert!(!after.replace("\r\n", "").contains('\n'));
+    commit(&p).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), after);
+    // Lines that were not touched are identical, bytes and all.
+    let diff = vahta_setup::unified_diff(&path, Some(&crlf), &after);
+    assert!(
+        diff.lines().filter(|l| l.starts_with('-')).count() <= 3,
+        "{diff}"
+    );
+}
+
+#[test]
 fn foreign_entries_keep_their_order_and_ours_come_last() {
     let v = m("claude").setup_version;
     let out = install(
@@ -879,7 +937,10 @@ fn the_diff_shows_a_change_and_nothing_for_none() {
         "{\n  \"a\": 1\n}\n",
     );
     assert!(
-        d.contains("--- /h/.claude/settings.json") && d.contains("+  \"a\": 1"),
+        d.contains(&format!(
+            "--- {}",
+            vahta_setup::display_path(Path::new("/h/.claude/settings.json"))
+        )) && d.contains("+  \"a\": 1"),
         "{d}"
     );
     let d = vahta_setup::unified_diff(Path::new("/h/x.json"), None, "{}\n");

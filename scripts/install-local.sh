@@ -2,7 +2,7 @@
 # Install vahta (and its short name vh) and vahta-hook from this checkout, for
 # daily use on this machine.
 #
-# Linux and macOS. Windows is out of scope for now.
+# Linux and macOS. On Windows use scripts\install-local.ps1.
 #
 # This is not a release: nothing is published anywhere. It builds the Rust
 # binaries and copies them into a directory you own, then points the harnesses
