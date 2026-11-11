@@ -170,6 +170,12 @@ it builds from source (`scripts/install-local.sh`). What exists on this branch:
 
 ### Fixed
 
+- **A program under `C:\Program Files` can be allowed.** A rule such as
+  `--allow "C:\Program Files\Git\usr\bin\printenv.exe"` failed with "cannot find the
+  program of the rule", because the rule was split at every space and quotes are
+  refused. A rule that starts with an absolute Windows path now takes the shortest
+  prefix ending in `.exe`, `.cmd`, `.bat` or `.com` as its program and the rest as
+  arguments; spaces in the path are kept as written. Any other rule reads as before.
 - **On Windows, Vahta's data no longer depends on which app started the process.** Claude
   Desktop and Codex are MSIX packages, and everything they start sees writes to `%APPDATA%`
   redirected into the package, so a terminal and an agent saw two different journals, project
