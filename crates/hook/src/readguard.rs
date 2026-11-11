@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::winshell;
 use vahta_scan::content::{findings_for_content, findings_for_path};
 use vahta_scan::finding::{Scope, leak_count};
 
@@ -93,9 +94,27 @@ pub(crate) enum Tok {
     RedirectDup,
 }
 
+/// How a command line is cut into words: as a POSIX shell does, or as
+/// PowerShell and `cmd` do (a backslash is a path separator, the escape is the
+/// backtick, and braces and parentheses set commands apart). The same text is
+/// read both ways, since a hook cannot tell which shell will run it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Dialect {
+    Posix,
+    Windows,
+}
+
+pub(crate) const DIALECTS: [Dialect; 2] = [Dialect::Posix, Dialect::Windows];
+
+/// Shell words and separators, as a POSIX shell cuts them.
+pub(crate) fn tokenize(cmd: &str) -> Vec<Tok> {
+    tokenize_as(cmd, Dialect::Posix)
+}
+
 /// Shell words and separators. Lenient: an unterminated quote runs to the end.
 #[allow(unused_assignments)]
-pub(crate) fn tokenize(cmd: &str) -> Vec<Tok> {
+pub(crate) fn tokenize_as(cmd: &str, dialect: Dialect) -> Vec<Tok> {
+    let win = dialect == Dialect::Windows;
     let mut out = Vec::new();
     let mut word = String::new();
     let mut have = false;
@@ -124,6 +143,12 @@ pub(crate) fn tokenize(cmd: &str) -> Vec<Tok> {
                 while let Some(q) = it.next() {
                     match q {
                         '"' => break,
+                        '`' if win => {
+                            if let Some(n) = it.next() {
+                                word.push(n);
+                            }
+                        }
+                        '\\' if win => word.push('\\'),
                         '\\' => match it.peek() {
                             Some(&n) if matches!(n, '"' | '\\' | '$' | '`') => {
                                 word.push(n);
@@ -134,6 +159,31 @@ pub(crate) fn tokenize(cmd: &str) -> Vec<Tok> {
                         _ => word.push(q),
                     }
                 }
+            }
+            '\\' if win => {
+                have = true;
+                word.push('\\');
+            }
+            '`' if win => {
+                have = true;
+                match it.next() {
+                    Some('\n') | None => {}
+                    Some(n) => word.push(n),
+                }
+            }
+            // `${env:NAME}` is one word.
+            '{' if win && word.ends_with('$') => {
+                word.push('{');
+                for q in it.by_ref() {
+                    word.push(q);
+                    if q == '}' {
+                        break;
+                    }
+                }
+            }
+            '{' | '}' | '(' | ')' if win => {
+                flush!();
+                out.push(Tok::Sep);
             }
             '\\' => {
                 have = true;
@@ -205,62 +255,150 @@ pub(crate) fn is_assignment(w: &str) -> bool {
     }
 }
 
-/// The paths a shell command may read, as written in it.
-fn read_candidates(cmd: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut redirect = false;
-    // The word after `>`, `>&` or `<&` is a target to write or a descriptor:
-    // it is not something being read.
-    let mut ignore_next = false;
-    let flush = |words: &mut Vec<String>, out: &mut Vec<String>| {
+/// One simple command of a command line: its words (assignments and wrappers
+/// included), the files it reads by `<` and the files it writes by `>`.
+#[derive(Default)]
+pub(crate) struct Command {
+    pub words: Vec<String>,
+    pub reads: Vec<String>,
+    pub writes: Vec<String>,
+}
+
+impl Command {
+    /// The words from the program on: after `VAR=value` and the wrappers.
+    pub fn program_words(&self) -> &[String] {
         let mut i = 0;
-        while i < words.len() && (is_assignment(&words[i]) || WRAPPERS.contains(&words[i].as_str()))
+        while i < self.words.len()
+            && (is_assignment(&self.words[i]) || WRAPPERS.contains(&self.words[i].as_str()))
         {
             i += 1;
         }
-        if let Some(prog) = words.get(i) {
-            let base = prog.rsplit('/').next().unwrap_or(prog);
-            if READERS.contains(&base) {
+        &self.words[i..]
+    }
+}
+
+/// The simple commands of `cmd`, cut as `dialect` cuts them. A descriptor
+/// after `>&` or `<&` is neither a word nor a file.
+pub(crate) fn commands(cmd: &str, dialect: Dialect) -> Vec<Command> {
+    let mut out = Vec::new();
+    let mut cur = Command::default();
+    // `Some(false)`: the next word is read from; `Some(true)`: written to.
+    let mut pending: Option<bool> = None;
+    let mut skip = false;
+    for t in tokenize_as(cmd, dialect) {
+        match t {
+            Tok::Word(_) if skip => skip = false,
+            Tok::Word(w) => match pending.take() {
+                Some(false) => cur.reads.push(w),
+                Some(true) => cur.writes.push(w),
+                None => cur.words.push(w),
+            },
+            Tok::RedirectIn => pending = Some(false),
+            Tok::RedirectOut => pending = Some(true),
+            Tok::RedirectDup => skip = true,
+            Tok::Sep => {
+                pending = None;
+                skip = false;
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// How deep `powershell -c "cmd /c ..."` is followed.
+pub(crate) const MAX_NESTING: usize = 4;
+
+fn push_unique(out: &mut Vec<String>, s: String) {
+    if !out.contains(&s) {
+        out.push(s);
+    }
+}
+
+/// The program's name for the reader and mutator lists: no directory (either
+/// slash) and no `.exe`.
+fn program_base(prog: &str) -> &str {
+    let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
+    base.strip_suffix(".exe").unwrap_or(base)
+}
+
+/// The paths a shell command may read (`all` false) or touch in any way
+/// (`all` true), as written in it. Read the way a POSIX shell cuts the line and
+/// the way PowerShell does, and followed into `powershell -c`, `cmd /c`, `sh -c`
+/// and `Invoke-Expression`.
+fn candidates(cmd: &str, all: bool, depth: usize, out: &mut Vec<String>) {
+    for dialect in DIALECTS {
+        for c in commands(cmd, dialect) {
+            for r in &c.reads {
+                push_unique(out, r.clone());
+            }
+            if all {
+                for w in &c.writes {
+                    push_unique(out, w.clone());
+                }
+            }
+            let words = c.program_words();
+            let Some(prog) = words.first() else {
+                continue;
+            };
+            let base = program_base(prog);
+            let wanted = |list: &[&str]| list.contains(&base);
+            if wanted(READERS) || (all && wanted(MUTATORS)) {
                 let mut only_args = false;
-                for w in &words[i + 1..] {
+                for w in &words[1..] {
+                    if all {
+                        match w.split_once('=') {
+                            Some((_, value)) if !value.is_empty() => {
+                                push_unique(out, value.to_string())
+                            }
+                            _ => {}
+                        }
+                    }
                     if only_args || !w.starts_with('-') {
-                        out.push(w.clone());
+                        push_unique(out, w.clone());
                     } else if w == "--" {
                         only_args = true;
                     }
                 }
             }
-        }
-        words.clear();
-    };
-    for t in tokenize(cmd) {
-        match t {
-            Tok::Word(_) if ignore_next => ignore_next = false,
-            Tok::Word(w) if redirect => {
-                out.push(w);
-                redirect = false;
+            for t in winshell::touches(words) {
+                if all || t.role == winshell::Role::Read {
+                    push_unique(out, t.path);
+                }
             }
-            Tok::Word(w) => words.push(w),
-            Tok::RedirectIn => redirect = true,
-            Tok::RedirectOut | Tok::RedirectDup => ignore_next = true,
-            Tok::Sep => {
-                redirect = false;
-                ignore_next = false;
-                flush(&mut words, &mut out);
+            if depth < MAX_NESTING
+                && let Some(sub) = winshell::nested(words)
+            {
+                candidates(&sub, all, depth + 1, out);
             }
         }
     }
-    flush(&mut words, &mut out);
+    if depth == 0 {
+        for t in winshell::dotnet(cmd) {
+            if all || t.role == winshell::Role::Read {
+                push_unique(out, t.path);
+            }
+        }
+    }
+}
+
+/// The paths a shell command may read, as written in it.
+fn read_candidates(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    candidates(cmd, false, 0, &mut out);
     out
 }
 
 /// The first file named in the shell command that holds secrets: its path as
 /// written, and its kind.
 pub fn secret_file_in_command(cmd: &str, cwd: Option<&str>) -> Option<(String, String)> {
-    read_candidates(cmd)
-        .into_iter()
-        .find_map(|given| secret_kind_in(&given, cwd, None).map(|k| (given, k)))
+    read_candidates(cmd).into_iter().find_map(|given| {
+        winshell::variants(&given)
+            .iter()
+            .find_map(|v| secret_kind_in(v, cwd, None))
+            .map(|k| (given, k))
+    })
 }
 
 // --- Vahta's own files ---------------------------------------------------------------
@@ -384,59 +522,22 @@ pub fn is_vahta_path(given: &str, cwd: Option<&str>) -> bool {
     false
 }
 
-/// The first of `candidates` that is one of Vahta's own files, as written.
+/// The first of `candidates` that is one of Vahta's own files, as written. A
+/// path is judged as written, with `\` as a separator, and with `~`, `$HOME`,
+/// `$env:NAME` and `%NAME%` expanded.
 fn first_vahta_path(candidates: Vec<String>, cwd: Option<&str>) -> Option<String> {
-    candidates.into_iter().find(|c| is_vahta_path(c, cwd))
+    candidates
+        .into_iter()
+        .find(|c| winshell::variants(c).iter().any(|v| is_vahta_path(v, cwd)))
 }
 
 /// Every word of a shell command that names something a reader or a mutator
-/// acts on, and every redirection target. A word with `=` (`of=file`,
-/// `--target-directory=dir`) also counts for what follows the `=`.
+/// acts on, every file a PowerShell or `cmd` command names, and every
+/// redirection target. A word with `=` (`of=file`, `--target-directory=dir`)
+/// also counts for what follows the `=`.
 fn touched_candidates(cmd: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut redirect = false; // the next word is a file to read or write
-    let mut ignore_next = false; // the next word is a descriptor
-    let flush = |words: &mut Vec<String>, out: &mut Vec<String>| {
-        let mut i = 0;
-        while i < words.len() && (is_assignment(&words[i]) || WRAPPERS.contains(&words[i].as_str()))
-        {
-            i += 1;
-        }
-        if let Some(prog) = words.get(i) {
-            let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
-            if READERS.contains(&base) || MUTATORS.contains(&base) {
-                for w in &words[i + 1..] {
-                    match w.split_once('=') {
-                        Some((_, value)) if !value.is_empty() => out.push(value.to_string()),
-                        _ => {}
-                    }
-                    if !w.starts_with('-') {
-                        out.push(w.clone());
-                    }
-                }
-            }
-        }
-        words.clear();
-    };
-    for t in tokenize(cmd) {
-        match t {
-            Tok::Word(_) if ignore_next => ignore_next = false,
-            Tok::Word(w) if redirect => {
-                out.push(w);
-                redirect = false;
-            }
-            Tok::Word(w) => words.push(w),
-            Tok::RedirectIn | Tok::RedirectOut => redirect = true,
-            Tok::RedirectDup => ignore_next = true,
-            Tok::Sep => {
-                redirect = false;
-                ignore_next = false;
-                flush(&mut words, &mut out);
-            }
-        }
-    }
-    flush(&mut words, &mut out);
+    let mut out = Vec::new();
+    candidates(cmd, true, 0, &mut out);
     out
 }
 
@@ -590,6 +691,250 @@ mod tests {
             let p = root.join(rel);
             assert!(is_vahta_path(&p.to_string_lossy(), None), "{rel}");
         }
+    }
+
+    fn vahta(cmd: &str) -> Option<String> {
+        vahta_file_in_command(cmd, None)
+    }
+
+    #[test]
+    fn powershell_and_cmd_forms_that_touch_vahtas_files_are_found() {
+        for cmd in [
+            // Unix programs with Windows separators.
+            r"cat .vahta\vault.bin",
+            r"rm -rf .vahta\locks",
+            r"cp .vahta\vault.bin x",
+            // Reading.
+            r"Get-Content .vahta\x",
+            r"gc .vahta/x",
+            r"GET-CONTENT -LiteralPath .vahta/x",
+            r"Get-Content -Path:.vahta\x",
+            r"Get-Content -Raw -Tail 3 .vahta\x",
+            r"type .vahta\x",
+            r"Select-String -Path .vahta\x -Pattern foo",
+            r"Select-String foo .vahta\x",
+            r"sls -Pattern foo -LiteralPath .vahta\x",
+            r"Get-ChildItem .vahta",
+            r"gci -Recurse .vahta\",
+            r"dir .vahta",
+            r"Import-Csv .vahta\x",
+            r"[IO.File]::ReadAllBytes('.vahta\vault.bin')",
+            r#"[System.IO.File]::ReadAllText(".vahta\vault.bin")"#,
+            r#"$t = [io.file]::ReadAllText(".vahta\vault.bin"); Write-Host $t"#,
+            r"[IO.Directory]::GetFiles('.vahta')",
+            r"cmd /c type .vahta\vault.bin",
+            r#"cmd.exe /d /c "type .vahta\vault.bin""#,
+            r"cmd /c findstr secret .vahta\vault.bin",
+            // Copying, moving, deleting.
+            r"Copy-Item .vahta\vault.bin $env:TEMP\x",
+            r"Copy-Item -Path a -Destination .vahta\x",
+            r"copy a .vahta\x",
+            r"Move-Item .vahta\x y",
+            r"mi y .vahta\x",
+            r"Rename-Item .vahta\x y",
+            r"Remove-Item -Recurse .vahta",
+            r"Remove-Item -Force -Recurse -Path .vahta",
+            r"ri -r -fo .vahta",
+            r"del .vahta\vault.lock",
+            r"Compress-Archive -Path .vahta -DestinationPath x.zip",
+            r"Expand-Archive x.zip -DestinationPath .vahta",
+            r"Invoke-WebRequest http://example.invalid/x -OutFile .vahta\vault.bin",
+            // Writing.
+            r#"Set-Content .vahta\x "text""#,
+            r#"Set-Content -Value text -Path .vahta\x"#,
+            r"Add-Content .vahta\x text",
+            r"Clear-Content .vahta\x",
+            r"Out-File -FilePath .vahta\x",
+            r#""text" | Out-File .vahta\x"#,
+            r"New-Item -Force .vahta\x",
+            r"New-Item -ItemType File -Name vault.bin -Path .vahta",
+            r"echo hi > .vahta\x",
+            r"Get-Date | Tee-Object .vahta\x",
+            r"[IO.File]::WriteAllText('.vahta\x', 'y')",
+            r"[IO.File]::Copy('a', '.vahta\x')",
+            r"[IO.File]::Delete('.vahta\x')",
+            r"cmd /c copy a .vahta\x",
+            r"cmd /c move .vahta\x a",
+            r"cmd /c del /q /f .vahta\x",
+            r"cmd /c erase .vahta\x",
+            r"cmd /c ren .vahta\x y",
+            r"cmd /c rd /s /q .vahta",
+            r"cmd /c echo hi > .vahta\x",
+            // Wrapped.
+            r#"powershell -NoProfile -Command "Get-Content .vahta\vault.bin""#,
+            r#"powershell.exe -ExecutionPolicy Bypass -c "Remove-Item -Recurse .vahta""#,
+            "pwsh -c 'gc .vahta/x'",
+            r#"pwsh -Command "& { Get-Content .vahta\x }""#,
+            r#"powershell -c "cmd /c copy .vahta\a b""#,
+            r#"bash -c "cat .vahta/x""#,
+            r#"iex "gc .vahta\x""#,
+            r"& { Get-Content .vahta\x }",
+            r"if ($true) { gc .vahta\x } else { }",
+            r"ForEach-Object { Remove-Item .vahta\x }",
+            r"Get-Content .vahta\x | Out-String",
+            r"cd proj; Get-Content .vahta\x",
+            // Home and variables.
+            r"Get-Content ~\.vahta\x",
+            r"Get-Content $HOME\.vahta\x",
+            r"Get-Content $env:USERPROFILE\proj\.vahta\x",
+            r"Get-Content ${env:USERPROFILE}\proj\.vahta\x",
+            r"Get-Content %USERPROFILE%\proj\.vahta\x",
+            r"cmd /c type %USERPROFILE%\proj\.vahta\x",
+        ] {
+            assert!(vahta(cmd).is_some(), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_data_directory_is_found_by_data_root_however_it_is_spelled() {
+        let Some(root) = data_root() else { return };
+        let root = root.to_string_lossy().into_owned();
+        for cmd in [
+            format!("Get-Content '{root}\\projects.json'"),
+            format!("Get-Content '{}/projects.json'", root.replace('\\', "/")),
+            format!("cmd /c type \"{root}\\projects.json\""),
+            format!("Remove-Item -Recurse '{root}'"),
+        ] {
+            assert!(vahta(&cmd).is_some(), "{cmd}");
+        }
+        // The Windows spellings of the place AppData stands for: only where
+        // that is the data directory.
+        if let Some(appdata) = dirs::data_dir()
+            && appdata.join("vahta").as_os_str() == root.as_str()
+        {
+            for cmd in [
+                r"Get-Content $env:APPDATA\vahta\projects.json",
+                r"gc $ENV:appdata/vahta/projects.json",
+                r"Get-Content ${env:APPDATA}\vahta\projects.json",
+                r"type %APPDATA%\vahta\projects.json",
+                r"cmd /c type %APPDATA%\vahta\projects.json",
+                r"Get-Content -LiteralPath $env:APPDATA\vahta\journal.jsonl",
+            ] {
+                assert!(vahta(cmd).is_some(), "{cmd}");
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_work_is_not_taken_for_a_touch_of_vahtas_files() {
+        for cmd in [
+            "Get-Content README.md",
+            r"gc src\main.rs",
+            r#"Set-Content notes.txt "text""#,
+            "Add-Content notes.txt more",
+            "Copy-Item a b",
+            r"Copy-Item -Recurse src\a src\b",
+            "Move-Item a b",
+            r"Remove-Item -Recurse -Force build",
+            r"del target\debug\x",
+            "New-Item -ItemType Directory out",
+            "Select-String -Pattern error build.log",
+            "Get-ChildItem -Recurse src",
+            r"dir src\",
+            // Text that only mentions a name, as an argument or a string.
+            r#"Set-Content notes.txt ".vahta""#,
+            r"Set-Content notes.txt .vahta\vault.bin",
+            r"Add-Content notes.txt $x -Value .vahta",
+            r#"Select-String -Pattern ".vahta" README.md"#,
+            r#"Select-String ".vahta\vault.bin" README.md"#,
+            r#"Write-Host "Get-Content .vahta\x""#,
+            r#"Write-Output 'Remove-Item -Recurse .vahta'"#,
+            r#"echo "type .vahta\x""#,
+            r#"git commit -m "gc .vahta\x""#,
+            r#"git commit -m "Remove-Item .vahta\x""#,
+            r"cmd /c echo .vahta",
+            r#"powershell -Command "Write-Host .vahta\x""#,
+            r"[IO.File]::ReadAllText('README.md')",
+            r"[IO.File]::WriteAllText('notes.txt', '.vahta\x')",
+            r"cmd /c type README.md",
+            r#"pwsh -c "gc README.md""#,
+            r"Get-Content .vahta-notes\x",
+            r"Get-Content vahta.toml",
+            // Unix `ls` is not guarded, nor is its PowerShell alias.
+            "ls .vahta",
+            r"ls -Force .vahta\",
+            // Names and switches that are not paths.
+            r"powershell -NoProfile -File build.ps1 -Config .vahta",
+            "cmd /?",
+            "Get-Content -Tail 5 notes.txt",
+        ] {
+            assert_eq!(vahta(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn file_readers_of_either_shell_are_read_candidates() {
+        for (cmd, file) in [
+            ("Get-Content .env", ".env"),
+            ("gc -Path .env", ".env"),
+            (r"type config\.env", r"config\.env"),
+            ("Select-String key .env", ".env"),
+            ("Get-Content -LiteralPath .env -Raw", ".env"),
+            ("[IO.File]::ReadAllText('.env')", ".env"),
+            ("cmd /c type .env", ".env"),
+            (r#"pwsh -c "Get-Content .env""#, ".env"),
+            ("Copy-Item .env copy.txt", ".env"),
+        ] {
+            assert!(c(cmd).iter().any(|f| f == file), "{cmd}: {:?}", c(cmd));
+        }
+        // Writing a file or naming it as text is not reading it.
+        for cmd in [
+            "Set-Content .env x",
+            "Out-File .env",
+            "Copy-Item a .env",
+            "Set-Content notes.txt .env",
+            "Write-Host .env",
+        ] {
+            assert!(!c(cmd).iter().any(|f| f == ".env"), "{cmd}: {:?}", c(cmd));
+        }
+    }
+
+    #[test]
+    fn a_secret_file_read_by_powershell_is_found() {
+        let tmp = std::env::temp_dir().join(format!("vahta-ps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        let key = ["sk-", "ant-", &"a".repeat(25)].concat();
+        std::fs::write(tmp.join("sub").join("app.env"), format!("API_KEY={key}\n")).unwrap();
+        std::fs::write(tmp.join("sub").join("notes.txt"), "hello\n").unwrap();
+        let cwd = tmp.to_str().unwrap();
+        for cmd in [
+            r"Get-Content sub\app.env",
+            r"type sub\app.env",
+            r"cmd /c type sub\app.env",
+            r"[IO.File]::ReadAllText('sub\app.env')",
+        ] {
+            assert!(secret_file_in_command(cmd, Some(cwd)).is_some(), "{cmd}");
+        }
+        assert!(secret_file_in_command(r"Get-Content sub\notes.txt", Some(cwd)).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_windows_dialect_keeps_backslashes_and_breaks_at_braces() {
+        let words = |cmd: &str| -> Vec<Vec<String>> {
+            commands(cmd, Dialect::Windows)
+                .into_iter()
+                .map(|c| c.words)
+                .filter(|w| !w.is_empty())
+                .collect()
+        };
+        assert_eq!(words(r"cat .vahta\x"), [["cat", r".vahta\x"]]);
+        assert_eq!(words(r#"gc "a b\c""#), [["gc", r"a b\c"]]);
+        assert_eq!(words("gc a`b"), [["gc", "ab"]]);
+        assert_eq!(
+            words(r"if (1) { gc x } else { gc y }"),
+            [
+                vec!["if"],
+                vec!["1"],
+                vec!["gc", "x"],
+                vec!["else"],
+                vec!["gc", "y"]
+            ]
+        );
+        // POSIX reading is unchanged.
+        let posix = commands(r"cat .vah\ta", Dialect::Posix);
+        assert_eq!(posix[0].words, ["cat", ".vahta"]);
     }
 
     #[test]
