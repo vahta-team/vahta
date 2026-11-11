@@ -606,7 +606,7 @@ mod tests {
                 assert!(is_vahta_path(&given, None), "file {given}");
                 for cmd in [
                     format!("cat '{given}'"),
-                    format!("rm {}", given.replace('\\', "/")),
+                    format!("rm '{}'", given.replace('\\', "/")),
                 ] {
                     assert!(vahta_file_in_command(&cmd, None).is_some(), "shell {cmd}");
                 }
