@@ -11,7 +11,8 @@ belongs to no project, so it does not live in a project's vault. Vahta keeps
 ```
 
 (`<data dir>` is `VAHTA_DATA_DIR`, else the platform's, for example
-`~/.local/share/vahta`.) It is a vault of its own kind. It is never found from a
+`~/.local/share/vahta`; on Windows `%USERPROFILE%\.local\share\vahta`, never under
+`%APPDATA%`, which Claude Desktop and Codex redirect into their own package.) It is a vault of its own kind. It is never found from a
 working directory, never serves an ordinary `vahta run`, and `--connector`
 never uses a project's vault.
 
