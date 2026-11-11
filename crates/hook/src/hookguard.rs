@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 use vahta_harness::{Event, Group, Manifest};
 use vahta_setup::Env;
 
-use crate::readguard::{self, Tok, is_assignment, normalise, resolved};
+use crate::readguard::{self, Dialect, normalise, resolved};
+use crate::winshell::{self, Role};
 
 /// Whether the person has let the agent change `harness`'s hook settings and
 /// the time has not run out (`pause.json` in Vahta's data directory, which
@@ -160,18 +161,32 @@ impl Watch {
         })
     }
 
-    /// `given` as an absolute path: `~`, `$HOME` and `${HOME}` expanded at the
-    /// start, the rest against `cwd`.
+    /// `given` as an absolute path: `~`, `$HOME`, `$env:USERPROFILE` and
+    /// `%USERPROFILE%` (and the like, in any case) expanded at the start, any
+    /// other variable of [`winshell::expand`], `\` taken as a separator, the
+    /// rest against `cwd`.
     fn expand(&self, given: &str, cwd: Option<&str>) -> PathBuf {
         let home = self.home.to_string_lossy();
-        for prefix in ["~", "$HOME", "${HOME}"] {
-            if let Some(rest) = given.strip_prefix(prefix)
+        for prefix in [
+            "~",
+            "$HOME",
+            "${HOME}",
+            "$env:HOME",
+            "${env:HOME}",
+            "$env:USERPROFILE",
+            "${env:USERPROFILE}",
+            "%USERPROFILE%",
+            "%HOME%",
+        ] {
+            if let Some(head) = given.get(..prefix.len())
+                && head.eq_ignore_ascii_case(prefix)
+                && let rest = &given[prefix.len()..]
                 && (rest.is_empty() || rest.starts_with(['/', '\\']))
             {
-                return readguard::resolve(&format!("{home}{rest}"), cwd);
+                return readguard::resolve(&format!("{home}{rest}").replace('\\', "/"), cwd);
             }
         }
-        readguard::resolve(given, cwd)
+        readguard::resolve(&winshell::expand(given).replace('\\', "/"), cwd)
     }
 
     /// Whether a pause lets the agent write files of `kind` by a shell command
@@ -434,54 +449,64 @@ struct Simple {
     redirects: Vec<String>,
 }
 
-fn simple_commands(cmd: &str) -> Vec<Simple> {
-    let mut out = Vec::new();
-    let mut cur = Simple {
-        words: Vec::new(),
-        redirects: Vec::new(),
-    };
-    let (mut redirect, mut skip) = (false, false);
-    let push = |cur: &mut Simple, out: &mut Vec<Simple>| {
-        let mut i = 0;
-        while i < cur.words.len()
-            && (is_assignment(&cur.words[i])
-                || readguard::WRAPPERS.contains(&cur.words[i].as_str()))
-        {
-            i += 1;
+fn simple_commands(cmd: &str, dialect: Dialect) -> Vec<Simple> {
+    readguard::commands(cmd, dialect)
+        .into_iter()
+        .map(|c| Simple {
+            words: c.program_words().to_vec(),
+            redirects: c.writes,
+        })
+        .collect()
+}
+
+/// What a PowerShell or `cmd` command does to a file that holds hooks: the
+/// file as written and a description, if it does.
+fn winshell_hit(w: &Watch, words: &[String], cwd: Option<&str>) -> Option<(String, &'static str)> {
+    for t in winshell::touches(words) {
+        if let Some(what) = judge_touch(w, &t, cwd) {
+            return Some((t.path, what));
         }
-        let words = cur.words.split_off(i);
-        out.push(Simple {
-            words,
-            redirects: std::mem::take(&mut cur.redirects),
-        });
-        cur.words.clear();
-    };
-    for t in readguard::tokenize(cmd) {
-        match t {
-            Tok::Word(_) if skip => skip = false,
-            Tok::Word(w) if redirect => {
-                cur.redirects.push(w);
-                redirect = false;
-            }
-            Tok::Word(w) => cur.words.push(w),
-            Tok::RedirectOut => redirect = true,
-            Tok::RedirectIn => {}
-            Tok::RedirectDup => skip = true,
-            Tok::Sep => {
-                redirect = false;
-                skip = false;
-                push(&mut cur, &mut out);
+    }
+    None
+}
+
+fn judge_touch(w: &Watch, t: &winshell::Touch, cwd: Option<&str>) -> Option<&'static str> {
+    let path = w.expand(&t.path, cwd);
+    match t.role {
+        Role::Read => None,
+        // Under a pause, a write the guard cannot judge is the person's to allow.
+        Role::Write => w
+            .kind_guarded(&path)
+            .map(|_| "would change or overwrite a file that holds hooks"),
+        Role::Remove => {
+            if w.kind_of(&path).is_some() {
+                Some("would change or remove a file that holds hooks")
+            } else if w.above_watched(&path) {
+                Some("would remove or move a directory that holds hooks")
+            } else {
+                None
             }
         }
     }
-    push(&mut cur, &mut out);
-    out
 }
 
 fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Tampering> {
     let lowered = cmd.to_lowercase();
     let names_file = |text: &str| -> bool { names_watched_file(w, text) };
-    for s in simple_commands(cmd) {
+    if depth == 0 {
+        // `[IO.File]::WriteAllText('...')` wherever in the command it stands.
+        for t in winshell::dotnet(cmd) {
+            if let Some(what) = judge_touch(w, &t, cwd) {
+                return Some(Tampering {
+                    file: t.path,
+                    what: format!("is a `{}` call that {what}", t.prog),
+                });
+            }
+        }
+    }
+    let mut simples = simple_commands(cmd, Dialect::Posix);
+    simples.extend(simple_commands(cmd, Dialect::Windows));
+    for s in simples {
         for r in &s.redirects {
             if w.kind_guarded(&w.expand(r, cwd)).is_some() {
                 return Some(Tampering {
@@ -502,6 +527,18 @@ fn shell_hit(w: &Watch, cmd: &str, cwd: Option<&str>, depth: usize) -> Option<Ta
                 what: format!("is a `{b}` command that {what}"),
             })
         };
+        // PowerShell cmdlets and `cmd` built-ins, and the shells that run them.
+        // (The Unix programs that are also aliases keep their own checks below.)
+        let own_check = ANY_ARG.contains(&b.as_str()) || TO_LAST.contains(&b.as_str());
+        if !own_check && let Some((file, what)) = winshell_hit(w, &s.words, cwd) {
+            return hit(&file, what);
+        }
+        if depth < readguard::MAX_NESTING
+            && let Some(inner) = winshell::nested(&s.words)
+            && let Some(t) = shell_hit(w, &inner, cwd, depth + 1)
+        {
+            return Some(t);
+        }
         // A shell given a script to run: look inside it.
         if SHELLS.contains(&b.as_str()) && depth < 3 {
             if let Some(i) = args
@@ -633,7 +670,15 @@ fn names_watched_file(w: &Watch, lowered_text: &str) -> bool {
             return true;
         }
         if let Some(rel) = abs.strip_prefix(&format!("{home}/")) {
-            for pre in ["~/", "$home/", "${home}/"] {
+            for pre in [
+                "~/",
+                "$home/",
+                "${home}/",
+                "$env:home/",
+                "$env:userprofile/",
+                "${env:userprofile}/",
+                "%userprofile%/",
+            ] {
                 if text.contains(&format!("{pre}{rel}")) {
                     return true;
                 }
@@ -765,6 +810,88 @@ mod tests {
         ] {
             assert!(!hit(&w, cmd), "{cmd}");
         }
+    }
+
+    #[test]
+    fn powershell_and_cmd_writes_to_hook_files_are_found_and_reads_are_not() {
+        let w = watch(Path::new("/h"));
+        for cmd in [
+            r#"Set-Content ~\.claude\settings.json "{}""#,
+            r"set-content -Path ~/.claude/settings.json -Value '{}'",
+            r"SC -LiteralPath ~\.claude\settings.json x",
+            r"Add-Content $HOME\.claude\settings.json x",
+            r"Clear-Content ~\.claude\settings.json",
+            r#""{}" | Out-File -FilePath $env:USERPROFILE\.claude\settings.json"#,
+            r#""{}" | Out-File ${env:USERPROFILE}\.claude\settings.json"#,
+            r"New-Item -Force ~\.codex\hooks.json",
+            r"Remove-Item ~\.claude\settings.json",
+            r"Remove-Item -Force -Recurse ~\.claude",
+            r"del ~\.claude\settings.json",
+            r"ri %USERPROFILE%\.cursor\hooks.json",
+            r"Move-Item ~\.claude\settings.json x",
+            r"Move-Item x ~\.codex\hooks.json",
+            r"Rename-Item ~\.claude\settings.json old.json",
+            r"Copy-Item x ~\.codex\hooks.json",
+            r"copy x /h\.cursor\hooks.json",
+            r"Copy-Item -Path x -Destination ~\.claude\settings.json",
+            r"Get-Date | Tee-Object ~\.claude\settings.json",
+            r"Invoke-WebRequest http://example.invalid/x -OutFile ~/.claude/settings.json",
+            r#"[IO.File]::WriteAllText("$env:USERPROFILE\.claude\settings.json", '{}')"#,
+            r"[System.IO.File]::Delete('/h/.claude/settings.json')",
+            r"[IO.File]::Copy('x', '/h/.codex/hooks.json', $true)",
+            r#"powershell -NoProfile -Command "Set-Content ~\.claude\settings.json '{}'""#,
+            r#"pwsh -c "Remove-Item ~/.claude/settings.json""#,
+            r#"pwsh -c "& { Clear-Content ~\.claude\settings.json }""#,
+            r"cmd /c del ~\.claude\settings.json",
+            r#"cmd /c "copy x /h\.claude\settings.json""#,
+            r"cmd /c ren /h\.claude\settings.json x",
+            r"echo {} > ~\.claude\settings.json",
+            r"cmd /c echo {} > /h\.claude\settings.json",
+            r#"iex "Remove-Item ~\.claude\settings.json""#,
+            r"cat x | tee ~\.claude\settings.json",
+        ] {
+            assert!(hit(&w, cmd), "{cmd}");
+        }
+        for cmd in [
+            r"Get-Content ~\.claude\settings.json",
+            r"gc ~/.claude/settings.json",
+            r"type ~\.claude\settings.json",
+            r"Select-String vahta ~\.claude\settings.json",
+            r"Get-ChildItem ~\.claude",
+            r"dir ~\.claude",
+            r"Copy-Item ~\.claude\settings.json backup.json",
+            r"Copy-Item ~\.claude\settings.json $env:TEMP\x",
+            r"Set-Content notes.txt text",
+            r#"Set-Content notes.txt "settings.json""#,
+            r"Set-Content notes.txt ~\.claude\settings.json",
+            r"Add-Content log.txt -Value ~/.claude/settings.json",
+            r"Copy-Item a b",
+            r"Remove-Item -Recurse ~\.claude\projects\x",
+            r"del build\out.txt",
+            r"Move-Item a.txt b.txt",
+            r#"[IO.File]::ReadAllText("$HOME\.claude\settings.json")"#,
+            r"[IO.File]::WriteAllText('notes.txt', 'x')",
+            r#"Write-Host "Set-Content ~\.claude\settings.json""#,
+            r#"echo "Remove-Item ~/.claude/settings.json""#,
+            r#"git commit -m "del ~\.claude\settings.json""#,
+            r"cmd /c type ~\.claude\settings.json",
+            r"cmd /c copy ~\.claude\settings.json backup.json",
+            r"powershell -NoProfile -File build.ps1",
+        ] {
+            assert!(!hit(&w, cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_pause_frees_powershell_writes_to_that_harness_and_not_removals() {
+        let mut w = watch(Path::new("/h"));
+        w.edits_for = Some("claude".to_string());
+        assert!(!hit(&w, r#"Set-Content ~\.claude\settings.json "{}""#));
+        assert!(!hit(&w, r"Move-Item x ~\.claude\settings.json"));
+        assert!(!hit(&w, r"Copy-Item x ~\.claude\settings.json"));
+        assert!(hit(&w, r"Remove-Item ~\.claude\settings.json"));
+        assert!(hit(&w, r"Move-Item ~\.claude\settings.json x"));
+        assert!(hit(&w, r"Set-Content ~\.cursor\hooks.json x"));
     }
 
     #[test]
