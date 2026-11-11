@@ -419,7 +419,19 @@ const VAULT_DIR: &str = ".vahta";
 fn data_root() -> Option<PathBuf> {
     match std::env::var_os("VAHTA_DATA_DIR") {
         Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
-        _ => dirs::data_dir().map(|d| d.join("vahta")),
+        _ => vahta_os::defaults::default_data_dir(),
+    }
+}
+
+/// The configuration directory, protected like the data directory where it is
+/// a separate place (Windows; there it used to be the same directory).
+fn config_root() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    match std::env::var_os("VAHTA_CONFIG_DIR") {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => vahta_os::defaults::default_config_dir(),
     }
 }
 
@@ -499,7 +511,7 @@ pub fn is_vahta_path(given: &str, cwd: Option<&str>) -> bool {
             return true;
         }
     }
-    if let Some(root) = data_root() {
+    for root in data_root().into_iter().chain(config_root()) {
         let real_root = resolved(&normalise(&root));
         for p in [&lexical, &real] {
             if inside(p, &root) || inside(p, &real_root) {
@@ -923,6 +935,40 @@ mod tests {
         // POSIX reading is unchanged.
         let posix = commands(r"cat .vah\ta", Dialect::Posix);
         assert_eq!(posix[0].words, ["cat", ".vahta"]);
+    }
+
+    #[test]
+    fn the_default_data_and_config_dirs_are_protected_for_files_and_shell() {
+        let mut roots = vec![data_root()];
+        if cfg!(windows) {
+            roots.push(config_root());
+        }
+        for root in roots {
+            let Some(root) = root else { continue };
+            for rel in ["journal.jsonl", "config.toml", "vaults/x/state"] {
+                let p = root.join(rel);
+                let given = p.to_string_lossy().into_owned();
+                assert!(is_vahta_path(&given, None), "file {given}");
+                for cmd in [
+                    format!("cat '{given}'"),
+                    format!("rm '{}'", given.replace('\\', "/")),
+                ] {
+                    assert!(vahta_file_in_command(&cmd, None).is_some(), "shell {cmd}");
+                }
+            }
+            assert!(is_vahta_path(&root.to_string_lossy(), None));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_defaults_are_not_under_appdata() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            data_root().unwrap(),
+            home.join(".local").join("share").join("vahta")
+        );
+        assert_eq!(config_root().unwrap(), home.join(".config").join("vahta"));
     }
 
     #[test]
